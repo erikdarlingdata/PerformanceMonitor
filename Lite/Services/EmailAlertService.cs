@@ -71,6 +71,13 @@ public class EmailAlertService : IFindingAlertSender
     /// findings carry their own <c>analysis_notify_cooldown_minutes</c> throttle and were not part of what
     /// #3430 measured.</para>
     /// </param>
+    /// <param name="trayShown">
+    /// #3916: whether the caller raised Lite's tray balloon for this alert on the same call. Defaults to
+    /// TRUE — the engine path (<c>LiteAlertDeliverer.DeliverAsync</c>) shows a styled balloon for every
+    /// non-muted alert. The analysis finding path passes FALSE: Lite wires no tray sink into
+    /// <c>AnalysisNotificationService</c>, so no toast is raised for a finding, and a row stored
+    /// <c>tray</c> there would read "Shown" for a toast nobody saw.
+    /// </param>
     public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
@@ -83,7 +90,8 @@ public class EmailAlertService : IFindingAlertSender
         bool muted = false,
         string? detailText = null,
         bool deliverProse = true,
-        AlertNotificationMode? deliveryMode = null)
+        AlertNotificationMode? deliveryMode = null,
+        bool trayShown = true)
     {
         try
         {
@@ -91,12 +99,14 @@ public class EmailAlertService : IFindingAlertSender
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
                 detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode);
 
-            /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
+            /* trayChannelPresent: trayShown, true on the engine path — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
                toast was shown. This is Lite's half of the deliberate per-SKU divergence; the headless
                Darling service passes false because it has no tray at all. Lite's stored values are
-               unchanged by the shared derivation. */
-            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: true);
+               unchanged by the shared derivation. #3916: the value is trayShown, which the analysis finding
+               path clears — no toast is raised for a finding on Lite, so its row must not claim one.
+               Still the named argument, so the answer cannot be flipped by a positional edit. */
+            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: trayShown);
 
             /* Always log the alert, regardless of email status. The numeric current/threshold
                resolution happens in the store (it owns the DuckDB DOUBLE columns); the record
@@ -168,7 +178,11 @@ public class EmailAlertService : IFindingAlertSender
             numericThresholdValue: alert.NotifyThreshold,
             muted: false,
             detailText: alert.DetailText,
-            deliverProse: alert.DeliverDetailText);
+            deliverProse: alert.DeliverDetailText,
+            /* #3916: Lite raises NO toast for an analysis finding (MainWindow wires no tray sink into
+               AnalysisNotificationService), so an unconfigured finding's row is "unconfigured", not a
+               "tray" row that reads Shown. */
+            trayShown: false);
     }
 
     /// <summary>
