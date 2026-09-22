@@ -342,13 +342,16 @@ LEFT JOIN modal_holder AS mh ON true
 LEFT JOIN modal_source AS ms ON true";
 
     /// <summary>
-    /// How many backlogged tables the read returns. The fact carries ONE — the worst by ratio, the way
-    /// <c>ANOMALY_OBJECT_GROWTH</c> carries its one table in <see cref="Fact.ObjectName"/> — because the
-    /// engine keys facts by <see cref="Fact.Key"/> and a second row under the same key would be dropped by
-    /// <c>ToFactLookup</c>; the count of the others rides in metadata and <c>get_pg_autovacuum</c> lists them.
-    /// One row is therefore all the fact needs; the limit is the read's own bound.
+    /// How many backlogged tables the read returns. ONE fact is still emitted — the engine keys facts by
+    /// <see cref="Fact.Key"/> and a second row under the same key would be dropped by <c>ToFactLookup</c> — and
+    /// its subject is still the worst by ratio, with its figures under the backlog metadata keys, unchanged.
+    /// What the extra two rows buy (#3691 lane 43, M3) is <see cref="Fact.Ranked"/>: the card can NAME the next
+    /// two persistently-backlogged tables instead of only counting them, which is what an operator asked the
+    /// <c>tables_in_backlog</c> number and then had to call a tool to answer. Three because the card is a
+    /// summary, not the list (<see cref="FactRanked.MaxObjects"/>) — <c>get_pg_autovacuum</c> is still the list,
+    /// and the sentence that points there keeps the full population count, which can exceed these three.
     /// </summary>
-    private const int BacklogRowLimit = 1;
+    private const int BacklogRowLimit = FactRanked.MaxObjects;
 
     /// <summary>
     /// How many disabled-and-backlogged tables the disabled read returns: the worst is the fact (its name in
@@ -549,6 +552,10 @@ LEFT JOIN modal_source AS ms ON true";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
 
+            /* The FIRST row is the fact's subject and nothing about it moved when the limit went from one to
+               three (#3691 lane 43): same ObjectName, same Value, same metadata keys, read from the same
+               columns of the same ORDER BY. Rows two and three are read by the loop at the end of this method
+               and ride on Fact.Ranked — they add names to the card, never a second opinion about the worst. */
             var databaseName = reader.IsDBNull(0) ? null : reader.GetString(0);
             var schema = reader.IsDBNull(1) ? null : reader.GetString(1);
             var table = reader.IsDBNull(2) ? null : reader.GetString(2);
@@ -643,6 +650,41 @@ LEFT JOIN modal_source AS ms ON true";
             if (maintWorkMem is not null)
                 maintWorkMem.Metadata[PgTargetScorer.MaintWorkMemBacklogRatioKey] = ratio;
 
+            /* Ranked (#3691 lane 43): [0] IS the subject — same name, same ratio, same figures under the same
+               keys the metadata above uses — then rows two and three in the read's own rank order. The SQL's
+               ORDER BY is the rank and nothing here re-sorts it. A row with no name triple at all cannot be
+               named and is therefore not ranked; an unnamed entry would break the list's own promise. */
+            StampBacklogRanked(fact, fact.ObjectName, databaseName, ratio, runHours, insertArm, dead, inserts, runFirstDead, runFirstInserts);
+            while (await reader.ReadAsync(context.CancellationToken))
+            {
+                var rowSchema = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var rowTable = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var rowName = string.IsNullOrEmpty(rowTable) ? null : string.IsNullOrEmpty(rowSchema) ? rowTable : $"{rowSchema}.{rowTable}";
+
+                var rowDead = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                var rowVacuumThreshold = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
+                var rowInserts = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+                var rowInsertThreshold = reader.IsDBNull(8) ? -1L : ToInt64(reader.GetValue(8));
+
+                /* Each ranked row's own arm, re-derived the way the subject's is — a table whose insert line is
+                   the binding one has an insert slope, and mixing the two arms across rows would put counts from
+                   different quantities under one figure name. */
+                var rowDeadRatio = rowVacuumThreshold > 0 ? (double)rowDead / rowVacuumThreshold : 0.0;
+                var rowInsertRatio = rowInsertThreshold > 0 ? (double)rowInserts / rowInsertThreshold : 0.0;
+
+                StampBacklogRanked(
+                    fact,
+                    rowName,
+                    reader.IsDBNull(0) ? null : reader.GetString(0),
+                    reader.IsDBNull(19) ? 0.0 : Convert.ToDouble(reader.GetValue(19)),
+                    (reader.GetDateTime(3) - reader.GetDateTime(15)).TotalHours,
+                    rowInsertRatio > rowDeadRatio,
+                    rowDead,
+                    rowInserts,
+                    reader.IsDBNull(16) ? 0L : ToInt64(reader.GetValue(16)),
+                    reader.IsDBNull(17) ? 0L : ToInt64(reader.GetValue(17)));
+            }
+
             facts.Add(fact);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
@@ -651,6 +693,42 @@ LEFT JOIN modal_source AS ms ON true";
                pre-migration store raises 42P01, classified quiet. An abandonment is NOT swallowed (#2443). */
             ReportCollectionFailure(ex, context);
         }
+    }
+
+    /// <summary>
+    /// One <see cref="Fact.Ranked"/> entry for a backlog row, in the backlog family's own vocabulary: the ratio
+    /// to the table's own line as the value, and ratio + the run's hours + the run's slope per hour as figures
+    /// under the same metadata key names the subject's figures ride under (#3691 lane 43). The slope figure is
+    /// omitted when the run has no span to divide by — the same honesty <see cref="PgTargetScorer.BacklogSlopeComputableKey"/>
+    /// gives the subject, expressed here by the figure's absence rather than by a companion flag, because an
+    /// entry's figures are read by name and a zero slope means "flat", not "unknown".
+    /// <para>A null <paramref name="objectName"/> is not ranked: <see cref="RankedObject"/> exists to carry a
+    /// NAME, and the store's name columns are nullable.</para>
+    /// </summary>
+    private static void StampBacklogRanked(
+        Fact fact,
+        string? objectName,
+        string? databaseName,
+        double ratio,
+        double runHours,
+        bool insertArm,
+        long dead,
+        long inserts,
+        long runFirstDead,
+        long runFirstInserts)
+    {
+        if (string.IsNullOrEmpty(objectName))
+            return;
+
+        var figures = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            [PgTargetScorer.BacklogRatioKey] = ratio,
+            [PgTargetScorer.BacklogHoursKey] = runHours,
+        };
+        if (runHours > 0)
+            figures[PgTargetScorer.BacklogSlopePerHourKey] = (insertArm ? inserts - runFirstInserts : dead - runFirstDead) / runHours;
+
+        fact.Ranked.Add(new RankedObject(objectName, databaseName, ratio, figures));
     }
 
     /// <summary>

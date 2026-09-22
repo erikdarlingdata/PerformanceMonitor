@@ -417,8 +417,12 @@ public sealed class PgTargetVacuumTests
 
     /* ── advice: value-stated, counter-objective, never "disable autovacuum", holder named per source ── */
 
+    /// <summary>#3691 lane 43 (M3): the backlog read returns three rows now, so the card NAMES the next two
+    /// backlogged tables (with each one's own ratio, run span and slope) where it used only to count them. The
+    /// population sentence keeps its own count and its own pointer to <c>get_pg_autovacuum</c>, because the gate's
+    /// population can exceed the three rows the read returns.</summary>
     [Fact]
-    public void TheBacklogAdvice_StatesTheTablesOwnNumbers_TheSlope_AndTheRunCount_AndNeverSuggestsSwitchingAutovacuumOff()
+    public void TheBacklogAdvice_StatesTheTablesOwnNumbers_TheSlope_TheRunCount_AndNamesTheNextTwoTables_AndNeverSuggestsSwitchingAutovacuumOff()
     {
         var fact = Backlog(5.0, 4,
             (PgTargetScorer.BacklogDeadTuplesKey, 5250), (PgTargetScorer.BacklogVacuumThresholdKey, 1050),
@@ -428,6 +432,10 @@ public sealed class PgTargetVacuumTests
             (PgTargetScorer.BacklogTablesKey, 3), (PgTargetScorer.BacklogHoursSinceLastAutovacuumKey, 0.33));
         fact.ObjectName = "public.hot";
         fact.DatabaseName = "appdb";
+        /* The collector's shape: [0] IS the subject (same name, same ratio), then the read's next two rows. */
+        RankBacklog(fact, "public.hot", 5.0, hours: 3, slope: 1083.3);
+        RankBacklog(fact, "public.orders", 3.1, hours: 5, slope: 400);
+        RankBacklog(fact, "sales.ledger", 1.4, hours: 2, slope: null);
         new FactScorer().ScoreAll([fact]);
 
         var advice = FactAdvice.Compose(PgTargetFactKeys.AutovacuumBacklog, Lookup(fact))!;
@@ -438,6 +446,10 @@ public sealed class PgTargetVacuumTests
         Assert.Contains("rose at 1,083 per hour", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("autovacuum ran on the table 2 times", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("running and LOSING", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains(
+            "The table has been past its line for 4 consecutive samples spanning 3 h; and two more: public.orders (3.1× for 5 hours, 400/h and rising), sales.ledger (1.4× for 2 hours). ",
+            advice.Investigation,
+            StringComparison.Ordinal);
         Assert.Contains("2 other tables are persistently past their line", advice.Investigation, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE public.hot SET (autovacuum_vacuum_cost_delay = 0)", advice.Remediation, StringComparison.Ordinal);
         Assert.Contains("ALTER TABLE public.hot SET (autovacuum_vacuum_scale_factor = 0.053)", advice.Remediation, StringComparison.Ordinal);
@@ -872,6 +884,21 @@ public sealed class PgTargetVacuumTests
                 [PgTargetScorer.BacklogRatioKey] = ratio,
                 [PgTargetScorer.BacklogHoursKey] = hours,
             }));
+
+    /// <summary>The backlog read's ranked shape (#3691 lane 43, M3): the disabled read's two figures plus the
+    /// run's slope per hour, which is ABSENT — not zero — when the run has no span to divide by, the way the
+    /// subject's <c>BacklogSlopeComputableKey</c> says so for the fact itself.</summary>
+    private static void RankBacklog(Fact fact, string objectName, double ratio, double hours, double? slope)
+    {
+        var figures = new Dictionary<string, double>(StringComparer.Ordinal)
+        {
+            [PgTargetScorer.BacklogRatioKey] = ratio,
+            [PgTargetScorer.BacklogHoursKey] = hours,
+        };
+        if (slope.HasValue)
+            figures[PgTargetScorer.BacklogSlopePerHourKey] = slope.Value;
+        fact.Ranked.Add(new RankedObject(objectName, fact.DatabaseName, ratio, figures));
+    }
 
     private static void AssertNeverDisablesAutovacuum(AdviceBlock block)
     {

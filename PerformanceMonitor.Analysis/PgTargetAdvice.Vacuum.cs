@@ -139,7 +139,23 @@ public static partial class PgTargetAdvice
             inv.Append(". ");
         }
 
-        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h. ");
+        /* #3691 lane 43 (M3): the next two persistently-backlogged tables BY NAME, with each one's own ratio and
+           slope. Before it, the read stopped at one row and the card could only COUNT the others
+           (tables_in_backlog) — an operator who read "4 other tables are past their line too" had to call
+           get_pg_autovacuum to learn which, and the collector had thrown the rows away. The clause rides on the
+           subject's persistence sentence because Ranked[0] IS the subject, so "and two more" means "besides this
+           table"; empty on a server with one backlogged table, which is the byte-identity arm. */
+        var rest = FactAdvice.NameTheRest(f, o =>
+        {
+            var oRatio = o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogRatioKey) ?? o.Value;
+            var oHours = o.Figures?.GetValueOrDefault(PgTargetScorer.BacklogHoursKey) ?? 0;
+            var oSlope = o.Figures is not null && o.Figures.TryGetValue(PgTargetScorer.BacklogSlopePerHourKey, out var s)
+                ? $", {Fmt(Math.Abs(s))}/h {(s > 0 ? "and rising" : s < 0 ? "and falling" : "and flat")}"
+                : string.Empty;
+            return $"{oRatio:0.#}× for {FmtHours(oHours)}{oSlope}";
+        });
+
+        inv.Append($"The table has been past its line for {trailing:0} consecutive samples spanning {hours:0.#} h{rest}. ");
 
         if (slopeComputable)
         {
@@ -181,6 +197,8 @@ public static partial class PgTargetAdvice
             inv.Append("PG_XMIN_HOLD co-fired: the xmin horizon is held back, so dead tuples newer than it are not removable by any vacuum — this backlog cannot clear until the holder is released. ");
         if (autovacuumOff)
             inv.Append("CONFIG_PG_AUTOVACUUM_OFF co-fired: autovacuum is off server-wide, so this backlog is by configuration. ");
+        /* The POPULATION, a different number from the named list above: every table that met the gate, which can
+           exceed the three rows the read returns. So the count stays and so does the pointer to the tool. */
         if (others > 0)
             inv.Append($"{others:0} other table{(others == 1 ? " is" : "s are")} persistently past their line too — get_pg_autovacuum lists them all by ratio. ");
 
