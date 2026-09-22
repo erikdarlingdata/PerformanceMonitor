@@ -230,8 +230,14 @@ public sealed class PgTargetAuditConfigTests
             var maxWal = Row(PgTargetFactKeys.ConfigMaxWalSize);
             Assert.Equal("not_applicable", maxWal.GetProperty("status").GetString());
             Assert.Equal("1 GB", maxWal.GetProperty("current_value").GetString());
-            Assert.Contains("Aurora", maxWal.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
-            Assert.Contains("storage layer owns checkpointing", maxWal.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
+            /* Lane 15's own composed sentence, verbatim from PgTargetAdvice.Write's Aurora arm — the headline
+               says it is not a finding HERE and the remediation redirects to where Aurora does report write
+               pressure. Asserted as the composed pair this tool renders (headline + " " + remediation), which
+               is what a caller reads. */
+            Assert.Contains("not a finding on Aurora, where the engine does not consult it",
+                maxWal.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
+            Assert.Contains("Read write pressure where Aurora reports it",
+                maxWal.GetProperty("recommendation").GetString()!, StringComparison.Ordinal);
 
             var checkpointTimeout = Row(PgTargetFactKeys.ConfigCheckpointTimeout);
             Assert.Equal("not_applicable", checkpointTimeout.GetProperty("status").GetString());
