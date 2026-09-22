@@ -20,10 +20,14 @@ services:
     image: timescale/timescaledb:latest-pg17
     restart: unless-stopped
     # #3899: pg_stat_statements, for the store's OWN statement statistics (get_store_query_stats: which of
-    # the store's queries the web viewer, the MCP tools and the service spend their time on). On the command
-    # line so it outranks both the image's generated postgresql.conf and any ALTER SYSTEM, with timescaledb
-    # kept in the list. track_utility=off keeps role DDL, which can carry a password literal, out of the view.
-    # The service creates the extension and its reader functions itself.
+    # the store's queries cost the most). In compose the service, the web dashboard and MCP all connect as the
+    # darling login, so the ranking has no per-surface role split here; the statements themselves still name
+    # the query. On the command line so it takes effect on an existing volume too, with timescaledb kept in the
+    # list. The command line outranks the image's postgresql.conf AND any ALTER SYSTEM, so this line IS the
+    # store's preload list: to preload another library, add it here (an ALTER SYSTEM or conf edit of
+    # shared_preload_libraries is silently ignored while this line is present). track_utility=off keeps
+    # utility statements, role DDL's password literals among them, out of the view. The service creates the
+    # extension and its reader functions itself.
     command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off"]
     environment:
       POSTGRES_USER: darling

@@ -35,7 +35,9 @@ namespace PerformanceMonitor.Collectors;
 /// a value (<c>WHERE id = 42</c>) or part of one; the pattern's own identifier guard is what keeps
 /// <c>transactionitems1</c> whole, exactly as it does inside a plan's <c>Filter</c>. The redacted text is
 /// what <see cref="Fingerprint"/> hashes, so one statement shape recurs to one fingerprint whatever it ran
-/// with — the plan hash's reasoning, over SQL text.</description></item>
+/// with — the plan hash's reasoning, over SQL text. <see cref="RedactStoredStatement"/> is the same with the
+/// dollar-quoted and <c>E''</c> forms added, for a surface that keeps the text instead of a
+/// hash.</description></item>
 /// <item><description><see cref="RedactMessage"/> — <c>message</c>, <c>detail</c> and <c>hint</c>, which
 /// are PostgreSQL's prose. Quoted literals go. Bare numbers STAY, because in prose they are the
 /// evidence rather than the value: <c>process 1549 still waiting for ShareLock on transaction 809 after
@@ -159,6 +161,46 @@ public static class PgLogTextRedactor
 
         var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(statement, "'?'");
         return PgPlanLogParser.s_bareNumber.Replace(scrubbed, "?");
+    }
+
+    /* The two string-literal forms the quoted-literal pattern cannot see, for statement text that is KEPT.
+       A dollar-quoted string (`$$pw$$`, `$tag$pw$tag$`) has no single quote in it at all, and an escape
+       string's backslash-escaped quote (`E'pa\'ss'`) ends the plain pattern's match early, which would leave
+       the rest of the value standing as ordinary text. The tag group always participates (it captures the
+       empty string for `$$`) because a .NET backreference to a group that did not match fails rather than
+       matching empty. A `$1` placeholder is not an opener: a tag cannot start with a digit. An opener with no
+       close runs to the end of the text, the safe direction for a value the reader cannot bound. */
+    private static readonly Regex s_dollarQuoted = new(
+        @"\$(?<tag>(?:[A-Za-z_][A-Za-z_0-9]*)?)\$(?:.*?\$\k<tag>\$|.*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    private static readonly Regex s_escapeString = new(
+        @"(?<![A-Za-z0-9_$])[Ee]'(?:[^'\\]|''|\\.)*(?:'|$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    /// <summary>
+    /// SQL text that is STORED rather than hashed: <see cref="RedactStatement"/> plus dollar-quoted and
+    /// <c>E''</c> escape strings, each replaced by the same <c>'?'</c> mark, with a positional parameter
+    /// (<c>$1</c>) kept, since it marks where a value was bound rather than carrying one. The log-event pipeline keeps only
+    /// <see cref="Fingerprint"/>'s hash of a statement, so it hashes <see cref="RedactStatement"/>'s output and
+    /// a <c>DO</c> body stays part of the shape it hashes; a surface that keeps the TEXT (the monitoring store's
+    /// own slow-statement entries, #3899) cannot leave a dollar-quoted password standing, so it runs the two
+    /// extra forms first. Null in, null out.
+    /// </summary>
+    public static string? RedactStoredStatement(string? statement)
+    {
+        if (string.IsNullOrEmpty(statement))
+        {
+            return statement;
+        }
+
+        var scrubbed = s_dollarQuoted.Replace(statement, "'?'");
+        scrubbed = s_escapeString.Replace(scrubbed, "'?'");
+        scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(scrubbed, "'?'");
+
+        /* A positional parameter ($1) is not a value, it is where one was bound, so the bare-number pass leaves
+           the digits after a '$' alone: the SAME compiled pattern, asked per match. */
+        return PgPlanLogParser.s_bareNumber.Replace(scrubbed, m => m.Index > 0 && scrubbed[m.Index - 1] == '$' ? m.Value : "?");
     }
 
     /// <summary>

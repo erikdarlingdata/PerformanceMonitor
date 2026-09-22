@@ -365,12 +365,14 @@ public sealed class DarlingWorker : BackgroundService
         new("baseline fallback views", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, logger, ct)),
         /* #3899: the store's OWN per-statement timings — pg_stat_statements (preloaded by the managed conf's v13
-           block), the SECURITY DEFINER reader get_store_query_stats calls, its grants to the reader roles, and
-           the role-DDL scrub. Ungated: nothing in it depends on TimescaleDB. After provisioning on the start
-           path (this segment follows it), so the grantees exist. On this cadence an extension a DBA creates by
-           hand, or a function or grant that was dropped, heals within the hour; the PRELOAD is restart-only and
-           lives in the conf, so this step cannot load the library, only report that it is not loaded. Counted in
-           place: 1 when the reader is ready, 0 in any of the named states that are not a failure. */
+           block), the SECURITY DEFINER readers get_store_query_stats calls, their grants to the reader roles,
+           and the scrub of statements whose text can carry a credential. Ungated: nothing in it depends on
+           TimescaleDB. After provisioning on the start path (this segment follows it), so the grantees exist.
+           The hourly pass runs on a TimescaleDB store only (the tick's gate), where an extension a DBA creates
+           by hand, or a function or grant that was dropped, heals within the hour; a plain-PostgreSQL store
+           re-runs this at its next start. The PRELOAD is restart-only and lives in the conf, so this step cannot
+           load the library, only report that it is not loaded. Counted in place: 1 when the reader is ready, 0
+           in any of the named states that are not a failure. */
         new("statement statistics", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.InPlace,
             async (connection, logger, ct) => await StoreStatementStats.EnsureAsync(
                 connection,

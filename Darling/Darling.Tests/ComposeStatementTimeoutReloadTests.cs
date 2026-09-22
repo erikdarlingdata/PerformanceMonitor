@@ -50,8 +50,32 @@ public sealed class ComposeStatementTimeoutReloadTests
         Assert.Contains(shared, batch, StringComparison.Ordinal);
 
         /* And the batch carries the pair exactly once — an embed that also left the old inline copy behind
-           would still satisfy Contains, while writing the ceiling twice. */
+           would still satisfy Contains, while writing the ceiling twice. The slow-statement line (#3899) rides
+           the same renderer, and is written once too. */
         Assert.Equal(2, Regex.Matches(batch, @"SET statement_timeout = '").Count);
+        Assert.Equal(2, Regex.Matches(batch, @"SET log_min_duration_statement = '").Count);
+    }
+
+    /// <summary>
+    /// #3899, through #3904's review: the slow-statement line is a THIRD of the clamped ceiling, rendered by the
+    /// same function the reload re-asserts, so a ceiling lowered to 5 s moves the line to 1666 ms instead of
+    /// leaving a fixed 5 s line that could never fire (the statement is cancelled at the line, and a cancel logs
+    /// no duration). admin gets no line.
+    /// </summary>
+    [Theory]
+    [InlineData(15, "5000ms")]
+    [InlineData(5, "1666ms")]
+    [InlineData(1, "1666ms")]
+    [InlineData(0, "5000ms")]
+    [InlineData(600, "200000ms")]
+    [InlineData(99999, "200000ms")]
+    public void TheRenderer_SetsTheSlowStatementLineAtAThirdOfTheClampedCeiling(int seconds, string expected)
+    {
+        var sql = DarlingManagedRoles.BuildComposeStatementTimeoutSql(seconds);
+
+        Assert.Contains($"ALTER ROLE viewer SET log_min_duration_statement = '{expected}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE mcp    SET log_min_duration_statement = '{expected}';", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ROLE admin", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

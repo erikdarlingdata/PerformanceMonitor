@@ -119,27 +119,119 @@ public class StoreLogClassifierTests
     ]);
 
     /// <summary>
-    /// A statement from a read identity that ran past the slow-statement line is RETAINED under
-    /// <c>slow_statement</c> with the statement in its raw entry, the continuation lines included (#3899). The
-    /// same words at ERROR are not a slow statement: the rule is LOG-scoped and anchored, and an ERROR that no rule
-    /// names stays in the retained residue.
+    /// A statement that ran past the slow-statement line is RETAINED under <c>slow_statement</c> as the statement
+    /// itself (#3899): the continuation lines joined, comments stripped, whitespace collapsed, and the message is
+    /// that statement with no duration in it, while the kept entry is the first line's prefix and duration with
+    /// the same statement after it. The same words at ERROR are not a slow statement: the rule is LOG-scoped and
+    /// anchored, and an ERROR that no rule names stays in the retained residue.
     /// </summary>
     [Fact]
-    public void ASlowStatementIsRetainedWithItsStatement_AndOnlyAtLog()
+    public void ASlowStatementIsRetainedAsItsStatement_AndOnlyAtLog()
     {
         var census = StoreLogClassifier.Classify(
             DefaultPrefix + "LOG:  duration: 6120.004 ms  execute <unnamed>: \n" +
+            "\t/* the store's newest row per server */\n" +
             "\tSELECT server_id, MAX(collection_time)\n" +
-            "\tFROM v_collection_log\n");
+            "\tFROM v_collection_log -- the view\n" +
+            "\tWHERE server_id = $1\n");
 
         var slow = Assert.Single(census.Groups);
-        Assert.Equal("slow_statement", slow.EventClass);
+        Assert.Equal(StoreLogClassifier.SlowStatementClass, slow.EventClass);
         Assert.Equal("LOG", slow.Severity);
-        Assert.StartsWith("duration: 6120.004 ms", slow.MessageText, StringComparison.Ordinal);
-        Assert.Contains("FROM v_collection_log", slow.SampleLine, StringComparison.Ordinal);
+        Assert.Equal("execute <unnamed>: SELECT server_id, MAX(collection_time) FROM v_collection_log WHERE server_id = $1", slow.MessageText);
+        Assert.Equal(
+            DefaultPrefix + "LOG:  duration: 6120.004 ms  execute <unnamed>: SELECT server_id, MAX(collection_time) FROM v_collection_log WHERE server_id = $1",
+            slow.SampleLine);
 
         var atError = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  duration: 6120.004 ms is not a statement\n");
         Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(atError.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #3904's review: the classifier reads no role, so an operator's store-wide <c>log_min_duration_statement</c>
+    /// (or auto_explain) puts ANY role's statements here, admin's config writes and provisioning's
+    /// <c>ALTER ROLE ... PASSWORD</c> among them, and the class is readable by the viewer and mcp roles through
+    /// <c>get_store_log</c>. So every literal form is masked (quoted, escape, dollar-quoted, and bare numbers,
+    /// with positional parameters kept), and every field line below the statement (a DETAIL carrying bind
+    /// parameters) is dropped. Nothing any of these carry reaches the census.
+    /// </summary>
+    [Fact]
+    public void ASlowStatementKeepsNoLiteralAndNoParameter()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "LOG:  duration: 7001.000 ms  statement: ALTER ROLE admin LOGIN NOSUPERUSER PASSWORD 'Secret3904a'",
+            DefaultPrefix + "LOG:  duration: 7002.000 ms  statement: ALTER ROLE mcp PASSWORD $pw$Secret3904b$pw$",
+            DefaultPrefix + "LOG:  duration: 7003.000 ms  statement: ALTER ROLE viewer PASSWORD E'Sec\\'ret3904c'",
+            DefaultPrefix + "LOG:  duration: 7004.000 ms  execute S_1: UPDATE config.config_notification SET teams_webhook_url = $1 WHERE id = 1",
+            DefaultPrefix + "DETAIL:  Parameters: $1 = 'https://hooks.example.invalid/Secret3904d'",
+            DefaultPrefix + "LOG:  duration: 7005.000 ms  statement: SELECT * FROM t WHERE code = 'Secret3904e' AND n > 42",
+            "",
+        ]));
+
+        var retained = census.Groups.Where(g => g.EventClass == StoreLogClassifier.SlowStatementClass).ToList();
+        Assert.Equal(5, retained.Count);
+        foreach (var group in retained)
+        {
+            Assert.DoesNotContain("Secret3904", group.MessageText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Secret3904", group.SampleLine, StringComparison.Ordinal);
+            Assert.DoesNotContain("ret3904", group.SampleLine, StringComparison.Ordinal);
+            Assert.DoesNotContain("DETAIL", group.SampleLine, StringComparison.Ordinal);
+        }
+
+        Assert.Contains(retained, g => g.MessageText == "statement: ALTER ROLE admin LOGIN NOSUPERUSER PASSWORD '?'");
+        Assert.Contains(retained, g => g.MessageText == "execute S_1: UPDATE config.config_notification SET teams_webhook_url = $1 WHERE id = ?");
+        Assert.Contains(retained, g => g.MessageText == "statement: SELECT * FROM t WHERE code = '?' AND n > ?");
+    }
+
+    /// <summary>
+    /// One slow query is ONE row however often it ran (#3904's review): the first version grouped by the
+    /// duration line, so a panel polled every minute filled the 20-row budget with one statement and pushed the
+    /// real signal out as "40 further distinct messages". Two different statements stay two rows.
+    /// </summary>
+    [Fact]
+    public void RepeatsOfOneSlowStatement_GroupIntoOneRow_WhateverTheirDurations()
+    {
+        var lines = new List<string>();
+        for (var i = 0; i < 45; i++)
+        {
+            lines.Add(DefaultPrefix + $"LOG:  duration: {6000 + i}.5{i % 10}0 ms  execute <unnamed>: ");
+            lines.Add("\tSELECT count(*) FROM collect.wait_stats WHERE server_id = $1");
+        }
+
+        lines.Add(DefaultPrefix + "LOG:  duration: 9000.000 ms  execute <unnamed>: SELECT 1 FROM collect.query_stats");
+        lines.Add("");
+
+        var census = StoreLogClassifier.Classify(string.Join("\n", lines));
+        var retained = census.Groups.Where(g => g.EventClass == StoreLogClassifier.SlowStatementClass).ToList();
+
+        Assert.Equal(2, retained.Count);
+        Assert.Equal(45, retained.Single(g => g.MessageText!.Contains("wait_stats", StringComparison.Ordinal)).Occurrences);
+        Assert.Equal(0, census.GroupsDropped);
+    }
+
+    /// <summary>
+    /// A duration line that names no statement is not a slow statement this class can name: <c>log_duration</c>'s
+    /// bare line, and auto_explain's plan, whose <c>Query Text</c> is the statement VERBATIM. Both are counted as
+    /// routine and keep no text.
+    /// </summary>
+    [Fact]
+    public void ADurationLineWithNoStatement_IsRoutine_AndKeepsNoText()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "LOG:  duration: 0.412 ms",
+            DefaultPrefix + "LOG:  duration: 8123.001 ms  plan:",
+            "\tQuery Text: SELECT * FROM t WHERE secret = 'Secret3904f'",
+            "\tSeq Scan on t  (cost=0.00..1.01 rows=1 width=4)",
+            "",
+        ]));
+
+        var only = Assert.Single(census.Groups);
+        Assert.Equal(StoreLogClassifier.RoutineClass, only.EventClass);
+        Assert.Equal(2, only.Occurrences);
+        Assert.Null(only.MessageText);
+        Assert.Null(only.SampleLine);
     }
 
     /// <summary>
