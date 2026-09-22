@@ -447,6 +447,7 @@ public sealed class IncidentAttachmentDeliveryTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Seed(dedupKey);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
 
         private Task<DateTime?> Seed(string? dedupKey) =>
             Task.FromResult<DateTime?>(
