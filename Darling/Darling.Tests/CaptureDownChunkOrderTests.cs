@@ -149,7 +149,12 @@ public sealed class CaptureDownChunkOrderTests
             }
 
             await using var postgres = NpgsqlDataSource.Create(connectionString!);
-            var missing = await DarlingSelfAlertEvaluator.ReadMissingCaptureSessionsAsync(postgres, TestServerId, ct);
+            /* #3854: an instance method now — the read goes out through the shared retry seam, whose
+               counter and pause live on the evaluator. The read itself is unchanged, which is what this
+               chunk-order pin is about. */
+            var h = new DarlingSelfAlertTests.Harness();
+            var evaluator = new DarlingSelfAlertEvaluator(h.Settings, h.Deliverer, h.History, _ => false);
+            var missing = await evaluator.ReadMissingCaptureSessionsAsync(postgres, TestServerId, ct);
             Assert.Equal(new[] { "Blocking" }, missing);
 
             bodySucceeded = true;

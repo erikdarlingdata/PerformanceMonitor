@@ -349,10 +349,13 @@ public sealed class TimeHonestyRungTests
         Assert.DoesNotContain("Not <c>sample_time_utc</c>, deliberately", doc, StringComparison.Ordinal);
 
         /* And the reader folds the pair the documented way — twin first, local as the fallback — rather than
-           reading only one of them. Source pin because ReadLatestCpuAsync is private and needs a live store. */
+           reading only one of them. Source pin because the read is private and needs a live store. #3854 split
+           it into an expression-bodied ReadLatestCpuAsync forwarder over the retry seam and a
+           ReadLatestCpuCoreAsync sibling holding the read byte-identical — the columns and the fold this pin
+           cares about live in the Core body, so that is the declaration it slices. */
         var reader = CSharpSourceWalker.StripCommentsAndStrings(worker);
-        var head = reader.IndexOf("ReadLatestCpuAsync(int serverId", StringComparison.Ordinal);
-        Assert.True(head >= 0, "DarlingWorker has no ReadLatestCpuAsync");
+        var head = reader.IndexOf("ReadLatestCpuCoreAsync(int serverId", StringComparison.Ordinal);
+        Assert.True(head >= 0, "DarlingWorker has no ReadLatestCpuCoreAsync");
         var body = reader.Substring(head, Math.Min(2500, reader.Length - head));
         Assert.Contains("reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3)", body, StringComparison.Ordinal);
         Assert.Contains("reader.IsDBNull(2) ? (DateTime?)null : reader.GetDateTime(2)", body, StringComparison.Ordinal);

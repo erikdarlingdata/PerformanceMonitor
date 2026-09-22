@@ -4288,7 +4288,7 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogError("[{Server}] Latest-CPU read for the alert pass failed after {ElapsedMs} ms: {Message}",
                 server.Config.DisplayName, cpuReadClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
-                runtime.ServerId.ToString(CultureInfo.InvariantCulture), "latest-CPU read", cpuReadClock.ElapsedMilliseconds);
+                runtime.ServerId.ToString(CultureInfo.InvariantCulture), LatestCpuReadName, cpuReadClock.ElapsedMilliseconds);
         }
 
         var sweepReadClock = Stopwatch.StartNew();
@@ -5923,7 +5923,30 @@ LIMIT 1";
     /// ServerSummaryItem.TotalCpuPercent derivation (:140-141): total = SQL + (other ?? 0),
     /// null when there is no SQL sample (Azure SQL DB stores other as 0; Linux stores NULL).
     /// </summary>
-    private async Task<(double? SqlCpu, double? TotalCpu, DateTime? SampleTime)> ReadLatestCpuAsync(int serverId, CancellationToken cancellationToken)
+    private Task<(double? SqlCpu, double? TotalCpu, DateTime? SampleTime)> ReadLatestCpuAsync(
+        int serverId, CancellationToken cancellationToken)
+        /* #3854: the seventh read on the alert pass, and the only one of the seven that lives outside the
+           self-alert evaluator — routed through the SAME shared seam for the same reason. It runs on
+           AlertPassCommandTimeoutSeconds (the comment at its call site says so, and calls it the first store
+           read of the pass, so under contention it is the first to fail), and its swallowed failure is
+           counted on this same counter under LatestCpuReadName. A retry seam that covered the evaluator's
+           six and left this one would leave the pass's FIRST read as its only unretried one. */
+        => DarlingAlertReadAdapter.ExecuteWithOneRetryAsync(
+            token => ReadLatestCpuCoreAsync(serverId, token),
+            serverId.ToString(CultureInfo.InvariantCulture),
+            LatestCpuReadName,
+            _readFailures,
+            Task.Delay,
+            cancellationToken);
+
+    /// <summary>
+    /// The counter's name for the latest-CPU read, one constant so the retry count and the failure count
+    /// cannot spell it two ways (#3854).
+    /// </summary>
+    internal const string LatestCpuReadName = "latest-CPU read";
+
+    /// <summary>The read itself, byte-identical to what shipped before #3854 routed it through the seam.</summary>
+    private async Task<(double? SqlCpu, double? TotalCpu, DateTime? SampleTime)> ReadLatestCpuCoreAsync(int serverId, CancellationToken cancellationToken)
     {
         double? sqlCpu = null;
         double? otherCpu = null;

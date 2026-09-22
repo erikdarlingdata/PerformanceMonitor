@@ -208,7 +208,11 @@ public sealed class StartupCommandTimeoutTests
     private static readonly (string File, string Member)[] s_excludedMembers =
     {
         ("StoreConfigProvider.cs", "ReadConfigVersionAsync"),
-        ("DarlingWorker.cs", "ReadLatestCpuAsync"),
+        /* #3854 split the latest-CPU read: ReadLatestCpuAsync is now an expression-bodied forwarder over the
+           retry seam — which MemberBody deliberately does not read as a declaration, and which creates no
+           command anyway — and ReadLatestCpuCoreAsync is the sibling holding the NpgsqlCommand on the
+           alert-pass deadline. The guard follows the command. */
+        ("DarlingWorker.cs", "ReadLatestCpuCoreAsync"),
         ("DarlingWorker.cs", "RunTestHypotheticalIndexAsync"),
         ("DarlingWorker.cs", "RunExecuteActualPlanAsync"),
     };
