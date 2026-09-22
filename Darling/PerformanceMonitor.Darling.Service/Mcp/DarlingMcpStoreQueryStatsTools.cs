@@ -333,12 +333,11 @@ LIMIT $2";
     /// <summary>
     /// The remedy for each way a store can lack statement statistics, in the order they have to be fixed in, or
     /// null when the read can go ahead. Pure, so every branch is pinned without a server. The setup runs at every
-    /// service start and again hourly on a TimescaleDB store; a plain-PostgreSQL store runs it at its next start,
-    /// and each remedy says which.
+    /// service start and again hourly (#3913: on every store shape), and each remedy says so.
     /// </summary>
     internal static string? PreconditionReason(StatsState state)
     {
-        const string Cadence = "The service builds the store's statement statistics at every start, and again hourly on a TimescaleDB store (a plain-PostgreSQL store waits for its next service start).";
+        const string Cadence = "The service builds the store's statement statistics at every start and again every hour.";
         const string ByoSetup = "A store you run yourself needs pg_stat_statements in shared_preload_libraries with pg_stat_statements.track_utility = off (a restart loads it), then CREATE EXTENSION pg_stat_statements run by a superuser in this database; Darling/tools/provision-roles.sql carries the steps.";
 
         if (state.ExtensionVersion is null)

@@ -193,6 +193,11 @@ public sealed class DarlingWorker : BackgroundService
         Tuning,
     }
 
+    /// <summary>Whether a convergence stage needs TimescaleDB: the two the start path runs inside its
+    /// TimescaleDB gate. The hourly pass on a plain-PostgreSQL store skips exactly these (#3913).</summary>
+    internal static bool NeedsTimescale(StoreObjectConvergenceStage stage) =>
+        stage is StoreObjectConvergenceStage.Timescale or StoreObjectConvergenceStage.TimescaleAfterRepairLaunch;
+
     /// <summary>
     /// Whether a step's return value counts CHANGES it made or OBJECTS it found in place — the difference
     /// between a number the summary line may report as "changed" and one it must not.
@@ -368,9 +373,8 @@ public sealed class DarlingWorker : BackgroundService
            block), the SECURITY DEFINER readers get_store_query_stats calls, their grants to the reader roles,
            and the scrub of statements whose text can carry a credential. Ungated: nothing in it depends on
            TimescaleDB. After provisioning on the start path (this segment follows it), so the grantees exist.
-           The hourly pass runs on a TimescaleDB store only (the tick's gate), where an extension a DBA creates
-           by hand, or a function or grant that was dropped, heals within the hour; a plain-PostgreSQL store
-           re-runs this at its next start. The PRELOAD is restart-only and lives in the conf, so this step cannot
+           On the hourly pass, on every store shape since #3913, an extension a DBA creates by hand, or a
+           function or grant that was dropped, heals within the hour. The PRELOAD is restart-only and lives in the conf, so this step cannot
            load the library, only report that it is not loaded. Counted in place: 1 when the reader is ready, 0
            in any of the named states that are not a failure. */
         new("statement statistics", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.InPlace,
@@ -2617,9 +2621,9 @@ public sealed class DarlingWorker : BackgroundService
 
                    The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
                    that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
-                   hour, on a pooled connection, saying nothing above Debug. Nothing else on this tick runs
-                   for such a store at all, which is what lets the probe carry the whole of the ungated
-                   half. */
+                   hour, on a pooled connection, saying nothing above Debug. The only other thing this tick
+                   runs for such a store is the store-object convergence pass's non-TimescaleDB steps (#3913,
+                   the else branch below). */
                 if (!_timescaleAvailable)
                 {
                     await ReprobeTimescaleAvailabilityAsync(stoppingToken);
@@ -2678,6 +2682,17 @@ public sealed class DarlingWorker : BackgroundService
                        hourly path is wired on THIS store, in the same log window an operator reads after a
                        restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
                     await ConvergeStoreObjectsAsync(stoppingToken);
+                }
+                else
+                {
+                    /* #3913: the same convergence pass on a store WITHOUT TimescaleDB, walking only the steps
+                       that run on every store shape (the Ungated and Tuning stages the start path already
+                       runs there): the baseline relations, the store's statement statistics, the composer's
+                       covering indexes. Before this, nothing re-ran on such a store between restarts, so a
+                       dropped fallback view, or an extension a DBA created by hand, waited for the next
+                       start. None of the compression-phase reasoning above applies, since a store without
+                       TimescaleDB has no policy jobs to sample. */
+                    await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
                 }
             }
 
@@ -6562,7 +6577,7 @@ LIMIT 1";
     /// counter: this is a maintenance ACTION, not an alert read whose failure would leave a condition
     /// unjudged.</para>
     /// </summary>
-    private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken)
+    private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken, bool timescaleAvailable = true)
     {
         var passClock = Stopwatch.StartNew();
         var tally = new StoreObjectConvergenceTally();
@@ -6574,6 +6589,13 @@ LIMIT 1";
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
             foreach (var step in s_storeObjectConvergence)
             {
+                /* #3913: the ONE filter the hourly pass has. On a store without TimescaleDB, a step that needs
+                   it is skipped rather than run to fail; every other step runs, as it does at start. */
+                if (!timescaleAvailable && NeedsTimescale(step.Stage))
+                {
+                    continue;
+                }
+
                 await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token);
             }
 
