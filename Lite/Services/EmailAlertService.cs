@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Notifications;
@@ -71,7 +72,14 @@ public class EmailAlertService : IFindingAlertSender
     /// findings carry their own <c>analysis_notify_cooldown_minutes</c> throttle and were not part of what
     /// #3430 measured.</para>
     /// </param>
-    public async Task TrySendAlertEmailAsync(
+    /// <param name="trayShown">
+    /// #3916: whether the caller raised Lite's tray balloon for this alert on the same call. Defaults to
+    /// TRUE — the engine path (<c>LiteAlertDeliverer.DeliverAsync</c>) shows a styled balloon for every
+    /// non-muted alert. The analysis finding path passes FALSE: Lite wires no tray sink into
+    /// <c>AnalysisNotificationService</c>, so no toast is raised for a finding, and a row stored
+    /// <c>tray</c> there would read "Shown" for a toast nobody saw.
+    /// </param>
+    public async Task<AlertDelivery?> TrySendAlertEmailAsync(
         string metricName,
         string serverName,
         string currentValue,
@@ -83,7 +91,8 @@ public class EmailAlertService : IFindingAlertSender
         bool muted = false,
         string? detailText = null,
         bool deliverProse = true,
-        AlertNotificationMode? deliveryMode = null)
+        AlertNotificationMode? deliveryMode = null,
+        bool trayShown = true)
     {
         try
         {
@@ -91,12 +100,14 @@ public class EmailAlertService : IFindingAlertSender
                 metricName, serverName, currentValue, thresholdValue, serverId.ToString(), context, attemptChannels: !muted,
                 detailText: deliverProse ? detailText : null, deliveryMode: deliveryMode);
 
-            /* trayChannelPresent: true — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
+            /* trayChannelPresent: trayShown, true on the engine path — LiteAlertDeliverer.DeliverAsync shows a styled balloon for every
                non-muted alert on the same call that reaches here, so a stored "tray" really does mean a
                toast was shown. This is Lite's half of the deliberate per-SKU divergence; the headless
                Darling service passes false because it has no tray at all. Lite's stored values are
-               unchanged by the shared derivation. */
-            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: true);
+               unchanged by the shared derivation. #3916: the value is trayShown, which the analysis finding
+               path clears — no toast is raised for a finding on Lite, so its row must not claim one.
+               Still the named argument, so the answer cannot be flipped by a positional edit. */
+            var delivery = AlertDelivery.FromFanout(result, muted, trayChannelPresent: trayShown);
 
             /* Always log the alert, regardless of email status. The numeric current/threshold
                resolution happens in the store (it owns the DuckDB DOUBLE columns); the record
@@ -113,21 +124,26 @@ public class EmailAlertService : IFindingAlertSender
                 numericCurrentValue, numericThresholdValue,
                 delivery,
                 muted, detailText, contextJson));
+
+            /* #3916: the recorded disposition, for the analysis path's hold (a hold is earned by a
+               delivery). The engine callers discard it. */
+            return delivery;
         }
         catch (Exception ex)
         {
             _logger.LogError($"TrySendAlertEmailAsync outer error: {ex.Message}");
+            return null;
         }
     }
 
     /// <summary>
-    /// <see cref="IFindingAlertSender"/>: latest alert_log time for (serverId, metricName),
-    /// any channel/result — seeds the shared AnalysisNotificationService cooldown across
-    /// restarts (the analysis cooldown is stamped unconditionally, so the persisted equivalent
-    /// is the latest row for that metric_name). Delegates to the injected store.
+    /// <see cref="IFindingAlertSender"/>: latest DELIVERED-page time for (serverId, metricName) —
+    /// seeds the shared AnalysisNotificationService #2054 hold across restarts. #3916: a hold is
+    /// earned by a delivery, so the seed reads only rows that reached someone. Delegates to the
+    /// injected store.
     /// </summary>
-    public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
-        => _historyStore.GetLastAlertTimeAsync(serverId, metricName);
+    public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+        => _historyStore.GetLastDeliveredPageUtcAsync(serverId, metricName);
 
     /// <summary>
     /// <see cref="IFindingAlertSender"/>: dispatches a composed analysis-finding alert.
@@ -136,8 +152,9 @@ public class EmailAlertService : IFindingAlertSender
     /// params — so no separate fallback row is needed.
     /// <para>The row persists <c>DetailText</c>; the channels render it only if the producer says
     /// to. Darling's <c>DarlingFindingAlertSender</c> reads the same declaration.</para>
+    /// <para>#3916: returns the delivery the row recorded; null only when the send path caught.</para>
     /// </summary>
-    public Task SendFindingAlertAsync(FindingAlert alert)
+    public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
     {
         var serverId = int.TryParse(alert.ServerId, out var sid) ? sid : 0;
 
@@ -162,7 +179,49 @@ public class EmailAlertService : IFindingAlertSender
             numericThresholdValue: alert.NotifyThreshold,
             muted: false,
             detailText: alert.DetailText,
-            deliverProse: alert.DeliverDetailText);
+            deliverProse: alert.DeliverDetailText,
+            /* #3916: Lite raises NO toast for an analysis finding (MainWindow wires no tray sink into
+               AnalysisNotificationService), so an unconfigured finding's row is "unconfigured", not a
+               "tray" row that reads Shown. */
+            trayShown: false);
+    }
+
+    /// <summary>
+    /// <see cref="IFindingAlertSender"/> (#3916): ONE message naming every held page over the cap, then one
+    /// row per named page under its own metric name carrying the summary's delivery. No toast (Lite wires no
+    /// analysis tray sink), so trayChannelPresent is false as on the single-page path. Never throws.
+    /// </summary>
+    public async Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+    {
+        if (named is null || named.Count == 0)
+            return null;
+        try
+        {
+            var (serverName, currentValue, context) = FindingSummary.Compose(named);
+            var result = await _core.TrySendAsync(
+                FindingSummary.MetricName, serverName, currentValue, named.Count.ToString(),
+                named[0].ServerId, context, attemptChannels: true);
+            /* No toast for a summary on Lite, the same answer the single-finding arm states: the local keeps
+               the one declared producer shape (trayChannelPresent: trayShown) the tray-channel pin reads. */
+            const bool trayShown = false;
+            var delivery = AlertDelivery.FromFanout(result, muted: false, trayChannelPresent: trayShown);
+            foreach (var alert in named)
+            {
+                await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
+                    alert.ServerId, alert.ServerName, alert.MetricName,
+                    alert.CurrentValue, alert.ThresholdValue,
+                    alert.Severity, alert.NotifyThreshold,
+                    delivery,
+                    false, FindingSummary.RowDetailText(alert, named.Count),
+                    alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null));
+            }
+            return delivery;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"SendFindingSummaryAsync error: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -172,21 +231,24 @@ public class EmailAlertService : IFindingAlertSender
     /// numeric severity/threshold, the full detail text, the serialized context — so every reader of the
     /// table sees one shape. Never throws.
     /// </summary>
-    private async Task RecordDigestRoutedFindingAsync(FindingAlert alert, int serverId)
+    private async Task<AlertDelivery?> RecordDigestRoutedFindingAsync(FindingAlert alert, int serverId)
     {
         try
         {
             string? contextJson = alert.Context is not null ? AlertContextSerializer.Serialize(alert.Context) : null;
+            var delivery = AlertDelivery.RoutedToDigest();
             await _historyStore.RecordAlertAsync(new AlertHistoryRecord(
                 serverId.ToString(), alert.ServerName, alert.MetricName,
                 alert.CurrentValue, alert.ThresholdValue,
                 alert.Severity, alert.NotifyThreshold,
-                AlertDelivery.RoutedToDigest(),
+                delivery,
                 false, alert.DetailText, contextJson));
+            return delivery;
         }
         catch (Exception ex)
         {
             _logger.LogError($"RecordDigestRoutedFindingAsync error: {ex.Message}");
+            return null;
         }
     }
 }

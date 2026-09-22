@@ -91,6 +91,16 @@ public interface IAlertSettings
     int    AnalysisNotifyCooldownMinutes { get; }
 
     /// <summary>
+    /// The most analysis PAGE incidents one hold-back window may deliver as individual messages (#3916). A
+    /// window holding more collapses into ONE summary naming every incident — so a restart or install burst
+    /// (every story re-paging at once across the fleet) arrives as one message, not dozens. Each SKU maps its
+    /// existing per-event cap: Darling <c>alerts.perEventMax</c> (default 5), Lite
+    /// <c>App.AlertPerEventMaxPerCycle</c> (default 10), Dashboard <c>UserPreferences.AlertPerEventMaxPerCycle</c>
+    /// (default 10). Clamped 1–100 at each adapter.
+    /// </summary>
+    int    AnalysisPageCap { get; }
+
+    /// <summary>
     /// Where an UNCORROBORATED analysis finding goes (#3712) — <c>analysis.uncorroborated_route</c>: a lone
     /// fact with no second fact in its chain and no matched co-fire check. <see cref="FindingRoute.Digest"/>
     /// (shipped) keeps it off the paging channels and puts it in the daily digest and the web/MCP surfaces;

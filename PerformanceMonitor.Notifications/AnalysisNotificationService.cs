@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
@@ -45,14 +46,61 @@ namespace PerformanceMonitor.Notifications;
 /// a story that later gains corroboration pages as a NEW firing rather than as a repeat of a digest entry.
 /// The knob is <see cref="IAlertSettings.UncorroboratedFindingRoute"/>.</para>
 /// </summary>
-public sealed class AnalysisNotificationService
+public sealed class AnalysisNotificationService : IDisposable
 {
+    /// <summary>
+    /// How long a PAGE-road incident waits before it is delivered (#3916), so that every page the fleet
+    /// raises inside one window is counted together against <see cref="IAlertSettings.AnalysisPageCap"/>:
+    /// at or under the cap each incident is its own message, over it they collapse into ONE summary that
+    /// names every one. Darling has no fleet-wide cycle — each server's sweep calls
+    /// <see cref="NotifyAsync"/> on its own schedule — so a cap without a window could only ever count one
+    /// server's incidents; the window is what makes the cap FLEET-wide.
+    /// <para><b>Sizing.</b> H must be at least the #1581 cold-start stagger
+    /// (<c>DarlingWorker.ColdStartSpreadSeconds</c>, 150 s) plus a margin, so that a restart or install
+    /// burst — every server's first sweep, spread over that stagger, each re-paging every story it holds —
+    /// lands in ONE window and arrives as one summary rather than dozens of per-server messages. Five
+    /// minutes is the stagger plus a full stagger of margin. Pinned against the constant in Darling.Tests.</para>
+    /// <para><b>Cost.</b> Every analysis page arrives up to five minutes later than it did. That is the
+    /// price, and it is small beside what it is measured against: a re-notify cooldown floored at 30 minutes,
+    /// on findings that are themselves the product of 5+ minute analysis passes. No page is lost to the
+    /// window — a queued page that the process stops before delivering is dropped UNSTAMPED
+    /// (<see cref="Dispose"/>), so nothing holds it and the next run re-attempts it.</para>
+    /// <para><b>No severity bypass.</b> A critical page does not skip the window, deliberately:
+    /// <see cref="CriticalSeverityCutoff"/> (1.5) equals the production notify threshold, so every
+    /// notify-worthy finding on a production store is already critical-band and a critical bypass would
+    /// exempt the whole population — the window and the cap would govern nothing.</para>
+    /// </summary>
+    public static readonly TimeSpan PageHoldBackWindow = TimeSpan.FromMinutes(5);
+
     private readonly IFindingAlertSender _sender;
     private readonly IAlertSettings _settings;
     private readonly Func<AnalysisFinding, string> _resolveServerId;
     private readonly Func<string, bool>? _isServerSilenced;
     private readonly ILogger<AnalysisNotificationService> _logger;
     private readonly Action<string, string>? _showTrayNotification;
+    private readonly Func<int, string, Task<bool>>? _isStoryMuted;
+    private readonly TimeSpan _holdBack;
+
+    /// <summary>
+    /// The page road's hold-back queue (#3916), keyed by the LEAD's page bucket key: a re-report of a
+    /// queued incident inside the window REPLACES its entry rather than adding a second page. Guarded by
+    /// <see cref="_pendingLock"/>, with the one-shot <see cref="_flushTimer"/> armed by the first enqueue of
+    /// a window. Nothing in the queue is stamped — a queued page is not a delivery; the buckets are stamped
+    /// only by <see cref="FlushPendingAsync"/>, with what the flush actually delivered.
+    /// </summary>
+    private Dictionary<string, PendingPage> _pending = new(StringComparer.Ordinal);
+    private readonly object _pendingLock = new();
+    private Timer? _flushTimer;
+    private bool _disposed;
+    private readonly SemaphoreSlim _flushGate = new(1, 1);
+
+    /// <summary>One queued page: the composed alert, its lead, the resolved serverId, and every member with
+    /// the bucket key it stamps once the flush delivers.</summary>
+    private sealed record PendingPage(
+        FindingAlert Alert,
+        AnalysisFinding Lead,
+        string ServerId,
+        IReadOnlyList<(AnalysisFinding Member, string Key)> Members);
 
     /// <summary>
     /// Per-symptom notification state (escalate-on-CRITICAL keying). A below-critical finding is
@@ -79,8 +127,11 @@ public sealed class AnalysisNotificationService
 
     /// <summary>One bucket's memory: when it last notified, at what severity, and when its story was
     /// last SEEN (notified or held — the prune horizon runs on this, so a persisting story cannot age
-    /// back into freshness while it keeps firing).</summary>
-    private sealed record BucketState(DateTime LastNotified, double LastNotifiedSeverity, DateTime LastSeen);
+    /// back into freshness while it keeps firing), and whether that notification was DELIVERED.
+    /// <para>#3916: <c>Delivered</c> is what arms the #2054 steady-severity hold. A hold must be earned by a
+    /// delivery — a bucket stamped by a send that reached no one throttles re-attempts to one per
+    /// cooldown but does not hold the story silent.</para></summary>
+    private sealed record BucketState(DateTime LastNotified, double LastNotifiedSeverity, DateTime LastSeen, bool Delivered);
 
     /// <summary>
     /// How much a story's severity must rise over its last-notified level to re-notify while it keeps
@@ -126,20 +177,45 @@ public sealed class AnalysisNotificationService
     /// notifications-enabled pref and marshals to the UI thread); Lite leaves it null. Best-effort:
     /// invoked inside the per-finding try, so a sink fault is logged, not propagated.
     /// </param>
+    /// <param name="isStoryMuted">
+    /// Optional <c>(serverId, storyPathHash)</c> mute read (#3916), consulted at FLUSH time for every queued
+    /// page: a mute rule written inside the hold-back window drops the page, unstamped, exactly as the
+    /// pipeline's own mute filter would have dropped the finding had the rule existed a pass earlier. Null
+    /// means no re-check (the pipeline's filter is the only one).
+    /// </param>
     public AnalysisNotificationService(
         IFindingAlertSender sender,
         IAlertSettings settings,
         Func<AnalysisFinding, string> serverIdResolver,
         ILogger<AnalysisNotificationService> logger,
         Func<string, bool>? isServerSilenced = null,
-        Action<string, string>? showTrayNotification = null)
+        Action<string, string>? showTrayNotification = null,
+        Func<int, string, Task<bool>>? isStoryMuted = null)
+        : this(sender, settings, serverIdResolver, logger, PageHoldBackWindow,
+               isServerSilenced, showTrayNotification, isStoryMuted)
+    {
+    }
+
+    /// <summary>Test seam (#3916): the same service with its hold-back window overridden, so the timer's own
+    /// flush can be pinned with a short window.</summary>
+    internal AnalysisNotificationService(
+        IFindingAlertSender sender,
+        IAlertSettings settings,
+        Func<AnalysisFinding, string> serverIdResolver,
+        ILogger<AnalysisNotificationService> logger,
+        TimeSpan holdBack,
+        Func<string, bool>? isServerSilenced = null,
+        Action<string, string>? showTrayNotification = null,
+        Func<int, string, Task<bool>>? isStoryMuted = null)
     {
         _sender = sender;
         _settings = settings;
         _resolveServerId = serverIdResolver;
         _logger = logger;
+        _holdBack = holdBack;
         _isServerSilenced = isServerSilenced;
         _showTrayNotification = showTrayNotification;
+        _isStoryMuted = isStoryMuted;
     }
 
     /// <summary>
@@ -248,16 +324,21 @@ public sealed class AnalysisNotificationService
             }
 
             /* Seed each not-yet-known PAGE bucket from the alert log on first lookup so a symptom that
-               fired shortly before an app restart is not re-fired afterward. The persisted equivalent
-               is the latest row for that member's metric_name (which embeds the finding's hash).
+               was DELIVERED shortly before an app restart is not re-fired afterward. The persisted
+               equivalent is the latest DELIVERED-page row for that member's metric_name (which embeds the
+               finding's hash) — #3916: a hold must be earned by a delivery. The seed used to read the
+               latest row regardless of delivery, and a month-old undelivered row (no channel reached
+               anyone) held one production story silent for 35 days; a row that reached no one now seeds
+               nothing, so the story is heard on its next firing. Seeded buckets are Delivered by
+               construction, because the read admits only delivered rows.
                History carries no severity, so the seed conservatively assumes the notify threshold —
                the minimum a notified finding can have had — and the first post-restart re-notify needs
                threshold + WorseningStep (#2054). Below-critical members share one bucket, so only the
                first (highest-severity) below-critical member — the one that would lead a
                below-critical e-mail — is looked up.
 
-               #3712: the store's seed read EXCLUDES digest-routed rows (IAlertHistoryStore.GetLastAlertTimeAsync,
-               both SKUs), so a digest entry written before a restart cannot seed the page bucket of the
+               #3712: the store's seed read EXCLUDES digest-routed rows (IAlertHistoryStore.GetLastDeliveredPageUtcAsync,
+               every SKU), so a digest entry written before a restart cannot seed the page bucket of the
                escalation that follows it. The DIGEST namespace is deliberately NOT seeded: there is no
                route-filtered seed on the sender seam, and the cost of not having one is bounded and
                channel-free — after a restart a standing single is re-recorded in the ledger once, no
@@ -270,9 +351,9 @@ public sealed class AnalysisNotificationService
                     var seedKey = BucketKey(m);
                     if (_cooldowns.ContainsKey(seedKey))
                         continue;
-                    var lastPersisted = await _sender.GetLastAlertTimeAsync(serverId, FindingMessageFormatter.MetricName(m));
+                    var lastPersisted = await _sender.GetLastDeliveredPageUtcAsync(serverId, FindingMessageFormatter.MetricName(m));
                     if (lastPersisted.HasValue)
-                        _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now));
+                        _cooldowns.TryAdd(seedKey, new BucketState(lastPersisted.Value, threshold, now, Delivered: true));
                 }
             }
 
@@ -286,6 +367,11 @@ public sealed class AnalysisNotificationService
                fleet truth notifies once per server, not once per cooldown expiry. The whole incident
                is held only when EVERY member holds (send-if-any-fresh, unchanged).
 
+               #3916: the steady-severity arm applies only to a bucket whose last send was DELIVERED. An
+               undelivered story re-attempts once per cooldown (floor 30 min), not every cycle: every
+               cycle would write a history row per story per analysis interval on a store with no channel
+               configured — a row flood — and once per cooldown is the email family's effective bound.
+
                #3712: on the page road only a PAGE-routed member may lead — a digest-routed single in a
                paging incident is named as co-fired, never put at the head of a page it did not earn.
                On the digest road every member is digest-routed and any may lead. */
@@ -295,7 +381,7 @@ public sealed class AnalysisNotificationService
                 if (route == FindingRoute.Page && decisions[m].Route != FindingRoute.Page)
                     continue;
                 if (_cooldowns.TryGetValue(BucketKey(m), out var state)
-                    && (now - state.LastNotified < cooldown || m.Severity < state.LastNotifiedSeverity + WorseningStep))
+                    && (now - state.LastNotified < cooldown || (state.Delivered && m.Severity < state.LastNotifiedSeverity + WorseningStep)))
                     continue;
                 lead = m;
                 break;
@@ -340,12 +426,13 @@ public sealed class AnalysisNotificationService
                     context.Details.Add(new AlertDetailItem { Heading = "Co-fired in this incident", Body = coFired });
 
                 /* SendFindingAlertAsync fans out to email + Slack + Teams and records the
-                   alert per this app's cadence. It returns no success/failure signal, so the
-                   buckets are stamped regardless — a symptom whose delivery failed is
-                   suppressed for the full cooldown (accepted best-effort behavior). On the digest
-                   road (#3712) the sender consults no channel and records the row with the digest
+                   alert per this app's cadence, and returns the AlertDelivery the row recorded
+                   (#3916; null = the sender caught). Every send stamps the buckets' cooldown below —
+                   that throttles a no-channel store to one re-attempt per cooldown rather than a row
+                   per cycle — but only a DELIVERED send arms the #2054 hold. On the digest road
+                   (#3712) the sender consults no channel and records the row with the digest
                    disposition; the same call, so the two roads cannot drift in what they persist. */
-                await _sender.SendFindingAlertAsync(new FindingAlert(
+                var alert = new FindingAlert(
                     FindingMessageFormatter.MetricName(lead),
                     lead.ServerName,
                     FindingMessageFormatter.CurrentValue(lead),
@@ -366,18 +453,26 @@ public sealed class AnalysisNotificationService
                        config_alert_log.detail_text, which is the sole copy of these facts on the surfaces
                        that render no structured context, and the input the mute pre-fill parses. */
                     DeliverDetailText: false,
-                    Route: route));
+                    Route: route);
 
-                /* Always raise the tray balloon for a notify-worthy incident (user choice), the
-                   same visible signal threshold alerts already pop — so a local-only user with no
-                   email/webhook still sees it. No-op when the host wired no sink (Lite) or tray
-                   notifications are disabled (the sink checks the pref). #3712: the tray is a paging
-                   channel — it interrupts — so the digest road raises nothing here either. */
-                if (route == FindingRoute.Page && _showTrayNotification is not null)
+                /* #3916: the PAGE road queues. The page waits out the hold-back window with every other page
+                   the fleet raises in it, and the flush decides — against the cap — whether it goes as its
+                   own message or inside one summary. Keyed by the lead's page bucket key, so a re-report of
+                   the same incident inside the window replaces its entry. NOTHING is stamped here: the
+                   buckets are stamped by the flush, with what it delivered, and a page dropped at stop
+                   leaves no trace to hold it. The tray balloon moved to the flush with the send. */
+                if (route == FindingRoute.Page)
                 {
-                    var (title, message) = FindingMessageFormatter.BalloonText(lead);
-                    _showTrayNotification(title, message);
+                    var keyed = new List<(AnalysisFinding, string)>(members.Count);
+                    foreach (var m in members)
+                        keyed.Add((m, BucketKey(m)));
+                    Enqueue(BucketKey(lead), new PendingPage(alert, lead, serverId, keyed));
+                    continue;
                 }
+
+                /* The DIGEST road is unchanged and immediate: its delivery is the ledger row, it interrupts
+                   no one, and it is not counted against the page cap. */
+                var delivery = await _sender.SendFindingAlertAsync(alert);
 
                 /* Stamp EVERY member's bucket (send-if-any-fresh, stamp-all): the e-mail named every
                    member, so none should re-fire until it WORSENS past what was just notified — the
@@ -387,12 +482,22 @@ public sealed class AnalysisNotificationService
                    (lower) members must not overwrite it downward, or a mid-severity member would
                    spuriously "worsen" past the lowest next cycle. Stamped in the namespace of the road
                    taken (BucketKey), so a digest entry never occupies a page bucket. */
+                /* #3916: what the hold is earned by. The page road is delivered when a channel sent
+                   (email/webhook) OR a tray sink is wired — a wired sink is Dashboard's toast, raised just
+                   above, and Dashboard is the only host that wires one (Lite and Darling wire none, so
+                   there only a sent channel counts). The digest road is Delivered: its delivery IS the
+                   ledger record — it never reaches a channel by design — and an undelivered digest bucket
+                   would re-record a standing single every cooldown. */
+                var delivered = route == FindingRoute.Digest
+                    || delivery?.Sent == true
+                    || _showTrayNotification is not null;
+
                 var stamped = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var m in members)
                 {
                     var key = BucketKey(m);
                     if (stamped.Add(key))
-                        _cooldowns[key] = new BucketState(now, m.Severity, now);
+                        _cooldowns[key] = new BucketState(now, m.Severity, now, delivered);
                 }
             }
             catch (Exception ex)
@@ -402,6 +507,172 @@ public sealed class AnalysisNotificationService
                 _logger.LogError(
                     $"AnalysisNotificationService: failed to notify on incident {incident.Key}: {ex.GetType().Name}: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>Queues one page for the hold-back window (#3916); the first enqueue of a window arms the
+    /// one-shot flush timer. A re-report of a queued key replaces its entry. Dropped after
+    /// <see cref="Dispose"/>.</summary>
+    private void Enqueue(string key, PendingPage page)
+    {
+        lock (_pendingLock)
+        {
+            if (_disposed)
+                return;
+            _pending[key] = page;
+            _flushTimer ??= new Timer(_ => _ = FlushPendingAsync(), null, _holdBack, Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    /// <summary>
+    /// Delivers every page queued in the current hold-back window (#3916). Timer-driven in production;
+    /// internal so tests flush deterministically. Serialized, and never throws.
+    /// <para>Each queued page is re-checked first — the server's silence and the story's mute, either of which
+    /// may have been applied inside the window — and a dropped page is NOT stamped. Then, against
+    /// <see cref="IAlertSettings.AnalysisPageCap"/>: at or under the cap each page is its own message, stamped
+    /// per page by what it delivered; over it, ONE summary names every page and every named member's bucket
+    /// is stamped with the summary's delivery — a summary that reached someone earns the #2054 hold for every
+    /// story it named, exactly as the individual pages would have. Pages are ordered newest first by analysis
+    /// time, then by severity, so a summary reads the freshest incident first.</para>
+    /// </summary>
+    internal async Task FlushPendingAsync()
+    {
+        await _flushGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            Dictionary<string, PendingPage> batch;
+            lock (_pendingLock)
+            {
+                batch = _pending;
+                _pending = new Dictionary<string, PendingPage>(StringComparer.Ordinal);
+                _flushTimer?.Dispose();
+                _flushTimer = null;
+                if (_disposed)
+                    return;
+            }
+
+            if (batch.Count == 0)
+                return;
+
+            var live = new List<PendingPage>(batch.Count);
+            foreach (var page in batch.Values)
+            {
+                if (_isServerSilenced is not null && _isServerSilenced(page.ServerId))
+                    continue;
+                if (_isStoryMuted is not null && await IsMutedAsync(page).ConfigureAwait(false))
+                    continue;
+                live.Add(page);
+            }
+
+            if (live.Count == 0)
+                return;
+
+            live = live
+                .OrderByDescending(p => p.Lead.AnalysisTime)
+                .ThenByDescending(p => p.Lead.Severity)
+                .ToList();
+
+            var cap = Math.Max(1, _settings.AnalysisPageCap);
+            if (live.Count <= cap)
+            {
+                foreach (var page in live)
+                {
+                    try
+                    {
+                        var delivery = await _sender.SendFindingAlertAsync(page.Alert).ConfigureAwait(false);
+
+                        /* Always raise the tray balloon for a notify-worthy incident (user choice), the
+                           same visible signal threshold alerts already pop — so a local-only user with no
+                           email/webhook still sees it. No-op when the host wired no sink (Lite, Darling) or
+                           tray notifications are disabled (the sink checks the pref). Page road only. */
+                        if (_showTrayNotification is not null)
+                        {
+                            var (title, message) = FindingMessageFormatter.BalloonText(page.Lead);
+                            _showTrayNotification(title, message);
+                        }
+
+                        Stamp(page, delivery?.Sent == true || _showTrayNotification is not null, DateTime.UtcNow);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(
+                            $"AnalysisNotificationService: failed to deliver a held page for {page.Alert.MetricName} on {page.Alert.ServerName}: {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+
+                return;
+            }
+
+            /* Over the cap: ONE summary naming every page. The sender records one row per named incident,
+               each carrying the summary's delivery, so the restart seed finds every named story. */
+            var summaryDelivery = await _sender.SendFindingSummaryAsync(live.Select(p => p.Alert).ToList()).ConfigureAwait(false);
+            if (_showTrayNotification is not null)
+            {
+                var servers = live.Select(p => p.ServerId).Distinct(StringComparer.Ordinal).Count();
+                _showTrayNotification(
+                    $"Analysis: {live.Count} findings on {servers} server{(servers == 1 ? "" : "s")}",
+                    string.Join("; ", live.Take(3).Select(p => FindingMessageFormatter.BalloonText(p.Lead).Title))
+                        + (live.Count > 3 ? $"; +{live.Count - 3} more" : ""));
+            }
+
+            var delivered = summaryDelivery?.Sent == true || _showTrayNotification is not null;
+            var at = DateTime.UtcNow;
+            foreach (var page in live)
+                Stamp(page, delivered, at);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"AnalysisNotificationService: page flush failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            _flushGate.Release();
+        }
+    }
+
+    /// <summary>The flush's mute re-check. Fails OPEN: a mute read that throws delivers the page, because a
+    /// page lost to a read error is worse than one delivered past a rule written inside the window.</summary>
+    private async Task<bool> IsMutedAsync(PendingPage page)
+    {
+        try
+        {
+            return await _isStoryMuted!(page.Lead.ServerId, page.Lead.StoryPathHash ?? string.Empty).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError($"AnalysisNotificationService: mute re-check failed for {page.Alert.MetricName}: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Stamps EVERY member's bucket of a delivered-or-attempted page (send-if-any-fresh, stamp-all) — the
+    /// page named every member, so none should re-fire until it WORSENS past what was just notified. Members
+    /// arrive severity-DESC, so the FIRST write to a shared bucket carries its highest member's severity.
+    /// <paramref name="delivered"/> is what arms the #2054 hold (#3916).
+    /// </summary>
+    private void Stamp(PendingPage page, bool delivered, DateTime at)
+    {
+        var stamped = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (m, key) in page.Members)
+        {
+            if (stamped.Add(key))
+                _cooldowns[key] = new BucketState(at, m.Severity, at, delivered);
+        }
+    }
+
+    /// <summary>
+    /// Cancels the hold-back timer and DROPS every queued page unstamped and unrecorded (#3916). A page lost
+    /// at stop leaves no row and no bucket, so nothing holds its story and the next run re-attempts it.
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_pendingLock)
+        {
+            _disposed = true;
+            _pending.Clear();
+            _flushTimer?.Dispose();
+            _flushTimer = null;
         }
     }
 

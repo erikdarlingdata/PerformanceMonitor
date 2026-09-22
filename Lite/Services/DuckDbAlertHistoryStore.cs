@@ -262,11 +262,11 @@ AND   notification_type IN ('webhook', 'email+webhook')"
     /// <summary>
     /// Returns the UTC time of the most recent alert_log row for this
     /// (serverId, metricName), regardless of notification channel or
-    /// delivery result. Used by <see cref="AnalysisNotificationService"/>
-    /// to seed its per-finding cooldown across restarts — unlike the
-    /// email cooldown (which filters to successful sends), the analysis
-    /// cooldown is stamped unconditionally, so the persisted equivalent
-    /// is the latest row for that metric_name — with one exclusion (#3712): a row the corroboration gate
+    /// delivery result. The #2716 Tier-0 seed shape (dedupKey-filtered): a cooldown that is stamped
+    /// unconditionally, muted or not, so the persisted equivalent is the latest row for that
+    /// metric_name. #3916: this is NOT the analysis seed any more — the analysis #2054 hold must be earned
+    /// by a delivery, and it seeds from <see cref="GetLastDeliveredPageUtcAsync"/>. Do not add
+    /// <c>alert_sent</c> here. One exclusion (#3712): a row the corroboration gate
     /// routed to the digest (<c>notification_type = 'digest'</c>) is not a page and must not seed the page
     /// bucket, or the page a story earns when it gains corroboration would be held as a repeat. See
     /// <see cref="IAlertHistoryStore.GetLastAlertTimeAsync"/>.
@@ -325,6 +325,55 @@ AND   metric_name = $2"
         catch (Exception ex)
         {
             AppLogger.Error("AnalysisNotify", $"Could not read persisted analysis cooldown: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #3916: the analysis #2054 hold's restart seed — MAX(alert_time) over rows that were a DELIVERED
+    /// page (<c>alert_sent</c> true = email and/or webhook delivered), minus the #3712 digest exclusion
+    /// (redundant by construction — a digest row is never Sent — and kept so the exclusion stays one
+    /// symbol). Lite raises no toast for analysis findings, so alert_sent is the whole delivery signal.
+    /// See <see cref="IAlertHistoryStore.GetLastDeliveredPageUtcAsync"/>.
+    /// </summary>
+    public async Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
+    {
+        /* #3456: decline unparseable keys rather than read the collapsed bucket. */
+        var sid = AlertHistoryServerIdentity.SeedScope(serverId);
+        if (sid is null) return null;
+        try
+        {
+            var duckDb = _duckDb;
+            if (duckDb == null)
+            {
+                var dbPath = App.DatabasePath;
+                if (string.IsNullOrEmpty(dbPath)) return null;
+                duckDb = new DuckDbInitializer(dbPath);
+            }
+
+            using var readLock = duckDb.AcquireReadLock();
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync();
+
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+SELECT MAX(alert_time)
+FROM config_alert_log
+WHERE server_id = $1
+AND   metric_name = $2
+AND   alert_sent"
+            + "\nAND   notification_type <> '" + AlertDelivery.ChannelDigest + "'";
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = sid.Value });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = metricName });
+
+            var result = await command.ExecuteScalarAsync();
+            if (result == null || result == DBNull.Value) return null;
+
+            return DateTime.SpecifyKind(Convert.ToDateTime(result), DateTimeKind.Utc);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("AnalysisNotify", $"Could not read persisted delivered-page seed: {ex.Message}");
             return null;
         }
     }
