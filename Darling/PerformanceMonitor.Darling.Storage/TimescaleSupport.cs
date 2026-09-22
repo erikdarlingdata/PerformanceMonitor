@@ -8427,17 +8427,39 @@ WHERE server_id <> 0
 GROUP BY server_id, collector_name, bucket
 WITH NO DATA";
 
-    /// <summary>How far back each refresh of <see cref="CollectionHealthHourlyView"/> re-materializes. Three
-    /// hours: two whole buckets behind the one-hour end offset, so a steady-state run re-reads only the last
-    /// few hours of <c>collection_log</c> — rows that are UNCOMPRESSED by construction, since
-    /// <see cref="CompressAfterDays"/> compresses them only after a whole day. A refresh that decompressed to
-    /// re-materialize would rebuild inside the fix the cost it removes. Like every aggregate here it does not
-    /// backfill (#1759); the reader's head composition and raw fallback keep the result exact meanwhile.</summary>
-    public const string CollectionHealthRefreshStartOffset = "3 hours";
+    /// <summary>
+    /// How far back each refresh of <see cref="CollectionHealthHourlyView"/> re-materializes: EIGHT DAYS — the
+    /// seven-day consumer window + one bucket (the head hour straddling the window's start) + margin, rounded up
+    /// to the whole day, equal to <see cref="CollectionHealthRetentionInterval"/>.
+    ///
+    /// <para><b>THE WINDOW MUST COVER THE CONSUMER WINDOW, OR HOLES ARE PERMANENT (#3893's watermark hole, found
+    /// before merge).</b> <c>materialized_only = false</c> serves raw rows only ABOVE the watermark; below it only
+    /// materialized buckets exist. A refresh moves the watermark to the end of its window, so a run whose window
+    /// starts AFTER the current watermark jumps it past every unrefreshed hour in between, and those hours are
+    /// never materialized. The first design (start_offset 3 h) did exactly that twice over: the FIRST run after
+    /// the ensure pass (which creates the aggregate WITH NO DATA — exact until then, because nothing is
+    /// materialized and the whole window is served real-time from raw) stranded all history older than 3 h, and
+    /// any outage longer than two hours stranded its gap. A run whose window starts at or before the watermark
+    /// can never jump a gap; with the window starting eight days back, far below the watermark, a hole cannot
+    /// form inside the consumer window BY CONSTRUCTION (an outage longer than eight days leaves its gap older
+    /// than the consumer window). The first run after install therefore IS the one-time backfill.</para>
+    ///
+    /// <para><b>Cost.</b> A refresh re-materializes only the INVALIDATED ranges inside its window, not the whole
+    /// window, so a steady-state run touches only the new hour (measured in the #3893 PR: 1–3 ms with nothing or
+    /// one still-filling hour new, 0.12 s for a whole fleet hour). A late row landing in a compressed chunk
+    /// invalidates its bucket, which the next run heals once, by decompressing that range once. This window sizes
+    /// the REFRESH, not the READ tail — the tail stays bounded by <see cref="CollectionHealthTailWorstCaseAge"/>
+    /// whatever this is. A pin fails if it ever drops below the consumer window plus a bucket.</para>
+    /// </summary>
+    public const string CollectionHealthRefreshStartOffset = "8 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRefreshStartOffset"/>, pinned equal
     /// by test.</summary>
-    public static readonly TimeSpan CollectionHealthRefreshStartSpan = TimeSpan.FromHours(3);
+    public static readonly TimeSpan CollectionHealthRefreshStartSpan = TimeSpan.FromDays(8);
+
+    /// <summary>The one consumer's window (<c>DarlingFleetReader</c>'s seven-day fleet collection-health read).
+    /// <see cref="CollectionHealthRefreshStartSpan"/> must be at least this plus a bucket (pinned).</summary>
+    public static readonly TimeSpan CollectionHealthConsumerWindow = TimeSpan.FromDays(7);
 
     /// <summary>The refresh cadence of <see cref="CollectionHealthHourlyView"/>, and ALSO its end offset — the
     /// same argument twice, like every refresh policy here (<see cref="ScheduleIntervalDoublesAsEndOffset"/>).
@@ -8449,7 +8471,7 @@ WITH NO DATA";
     public static readonly TimeSpan CollectionHealthRefreshScheduleSpan = TimeSpan.FromHours(1);
 
     /// <summary>What one refresh run is allowed to take in the tail-age bound below — one hour, far above
-    /// what a steady-state run over three hours of uncompressed rows takes (measured in the #3893 PR).</summary>
+    /// what a steady-state run takes (0.12 s for a whole fleet hour, measured in the #3893 PR).</summary>
     public static readonly TimeSpan CollectionHealthRefreshRunAllowance = TimeSpan.FromHours(1);
 
     /// <summary>
@@ -8466,8 +8488,9 @@ WITH NO DATA";
         CollectionHealthRefreshScheduleSpan + HourlyBucket + CollectionHealthRefreshScheduleSpan + CollectionHealthRefreshRunAllowance;
 
     /// <summary>Retention horizon of <see cref="CollectionHealthHourlyView"/>. Its one consumer reads seven days;
-    /// 7 d + one bucket (the head hour straddling the cut) + the three-hour refresh start span = 7 d 4 h,
-    /// rounded UP to whole days = 8 days. A chunk-level drop, so the slack costs one small chunk.</summary>
+    /// 7 d + one bucket (the head hour straddling the cut) + margin, rounded UP to whole days = 8 days — the
+    /// same span as <see cref="CollectionHealthRefreshStartOffset"/>. A chunk-level drop, so the slack costs one
+    /// small chunk.</summary>
     public const string CollectionHealthRetentionInterval = "8 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRetentionInterval"/>, pinned equal by
@@ -8488,8 +8511,9 @@ WITH NO DATA";
     /// <para><b>Finish-to-start, no <c>initial_start</c> — the daily tier's precedent
     /// (<see cref="AddDailyRefreshPolicySql"/>).</b> Its start minute therefore DRIFTS forward run by run and
     /// will eventually visit the heaviest refresh window. That is acceptable ONLY because the refresh is
-    /// measured cheap (the fleet-sized steady-state measurement is in the #3893 PR). If that stops holding,
-    /// this belongs on the grid (#3892), not here.</para>
+    /// measured cheap even with its eight-day window (the fleet-sized steady-state measurement is in the #3893
+    /// PR: milliseconds, 0.12 s for a whole fleet hour). If that stops holding, this belongs on the grid
+    /// (#3892), not here.</para>
     ///
     /// <para>Every converge that walks refresh jobs skips it by MEMBERSHIP: the #3012 window/phase converge
     /// reads <see cref="HourlyRefreshPhaseOrder"/>, the #3745 batching converge reads
