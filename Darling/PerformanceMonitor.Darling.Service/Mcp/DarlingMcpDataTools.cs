@@ -1492,7 +1492,8 @@ public sealed class DarlingMcpDataTools
         bool everRecorded,
         string? collectorName,
         double? minDurationMs,
-        int hoursBack)
+        int hoursBack,
+        string? status = null)
     {
         var hours = hoursBack.ToString(CultureInfo.InvariantCulture);
 
@@ -1513,11 +1514,15 @@ public sealed class DarlingMcpDataTools
             + "reading these rows exist for. Do NOT check get_collection_health for these names: it is scoped "
             + "to monitored servers and lists neither of them.";
 
-        if (!string.IsNullOrWhiteSpace(collectorName) || minDurationMs is not null)
+        /* #3869 joins this gate rather than only the server-shaped one below: the maintenance passes write
+           SUCCESS and WARNING (a pass whose tables partly failed), so a status filter is a real question to
+           ask of this population, and an unnamed filter here would let the cadence sentence claim the pass
+           did not RUN when it ran and merely did not match. */
+        if (!string.IsNullOrWhiteSpace(collectorName) || minDurationMs is not null || !string.IsNullOrWhiteSpace(status))
         {
             return ("empty",
                 $"No fleet-maintenance run-records in the last {hours} hour(s) matched "
-                + $"{McpHelpers.DescribeCollectionLogFilters(collectorName, minDurationMs)}. "
+                + $"{McpHelpers.DescribeCollectionLogFilters(collectorName, minDurationMs, status)}. "
                 + cadence);
         }
 
@@ -1525,7 +1530,7 @@ public sealed class DarlingMcpDataTools
             $"No fleet-maintenance run-records at all in the last {hours} hour(s). " + cadence);
     }
 
-    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and on a busy fleet those are wildly different — roughly 500 log rows a minute across 50 servers means a 24-hour request at the 200-row default is satisfied by about the last 25 seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. Both filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it. THE RESERVED server_name (fleet) READS THE FLEET-MAINTENANCE RUN-RECORDS instead of a monitored server's collector runs: the passes that iterate the whole fleet have no one server to attribute a run to, so they log under a sentinel that is not in the server list — data_retention for the daily purge, oversized_plan_sweep for the fifteen-minute oversized-plan backlog drain. Read those rows by their ABSENCE as much as their contents: every tick writes one whatever it found, including a tick that found an empty backlog and captured nothing, so rows_collected = 0 means the pass ran and had nothing to fetch while a MISSING row past the pass's cadence means the pass did not run at all. That is the only way to tell those two apart. error_message carries the tick's counts on a SUCCESS row (servers swept, plans claimed, captured, expired, fetch failures); sql_duration_ms is the time inside the monitored-server fetches and store_duration_ms the rest of the tick. These rows are excluded from get_collection_health and from get_fleet_overview by design — they are maintenance passes, not collectors, so a per-server staleness ladder does not apply to them.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the store, rows collected, status and any error. get_collection_health rolls seven days of these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and on a busy fleet those are wildly different — roughly 500 log rows a minute across 50 servers means a 24-hour request at the 200-row default is satisfied by about the last 25 seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. All THREE filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. status IS THE FAILURE-HUNTING FILTER and the reason to reach for this tool during an incident: 'show me the failures' is the most common question asked of this log, and without it a caller pages the newest-first tail eyeballing status — which the page-span contract above explains cannot work, because a 200-row page on a busy fleet covers seconds and raising limit does not reach a failure that happened twenty minutes ago. Pass one of SUCCESS, SKIPPED, YIELDED, ABANDONED, ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING, WARNING (case-insensitive); an unknown value is REFUSED and the refusal names the whole set, rather than being applied as an equality filter that returns an empty page a caller would read as 'no failures'. get_collection_health is not this question's answer either: it carries one last_error per collector over a seven-day rollup, not the runs, their timestamps or their sequence — which is what says whether every collector failed at 03:41 or one collector failed all night. A status filter changes the page from a contiguous tail to a filtered one, so read the two page-span timestamps the same way you would under a duration floor. Also carries the phase decomposition where the run recorded one, as nested blocks that are null when the run took a path that does not report them — and a row carries at most ONE family. Server-scoped collectors fill sql_phases (open_ms, drain_ms, other_ms which is derived, watermark_ms) and drain (rows_read, bytes_read, last_read_ms, target_session_id). Per-database collectors that perform a deferred plan or statement-text fetch instead fill plan_fetch and/or text_fetch, each carrying probe_ms, target_ms, write_ms, ids_attempted and probe_ids summed across that run's databases. sweep_peer_max_ms is flat and present on every row: it is the slowest peer collector in the same sweep, the denominator for asking whether a slow run was slow alone or the whole sweep was. A null block means the run took the other path, not that the phase was free — most runs perform no deferred fetch at all. Divide target_ms by ids_attempted for the per-id target cost, probe_ms by probe_ids for the per-reference probe cost. CRITICAL for reading sql_duration_ms on a fetching collector: it is NOT purely target-side there. The deferred fetches run inside the driver's per-item SQL stopwatch and each one round-trips the MONITORING STORE to decide what plan XML and statement text are already held before writing back what came off the target, so the store's probe and write are billed to the column documented as the monitored server's. The probe is the largest single term in both fetches on this fleet — 55.4% of plan_fetch and 80.6% of text_fetch — and on one production run it was 107,334 ms of a 124,972 ms sql_duration_ms, 86%, against a plan-plus-text target time of 6,494 ms. sql_store_ms is that store share, derived from the two fetch blocks (probe_ms + write_ms of each) and null when no fetch ran. It is a FLOOR, not the whole: the per-item watermark refresh is also a store read inside the same stopwatch, the enumerated path records no watermark_ms, and that component is stored nowhere — so sql_duration_ms minus sql_store_ms is an UPPER bound on target-side time rather than the target-side time. store_duration_ms is not where the probe went either: it is the binary COPY of the collected rows and nothing else. Do NOT conclude a monitored server is slow from a large sql_duration_ms on query_store without reading sql_store_ms beside it. THE RESERVED server_name (fleet) READS THE FLEET-MAINTENANCE RUN-RECORDS instead of a monitored server's collector runs: the passes that iterate the whole fleet have no one server to attribute a run to, so they log under a sentinel that is not in the server list — data_retention for the daily purge, oversized_plan_sweep for the fifteen-minute oversized-plan backlog drain. Read those rows by their ABSENCE as much as their contents: every tick writes one whatever it found, including a tick that found an empty backlog and captured nothing, so rows_collected = 0 means the pass ran and had nothing to fetch while a MISSING row past the pass's cadence means the pass did not run at all. That is the only way to tell those two apart. error_message carries the tick's counts on a SUCCESS row (servers swept, plans claimed, captured, expired, fetch failures); sql_duration_ms is the time inside the monitored-server fetches and store_duration_ms the rest of the tick. These rows are excluded from get_collection_health and from get_fleet_overview by design — they are maintenance passes, not collectors, so a per-server staleness ladder does not apply to them.")]
     public static async Task<string> GetCollectionLog(
         NpgsqlDataSource postgres,
         [Description("Server name or display name, or the reserved name (fleet) for the fleet-maintenance run-records.")] string? server_name = null,
@@ -1543,7 +1548,13 @@ public sealed class DarlingMcpDataTools
             every existing one meaning what it already meant.
         */
         [Description("Limit to one collector, matched EXACTLY (query_store, plan_correction, wait_stats — the names get_collection_health lists). Omit for every collector. A name this server has never run returns the no-matches status rather than a quiet-window one.")] string? collector_name = null,
-        [Description("Return only runs whose total duration_ms is at or above this floor, AND rank the page SLOWEST FIRST rather than newest first — a floor under newest-first ordering still cannot reach the tail. Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order.")] double? min_duration_ms = null)
+        [Description("Return only runs whose total duration_ms is at or above this floor, AND rank the page SLOWEST FIRST rather than newest first — a floor under newest-first ordering still cannot reach the tail. Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order.")] double? min_duration_ms = null,
+        /*
+            #3869, APPENDED for the reason collector_name was: every filter joins the end of this list so no
+            positional C# caller changes meaning. This one is the log's own stored vocabulary, so it is a
+            ValidateChoice parameter rather than free text.
+        */
+        [Description("Limit to runs with this status, matched case-insensitively against the log's own vocabulary: SUCCESS, SKIPPED, YIELDED, ABANDONED, ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING, WARNING. THE FAILURE FILTER — 'show me the failures' is what this log exists to answer, and paging the newest-first tail cannot reach a failure that is not recent. An unknown value is REFUSED, naming the accepted set, rather than applied as a filter that matches nothing. Omit for every status.")] string? status = null)
     {
         /* The SENTINEL-AWARE resolve, and this read is the only one that takes it (#3399): its subject is
            the log itself, so the fleet-maintenance run-records have to be nameable here or they answer
@@ -1561,6 +1572,21 @@ public sealed class DarlingMcpDataTools
            duration-ranked full page with nothing to say the filter was ignored. */
         var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
         if (invalidFloor != null) return invalidFloor;
+
+        /*
+            #3869: the status VALUE is validated as loudly as #3870 makes an unknown ARGUMENT NAME a hard
+            error, and deliberately so — the two halves of the same promise. An unknown key and an unknown
+            value are the same caller mistake seen from two angles, and the quiet failure mode is identical:
+            a read that looks like it answered. An equality filter on a misspelled status returns an empty
+            page, and on THIS tool that page reads as "no failures in the window" — the single most
+            dangerous false negative this surface can produce, since the caller asked the question during an
+            incident. So the closed set is refused by name rather than applied, following #3541 A13's
+            get_analysis_facts ruling, and the refusal prints the whole vocabulary because a caller cannot
+            otherwise discover a set the store's writers define.
+        */
+        var invalidStatus = McpHelpers.ValidateChoice(
+            status, EnumeratedCollectorDriver.CollectionLogStatuses, "status");
+        if (invalidStatus != null) return invalidStatus;
 
         /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
            hours_back, so routing them through the shared validator would impose the 168-hour ceiling every
@@ -1585,11 +1611,13 @@ public sealed class DarlingMcpDataTools
                would make it mean "more rows were in the window", which is a different sentence under the
                same field name. */
             var rows = await DarlingDataReader.GetCollectionLogAsync(
-                postgres, resolved.ServerId, start, end, limit + 1, collector_name, min_duration_ms);
+                postgres, resolved.ServerId, start, end, limit + 1, collector_name, min_duration_ms, status);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
 
-            var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null;
+            var filtered = !string.IsNullOrWhiteSpace(collector_name)
+                || min_duration_ms is not null
+                || !string.IsNullOrWhiteSpace(status);
 
             if (rows.Count == 0)
             {
@@ -1627,7 +1655,7 @@ public sealed class DarlingMcpDataTools
                 if (resolved.ServerId == DarlingObservability.FleetServerId)
                 {
                     var (state, text) = FleetMaintenanceLogMiss(
-                        everCollected, collector_name, min_duration_ms, hours_back);
+                        everCollected, collector_name, min_duration_ms, hours_back, status);
 
                     return McpHelpers.Status(state, text);
                 }
@@ -1643,7 +1671,7 @@ public sealed class DarlingMcpDataTools
                 {
                     return McpHelpers.Status(
                         "empty",
-                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
+                        $"No collector runs on {resolved.ServerName} in the last {hours_back} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds, and check collector_name against the names get_collection_health lists, since it is matched exactly.");
                 }
 
                 return McpHelpers.Status(
@@ -1821,6 +1849,10 @@ public sealed class DarlingMcpDataTools
                    truncated describe the MATCHING rows, and that sentence is unreadable without them. */
                 collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
                 min_duration_ms,
+                /* #3869: echoed in the STORED spelling rather than the caller's, because the filter matched
+                   case-insensitively and a page echoing "error" beside rows whose status field reads "ERROR"
+                   would invite a client to compare the two and conclude the filter had not applied. */
+                status = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs = result,
             }, McpHelpers.JsonOptions);
         }

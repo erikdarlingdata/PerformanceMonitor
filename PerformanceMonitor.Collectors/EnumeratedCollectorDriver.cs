@@ -426,6 +426,37 @@ public static class EnumeratedCollectorDriver
     public static readonly IReadOnlyList<string> FreshnessSuccessStatuses = new[] { "SUCCESS", "SKIPPED" };
 
     /// <summary>
+    /// Every value <c>collection_log.status</c> can carry, as the CLOSED SET a caller filtering the log is
+    /// allowed to name (#3869). The vocabulary was previously spread across the writers as bare literals —
+    /// <see cref="ClassifyReturnedRun"/>'s <c>SUCCESS</c> and <see cref="AbandonedStatus"/>, Lite's
+    /// <c>RemoteCollectorService</c> (<c>SKIPPED</c>, <c>YIELDED</c>, <c>ERROR</c>),
+    /// <c>DarlingWorker.PostgresFaultOutcome</c> and its sibling catch arms (<c>PERMISSIONS</c>,
+    /// <c>SESSION_MISSING</c>, <c>ERROR</c>, <c>YIELDED</c>),
+    /// <see cref="CollectorRuntimePrecondition.ExtensionMissingStatus"/>, and the two fleet-maintenance
+    /// passes, whose partial-failure rollup writes <c>WARNING</c> (<c>DarlingRetention</c>,
+    /// <c>OversizedPlanBacklogSweep</c>) — so nothing could state the set, and a status filter had no
+    /// authority to validate against.
+    ///
+    /// <para><b>Ordered by what a triage caller reaches for</b>, not alphabetically: the successes first, then
+    /// the guards, then the faults. The order is what a refusal prints, and a refusal is read by someone who
+    /// is hunting failures.</para>
+    ///
+    /// <para><b>WARNING is in the set because the store WRITES it</b>, on a fleet-maintenance pass whose
+    /// tables partly failed — and those rows are reachable through the reserved <c>(fleet)</c> server name.
+    /// A vocabulary that omitted it would refuse a value the log genuinely carries, which is the same defect
+    /// as accepting one it does not.</para>
+    ///
+    /// <para>Declared HERE, beside the statuses this type already owns, rather than in an MCP helper: the
+    /// writers are collectors and both SKUs' readers already link this assembly, so the set sits with the
+    /// thing it describes and neither reader can hold a private copy.</para>
+    /// </summary>
+    public static readonly IReadOnlyList<string> CollectionLogStatuses = new[]
+    {
+        "SUCCESS", "SKIPPED", "YIELDED", "ABANDONED", "ERROR",
+        "PERMISSIONS", "EXTENSION_MISSING", "SESSION_MISSING", "WARNING"
+    };
+
+    /// <summary>
     /// How a run that RETURNED (rather than threw) becomes a collection_log status, shared by both hosts so
     /// the two cannot drift on it — they previously held one hardcoded <c>"SUCCESS"</c> literal each, which
     /// is precisely how the whole-cycle abandonment inherited a success status in both.

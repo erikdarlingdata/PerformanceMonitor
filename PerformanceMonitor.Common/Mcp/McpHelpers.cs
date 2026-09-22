@@ -484,23 +484,35 @@ internal static class McpHelpers
     /// empty branches already follow — a user moving between the products must not be told a different story
     /// about the same read. The phrase is written to slot after "…matched ", so it names the constraint rather
     /// than forming a sentence of its own.</para>
+    ///
+    /// <para>#3869 added the third filter and with it rewrote the shape: the pairwise cascade this method
+    /// used to be needed one arm per SUBSET, so two filters cost three arms and three cost seven — growth
+    /// that guarantees the next filter arrives with an arm missing, and a missing arm here silently drops a
+    /// filter from the one sentence whose whole job is to name what was applied. A list joined with "with"
+    /// emits exactly the same text for all three of the old reachable cases (the parity pin and the
+    /// no-matches tests compare that text verbatim) and cannot omit a filter it was given.</para>
     /// </summary>
-    public static string DescribeCollectionLogFilters(string? collectorName, double? minDurationMs)
+    public static string DescribeCollectionLogFilters(
+        string? collectorName, double? minDurationMs, string? status = null)
     {
-        var named = string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim();
+        var applied = new List<string>(3);
 
-        if (named != null && minDurationMs is not null)
-            return $"collector_name '{named}' with min_duration_ms {Ms(minDurationMs)}";
-        if (named != null)
-            return $"collector_name '{named}'";
+        if (!string.IsNullOrWhiteSpace(collectorName))
+            applied.Add($"collector_name '{collectorName.Trim()}'");
         if (minDurationMs is not null)
-            return $"min_duration_ms {Ms(minDurationMs)}";
+            applied.Add($"min_duration_ms {Ms(minDurationMs)}");
 
-        /* Unreachable from the one caller, which asks only when a filter was supplied. Written out rather
-           than left to fall through the branch above, because that would emit "matched min_duration_ms "
-           with nothing after it -- a formatting bug in the one message whose whole job is to name what was
-           applied, and one that would read as a product defect rather than as a misuse of this helper. */
-        return "no filters";
+        /* Named in the STORED spelling, not the caller's: the filter matched case-insensitively, so echoing
+           "error" in a sentence about rows whose status reads "ERROR" would read as a mismatch rather than
+           as the value that was applied. */
+        if (!string.IsNullOrWhiteSpace(status))
+            applied.Add($"status {status.Trim().ToUpperInvariant()}");
+
+        /* Unreachable from every caller, which ask only when a filter was supplied. Written out rather than
+           left to emit an empty string, because that would render "matched " with nothing after it -- a
+           formatting bug in the one message whose whole job is to name what was applied, and one that would
+           read as a product defect rather than as a misuse of this helper. */
+        return applied.Count == 0 ? "no filters" : string.Join(" with ", applied);
     }
 
     /// <summary>
