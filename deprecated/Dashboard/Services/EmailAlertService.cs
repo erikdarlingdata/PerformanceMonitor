@@ -208,9 +208,6 @@ namespace PerformanceMonitorDashboard.Services
         }
 
         /// <summary>
-        /// Gets email delivery health summary (from the shared send core).
-        /// </summary>
-        /// <summary>
         /// <see cref="IFindingAlertSender"/> (#3916): ONE message naming every held page over the cap, then one
         /// row per named page under its own metric name carrying the summary's delivery. The shared service
         /// raises ONE tray balloon for the summary through its wired sink, so the rows say the tray showed.
@@ -246,6 +243,9 @@ namespace PerformanceMonitorDashboard.Services
             }
         }
 
+        /// <summary>
+        /// Gets email delivery health summary (from the shared send core).
+        /// </summary>
         public (int ConsecutiveFailures, string? LastError) GetEmailHealth()
             => _core.GetEmailHealth();
     }
