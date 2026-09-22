@@ -382,6 +382,17 @@ public sealed class DarlingAnalysisService
             LastCollectionFailures = context.CollectionFailures;
             LastCollectionFamilyCount = context.CollectionFamilyCount;
 
+            /* #3691 lane 45: the same two facts into the PROCESS-WIDE ledger, because the two properties
+               above are on THIS INSTANCE and the worker builds a fresh analysis service for every scheduled
+               pass — so on a production install, where every pass is scheduled, the singleton the MCP tools
+               were injected with is permanently empty and a scheduled pass's caveats reached nothing but the
+               log line below. Recorded on EVERY pass, clean ones included: a clean pass is the only evidence
+               that a family recovered. Failure-free by construction (a bounded in-memory ring), so it needs
+               no isolation wrap of its own. */
+            CollectionCaveatLedger.Shared.Record(
+                context.ServerId, context.ServerName, DateTime.UtcNow,
+                context.CollectionFailures, context.CollectionFamilyCount);
+
             if (context.CollectionFailures.Count > 0)
             {
                 /* #3691: the per-site log lines above say each failure as it happened; this one line says

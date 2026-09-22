@@ -7167,6 +7167,13 @@ LIMIT 1";
                how both miss markers self-heal. Failure-isolated like the other observability writes.
                Only the REAL terminal states write it — a Skipped/TimedOut/Error pass (handled above /
                in the catch) leaves the last known marker untouched. */
+            /* #3691: the sweep's own pass result, the row an operator reads in the analysis state. A pass
+               that could not read a fact family still RAN and still counted its findings honestly — it just
+               counted them over less evidence than it looks like, and the message is the only place that
+               says so. Composed, never overwritten: the window-empty arm below already has a sentence. */
+            var collectionCaveat = analysisService.LastCollectionFailures.Count > 0
+                ? CollectionCaveats.Describe(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount)
+                : null;
             if (analysisService.InsufficientDataMessage is string insufficient)
             {
                 await DarlingObservability.WriteAnalysisStateAsync(
@@ -7178,12 +7185,12 @@ LIMIT 1";
             {
                 await DarlingObservability.WriteAnalysisStateAsync(
                     _postgres!, serverId, insufficientData: false, windowEmpty, _logger, stoppingToken);
-                return new AnalysisPassResult(AnalysisPassStatus.Ran, 0, windowEmpty);
+                return new AnalysisPassResult(AnalysisPassStatus.Ran, 0, CollectionCaveats.Compose(windowEmpty, collectionCaveat));
             }
 
             await DarlingObservability.WriteAnalysisStateAsync(
                 _postgres!, serverId, insufficientData: false, null, _logger, stoppingToken);
-            return new AnalysisPassResult(AnalysisPassStatus.Ran, findings.Count, null);
+            return new AnalysisPassResult(AnalysisPassStatus.Ran, findings.Count, collectionCaveat);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
