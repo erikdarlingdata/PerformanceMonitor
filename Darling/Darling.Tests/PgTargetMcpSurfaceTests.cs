@@ -21,9 +21,11 @@ namespace Darling.Tests;
 /// <summary>
 /// #3542: the two MCP sites the plumbing touched. <c>ToolRecommendations</c> grew a PostgreSQL prefix arm ahead
 /// of its SQL Server ones so a PostgreSQL story's <c>next_tools</c> name <c>get_pg_*</c> reads and never
-/// <c>get_wait_stats</c>; <c>audit_config</c> grew an honest <c>not_collected</c> envelope for a PostgreSQL
-/// target in place of "no_config_data — the config collector may not have run yet", which was false for a
-/// target whose <c>pg_server_config</c> collector runs hourly.
+/// <c>get_wait_stats</c>; <c>audit_config</c> grew a PostgreSQL arm in place of "no_config_data — the config
+/// collector may not have run yet", which was false for a target whose <c>pg_server_config</c> collector runs
+/// hourly. That arm answered an honest refusal through #3542 and, since #3691 line 70, projects the pass's
+/// <c>CONFIG_PG_*</c> facts instead — the structural pin is here, the projected payload is executed live in
+/// <c>PgTargetAuditConfigTests</c>.
 /// </summary>
 public sealed class PgTargetMcpSurfaceTests
 {
@@ -108,8 +110,21 @@ public sealed class PgTargetMcpSurfaceTests
         Assert.Empty(ToolRecommendations.GetForStoryPath(StoryKeys.OfPath("NOT_A_KEY")));
     }
 
+    /// <summary>
+    /// #3691 line 70 (Erik's ruling, 2026-09-22) finished what #3542 started here. The refusal this method used
+    /// to pin was honest but unhelpful — it told a caller who had already asked the right question to go ask a
+    /// different tool — so the PostgreSQL arm now PROJECTS the pass's <c>CONFIG_PG_*</c> facts into the same
+    /// recommendations shape. Asserted on the source rather than a payload because this is about the arm's
+    /// STRUCTURE (the engine read, then the fact read, then the key-prefix filter, and no refusal left behind);
+    /// what the projected rows say is executed live in <see cref="PgTargetAuditConfigTests"/>.
+    ///
+    /// <para><b>Why the prefix is asserted as the CONSTANT.</b> The tool filters on
+    /// <c>PgTargetFactKeys.ConfigPrefix</c>, not the literal <c>"CONFIG_PG_"</c> — a pin written against the
+    /// literal would pass today only by accident of the comment text and would red on a legal refactor of the
+    /// constant's spelling while missing a filter that had been deleted.</para>
+    /// </summary>
     [Fact]
-    public void AuditConfig_AnswersNotCollectedForAPostgresTarget_BeforeItReadsAnyFact()
+    public void AuditConfig_ProjectsConfigPgFacts_ForAPostgresTarget()
     {
         var tools = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
         var audit = tools.IndexOf("Name = \"audit_config\"", StringComparison.Ordinal);
@@ -117,12 +132,26 @@ public sealed class PgTargetMcpSurfaceTests
         var body = tools[audit..];
         body = body[..body.IndexOf("if (recommendations.Count == 0)", StringComparison.Ordinal)];
 
+        /* The order the arm must keep: engine off the registry, THEN the pass, THEN the filter. */
         var arm = body.IndexOf("if (MonitoredEngineKind.IsPostgres(engineKind))", StringComparison.Ordinal);
-        var read = body.IndexOf("analysisService.CollectAndScoreFactsAsync(", StringComparison.Ordinal);
-        Assert.True(arm > 0 && read > arm, "the PostgreSQL arm must answer before the SQL Server fact read");
-        Assert.Contains("\"not_collected\"", body, StringComparison.Ordinal);
-        Assert.Contains("CONFIG_PG_* facts", body, StringComparison.Ordinal);
-        Assert.Contains("PostgresTargetFactsAsync(postgres, resolved.ServerId)", body, StringComparison.Ordinal);
+        var engineRead = body.IndexOf("PostgresTargetFactsAsync(postgres, resolved.ServerId)", StringComparison.Ordinal);
+        var factRead = body.IndexOf("analysisService.CollectAndScoreFactsAsync(", StringComparison.Ordinal);
+        var filter = body.IndexOf("StartsWith(PgTargetFactKeys.ConfigPrefix", StringComparison.Ordinal);
+        Assert.True(engineRead > 0 && arm > engineRead, "the engine must be resolved off the registry before the arm branches");
+        Assert.True(factRead > arm, "the PostgreSQL arm's fact read is INSIDE the arm, not the SQL Server read above it");
+        Assert.True(filter > factRead, "the CONFIG_PG_* filter reads the facts the arm just collected");
+
+        /* Filtered by key prefix, not by source: the family lives on pg_config, pg_memory and pg_vacuum. */
+        Assert.DoesNotContain("Source == PgTargetSources.ConfigSource", body, StringComparison.Ordinal);
+
+        /* The refusal is gone from the whole tool body, not just from this arm — there is no PostgreSQL path
+           left that answers not_collected, which is the sentence the description stopped promising. */
+        var whole = tools[audit..tools.IndexOf("FormatError(\"audit_config\"", StringComparison.Ordinal)];
+        Assert.DoesNotContain("\"not_collected\"", whole, StringComparison.Ordinal);
+        Assert.DoesNotContain("get_pg_logging_audit", whole, StringComparison.Ordinal);
+
+        /* The zero-fact case keeps its own envelope: no facts is not a refusal, and it names the health read. */
+        Assert.Contains("\"no_config_data\"", whole, StringComparison.Ordinal);
 
         /* The ToolRecommendations arm sits ahead of every SQL Server prefix arm. */
         var pgArm = tools.IndexOf("if (PgTargetFactKeys.IsPgKey(key))", StringComparison.Ordinal);

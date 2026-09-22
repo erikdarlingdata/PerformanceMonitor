@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -591,7 +592,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). SQL Server only: for a PostgreSQL target this tool refuses with status not_collected and points at get_pg_server_config, get_pg_logging_audit and the CONFIG_PG_* facts instead of pretending the collector failed.")]
+    [McpServerTool(Name = "audit_config"), Description("Evaluates SQL Server configuration settings against best practices and the server's resources (memory, cores per socket, database footprint). Checks CTFP, MAXDOP, max server memory, and max worker threads. Returns specific recommendations with current values, recommended values, and reasoning. The payload reports the server's edition for context; NO check branches on it (MAXDOP is topology-based, the others are resource-based). For a PostgreSQL target it projects the analysis pass's CONFIG_PG_* setting facts into the same recommendations shape (setting, current_value with unit, status, recommendation; no suggested_value - the recommendation sentence carries the evidence), reports engine in place of edition, and renders checkpoint_timeout / max_wal_size as not_applicable on Aurora, where the engine manages checkpointing. get_analysis_facts has each setting's full investigation; get_pg_server_config has the raw snapshot.")]
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -602,34 +603,144 @@ public sealed class DarlingMcpTools
 
         try
         {
-            /* #3542: every check below is a SQL Server setting (CTFP, MAXDOP, max server memory, worker
-               threads), so for a PostgreSQL target the loop found nothing and answered "no_config_data — the
-               config collector may not have run yet" — false for a target whose pg_server_config collector
-               runs hourly. Say what this tool IS instead, and where the PostgreSQL setting checks live: they
-               are the CONFIG_PG_* facts the analysis pass emits, read through get_analysis_facts and
-               analyze_server. An honest envelope rather than a projection of those facts into this tool's
-               recommendations shape, because the projection is a content question (which settings, which
-               units, which bars) that the knobs lane owns; this is the plumbing that stops the lie. Same
-               registry read the not_collected envelopes use; a registry that cannot answer falls through
-               to the SQL Server audit exactly as before. */
+            /* #3542 stopped this tool's original lie — every check below is a SQL Server setting (CTFP,
+               MAXDOP, max server memory, worker threads), so a PostgreSQL target fell out of the loop with
+               nothing and was told "the config collector may not have run yet", false for a target whose
+               pg_server_config collector runs hourly — by answering an honest refusal and naming where the
+               PostgreSQL checks live. #3691 line 70 (Erik's ruling, 2026-09-22) finishes the job: those
+               checks are the CONFIG_PG_* facts THIS SAME PASS emits, so the tool projects them rather than
+               redirecting a reader who already asked the right question.
+
+               Every difference from the SQL Server envelope is a difference of the engine, and each is
+               stated in the tool's description so the contract changes once: `engine` in place of `edition`
+               (PostgreSQL ships no editions, and the token is the registry's, resolved below); a STRING
+               `current_value`, because "random_page_cost 4.0", "shared_buffers 4 GB" and "autovacuum off"
+               are not integers; and NO `suggested_value`, because the right value for a PostgreSQL knob is
+               host- and workload-specific — the advice's remediation sentence carries the evidence and the
+               counter-objective that a bare number would strip, which is exactly what the evidence-first
+               discipline forbids shipping. Investigation is not duplicated here either: get_analysis_facts
+               has each fact's full block, and this payload carries the headline and the remediation.
+
+               What it does NOT do: grade anything. Severity is the analysis pass's, read off the fact; the
+               tool only spells it ok / review / warning, plus not_applicable for a fact the collector
+               stamped (lane 15, #3728 §A4: on Aurora the storage layer owns checkpointing, so
+               checkpoint_timeout and max_wal_size are values nothing consults — they are reported with the
+               engine's own sentence and excluded from the checked count, never counted as findings).
+
+               Engine resolved off the registry (never a column's presence, #2530) through the same read the
+               refusal used; a registry that cannot answer falls through to the SQL Server audit exactly as
+               before. */
             var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId);
             if (MonitoredEngineKind.IsPostgres(engineKind))
             {
-                return McpHelpers.Status(
-                    "not_collected",
-                    $"audit_config evaluates SQL Server settings (cost threshold for parallelism, MAXDOP, max server memory, max worker threads) and does not apply to {resolved.ServerName}, a {MonitoredEngineKind.DescribeEngineKind(engineKind)} target. " +
-                    "A PostgreSQL target's configuration advisories are the CONFIG_PG_* facts the analysis pass emits: call get_analysis_facts with source pg_config for the current settings and their scores, or analyze_server for the advisory findings they root.",
-                    new
+                /* Coverage discarded for the reason the SQL Server arm states below (#3538 A2): these are
+                   point-in-time settings — the latest row regardless of window — and an hour the collector
+                   missed changes nothing about what the server is configured to. */
+                var (pgFacts, _, _) = await analysisService.CollectAndScoreFactsAsync(
+                    resolved.ServerId, resolved.ServerName, 1);
+
+                var pgFactsByKey = pgFacts.ToFactLookup();
+
+                /* Read once, off the registry engine resolved above — the payload's `engine` token and rider 1's
+                   not-applicable arm are the same question asked twice. */
+                var isAurora = MonitoredEngineKind.IsAurora(engineKind);
+
+                /* Filtered by KEY prefix, not by source: the CONFIG_PG_* family lives on THREE sources —
+                   pg_config for the pg_settings reads, pg_memory for the composition check
+                   (CONFIG_PG_MEMORY_OVERCOMMIT), pg_vacuum for the per-table reloption
+                   (CONFIG_PG_AUTOVACUUM_DISABLED) — so a source filter would silently drop the two checks
+                   that are not settings snapshots. Iterated as a LIST rather than through the lookup because
+                   the reloption check is per table and may legitimately repeat its key; ordered by key so
+                   two calls on one server read alike. */
+                var pgRecommendations = pgFacts
+                    .Where(f => f.Key.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal))
+                    .OrderBy(f => f.Key, StringComparer.Ordinal)
+                    .ThenBy(f => f.ObjectName, StringComparer.Ordinal)
+                    .Select(fact =>
                     {
-                        engine_kind = engineKind,
-                        next_tools = new object[]
-                        {
-                            new { tool = "get_analysis_facts", reason = "CONFIG_PG_* setting facts for this target", suggested_params = new { source = "pg_config" } },
-                            new { tool = "analyze_server", reason = "the advisory findings those settings root" },
-                            new { tool = "get_pg_server_config", reason = "the raw pg_settings snapshot with sources and pending restarts" },
-                            new { tool = "get_pg_logging_audit", reason = "the PostgreSQL logging-configuration audit (log_min_duration_statement, log_lock_waits, log_checkpoints and their peers)" },
-                        },
-                    });
+                        var advice = FactAdvice.Compose(fact.Key, pgFactsByKey);
+
+                        /* not_applicable comes from the FACT where the collector stamped it (max_wal_size, lane
+                           15 / #3728 §A4) and from the ENGINE for checkpoint_timeout, which the collector emits
+                           unstamped because it is base-0 context there and nothing was grading it. It is graded
+                           by nothing here either — but this tool RENDERS it as a setting with a recommendation,
+                           and the composed context sentence says "tune it with max_wal_size", which on Aurora
+                           sends an operator to a knob the storage layer ignores. Rider 1 of Erik's ruling names
+                           both keys for exactly that reason. Stamping the fact itself (so get_analysis_facts
+                           said it too) is the collector's change and lane 15's file; this arm is where the
+                           advice is being handed to a reader, so this is where it is made true. */
+                        var notApplicable = fact.Metadata.GetValueOrDefault("not_applicable") > 0
+                            || (isAurora && fact.Key == PgTargetFactKeys.ConfigCheckpointTimeout);
+
+                        return new PgConfigRecommendation(
+                            Setting: PgTargetFactKeys.ConfigPgSettingName(fact.Key) ?? fact.Key,
+                            FactKey: fact.Key,
+                            CurrentValue: FormatConfigPgValue(fact),
+                            Status: notApplicable ? "not_applicable"
+                                : fact.Severity >= 0.5 ? "warning"
+                                : fact.Severity > 0 ? "review"
+                                : "ok",
+                            /* Headline + remediation. The stamped fact needs no special case: lane 15 composed
+                               the not-applicable sentence INTO the advice block, so the same two fields carry
+                               it. The engine-side case above has no such block, so the sentence is appended —
+                               the headline still states the value, which is what the parameter group says, and
+                               the rider says who actually decides it. A key with no composed block (none today;
+                               a future key added without an advice arm) says so rather than rendering an empty
+                               sentence. */
+                            Recommendation: advice is null
+                                ? $"No composed advice for {fact.Key} in this build — get_analysis_facts carries the fact and its metadata."
+                                : advice.Headline + " " + advice.Remediation
+                                    + (notApplicable && fact.Metadata.GetValueOrDefault("not_applicable") == 0
+                                        ? " Not applicable on Aurora PostgreSQL: the storage layer owns checkpointing, so this value is what the parameter group holds rather than a schedule the engine keeps — read write pressure through get_pg_io_stats and the instance CPU and wait findings instead."
+                                        : string.Empty),
+                            /* The fact's own lineage stamp, passed through: 0 = the bar was chosen, not
+                               measured; 1 = measured against the dogfood PostgreSQL fleet. ABSENT (null) is
+                               the config family's normal case and means neither — the bar IS PostgreSQL's own
+                               shipped default, so there is no chosen number to disclose (PgTargetScorer.Config
+                               says exactly this in its class summary). */
+                            ThresholdLineage: fact.Metadata.TryGetValue("threshold_lineage", out var lineage) ? lineage : null,
+                            ObjectName: fact.ObjectName);
+                    })
+                    .ToList();
+
+                if (pgRecommendations.Count == 0)
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        server = resolved.ServerName,
+                        status = "no_config_data",
+                        message = "No PostgreSQL configuration facts this pass. The pg_server_config collector may not have run yet; get_collection_health says whether it is running and get_pg_server_config shows the raw snapshot if one exists."
+                    }, McpHelpers.JsonOptions);
+                }
+
+                /* The host's physical memory, when a PG_HOST_MEMORY-family fact is in hand — Aurora reports it
+                   through pg_cpu_utilization's memory columns (V136), stock PostgreSQL does not, and the field
+                   is null rather than zero there: "we did not measure it" is not "the host has none". The
+                   window MINIMUM is the honest figure on an instance that scaled mid-window, and it is the
+                   same number the composition check divides by. */
+                double? hostMemoryMb = pgFactsByKey.TryGetValue(PgTargetFactKeys.HostMemoryPressure, out var hostFact)
+                    && hostFact.Metadata.TryGetValue(PgTargetScorer.MemoryTotalMinBytesKey, out var hostBytes)
+                    && hostBytes > 0
+                        ? hostBytes / 1024.0 / 1024.0
+                        : null;
+
+                return JsonSerializer.Serialize(new
+                {
+                    server = resolved.ServerName,
+                    engine = isAurora ? MonitoredEngineKind.AuroraPostgres : MonitoredEngineKind.Postgres,
+                    total_physical_memory_mb = hostMemoryMb,
+                    summary = new
+                    {
+                        /* not_applicable rows are counted on their own line and EXCLUDED here (rider 1): a
+                           knob the engine does not consult was not checked, and folding it into the checked
+                           count would inflate the audit's own idea of how much it looked at. */
+                        settings_checked = pgRecommendations.Count(r => r.Status != "not_applicable"),
+                        warnings = pgRecommendations.Count(r => r.Status == "warning"),
+                        needs_review = pgRecommendations.Count(r => r.Status == "review"),
+                        not_applicable = pgRecommendations.Count(r => r.Status == "not_applicable")
+                    },
+                    recommendations = pgRecommendations.Select(r => r.ToPayload()).ToList()
+                }, McpHelpers.JsonOptions);
             }
 
             /* Coverage is discarded here on purpose (#3538 A2): this tool reads point-in-time
@@ -841,6 +952,90 @@ public sealed class DarlingMcpTools
         {
             return McpHelpers.FormatError("audit_config", ex);
         }
+    }
+
+    /// <summary>
+    /// A <c>CONFIG_PG_*</c> fact's value as an operator would read it in <c>pg_settings</c> — with its unit,
+    /// because the number alone is ambiguous in both directions (4 could be a cost ratio or four megabytes;
+    /// 300 could be seconds or connections). Keyed off the FACT KEY rather than sniffed from the value: the
+    /// collector knows what it read and encoded it in the key, and a magnitude heuristic would eventually call
+    /// a 1 GB <c>work_mem</c> a boolean.
+    ///
+    /// <para>Two inversions worth stating, because a reader who did not write them would get them backwards.
+    /// <c>CONFIG_PG_AUTOVACUUM_OFF</c> is a FINDING flag — value 1 means the <c>autovacuum</c> setting is
+    /// <c>off</c> — so the rendering flips it back to the setting's own word. And
+    /// <c>CONFIG_PG_AUTOVACUUM_DISABLED</c>'s value is the table's backlog RATIO, not its reloption: the
+    /// reloption is <c>off</c> by construction (the fact exists only for a table where it is), so that is what
+    /// the row states, and the ratio stays in the advice where the evidence is.</para>
+    ///
+    /// <para>Deliberately NOT a copy of <c>PgTargetAdvice</c>'s private <c>Knob*</c> formatters: they compose
+    /// prose inside the analysis assembly and are private to it. This renders the same shapes (whole GB when
+    /// whole, else MB; minutes when whole; one decimal on a ratio) so a value reads alike in an advice sentence
+    /// and in this payload — the pin is the pair of renderings, not a shared helper.</para>
+    /// </summary>
+    private static string FormatConfigPgValue(Fact fact) => fact.Key switch
+    {
+        /* Megabyte-valued facts: the collector divides bytes down to MB (ToMb) before scoring. */
+        PgTargetFactKeys.ConfigSharedBuffers
+            or PgTargetFactKeys.ConfigMaxWalSize
+            or PgTargetFactKeys.ConfigEffectiveCacheSize
+            or PgTargetFactKeys.ConfigWorkMem
+            or PgTargetFactKeys.ConfigMaintWorkMem
+            => FormatConfigPgMb(fact.Value),
+
+        /* Seconds, as the collector stores checkpoint_timeout (ms / 1000). */
+        PgTargetFactKeys.ConfigCheckpointTimeout => FormatConfigPgSeconds(fact.Value),
+
+        /* Booleans, as the setting spells itself. */
+        PgTargetFactKeys.ConfigTrackIoTiming
+            or PgTargetFactKeys.ConfigWalCompression
+            => fact.Value > 0 ? "on" : "off",
+
+        /* The two inversions from the summary above. */
+        PgTargetFactKeys.ConfigAutovacuumOff => fact.Value > 0 ? "off" : "on",
+        PgTargetFactKeys.ConfigAutovacuumDisabled => "off",
+
+        /* Counts. */
+        PgTargetFactKeys.ConfigMaxConnections
+            or PgTargetFactKeys.ConfigSuperuserReserved
+            or PgTargetFactKeys.ConfigReservedConnections
+            => fact.Value.ToString("#,0", CultureInfo.InvariantCulture),
+
+        /* Presence, not a value: the extension is either in shared_preload_libraries or it is not. */
+        PgTargetFactKeys.ConfigStatStatementsMissing
+            => fact.Value > 0 ? "not loaded" : "loaded",
+
+        /* A ratio of the configured worst case to the host's physical memory — stated as what it divides, so
+           1.4 cannot be read as 1.4 GB. */
+        PgTargetFactKeys.ConfigMemoryOvercommit
+            => fact.Value.ToString("0.0", CultureInfo.InvariantCulture) + "\u00d7 host memory",
+
+        /* Planner cost ratios and anything else this build has not classified: one decimal, no unit to
+           invent. random_page_cost 4.0 is the shipped default and reads as the planner writes it. */
+        _ => fact.Value.ToString("0.0", CultureInfo.InvariantCulture),
+    };
+
+    /// <summary>Megabytes as an operator would write them: whole GB when whole, else MB — the shape
+    /// <c>PgTargetAdvice</c>'s <c>KnobMb</c> renders inside an advice sentence, so one value does not read two
+    /// ways across the two surfaces.</summary>
+    private static string FormatConfigPgMb(double mb)
+    {
+        if (mb >= 1024 && mb % 1024 == 0)
+            return (mb / 1024).ToString("0", CultureInfo.InvariantCulture) + " GB";
+        if (mb >= 1024)
+            return (mb / 1024).ToString("0.#", CultureInfo.InvariantCulture) + " GB";
+        if (mb >= 1 || mb == 0)
+            return mb.ToString("0.#", CultureInfo.InvariantCulture) + " MB";
+        return (mb * 1024).ToString("0.#", CultureInfo.InvariantCulture) + " kB";
+    }
+
+    /// <summary>Seconds in the unit the operator set them in: hours or minutes when whole, else seconds
+    /// (<c>KnobSeconds</c>'s shape, for the same reason).</summary>
+    private static string FormatConfigPgSeconds(double seconds)
+    {
+        if (seconds >= 3600 && seconds % 3600 == 0) return (seconds / 3600).ToString("0", CultureInfo.InvariantCulture) + " h";
+        if (seconds >= 60 && seconds % 60 == 0) return (seconds / 60).ToString("0", CultureInfo.InvariantCulture) + " min";
+        return seconds.ToString("0.#", CultureInfo.InvariantCulture) + " s";
     }
 
     [McpServerTool(Name = "get_analysis_findings"), Description("Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. Each finding's confidence is an EVIDENCE score (see analyze_server): 0.20 for the fired symptom alone, plus corroboration from matched amplifier checks and chain depth. Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape (pre-#3538) and they must not be read as corroborated. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed). Three recurrence fields ride on every entry, read off the representative's frozen advice where the analysis pass wrote them (#3653): recurring_at_this_hour is true when the chain fired in the same hour×weekday slot on the server's clock for three or more consecutive weeks counting the latest, recurrence_weeks is that count (null when not labelled), and maintenance_window_moved is true when a long-running Agent job the chain is tied to ran in a different slot last week than this. These are LABELS at unchanged severity — a weekly problem is still a problem — and the advice text carries the sentence that states the slot.")]
@@ -1442,3 +1637,44 @@ internal record ConfigRecommendation(
     int SuggestedValue,
     string Status,
     string Recommendation);
+
+/// <summary>
+/// One row of <c>audit_config</c>'s PostgreSQL projection (#3691 line 70). Separate from
+/// <see cref="ConfigRecommendation"/> rather than a widening of it, so the SQL Server arm's payload stays
+/// byte-identical: its <c>current_value</c> is still an int, its <c>suggested_value</c> still present, and
+/// nothing about this shape can reach it.
+/// </summary>
+internal record PgConfigRecommendation(
+    string Setting,
+    string FactKey,
+    string CurrentValue,
+    string Status,
+    string Recommendation,
+    double? ThresholdLineage,
+    string? ObjectName)
+{
+    /// <summary>The serialized row. <c>object_name</c> is OMITTED, not null, for the server-level settings:
+    /// a null table name on a <c>shared_buffers</c> row invites a reader to wonder which table it meant, and
+    /// the two arms below are the whole reason this is a record with a payload method rather than an
+    /// anonymous type in the tool body.</summary>
+    public object ToPayload() => ObjectName is null
+        ? new
+        {
+            setting = Setting,
+            fact_key = FactKey,
+            current_value = CurrentValue,
+            status = Status,
+            recommendation = Recommendation,
+            threshold_lineage = ThresholdLineage
+        }
+        : new
+        {
+            setting = Setting,
+            fact_key = FactKey,
+            current_value = CurrentValue,
+            status = Status,
+            recommendation = Recommendation,
+            threshold_lineage = ThresholdLineage,
+            object_name = ObjectName
+        };
+}

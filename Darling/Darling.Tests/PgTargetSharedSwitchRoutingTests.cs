@@ -667,6 +667,53 @@ public sealed class PgTargetSharedSwitchRoutingTests
         }
     }
 
+    /// <summary>
+    /// #3691 line 70: every declared <c>CONFIG_PG_*</c> constant names the setting an operator would go set.
+    /// <c>audit_config</c>'s PostgreSQL projection renders <c>PgTargetFactKeys.ConfigPgSettingName(key) ?? key</c>
+    /// on every row, so a key the map has never heard of does not break the payload — it shows the reader
+    /// <c>CONFIG_PG_WORK_MEM</c> where <c>work_mem</c> belongs, which is the kind of miss that ships quietly
+    /// and forever. Reflected off the constants (the <c>EveryDeclaredPgKey_IsRouted…</c> pattern above) rather
+    /// than listed, so ADDING a key is what fails: the next lane to declare one is told, at the moment it
+    /// declares it, to say what an operator would type.
+    ///
+    /// <para>The three that are not one <c>pg_settings</c> row are asserted to SAY so, not merely to be
+    /// non-null. A composite rendered as a bare setting name is worse than the key: <c>autovacuum</c> on the
+    /// per-table reloption row would send an operator to <c>ALTER SYSTEM</c> for something only
+    /// <c>ALTER TABLE</c> can reach.</para>
+    /// </summary>
+    [Fact]
+    public void EveryDeclaredConfigPgKey_NamesTheSettingAnOperatorWouldSet()
+    {
+        var keys = typeof(PgTargetFactKeys).GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && !f.Name.EndsWith("Prefix", StringComparison.Ordinal))
+            .Select(f => (Name: f.Name, Value: (string)f.GetRawConstantValue()!))
+            .Where(k => k.Value.StartsWith(PgTargetFactKeys.ConfigPrefix, StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(keys.Count >= 12, $"the sweep found {keys.Count} CONFIG_PG_* constants; the vocabulary has moved");
+
+        foreach (var (name, value) in keys)
+        {
+            var setting = PgTargetFactKeys.ConfigPgSettingName(value);
+            Assert.False(string.IsNullOrWhiteSpace(setting), $"{name} ({value}) returns no setting name from ConfigPgSettingName — audit_config would render the KEY to a PostgreSQL operator; add the pg_settings name (or the honest composite spelling) beside the constant");
+            /* Lower-case, as pg_settings spells every name; the composites carry their qualifier after it. */
+            Assert.Matches("^[a-z_]+", setting!);
+        }
+
+        /* An unknown key falls back to null, which is what lets the tool render the key rather than a guess. */
+        Assert.Null(PgTargetFactKeys.ConfigPgSettingName("CONFIG_PG_NOT_A_KEY"));
+        Assert.Null(PgTargetFactKeys.ConfigPgSettingName(null));
+
+        /* The three that are not a settings row say what they are, in the words the tool shows. */
+        Assert.Equal("shared_preload_libraries (pg_stat_statements)", PgTargetFactKeys.ConfigPgSettingName(PgTargetFactKeys.ConfigStatStatementsMissing));
+        Assert.Equal("autovacuum_enabled (table reloption)", PgTargetFactKeys.ConfigPgSettingName(PgTargetFactKeys.ConfigAutovacuumDisabled));
+        Assert.Contains("(composite)", PgTargetFactKeys.ConfigPgSettingName(PgTargetFactKeys.ConfigMemoryOvercommit)!, StringComparison.Ordinal);
+
+        /* And the two knobs the campaign's first lane named read as themselves. */
+        Assert.Equal("shared_buffers", PgTargetFactKeys.ConfigPgSettingName(PgTargetFactKeys.ConfigSharedBuffers));
+        Assert.Equal("max_wal_size", PgTargetFactKeys.ConfigPgSettingName(PgTargetFactKeys.ConfigMaxWalSize));
+    }
+
     private static int Count(string haystack, string needle)
     {
         var count = 0;

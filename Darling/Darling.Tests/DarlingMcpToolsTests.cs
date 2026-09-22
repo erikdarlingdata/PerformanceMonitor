@@ -90,11 +90,19 @@ public sealed class DarlingMcpToolsTests
     /// <summary>
     /// #3653 A15/A16: <c>audit_config</c> claimed to account for edition with zero edition branches (the MAXDOP
     /// rule is topology-based, the rest resource-based; the edition is REPORTED in the payload, never consulted),
-    /// and its description said nothing about the PostgreSQL refusal the body has carried since #3542. The
-    /// description now says both, and the instruction table stops calling it "edition-aware".
+    /// and its description said nothing about the PostgreSQL arm the body has carried since #3542. The
+    /// description says both, and the instruction table stops calling it "edition-aware".
+    ///
+    /// <para>#3691 line 70 (Erik's ruling, 2026-09-22) replaced that arm's honest refusal with a PROJECTION of
+    /// the pass's <c>CONFIG_PG_*</c> facts into the same recommendations shape, so the sentence a PostgreSQL
+    /// caller reads before spending a call changed with it — and the whole point of changing the description
+    /// ONCE is that the four things a projected row does NOT look like are stated up front: the shape is the
+    /// SQL Server one, the setting's value carries its unit, <c>engine</c> stands where <c>edition</c> does,
+    /// there is no <c>suggested_value</c>, and two knobs read <c>not_applicable</c> on Aurora. A description
+    /// that promised the refusal would now be a lie of the same class as the one #3542 removed.</para>
     /// </summary>
     [Fact]
-    public void AuditConfig_Description_DoesNotClaimEditionAwareness_AndNamesThePostgresRefusal()
+    public void AuditConfig_Description_DoesNotClaimEditionAwareness_AndNamesThePostgresProjection()
     {
         var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
             .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "audit_config");
@@ -102,9 +110,19 @@ public sealed class DarlingMcpToolsTests
 
         Assert.DoesNotContain("accounting for edition", description, StringComparison.Ordinal);
         Assert.Contains("NO check branches on it", description, StringComparison.Ordinal);
-        Assert.Contains("not_collected", description, StringComparison.Ordinal);
+
+        /* The projection's four stated differences, each in the words the tool uses. */
+        Assert.Contains("CONFIG_PG_*", description, StringComparison.Ordinal);
+        Assert.Contains("engine in place of edition", description, StringComparison.Ordinal);
+        Assert.Contains("not_applicable on Aurora", description, StringComparison.Ordinal);
+        Assert.Contains("no suggested_value", description, StringComparison.Ordinal);
+        Assert.Contains("current_value with unit", description, StringComparison.Ordinal);
         Assert.Contains("get_pg_server_config", description, StringComparison.Ordinal);
-        Assert.Contains("get_pg_logging_audit", description, StringComparison.Ordinal);
+        Assert.Contains("get_analysis_facts", description, StringComparison.Ordinal);
+
+        /* And it no longer promises the refusal the body stopped answering. */
+        Assert.DoesNotContain("not_collected", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("SQL Server only", description, StringComparison.Ordinal);
 
         /* And the claim is true of the body: the only edition reads are the fact lookup and the payload echo. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");

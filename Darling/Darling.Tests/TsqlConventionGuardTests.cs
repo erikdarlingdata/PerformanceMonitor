@@ -1444,6 +1444,15 @@ public sealed class TsqlConventionGuardTests
            Neither is T-SQL and neither is a tempdb label, so no census reads a site of that kind here. */
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Stamp",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs Window",
+        /* #3691 line 70: audit_config's PostgreSQL projection row serializes through an expression-bodied
+           `ObjectName is null ? new { … } : new { … }` — the two anonymous-object initializers are where the
+           walk stops, the same shape as the property-pattern derivations below. What falls outside the range
+           is the payload's own KEY NAMES (setting, fact_key, current_value, status, recommendation,
+           threshold_lineage, object_name): not T-SQL, not a tempdb label, and read by the contract censuses
+           from the SERIALIZED payload and the tool's description rather than from a member-scoped literal
+           sweep — PgTargetAuditConfigTests executes both arms of the ternary against a live store, which is
+           the only reading of those keys that could go wrong. */
+        "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs ToPayload",
         /* #3541 A12: four expression-bodied derivations on the growth row, each `Baseline is { } b ? … : null`
            — the property pattern's braces are where the walk stops. Every one is arithmetic over the row's
            own fields and strands NO string literal at all, so no census reads a site of that kind here. The

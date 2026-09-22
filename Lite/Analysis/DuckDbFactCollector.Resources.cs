@@ -14,7 +14,9 @@ public partial class DuckDbFactCollector
 {
     /// <summary>
     /// Collects memory stats: total physical RAM, buffer pool size, target memory.
-    /// These facts enable edition-aware memory recommendations in the config audit.
+    /// These facts enable RESOURCE-based memory recommendations in the config audit: max server memory is
+    /// sized against the host's physical RAM, and no check in that audit branches on the edition (which the
+    /// payload reports for context only).
     /// </summary>
     private async Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts)
     {

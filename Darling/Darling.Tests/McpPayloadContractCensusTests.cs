@@ -1683,7 +1683,7 @@ public sealed class McpPayloadContractCensusTests
         ("warning", "DarlingMcpPgWraparoundTools.cs",
             "the bare tier of the PostgreSQL severity-TOKEN ladder (ok / info_anti_wraparound_vacuum_expected / warning / critical_failsafe_range / critical_wraparound_imminent) — a tier-prefixed token family, not a case variant of the band"),
         ("warning", "DarlingMcpTools.cs",
-            "audit_config's per-recommendation status (ok / warning / review) — the lower-case status vocabulary every `status` key on the surface speaks, not a band"),
+            "audit_config's per-recommendation status (ok / warning / review, plus not_applicable since #3691 line 70 for a PostgreSQL knob the engine does not consult — Aurora's checkpoint_timeout and max_wal_size) — the lower-case status vocabulary every `status` key on the surface speaks, not a band"),
         ("warning", "McpAnalysisTools.cs",
             "audit_config's per-recommendation status — the Lite twin of the above"),
     ];

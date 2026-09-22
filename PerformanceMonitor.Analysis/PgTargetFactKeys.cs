@@ -492,6 +492,48 @@ public static class PgTargetFactKeys
         key is not null && key.StartsWith(AnomalyPrefix, StringComparison.Ordinal);
 
     /// <summary>
+    /// The <c>pg_settings</c> name behind a <c>CONFIG_PG_*</c> fact key — what an operator types into
+    /// <c>ALTER SYSTEM</c> or searches for in a parameter group — or <c>null</c> for a key this build does not
+    /// know (the caller renders the KEY then, which is honest: an unmapped key is a vocabulary the reader can
+    /// still look up, where a guessed setting name is a wrong instruction).
+    ///
+    /// <para><b>Why here and not in the tool.</b> <c>audit_config</c>'s PostgreSQL arm (#3691 line 70, Erik's
+    /// ruling 2026-09-22) projects these facts into the recommendations shape, and a second surface reading the
+    /// same facts would have to invent the same mapping; the map lives beside the constants so it is one
+    /// declaration and a renamed key fails to compile in both places at once. Every declared <c>CONFIG_PG_*</c>
+    /// constant appears below — pinned by a reflection census, so a new key cannot be added without naming
+    /// what an operator would set.</para>
+    ///
+    /// <para><b>The three that are not one setting.</b> <c>CONFIG_PG_STAT_STATEMENTS_MISSING</c> is an
+    /// extension's absence from <c>shared_preload_libraries</c>, not a setting with a value;
+    /// <c>CONFIG_PG_MEMORY_OVERCOMMIT</c> is arithmetic OVER settings (§4b's worst case against the host);
+    /// <c>CONFIG_PG_AUTOVACUUM_DISABLED</c> is a per-table reloption, and the TABLE rides the fact's
+    /// <see cref="Fact.ObjectName"/> rather than the name here. Each is spelled so that the reader cannot
+    /// mistake it for a <c>pg_settings</c> row it could go read — the alternative (a bare <c>autovacuum</c> for
+    /// the reloption) would send an operator to the wrong knob.</para>
+    /// </summary>
+    public static string? ConfigPgSettingName(string? key) => key switch
+    {
+        ConfigSharedBuffers => "shared_buffers",
+        ConfigMaxWalSize => "max_wal_size",
+        ConfigEffectiveCacheSize => "effective_cache_size",
+        ConfigRandomPageCost => "random_page_cost",
+        ConfigTrackIoTiming => "track_io_timing",
+        ConfigCheckpointTimeout => "checkpoint_timeout",
+        ConfigWalCompression => "wal_compression",
+        ConfigAutovacuumOff => "autovacuum",
+        ConfigMaxConnections => "max_connections",
+        ConfigWorkMem => "work_mem",
+        ConfigMaintWorkMem => "maintenance_work_mem",
+        ConfigSuperuserReserved => "superuser_reserved_connections",
+        ConfigReservedConnections => "reserved_connections",
+        ConfigStatStatementsMissing => "shared_preload_libraries (pg_stat_statements)",
+        ConfigMemoryOvercommit => "shared_buffers + work_mem × max_connections (composite)",
+        ConfigAutovacuumDisabled => "autovacuum_enabled (table reloption)",
+        _ => null,
+    };
+
+    /// <summary>
     /// The wait fact key for a PostgreSQL wait: the type rollup when <paramref name="waitEvent"/> is null or
     /// empty (<c>PG_WAIT_LOCK</c>), the named standout otherwise (<c>PG_WAIT_LOCK_RELATION</c>). Upper-cased
     /// invariantly and every non-alphanumeric run collapsed to one underscore, because Aurora renamed wait
