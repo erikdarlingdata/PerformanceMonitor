@@ -590,6 +590,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
                    surface beside get_store_metrics. */
                 .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+                .WithGeminiCompatibleTools<DarlingMcpStoreQueryStatsTools>()
                 .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
                 /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
                    while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by

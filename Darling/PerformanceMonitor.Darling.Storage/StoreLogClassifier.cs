@@ -224,6 +224,16 @@ public static class StoreLogClassifier
         new("lock_timeout", Error, MatchKind.StartsWith, "canceling statement due to lock timeout", true,
             "a statement hit the store's own lock_timeout waiting for a lock"),
 
+        /* Retained (#3899) - a statement from one of the read identities that ran past the slow-statement line
+           provisioning sets on them (DarlingManagedRoles.SlowStatementLogThreshold, viewer and mcp). PostgreSQL
+           writes it as LOG with the duration first and the statement after, on the same line and the
+           tab-indented continuation lines below it, so the raw entry carries the query. Retained for the reason
+           statement_timeout is: the text is what makes one actionable, and a count throws it away. Without this
+           rule every one lands in routine, counted and dropped. Bind parameters are not in it: the same
+           provisioning sets log_parameter_max_length = 0 on those roles. */
+        new("slow_statement", Log, MatchKind.StartsWith, "duration: ", true,
+            "a web-viewer or MCP statement ran past the store's slow-statement line - the entry carries the statement"),
+
         /* EXCLUDING - the ~1,100/day floor. StartsWith and ERROR-scoped, so it cannot reach a FATAL or a
            PANIC and cannot match a message that merely mentions a cancel. */
         new("user_request_cancel", Error, MatchKind.StartsWith, "canceling statement due to user request", false,

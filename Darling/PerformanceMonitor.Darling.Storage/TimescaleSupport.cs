@@ -4564,7 +4564,7 @@ WITH NO DATA";
     /// <see cref="CompressionPhaseOrder"/>, because a static field initializer runs in declaration order and
     /// this one reads both.</para>
     /// </summary>
-    private static readonly IReadOnlyDictionary<string, int> s_compressionPhaseSlots = BuildCompressionPhaseSlots();
+    private static readonly Dictionary<string, int> s_compressionPhaseSlots = BuildCompressionPhaseSlots();
 
     private static Dictionary<string, int> BuildCompressionPhaseSlots()
     {

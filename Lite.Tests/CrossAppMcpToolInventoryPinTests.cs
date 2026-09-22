@@ -174,6 +174,12 @@ public sealed class CrossAppMcpToolInventoryPinTests
            twin to point at, so this is a SKU boundary rather than a porting to-do. */
         "get_store_log",
 
+        /* #3899: the store's own per-statement timings (get_store_query_stats) over pg_stat_statements in the
+           central Postgres store, split by the role that ran each statement. Darling-ONLY by architecture, the
+           get_store_log reason: Lite's store is embedded DuckDB, with no server, no roles and no
+           pg_stat_statements to read. A SKU boundary rather than a porting to-do. */
+        "get_store_query_stats",
+
         /* #2674: the collector-cost read (get_collector_cost) over collect.collector_cost — the tool measuring
            its OWN per-collector cost on the monitored servers. Darling-ONLY by architecture, the same as
            get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */

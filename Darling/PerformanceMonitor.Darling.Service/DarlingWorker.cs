@@ -242,8 +242,8 @@ public sealed class DarlingWorker : BackgroundService
     /// occurrence count in the file invariant, so the span between the acquire and the handoff is all it has
     /// to work with. A second such call here, on an unrelated <c>step</c> of an entirely different kind, turns
     /// that pin red and reports it as a Query Store lease defect. It scans this file as TEXT, which is why the
-    /// sentence above describes the call instead of quoting it. The verb is the vocabulary of the twelve things
-    /// this delegate actually calls anyway — they are all <c>Ensure*</c> or <c>Converge*</c>.</para>
+    /// sentence above describes the call instead of quoting it. The verb is the vocabulary of everything
+    /// this delegate actually calls anyway — each is an <c>Ensure*</c> or a <c>Converge*</c>.</para>
     /// </summary>
     internal sealed record StoreObjectConvergenceStep(
         string Name,
@@ -364,6 +364,20 @@ public sealed class DarlingWorker : BackgroundService
            silently returning nothing. */
         new("baseline fallback views", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, logger, ct)),
+        /* #3899: the store's OWN per-statement timings — pg_stat_statements (preloaded by the managed conf's v13
+           block), the SECURITY DEFINER reader get_store_query_stats calls, its grants to the reader roles, and
+           the role-DDL scrub. Ungated: nothing in it depends on TimescaleDB. After provisioning on the start
+           path (this segment follows it), so the grantees exist. On this cadence an extension a DBA creates by
+           hand, or a function or grant that was dropped, heals within the hour; the PRELOAD is restart-only and
+           lives in the conf, so this step cannot load the library, only report that it is not loaded. Counted in
+           place: 1 when the reader is ready, 0 in any of the named states that are not a failure. */
+        new("statement statistics", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await StoreStatementStats.EnsureAsync(
+                connection,
+                PgSchemaGenerator.ConfigSchema,
+                [DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName],
+                logger,
+                ct) == StoreStatementStats.SetupOutcome.Ready ? 1 : 0),
 
         /* #3573 and the composer's covering indexes: CREATE INDEX IF NOT EXISTS (a catalog check) and the
            per-table autovacuum overrides, plus the catalog-FILTERED hypertable insert-tuning sweep, which
@@ -389,7 +403,7 @@ public sealed class DarlingWorker : BackgroundService
        reasoning as the retention re-evaluation's five minutes beside it: the pass is AWAITED on the serial
        sweep loop, and every statement inside it carries TimescaleSupport's 300 s bulk-setup CommandTimeout,
        which is right for a first hypertable conversion on an adopted store and wrong for something the fleet
-       loop waits behind. Twelve steps over fifty-one hypertables and twenty aggregates is a few hundred
+       loop waits behind. Fourteen steps over fifty-one hypertables and twenty aggregates is a few hundred
        statements in the worst case, so the per-statement deadline bounds nothing useful here; one linked
        budget for the pass does.
 
@@ -6613,8 +6627,8 @@ LIMIT 1";
     /// internal warnings name one item, this one names the step that did not complete, and the difference
     /// matters — a per-aggregate failure is one family, a throw out of
     /// <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/> itself is all twenty. Cancellation is
-    /// rethrown, so the budget and shutdown reach the pass's own catches rather than being recorded as twelve
-    /// step failures.</para>
+    /// rethrown, so the budget and shutdown reach the pass's own catches rather than being recorded as a
+    /// failure of every step.</para>
     ///
     /// <para><see cref="StoreObjectChangeSignal"/> is what keeps the changed count honest: only the six
     /// steps whose return value IS a change count can contribute to it, and the rest are counted as steps
