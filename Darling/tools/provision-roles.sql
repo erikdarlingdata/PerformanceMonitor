@@ -106,8 +106,11 @@ ALTER ROLE viewer SET statement_timeout = '15s';
 --          a single literal holding the whole list is stored as one library name, and the server will not
 --          start.
 --       b. CREATE EXTENSION pg_stat_statements;  in this database.
---       c. If the owner role is not a superuser: GRANT pg_read_all_stats TO darling;  so the service's reader
---          shows every role's statement text (without it, other roles' text reads <insufficient privilege>).
+--       c. Optional, and a trade-off: if the owner role is not a superuser, other roles' statement text reads
+--          <insufficient privilege> in the service's reader. GRANT pg_read_all_stats TO darling; shows it, but
+--          also lets that login read every session's query text and every database's statements on the
+--          cluster, and in bring-your-own mode the web dashboard and MCP server connect as that login. On a
+--          cluster shared with other applications, leave it out.
 --     The service builds its reader functions at its next start (and hourly on a TimescaleDB store).
 ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
 ALTER ROLE viewer SET log_parameter_max_length = 0;

@@ -42,7 +42,7 @@ public sealed class DarlingMcpStoreQueryStatsTools
 
     /// <summary>What the module shows in place of a statement's text when the reader's definer may not read
     /// another role's.</summary>
-    internal const string InsufficientPrivilegeText = "<insufficient privilege>";
+    internal const string InsufficientPrivilegeText = StoreStatementStats.InsufficientPrivilegeText;
 
     /// <summary>The <c>order_by</c> values, mapped to the reader function's columns. The map IS the whitelist:
     /// a value not in it is refused, and only a value from it is ever interpolated into SQL.</summary>
@@ -380,7 +380,7 @@ LIMIT $2";
         };
 
         parts.Add(utilityTracked
-            ? "Utility statements are tracked on this store (pg_stat_statements.track_utility is on), so COPY, CALL, VACUUM and DDL are in these figures. Role DDL can carry a password literal: the reader refuses it, and the store should set track_utility off."
+            ? "Utility statements are tracked on this store (pg_stat_statements.track_utility is on), so COPY, CALL, VACUUM and DDL are in these figures, each with its text withheld: a utility statement keeps its literals as typed, a password among them, so only normalized SELECT, INSERT, UPDATE, DELETE and MERGE text is shown. The store should set track_utility off."
             : "Utility statements are not tracked (pg_stat_statements.track_utility is off, as the store sets it), so COPY, CALL, VACUUM and DDL are not in these figures: the collectors' bulk ingest is COPY, so the owner's share understates collection. get_collector_cost has the collection side.");
 
         if (state.ConnectedAsOwner)
@@ -390,7 +390,7 @@ LIMIT $2";
 
         if (hiddenText > 0)
         {
-            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. GRANT pg_read_all_stats TO the owner role to show their text.");
+            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster; on a compose or bring-your-own store the web viewer and MCP tools run as that login (#3914), so on a cluster shared with other applications leave it hidden.");
         }
 
         if (state.ExtensionVersion is { } version

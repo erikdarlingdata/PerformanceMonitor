@@ -463,7 +463,7 @@ public sealed class PgLogEventsPipelineTests
     {
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $$hunter2$$"));
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2$pw$"));
-        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2 cut off at the cap"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2 cut off at the cap"));
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD E'hun\\'ter2'"));
         Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD e'it''s'"));
         Assert.Equal(
@@ -476,8 +476,153 @@ public sealed class PgLogEventsPipelineTests
         Assert.Null(PgLogTextRedactor.RedactStoredStatement(null));
         Assert.Equal("", PgLogTextRedactor.RedactStoredStatement(""));
 
+        /* #3915's review, each a leak the regex chain had: an apostrophe inside a double-quoted identifier or a
+           nested comment opened a phantom literal and left the next real one standing; a standard string with a
+           backslash-escaped quote (a client with standard_conforming_strings off) ended early; a statement cut
+           inside a literal was kept as it stood. The lexer masks the first two and refuses the last two: since
+           #3920's review a standard string's backslash before a quote reads two ways, and neither is trusted. */
+        Assert.Equal(
+            "SELECT count(*) AS \"owner's count\" FROM t WHERE pw = '?'",
+            PgLogTextRedactor.RedactStoredStatement("SELECT count(*) AS \"owner's count\" FROM t WHERE pw = 'hunter2'"));
+        Assert.Equal("SELECT '?'", PgLogTextRedactor.RedactStoredStatement("/* a /* b */ Erik's note */ SELECT 'SECRET1'"));
+        Assert.Equal("SELECT '?' , '?'", PgLogTextRedactor.RedactStoredStatement("SELECT $$O'Brien$$ /* don't */, 'SECRET2'"));
+        Assert.Equal("SELECT '?', '?' , '?'", PgLogTextRedactor.RedactStoredStatement("SELECT E'it\\'s', 'x--y'\n, 'SECRET4'"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT 'it\\'s SECRET5', 1"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT 'first line of SECRET6"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT 1 /* never closed"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement("SELECT \"never closed"));
+
+        /* Every numeric spelling is a value; every other literal prefix is a literal. */
+        Assert.Equal("SELECT ?, ?, ?, ?, ?, ?", PgLogTextRedactor.RedactStoredStatement("SELECT 0x1F2A, 0o17, 0b101, 1_000_000, 1.5e3, .5"));
+        Assert.Equal(
+            "UPDATE t SET c = '?' WHERE \"a\"\"b\" = '?' AND d = '?'",
+            PgLogTextRedactor.RedactStoredStatement("UPDATE t SET c = U&'d\\0061t' WHERE \"a\"\"b\" = X'1F' AND d = N'nat'"));
+
         /* The hashed form is unchanged: a DO body stays part of the shape a fingerprint distinguishes. */
         Assert.Equal("DO $$ BEGIN PERFORM ?; END $$", PgLogTextRedactor.RedactStatement("DO $$ BEGIN PERFORM 1; END $$"));
+    }
+
+    /// <summary>
+    /// #3920's review, the lexer's second round. A backslash before a quote in a standard string is read two ways
+    /// by PostgreSQL, depending on the sending client's <c>standard_conforming_strings</c>, and the text does not
+    /// say which, so an odd run before a quote is refused. Reading every backslash as an escape, the first rule,
+    /// skipped the close of <c>'C:\'</c> and printed the next literal's contents as identifiers. Bit strings never
+    /// escape, E-strings always do, and an even run reads the same both ways. Whitespace and comments follow
+    /// PostgreSQL's lexer: a line comment ends at a bare carriage return, and a non-ASCII space is part of an
+    /// identifier, not a separator.
+    /// </summary>
+    [Fact]
+    public void AStoredStatement_RefusesABackslashItCannotRead_AndFollowsPostgresLexicalRules()
+    {
+        foreach (var ambiguous in new[]
+        {
+            "SELECT * FROM t WHERE name LIKE 'a\\_%' ESCAPE '\\' AND pw = 'Leak3920k' -- don't cache",
+            "UPDATE t SET path = 'C:\\', note = 'Leak3920l -- x' WHERE id = 1",
+            "INSERT INTO t VALUES ('C:\\temp\\', '{\"pw\": \"Leak3920m\"}', E'it\\'s')",
+            "SELECT N'x\\', 'Leak3920n'",
+            "SELECT U&'x\\', 'Leak3920o'",
+        })
+        {
+            Assert.Null(PgLogTextRedactor.RedactStoredStatement(ambiguous));
+        }
+
+        Assert.Equal("SELECT '?', '?'", PgLogTextRedactor.RedactStoredStatement("SELECT X'ab\\', 'Leak3920p -- x'"));
+        Assert.Equal("SELECT '?', '?'", PgLogTextRedactor.RedactStoredStatement("SELECT B'10\\', 'Leak3920q'"));
+        Assert.Equal("SELECT '?', '?'", PgLogTextRedactor.RedactStoredStatement("SELECT 'C:\\\\', 'Leak3920r'"));
+        Assert.Equal("SELECT '?', '?'", PgLogTextRedactor.RedactStoredStatement("SELECT 'a\\nb', 'Leak3920s'"));
+        Assert.Equal("SELECT '?', '?'", PgLogTextRedactor.RedactStoredStatement("SELECT E'it\\'s', 'Leak3920t'"));
+
+        Assert.Equal("SELECT x , '?'", PgLogTextRedactor.RedactStoredStatement("SELECT x -- note\r, 'multi\nLeak3920u -- pw'"));
+        Assert.Equal(
+            "SELECT ? AS \u00A0$a$, '?'",
+            PgLogTextRedactor.RedactStoredStatement("SELECT 1 AS \u00A0$a$, '$a$ Leak3920v -- x'"));
+    }
+
+    /// <summary>
+    /// #3920's review: prose masking kept the SQL PostgreSQL writes into DETAIL and CONTEXT (bare numbers,
+    /// dollar-quoted strings, escaped quotes), on the store's own log and on every monitored target's
+    /// <c>pg_log_events</c>. A deadlock's <c>Process N:</c> queries and a crash's <c>Failed process was
+    /// running:</c> query are masked as SQL, and withheld when cut inside a literal. A function's
+    /// <c>SQL statement "..."</c> frame ends where its statement reads to its end, so neither a double quote nor a
+    /// fake frame line inside it can move the boundary. Every shape comes back unchanged when masked again.
+    /// </summary>
+    [Fact]
+    public void DetailAndContext_MaskTheSqlPostgresWritesIntoThem()
+    {
+        var deadlock = PgLogTextRedactor.RedactDetail(string.Join("\n",
+        [
+            "Process 5012 waits for ShareLock on transaction 809; blocked by process 5013.",
+            "\tProcess 5013 waits for ShareLock on transaction 810; blocked by process 5012.",
+            "\tProcess 5012: UPDATE accounts SET balance = balance - 250000 WHERE card = 4111111111111111",
+            "\tProcess 5013: UPDATE accounts SET note = E'client\\'s pin Leak3920a', token = $t$Leak3920b$t$",
+            "\t  WHERE id = 7",
+        ]));
+        Assert.Equal(string.Join("\n",
+        [
+            "Process 5012 waits for ShareLock on transaction 809; blocked by process 5013.",
+            "\tProcess 5013 waits for ShareLock on transaction 810; blocked by process 5012.",
+            "\tProcess 5012: UPDATE accounts SET balance = balance - ? WHERE card = ?",
+            "\tProcess 5013: UPDATE accounts SET note = '?', token = '?' WHERE id = ?",
+        ]), deadlock);
+        Assert.Equal(deadlock, PgLogTextRedactor.RedactDetail(deadlock));
+
+        /* csvlog and jsonlog carry the same DETAIL without the tabs. */
+        Assert.Equal(
+            "Process 1 waits for ShareLock on transaction 2; blocked by process 3.\nProcess 1: SELECT ?",
+            PgLogTextRedactor.RedactDetail("Process 1 waits for ShareLock on transaction 2; blocked by process 3.\nProcess 1: SELECT 4111111111111111"));
+
+        /* Cut at track_activity_query_size inside a literal: withheld, never kept as it stood. */
+        var crash = PgLogTextRedactor.RedactDetail("Failed process was running: UPDATE creds SET secret = 'Leak3920c");
+        Assert.Equal("Failed process was running: " + PgLogTextRedactor.WithheldStatement, crash);
+        Assert.Equal(crash, PgLogTextRedactor.RedactDetail(crash));
+
+        var context = PgLogTextRedactor.RedactContext(
+            "SQL statement \"UPDATE \"o'k\" SET a = 'x', b = 'Leak3920d' WHERE c = 1\"\n\tPL/pgSQL function f() line 3 at SQL statement");
+        Assert.Equal("SQL statement \"UPDATE \"o'k\" SET a = '?', b = '?' WHERE c = ?\"\n\tPL/pgSQL function f() line 3 at SQL statement", context);
+        Assert.Equal(context, PgLogTextRedactor.RedactContext(context));
+
+        /* A statement spanning lines, the frame after it kept as prose. */
+        Assert.Equal(
+            "PL/pgSQL expression \"total + ?\"\n\tPL/pgSQL function g(integer) line 5 at assignment",
+            PgLogTextRedactor.RedactContext("PL/pgSQL expression \"total +\n\t42\"\n\tPL/pgSQL function g(integer) line 5 at assignment"));
+
+        /* A fake frame line inside a literal: the first close it offers leaves the literal open, so the real close
+           is found; with no real close, the frame and everything after it are withheld. */
+        var fake = PgLogTextRedactor.RedactContext(
+            "SQL statement \"SELECT 'a\"\n\tPL/pgSQL function x() line 1 at SQL statement\n\tLeak3920e'\"\n\tPL/pgSQL function f() line 9 at PERFORM");
+        Assert.Equal("SQL statement \"SELECT '?'\"\n\tPL/pgSQL function f() line 9 at PERFORM", fake);
+        Assert.Equal(
+            "SQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
+            PgLogTextRedactor.RedactContext("SQL statement \"SELECT 'Leak3920f\"\n\tPL/pgSQL function f() line 9 at PERFORM\n\tmore"));
+
+        /* The prose frames around it stay as they were. */
+        Assert.Equal("while updating tuple (0,1) in relation \"accounts\"", PgLogTextRedactor.RedactContext("while updating tuple (0,1) in relation \"accounts\""));
+        Assert.Null(PgLogTextRedactor.RedactDetail(null));
+        Assert.Null(PgLogTextRedactor.RedactContext(null));
+    }
+
+    /// <summary>
+    /// #3920's review, the prose value shapes: a partition key's values, a JSON line, and a key tuple whose quoted
+    /// column name holds an apostrophe. The value shapes now run before the single-quote pass, and that pass
+    /// steps over double-quoted names, so an apostrophe inside <c>"o'k"</c> pairs with nothing.
+    /// </summary>
+    [Fact]
+    public void Prose_MasksPartitionKeysJsonLinesAndQuotedNamesWithApostrophes()
+    {
+        var cases = new (string Raw, string Masked)[]
+        {
+            ("Partition key of the failing row contains (tenant_email) = (bob@example.com).", "Partition key of the failing row contains (tenant_email) = (?)."),
+            ("Partition key of the failing row contains (lower(a), b) = (x (y), z).", "Partition key of the failing row contains (lower(a), b) = (?)."),
+            ("JSON data, line 1: {\"card\": 4111111111111111, \"cvv\": 123, \"x\": }", "JSON data, line 1: ?"),
+            ("Key (\"o'k\")=(it's Leak3920g) already exists.", "Key (\"?\")=(?) already exists."),
+            ("column \"o'k\" of relation \"t\" and the value 'Leak3920h'", "column \"o'k\" of relation \"t\" and the value '?'"),
+        };
+
+        foreach (var (raw, masked) in cases)
+        {
+            Assert.Equal(masked, PgLogTextRedactor.RedactMessage(raw));
+            Assert.Equal(masked, PgLogTextRedactor.RedactMessage(masked));
+        }
     }
 
     /* ---- the self-hosted collector and the shared tailer --------------------------------------------- */
