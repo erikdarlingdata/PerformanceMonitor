@@ -11,6 +11,7 @@ using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCoun
    this namespace also defines. */
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitorLite.Mcp;
 
@@ -501,7 +502,11 @@ public sealed class McpHealthTools
             var alertReads = AlertReadFailureCounter.Shared.ReadFor(resolved.ServerId.ToString());
             var alertReadFinding = AlertReadFailureCounter.FormatFinding(alertReads);
 
-            return JsonSerializer.Serialize(new
+            /* #3691: wraps the whole payload rather than sitting in it as a property — McpHelpers.JsonOptions
+               WRITES nulls, so a property would ship analysis_caveats: null on every clean answer — and it reads
+               the process-wide ledger because the scheduled sweep builds a fresh analysis service per pass.
+               A different layer from the collector rows above: 43 healthy collectors above a family the pass timed out reading. */
+            return JsonSerializer.Serialize(CollectionCaveatLedger.Shared.Attach(new
             {
                 server = resolved.ServerName,
                 /* #3453: the build-attribution read, and deliberately the same block Darling's twin
@@ -644,7 +649,7 @@ public sealed class McpHealthTools
                    monitored engine counted, because nothing on this surface measures the second. */
                 output_note = CollectorHealthClassifier.OutputWindowNote,
                 collectors = result
-            }, McpHelpers.JsonOptions);
+            }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
