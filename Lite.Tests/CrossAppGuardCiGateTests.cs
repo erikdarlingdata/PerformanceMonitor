@@ -84,7 +84,12 @@ namespace Lite.Tests;
 /// </summary>
 public class CrossAppGuardCiGateTests
 {
-    /* Which filter gates which suite, per build.yml's "Run Lite tests" / "Run Darling tests" steps. */
+    /* Which filter gates which suite, per build.yml's "Run Lite tests (shard)" / "Run Darling tests"
+       steps. The Lite arm reads the SHARD job's step since #3887: the build job's own "Run Lite tests"
+       is release-only now, and the step that decides whether the suite runs on a pull request is the
+       one in the lite-tests matrix. Its filter block is a byte-for-byte copy of the build job's,
+       renamed *_shard so each set is findable unambiguously and pinned equal by
+       TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs below. */
     private const string LiteAppDir = "Lite";
     private const string LiteTestsDir = "Lite.Tests";
     private const string DarlingAppDir = "Darling";
@@ -1320,8 +1325,12 @@ public class CrossAppGuardCiGateTests
         Check(repo, yaml, failures,
             scannedProject: LiteTestsDir,
             other: DarlingTrees,
-            filterName: "lite",
-            gatingStep: "Run Lite tests",
+            /* #3887: the lite-tests matrix job's copy, because that is the step that now decides
+               whether the suite runs on a pull request. The copy is pinned byte-equal to the build
+               job's 'lite' by TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs, so reading
+               either set here asserts the same reachability. */
+            filterName: "lite_shard",
+            gatingStep: "Run Lite tests (shard)",
             backstopped: null);
 
         Check(repo, yaml, failures,
@@ -1340,6 +1349,48 @@ public class CrossAppGuardCiGateTests
             "Cross-app guards that PR CI cannot run — add the path to the named filter in " +
             ".github/workflows/build.yml, or the guard only fires in the nightly, after the merge:\n  " +
             string.Join("\n  ", failures));
+    }
+
+    /// <summary>
+    /// #3887 moved the Lite suite into its own matrix job, which needs the same path filters the build job
+    /// uses. A job cannot read another job's <c>steps.filter</c> outputs, and making the shards
+    /// <c>needs: build</c> would serialize them behind the very job they were split out of — so the
+    /// predicates are COPIED, and a copy is a thing that drifts.
+    ///
+    /// <para>This is the drift alarm, and it is the argument the retired <c>lite_analysis</c> split lost on:
+    /// the danger was never the split itself but a filter somebody had to keep in step by hand. The shard cut
+    /// INSIDE the job is arithmetic over the class name and cannot drift; these three predicate SETS can, so
+    /// they are pinned byte-for-byte against the build job's originals. A pattern edited on one side and not
+    /// the other reds here, naming both sets, instead of silently gating the Lite suite on a narrower diff
+    /// than the build job gates its Lite BUILD on.</para>
+    ///
+    /// <para>Compared as ordered sequences rather than sets: these blocks are meant to be literal copies, so
+    /// a reordering is a diff worth seeing.</para>
+    /// </summary>
+    [Fact]
+    public void TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs()
+    {
+        var yaml = ReadBuildYaml(RepoRoot());
+
+        foreach (var (original, copy) in new[]
+                 { ("lite", "lite_shard"), ("core", "core_shard"), ("root", "root_shard") })
+        {
+            var originalPatterns = FilterPatterns(yaml, original);
+            var copiedPatterns = FilterPatterns(yaml, copy);
+
+            /* Anti-vacuity on BOTH sides: a renamed or moved block returns an empty list, and two empty
+               lists are equal — which is exactly the green that would mean this pin had stopped reading the
+               thing it is named for. */
+            Assert.True(
+                originalPatterns.Count > 0,
+                $"build.yml's '{original}' filter is gone — find where it moved before editing this test");
+            Assert.True(
+                copiedPatterns.Count > 0,
+                $"build.yml's '{copy}' filter is gone — the lite-tests matrix job needs its own copy of "
+              + $"'{original}', because a job cannot read another job's step outputs");
+
+            Assert.Equal(originalPatterns, copiedPatterns);
+        }
     }
 
     /// <summary>
