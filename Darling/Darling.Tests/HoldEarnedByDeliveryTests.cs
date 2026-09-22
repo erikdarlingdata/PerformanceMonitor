@@ -31,6 +31,9 @@ namespace Darling.Tests;
 /// the hold. The Tier-0 seed (<see cref="IAlertHistoryStore.GetLastAlertTimeAsync"/>) is deliberately
 /// unchanged.
 /// </summary>
+/* Live-fixture tests share one Postgres store; the collection serializes them so
+   cross-test row churn (inserts/purges/deletes) cannot race another class's assertions. */
+[Collection("live-postgres")]
 public sealed class HoldEarnedByDeliveryTests
 {
     private const int TestServerId = -391600;
