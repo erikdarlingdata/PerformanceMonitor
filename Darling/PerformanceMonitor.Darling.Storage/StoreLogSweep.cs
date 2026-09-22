@@ -178,20 +178,6 @@ WHERE capture_time < $1";
         bool OffsetReset,
         StoreLogClassifier.Census Census);
 
-    /// <summary>
-    /// One capture: list the log directory, read what is unread in each file, classify it, and write the
-    /// census, the capture row and the advanced marker.
-    ///
-    /// <para><b>The marker moves inside the SAME transaction as the rows it accounts for.</b> #3008 had to
-    /// solve this by ordering — commit the RDS marker strictly after the write, because the marker lives in
-    /// the ingestor's memory and the rows live in the store, and nothing can make the two atomic. Here both
-    /// live in the store we own, so the ordering problem does not arise: either a file's rows and its new
-    /// offset both land, or neither does and the next capture reads the same bytes again. One transaction
-    /// per FILE rather than per capture, so a fault reading the second file does not discard the first
-    /// file's progress.</para>
-    ///
-    /// <para>Returns what was captured, per file, so the caller can log it and the tests can assert it.</para>
-    /// </summary>
     /// <summary>How many stored rows one re-mask pass examines (#3915): a bounded slice per hourly tick, so a
     /// store with a long retained history finishes over a few ticks instead of overrunning one tick's
     /// budget.</summary>
@@ -269,6 +255,20 @@ WHERE ctid = $3::tid";
         return (next, page.Count, rewritten);
     }
 
+    /// <summary>
+    /// One capture: list the log directory, read what is unread in each file, classify it, and write the
+    /// census, the capture row and the advanced marker.
+    ///
+    /// <para><b>The marker moves inside the SAME transaction as the rows it accounts for.</b> #3008 had to
+    /// solve this by ordering — commit the RDS marker strictly after the write, because the marker lives in
+    /// the ingestor's memory and the rows live in the store, and nothing can make the two atomic. Here both
+    /// live in the store we own, so the ordering problem does not arise: either a file's rows and its new
+    /// offset both land, or neither does and the next capture reads the same bytes again. One transaction
+    /// per FILE rather than per capture, so a fault reading the second file does not discard the first
+    /// file's progress.</para>
+    ///
+    /// <para>Returns what was captured, per file, so the caller can log it and the tests can assert it.</para>
+    /// </summary>
     public static async Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,
