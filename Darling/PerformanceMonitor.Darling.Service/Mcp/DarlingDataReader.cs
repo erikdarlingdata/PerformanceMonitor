@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -1625,6 +1627,72 @@ internal static class DarlingDataReader
         ORDER BY collector_name
         """;
 
+    /// <summary>How long a completed per-server collection-health read is served from memory before the next
+    /// caller re-reads it (#3856) — 60 seconds, the SAME figure as the fleet rollup's
+    /// <see cref="DarlingFleetReader.CollectionHealthMemoLifetime"/> and deliberately not an independent
+    /// constant: both memos cover reads of <c>collection_log</c> over the same trailing seven days, and the
+    /// floor of what either could report differently is one collector cadence (a minute). Two lifetimes would
+    /// let <c>get_collection_health</c> and <c>get_fleet_overview</c>'s collector dots disagree about the same
+    /// rows for up to the difference between them, which is exactly the drift #3735 memoized the rollup to
+    /// avoid. Read through the fleet reader's declaration so a change to the cadence reasoning moves both.</summary>
+    internal static TimeSpan CollectionHealthMemoLifetime => DarlingFleetReader.CollectionHealthMemoLifetime;
+
+    /// <summary>One <see cref="PerServerCollectionHealthMemo"/> per <see cref="NpgsqlDataSource"/>, weakly
+    /// keyed so a disposed data source takes its memo with it — the shape and the reasons are
+    /// <see cref="DarlingFleetReader.CollectionHealthMemoFor"/>'s: the MCP host and the web host build their
+    /// OWN data source (different roles, different pools), so the bound this buys is one scan per minute per
+    /// HOST per server, and gated-live tests spin several stores in one process where a bare static would
+    /// bleed one store's collection health into another's.</summary>
+    private static readonly ConditionalWeakTable<NpgsqlDataSource, PerServerCollectionHealthMemo> s_collectionHealthMemos = new();
+
+    /// <summary>The memo the per-server 7-day collection-health read for <paramref name="postgres"/> is served
+    /// through (#3856). Internal so a live test can ask the memo how many statements N racing
+    /// <c>get_collection_health</c> calls actually cost the store.</summary>
+    internal static PerServerCollectionHealthMemo CollectionHealthMemoFor(NpgsqlDataSource postgres) =>
+        s_collectionHealthMemos.GetOrCreateValue(postgres);
+
+    /// <summary>
+    /// The per-collector 7-day health rows for one server, through the single-flight memo (#3856) —
+    /// <paramref name="nowUtc"/> is the freshness reference AND the instant the trailing-7-day window is cut
+    /// from, and the returned age is how many whole seconds older than it the reading is (0 when this call's
+    /// own statement produced it).
+    ///
+    /// <para><b>Why a second memo rather than a filter over the fleet rollup's.</b> #3856 preferred deriving
+    /// this from the scan #3735 already memoizes, gated on the two windows being the same fixed
+    /// <c>now - 7 days</c>. They ARE (this method's caller and
+    /// <see cref="DarlingFleetReader.GetFleetOverviewAsync"/>'s both cut it that way), and the window is not
+    /// what makes the derivation unavailable: the RESULTS are different reads of the same rows.
+    /// <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> is twelve plain aggregates reduced to four
+    /// per-server COUNTS plus two band words — every per-collector fact this payload publishes is already
+    /// summed away by the time the fleet memo holds it — while <see cref="CollectionHealthSql"/> is
+    /// twenty-nine columns per collector over a subquery carrying four window functions. Widening the fleet
+    /// statement to carry them is what its own comment refuses in terms: putting a fleet-wide sort of a week of
+    /// <c>collection_log</c> in front of a GROUP BY that hashes today would spend the very headroom #3735
+    /// bought. So the honest shape here is #3856's first: the same primitive, the same lifetime, keyed per
+    /// server.</para>
+    ///
+    /// <para>The memo is keyed on (server, window start) and the window start is the KEY rather than an
+    /// argument the memo ignores, which is the guard #3856 asked for in the derivation's place. Both of this
+    /// method's production callers pass the fixed trailing seven days, so in production there is one key per
+    /// server and the memo holds; a caller that ever asks for a DIFFERENT window gets its own key and its own
+    /// statement rather than being served a reading cut from someone else's window, which is the falling-
+    /// through the issue required — the direct read stays alive, it is just never reached with a key that
+    /// would lie. Cited: #3735 / #3738 (the fleet twin), #3856 (this one).</para>
+    /// </summary>
+    internal static async Task<(List<CollectorHealth> Rows, int AgeSeconds)> GetCollectionHealthMemoizedAsync(
+        NpgsqlDataSource postgres,
+        int serverId,
+        DateTime windowStartUtc,
+        DateTime nowUtc,
+        CancellationToken cancellationToken = default) =>
+        await CollectionHealthMemoFor(postgres).GetAsync(
+            serverId,
+            windowStartUtc,
+            nowUtc,
+            (scanServerId, scanWindowStart, scanToken) =>
+                GetCollectionHealthAsync(postgres, scanServerId, scanWindowStart, scanToken),
+            cancellationToken);
+
     public static async Task<List<CollectorHealth>> GetCollectionHealthAsync(
         NpgsqlDataSource postgres, int serverId, DateTime windowStartUtc, CancellationToken cancellationToken = default)
     {
@@ -1678,6 +1746,196 @@ internal static class DarlingDataReader
         }
 
         return rows;
+    }
+
+    /// <summary>One completed per-server collection-health read (#3856): the rows
+    /// <see cref="GetCollectionHealthAsync"/> produced and the <c>nowUtc</c> the scan was started with — both
+    /// the instant its window was cut from and the instant <c>collection_health_age_seconds</c> is measured
+    /// from. The list is handed to every caller of the next minute and none of them may mutate it under the
+    /// others, so the payload projection only ever enumerates it; the fleet twin says the same thing by giving
+    /// its dictionary a read-only type, which a <c>List&lt;T&gt;</c> has no equivalent of without copying the
+    /// rows this memo exists to avoid re-reading.</summary>
+    internal sealed record PerServerCollectionHealthScan(List<CollectorHealth> Rows, DateTime ReadAtUtc);
+
+    /// <summary>
+    /// Single-flight plus a one-minute memo over the per-server 7-day collection-health read (#3856) —
+    /// <see cref="DarlingFleetReader.CollectionHealthMemo"/>'s primitive, keyed per (server, window start).
+    /// Concurrent callers asking the same key share ONE in-flight statement; a completed scan younger than
+    /// <see cref="CollectionHealthMemoLifetime"/> is served from memory.
+    ///
+    /// <para><b>The production photo this answers.</b> 2026-09-21 21:3xZ, the largest production store:
+    /// <see cref="CollectionHealthSql"/> was cancelled by the <c>mcp</c> role's 15 s server-side
+    /// <c>statement_timeout</c> (SQLSTATE 57014) for the first time on record, during a store-busy minute —
+    /// the hourly successor materializations' write burst and the checkpoint sync tail behind it, the same
+    /// write-IO band that produced #3735's photo on this read's fleet twin — alongside an out-of-band overview
+    /// timeout in the same hour. The sequential retry succeeded. Solo on a quiet store this statement runs in
+    /// well under a second, and neither the plan nor the role's cap is the problem: the exposure is the band,
+    /// and with one caller there is no fan-out amplifier, which is why it took a week to appear once. What is
+    /// wrong is that the read was UNMEMOIZED while its twin was not — #3738 gave the rollup one scan per minute
+    /// per host and left the per-server read of the same table running on every call.</para>
+    ///
+    /// <para><b>Keyed on (server, window start), and the window start is in the key.</b> #3856 preferred
+    /// deriving this read from the fleet memo's scan if and only if the two windows were the same fixed
+    /// <c>now - 7 days</c>; they are, but the fleet memo holds per-server COUNTS off a twelve-column plain
+    /// aggregate and this payload needs twenty-nine columns per collector, so there is nothing to filter (the
+    /// long reasoning is on <see cref="GetCollectionHealthMemoizedAsync"/>). The window still belongs in the
+    /// key rather than being ignored: a reading cut from a different window is not this caller's answer, and a
+    /// memo that served it anyway would answer a question nobody asked. Both production callers pass the fixed
+    /// seven days, so production holds one key per server; anything else falls through to its own statement,
+    /// which is the direct read staying alive.</para>
+    ///
+    /// <para>Everything else — the caller's <c>nowUtc</c> as the memo's clock, the shared scan running on
+    /// <see cref="CancellationToken.None"/> so one caller's token releases only that caller, a failed scan
+    /// never memoized and never an unobserved exception, the last good reading surviving a failed re-read —
+    /// is <see cref="DarlingFleetReader.CollectionHealthMemo"/>'s behaviour for
+    /// <see cref="DarlingFleetReader.CollectionHealthMemo"/>'s reasons, deliberately copied rather than
+    /// re-derived. The one thing this class adds is the dictionary of per-key state, and its entries are
+    /// bounded by the servers a host reads: a key whose reading has aged out is REPLACED by the next caller's
+    /// scan, and the fixed window start means a server contributes one entry, not one per call.</para>
+    /// </summary>
+    internal sealed class PerServerCollectionHealthMemo
+    {
+        /// <summary>The scan's outcome as a VALUE — exactly one of the two is non-null — so the shared task
+        /// completes successfully whether the statement did or not, and a scan every waiter abandoned before it
+        /// failed cannot surface on the finalizer thread as an unobserved exception. The dispatch info rather
+        /// than the bare exception so a waiter's rethrow keeps the statement's own stack.</summary>
+        private sealed record ScanOutcome(PerServerCollectionHealthScan? Scan, ExceptionDispatchInfo? Failure);
+
+        /// <summary>One key's state: the scan its current callers share (non-null and incomplete while a
+        /// statement is running) and the newest scan that SUCCEEDED. Separate fields for the same reason the
+        /// fleet memo keeps them apart — a failure must not evict a good reading that is still inside its
+        /// minute, or one timed-out statement becomes a burst of retries from every caller of the next
+        /// minute.</summary>
+        private sealed class KeyState
+        {
+            public Task<ScanOutcome>? InFlight;
+            public PerServerCollectionHealthScan? Latest;
+        }
+
+        private readonly object _gate = new();
+
+        /// <summary>Per (server, window start). Guarded by <c>_gate</c>, like every field on the fleet twin —
+        /// nothing here is read or written outside it, so a plain Dictionary is correct and a concurrent one
+        /// would buy nothing but the illusion that the compound check-and-start below was atomic without
+        /// it.</summary>
+        private readonly Dictionary<(int ServerId, DateTime WindowStartUtc), KeyState> _byKey = new();
+
+        private int _scansStarted;
+
+        /// <summary>How many statements this memo has actually started, over its whole life and across every
+        /// key — the figure a live test compares against the number of <c>get_collection_health</c> calls it
+        /// raced. Diagnostic; nothing reads it in production.</summary>
+        internal int ScansStarted
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _scansStarted;
+                }
+            }
+        }
+
+        /// <summary>
+        /// One server's per-collector health rows as of <paramref name="nowUtc"/> — from memory when this key's
+        /// reading is under a minute old, from the scan already in flight for it when there is one, else from a
+        /// scan this call starts through <paramref name="scan"/> — with how many whole seconds older than
+        /// <paramref name="nowUtc"/> the reading is (0 when this call's own scan produced it).
+        /// </summary>
+        /// <param name="scan">The statement, as a function of the server, the window start and the token to run
+        /// under. The memo, not the caller, decides the token (a departing caller must not tear down a
+        /// statement two others are waiting on), which is why the seam takes one rather than closing over the
+        /// caller's. Substitutable so a test can count executions without a store.</param>
+        /// <param name="cancellationToken">Releases THIS caller's wait. It does not reach the statement.</param>
+        internal async Task<(List<CollectorHealth> Rows, int AgeSeconds)> GetAsync(
+            int serverId,
+            DateTime windowStartUtc,
+            DateTime nowUtc,
+            Func<int, DateTime, CancellationToken, Task<List<CollectorHealth>>> scan,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(scan);
+
+            var key = (serverId, windowStartUtc);
+
+            Task<ScanOutcome> shared;
+            TaskCompletionSource<ScanOutcome>? lead = null;
+            lock (_gate)
+            {
+                if (!_byKey.TryGetValue(key, out var state))
+                {
+                    state = new KeyState();
+                    _byKey[key] = state;
+                }
+
+                if (state.Latest is { } latest && nowUtc - latest.ReadAtUtc < CollectionHealthMemoLifetime)
+                {
+                    return (latest.Rows, AgeSeconds(nowUtc, latest));
+                }
+
+                if (state.InFlight is not { IsCompleted: false })
+                {
+                    /* RunContinuationsAsynchronously: the waiters' continuations — a whole payload projection,
+                       the sweep-pressure arithmetic and the JSON write each — must not run inline on whichever
+                       thread completes the statement, or the leader's connection callback would carry every
+                       joiner's work. */
+                    lead = new TaskCompletionSource<ScanOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    state.InFlight = lead.Task;
+                    _scansStarted++;
+                }
+
+                shared = state.InFlight;
+            }
+
+            if (lead is not null)
+            {
+                /* Started OUTSIDE the lock so the statement's synchronous prefix (command construction) never
+                   runs under it, and deliberately not awaited here: this caller is one waiter among any
+                   number, and its own cancellation below must not be the scan's. RunScanAsync completes the
+                   source in both arms and never throws, so the discarded task cannot fault. */
+                _ = RunScanAsync(lead, key, nowUtc, scan);
+            }
+
+            var outcome = await shared.WaitAsync(cancellationToken);
+            outcome.Failure?.Throw();
+            var read = outcome.Scan!;
+            return (read.Rows, AgeSeconds(nowUtc, read));
+        }
+
+        private async Task RunScanAsync(
+            TaskCompletionSource<ScanOutcome> lead,
+            (int ServerId, DateTime WindowStartUtc) key,
+            DateTime nowUtc,
+            Func<int, DateTime, CancellationToken, Task<List<CollectorHealth>>> scan)
+        {
+            try
+            {
+                var rows = await scan(key.ServerId, key.WindowStartUtc, CancellationToken.None);
+                var read = new PerServerCollectionHealthScan(rows, nowUtc);
+                lock (_gate)
+                {
+                    /* The key's state, not a fresh one: a scan that outlived every waiter still belongs to the
+                       key it was started for, and the entry is always present because GetAsync created it
+                       before starting this scan. */
+                    if (_byKey.TryGetValue(key, out var state))
+                    {
+                        state.Latest = read;
+                    }
+                }
+
+                lead.SetResult(new ScanOutcome(read, null));
+            }
+            catch (Exception ex)
+            {
+                lead.SetResult(new ScanOutcome(null, ExceptionDispatchInfo.Capture(ex)));
+            }
+        }
+
+        /// <summary>Whole seconds from the scan's reference instant to <paramref name="nowUtc"/>, floored at
+        /// zero — a caller whose clock reads behind the scan's is not holding a reading from the future, it is
+        /// holding the freshest one there is.</summary>
+        private static int AgeSeconds(DateTime nowUtc, PerServerCollectionHealthScan read) =>
+            (int)Math.Max(0, Math.Floor((nowUtc - read.ReadAtUtc).TotalSeconds));
     }
 
     /// <summary>

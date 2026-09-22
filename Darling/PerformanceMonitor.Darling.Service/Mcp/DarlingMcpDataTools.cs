@@ -987,7 +987,25 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var rows = await DarlingDataReader.GetCollectionHealthAsync(postgres, resolved.ServerId, DateTime.UtcNow.AddDays(-7));
+            /* #3856: through the single-flight memo, never the direct read. This statement is 29 columns per
+               collector over a four-window-function subquery across seven days of collection_log, and it was
+               the one surface of that scan #3738 left unmemoized when it gave the fleet rollup's twin one scan
+               per minute per host (#3735). On 2026-09-21 21:3xZ the mcp role's 15 s statement_timeout cancelled
+               it (57014) inside the hourly materializations' write band — first occurrence on record, and the
+               retry succeeded, which is the band's signature rather than the plan's.
+
+               nowUtc is read ONCE and used twice, deliberately: it is the instant the trailing-7-day window is
+               cut from AND the reference collection_health_age_seconds is measured against, and two
+               DateTime.UtcNow reads would put a payload's age on a different clock from the window it
+               describes. The memo keys on (server, window start) and this call site's window start is the same
+               fixed now - 7 days get_fleet_overview's rollup cuts — which is what #3856 asked to be verified
+               before relying on the windows matching. It does not make the two reads INTERCHANGEABLE (the
+               rollup's memo holds per-server counts off a twelve-column aggregate, not these rows; see
+               GetCollectionHealthMemoizedAsync), and that is why this is its own memo rather than a filter over
+               that one. */
+            var nowUtc = DateTime.UtcNow;
+            var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(
+                postgres, resolved.ServerId, nowUtc.AddDays(-7), nowUtc);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No collection health data available.");
 
@@ -1356,7 +1374,19 @@ public sealed class DarlingMcpDataTools
                    to avoid. It also says outright that rows are what a run STORED and never what the
                    monitored engine counted, because nothing on this surface measures the second. */
                 output_note = CollectorHealthClassifier.OutputWindowNote,
-                collectors = result
+                collectors = result,
+                /* #3856: how old the collector half of this payload is, in whole seconds — the same field, the
+                   same name and the same semantics get_fleet_overview has carried since #3735, because it is
+                   now the same kind of reading: one 7-day scan per minute per host per server, shared by every
+                   get_collection_health call of that minute. 0 means this call's own statement produced it.
+
+                   Published UNCONDITIONALLY, including on the 0, for the self-proving-flag reason (#3574's
+                   visibility, #3735's own): a memo whose hit is indistinguishable from a fresh read has not
+                   reported, and a caller watching a collector it just fixed needs to know whether it is reading
+                   a minute-old answer before concluding the fix did not take. Trailing, after collectors, so
+                   nothing an existing consumer indexes by position moved — the same placement rule every
+                   column of the statement behind it follows. */
+                collection_health_age_seconds = collectionHealthAgeSeconds
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

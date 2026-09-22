@@ -123,6 +123,10 @@ public sealed class RepoFileAdoptionTests
            CommandTimeout line that follows it — the two facts the memo promised not to touch, asserted as
            the exact shape they were in, which a single-line anchor could not tell from a rewrite. */
         "FleetCollectionHealthMemoTests.cs",
+        /* #3856: its tool and reader anchors span line breaks (the nowUtc-then-memoized-call pair, the
+           CreateCommand-plus-CommandTimeout shape, and the statement's own WHERE/AND tail) — the same
+           reasoning as the fleet twin above, which is the file this one was written beside. */
+        "PerServerCollectionHealthMemoTests.cs",
         "FleetPageAttentionFilterTests.cs",
         /* #3653 item 12 (Q6): its cross-SKU pin slices the multi-line `keyed` CTE out of the Darling provider's
            SOURCE (from `keyed AS (` to `FROM clean` + `)` on the next line) and asserts Lite's source carries the
