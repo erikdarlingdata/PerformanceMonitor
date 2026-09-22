@@ -84,9 +84,11 @@ public sealed class PgServerConfigOverrideLivePostgresTests
             var withOverrides = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfig(postgres, ServerName, 50)).RootElement;
             Assert.Equal("server_config", withOverrides.GetProperty("status").GetString());
 
-            /* The server-wide section is UNCHANGED by the override rows: three settings, two chosen. A
-               reader missing its predicate would report five settings with two duplicate names. */
-            Assert.Equal(3, withOverrides.GetProperty("settings_returned").GetInt32());
+            /* The server-wide section is UNCHANGED by the override rows: the page is the tool's default view
+               (include_defaults = false) — the two CHOSEN settings; wal_level at its default is counted in the
+               snapshot but not paged. A reader missing its predicate would report four settings with two
+               duplicate names. */
+            Assert.Equal(2, withOverrides.GetProperty("settings_returned").GetInt32());
             Assert.Equal(2, withOverrides.GetProperty("non_default_count").GetInt32());
             Assert.False(withOverrides.GetProperty("truncated").GetBoolean());
             var names = withOverrides.GetProperty("settings").EnumerateArray().Select(s => s.GetProperty("name").GetString()).ToList();
@@ -174,6 +176,9 @@ public sealed class PgServerConfigOverrideLivePostgresTests
                record intact rather than collapsing onto one scope. */
             Assert.Contains(rows, r => r.DatabaseName == "tenant_db" && r.RoleName == "reporting_role" && r.Setting == "1048576");
             Assert.Contains(rows, r => r.DatabaseName == "tenant_db" && r.RoleName is null && r.Setting == "262144");
+            /* Every override row carries the snapshot it came from — the same newest capture the page read anchors on
+               (the latest-anchored-read census requires the anchor projected; this is what it is for). */
+            Assert.All(rows, r => Assert.Equal(DarlingMcpTestData.Naive(snapshot), r.CollectionTime));
 
             bodySucceeded = true;
         }

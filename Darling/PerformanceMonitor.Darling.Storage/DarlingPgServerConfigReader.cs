@@ -275,12 +275,19 @@ public static class DarlingPgServerConfigReader
     /// DATABASE … SET</c>). A row with neither cannot exist here — that is a server-wide
     /// <c>pg_settings</c> row, which the read below excludes by the same predicate every other reader
     /// uses.</para>
+    ///
+    /// <para><see cref="CollectionTime"/> is the snapshot the row came from — the same newest capture the
+    /// server-wide page read anchors on, projected here because every latest-anchored read in this store
+    /// projects its anchor (<c>McpPayloadContractCensusTests.EveryLatestAnchoredRead_ProjectsItsAnchorColumn_OrIsRostered</c>):
+    /// a row that says WHEN it was true can never be mistaken for the current state after the collector has
+    /// stopped, and the live pin asserts it equals the page's <c>captured_at</c>.</para>
     /// </summary>
     public readonly record struct PgConfigOverrideRow(
         string? DatabaseName,
         string? RoleName,
         string Name,
-        string? Setting);
+        string? Setting,
+        DateTime CollectionTime);
 
     /// <summary>
     /// The newest snapshot's per-database and per-role setting overrides (#3691, V138) — the ONE read in the
@@ -315,7 +322,8 @@ public static class DarlingPgServerConfigReader
             c.database_name,
             c.role_name,
             c.name,
-            c.setting
+            c.setting,
+            c.collection_time
         FROM pg_server_config AS c
         WHERE c.server_id = $1
         AND   c.collection_time = (
@@ -349,7 +357,8 @@ public static class DarlingPgServerConfigReader
                 reader.IsDBNull(0) ? null : reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
                 reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3)));
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.GetDateTime(4)));
         }
 
         return rows;

@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -654,7 +655,7 @@ public sealed class DarlingMcpPgServerStateTools
                question it answers is "is my value overridden anywhere" and a cap turns a No into a maybe. */
             var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId);
 
-            return JsonSerializer.Serialize(new
+            var configPage = new
             {
                 server = resolved.ServerName,
                 status = "server_config",
@@ -701,44 +702,48 @@ public sealed class DarlingMcpPgServerStateTools
                     category = r.Category,
                     description = r.ShortDescription,
                 }),
-                /* #3691 (V138): ABSENT rather than empty when the cluster has no overrides, which is the
-                   attach pattern this tool family uses for a section that is not always an answer
-                   (JsonOptions writes nulls, so an empty list would render as a key with [] and read as
-                   "we checked and there are none" on a pre-V138 snapshot too, where the truth is that the
-                   collector was not reading the catalog yet). A caller that sees no key should read the
-                   note, not infer.
+            };
 
-                   Why this is not folded into the settings list: an override is keyed by SCOPE plus name
-                   while a server setting is keyed by name, so two rows called work_mem on one page would
-                   need a column read to tell which one a session actually gets - and every count above
-                   (settings_returned, non_default_count, non_default_returned) is a count of the
-                   server-wide population, which is what those names have always promised. The overrides sit
-                   beside them, not among them. */
-                database_overrides = overrides.Count > 0
-                    ? overrides.Select(o => new
-                    {
-                        /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET,
-                           a role with no database is ALTER ROLE ... SET (that role in every database), and
-                           both is ALTER ROLE ... IN DATABASE ... SET. Neither-NULL cannot appear here - that
-                           is a server-wide row, and the read excludes it. */
-                        database_name = o.DatabaseName,
-                        role_name = o.RoleName,
-                        name = o.Name,
-                        setting = o.Setting,
-                    })
-                    : null,
-                database_overrides_note = overrides.Count > 0
-                    ? "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
-                      + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
-                      + "database, or as that role, runs with the override rather than with the server-wide "
-                      + "value listed above - so a setting that appears in both places has TWO answers and "
-                      + "which one applies depends on who is connecting. The stored text is what was SET, "
-                      + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
-                      + "connection at connect time, and the catalog records only the instruction. No unit, "
-                      + "default or context is carried on these rows because the catalog does not hold them "
-                      + "- read those off the server-wide row for the same setting name."
-                    : null,
-            }, McpHelpers.JsonOptions);
+            /* #3691 (V138): the overrides section is ATTACHED, never a property. McpHelpers.JsonOptions writes
+               nulls, so `database_overrides = overrides.Count > 0 ? … : null` would put "database_overrides": null
+               on every page of every cluster with no overrides — and on every pre-V138 snapshot, where the truth is
+               that the collector was not reading the catalog yet. Absent means "nothing to say"; a caller that
+               sees no key reads the description, not the value. The live pin holds the whole page string
+               byte-identical with and without overrides planted (PgServerConfigOverrideLivePostgresTests).
+
+               Why this is not folded into the settings list: an override is keyed by SCOPE plus name while a
+               server setting is keyed by name, so two rows called work_mem on one page would need a column read
+               to tell which one a session actually gets — and every count above (settings_returned,
+               non_default_count, non_default_returned) is a count of the server-wide population, which is what
+               those names have always promised. The overrides sit beside them, not among them. */
+            if (overrides.Count == 0)
+            {
+                return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);
+            }
+
+            var node = JsonSerializer.SerializeToNode(configPage, McpHelpers.JsonOptions)?.AsObject()
+                ?? throw new InvalidOperationException("the server-config page did not serialize to a JSON object");
+            node["database_overrides"] = JsonSerializer.SerializeToNode(overrides.Select(o => new
+            {
+                /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET, a role with no
+                   database is ALTER ROLE ... SET (that role in every database), and both is ALTER ROLE ... IN
+                   DATABASE ... SET. Neither-NULL cannot appear here — that is a server-wide row, and the read
+                   excludes it. */
+                database_name = o.DatabaseName,
+                role_name = o.RoleName,
+                name = o.Name,
+                setting = o.Setting,
+            }).ToList(), McpHelpers.JsonOptions);
+            node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
+                + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
+                + "database, or as that role, runs with the override rather than with the server-wide "
+                + "value listed above - so a setting that appears in both places has TWO answers and "
+                + "which one applies depends on who is connecting. The stored text is what was SET, "
+                + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
+                + "connection at connect time, and the catalog records only the instruction. No unit, "
+                + "default or context is carried on these rows because the catalog does not hold them "
+                + "- read those off the server-wide row for the same setting name.";
+            return node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
