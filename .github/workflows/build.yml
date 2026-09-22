@@ -376,14 +376,20 @@ jobs:
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
-      # One step for the whole Lite suite. It was split into fast / analysis-heavy halves when the
-      # seven analysis classes rebuilt the full DuckDB schema inside every test and their subset
-      # alone cost ~9 minutes; after the shared class fixtures (#1693, #1698) and batched seeding
-      # (#1694) that subset runs in ~1 minute, so the split — and the narrower lite_analysis path
-      # gate that let non-analysis Lite changes skip it — stopped earning its second test-host
-      # spin-up and its filter-drift risk.
+      # RELEASE-ONLY here since #3887; on pull requests and pushes the suite runs in the lite-tests
+      # matrix job below, four shards cut by CLASS-NAME HASH, because this one step had grown to
+      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The hash cut is the
+      # deliberate opposite of the SEMANTIC split this step's history retired: it was split into
+      # fast / analysis-heavy halves when the seven analysis classes rebuilt the full DuckDB schema
+      # inside every test and their subset alone cost ~9 minutes; after the shared class fixtures
+      # (#1693, #1698) and batched seeding (#1694) that subset ran in ~1 minute, so the split — and
+      # the narrower lite_analysis path gate that let non-analysis Lite changes skip it — stopped
+      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A hash over the class name
+      # cannot drift: every class lands in exactly one shard by arithmetic, a class added tomorrow
+      # included, and no list anywhere has to be maintained. Releases keep this single unsharded
+      # pass so the artifact-producing run still executes the suite whole, in one log.
       - name: Run Lite tests
-        if: steps.filter.outputs.lite == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: github.event_name == 'release'
         run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build
 
       - name: Run Installer tests
@@ -1263,3 +1269,155 @@ jobs:
       - name: Run the whole-tree guards
         if: steps.gate.outputs.run == 'true'
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build
+
+  # The Lite suite on pull requests and pushes: four shards cut by CLASS-NAME HASH (#3887). The
+  # build job's single "Run Lite tests" step had grown to ~9½ minutes of a ~15-minute job — 62% of
+  # the PR wall's critical path over the eight runs measured — and it is release-only there now.
+  #
+  # The cut is a SHA-256 over the class name, modulo four: arithmetic, not a list and not a
+  # semantic filter. This job's own history is the argument (see the retired lite_analysis split
+  # this file documents above the release-only step): any filter somebody has to MAINTAIN drifts,
+  # and a class added tomorrow is exactly the class such a filter misses. A hash cannot drift —
+  # every class lands in exactly one shard, additions included, and the partition is total by
+  # construction. SHA-256 rather than string.GetHashCode() because the latter is randomized per
+  # process ON PURPOSE and would send the same class to a different shard on every run.
+  #
+  # FOUR and not three, decided on measurement rather than taste: the hash balances CLASSES, and
+  # Lite's classes carry uneven test counts, so a 3-way cut left one shard holding 42% of the tests
+  # (~6½ minutes with setup) while another held 25%. At four the worst shard holds 27% (~5 minutes);
+  # five would buy 0.4 minutes more for another Windows runner out of the shared pool this file's
+  # own comments blame for serializing everyone's CI, and six is worse than five. Four is the knee.
+  #
+  # Each shard pays its own checkout/setup/restore/build (~2½ minutes measured on a warm NuGet
+  # cache) — the price of taking ~10 minutes off the PR wall. They run in parallel with the build
+  # job, off its critical path. The filter predicates below are BYTE-FOR-BYTE copies of
+  # the build job's lite/core/root (renamed *_shard so the census can find each set unambiguously);
+  # CrossAppGuardCiGateTests pins the copies equal, so they cannot drift apart silently.
+  lite-tests:
+    name: Lite tests
+    if: github.event_name != 'release'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    # A shard is at most ~27% of a ~9½-minute suite plus ~2½ minutes of setup; 20 minutes is ~4x that,
+    # past which something is hung and a shared-pool Windows runner is being held for nothing.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          filters: |
+            # COPIES of the build job's root/core/lite predicates, generated from them and pinned
+            # byte-equal by CrossAppGuardCiGateTests.TheShardJobsFilters_AreByteForByteCopiesOfTheBuildJobs.
+            # The REASONING for every entry lives at the build job's own filter block and is not
+            # duplicated here — duplicated prose is prose that rots out of step. What matters is that
+            # the sets stay identical: the shards must run the Lite suite in exactly the cases the
+            # build job's step used to, or the split loses coverage silently. That includes the
+            # entries that look foreign to Lite (the two READMEs, the three Darling trees) — Lite.Tests
+            # reads those files in its cross-app and docs guards, so an edit there has to reach this
+            # suite. A hand-typed copy of this block dropped two of them and was caught by the pin
+            # above before CI ever ran (#3887).
+            root_shard:
+              - 'PerformanceMonitor.sln'
+              - 'Directory.Build.props'
+              - 'global.json'
+              - 'nuget.config'
+              - 'NuGet.config'
+              - '.github/workflows/build.yml'
+            core_shard:
+              - 'PerformanceMonitor.Alerting/**/!(*.md)'
+              - 'PerformanceMonitor.Analysis/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
+              - 'PerformanceMonitor.Common/**/!(*.md)'
+              - 'PerformanceMonitor.Notifications/**/!(*.md)'
+              - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
+              - 'PerformanceMonitor.Ui/**/!(*.md)'
+            lite_shard:
+              - 'Lite/**/!(*.md)'
+              - 'Lite.Tests/**/!(*.md)'
+              - 'README.md'
+              - 'Lite/README.md'
+              - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
+              - 'Darling/Darling.Tests/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
+      - name: Setup .NET 10.0
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/packages.lock.json'
+
+      - name: Restore Lite.Tests
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        run: dotnet restore Lite.Tests/Lite.Tests.csproj --locked-mode
+
+      - name: Build Lite.Tests
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        run: dotnet build Lite.Tests/Lite.Tests.csproj -c Release --no-restore
+
+      # The class list comes off the built assembly itself (-list classes/json), so the population is
+      # whatever exists on THIS commit — no roster. An empty selection is a hard error, not a skip:
+      # with zero -class arguments the runner executes the WHOLE suite, so "my shard is empty" and
+      # "run everything" are one argument-list apart — the loudest possible difference to get wrong
+      # quietly. (394 classes across four shards make an empty one arithmetically implausible; the
+      # measured split is 27/26/25/22% of tests, so the arm is a guard, not an expectation.)
+      - name: Run Lite tests (shard)
+        if: steps.filter.outputs.lite_shard == 'true' || steps.filter.outputs.core_shard == 'true' || steps.filter.outputs.root_shard == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $raw = dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
+          $classes = @($raw | ConvertFrom-Json)
+          if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
+
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $mine = @($classes | Where-Object {
+              $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($_))
+              ($hash[0] % 4) -eq ${{ matrix.shard }}
+          })
+          Write-Host "shard ${{ matrix.shard }}: $($mine.Count) of $($classes.Count) classes"
+          if ($mine.Count -eq 0) { throw "shard ${{ matrix.shard }} selected zero of $($classes.Count) classes - refusing to run, because a runner with no -class arguments runs the whole suite" }
+
+          $shardArgs = foreach ($class in $mine) { '-class'; $class }
+          dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- @shardArgs
+          exit $LASTEXITCODE
+
+  # The one result branch protection can require. Four matrix legs cannot each be a required check
+  # without hard-coding the shard count into repo settings, and a leg that never starts reports
+  # nothing — the same silent green the whole-tree guards job exists to prevent. This job always
+  # reports: success when every leg succeeded or the filters skipped the suite everywhere, failure
+  # for anything else, and it says which out loud. (Branch protection must list "Lite tests
+  # (result)" for the shards to gate merges — noted on #3887.)
+  lite-tests-result:
+    name: Lite tests (result)
+    needs: lite-tests
+    if: ${{ !cancelled() && github.event_name != 'release' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Report the shards' one answer
+        shell: bash
+        env:
+          RESULT: ${{ needs.lite-tests.result }}
+        run: |
+          set -euo pipefail
+          case "${RESULT}" in
+            success)
+              echo "::notice title=Lite shards green::All four class-hash shards succeeded (or every leg's filters said the Lite suite is untouched by this diff)." ;;
+            skipped)
+              echo "::notice title=Lite shards skipped::The matrix job itself was skipped, which only the release guard does - and releases run the whole suite unsharded in the build job." ;;
+            *)
+              echo "::error title=Lite shards failed::needs.lite-tests.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit."
+              exit 1 ;;
+          esac
