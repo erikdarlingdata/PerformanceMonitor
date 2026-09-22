@@ -106,6 +106,38 @@ public class AnalysisContext
     public double PeriodDurationMs => (TimeRangeEnd - TimeRangeStart).TotalMilliseconds;
 
     /// <summary>
+    /// How far back from <see cref="TimeRangeEnd"/> a "latest value" read looks for each series' newest
+    /// sample (#3896): the database files summed into <c>DATABASE_TOTAL_SIZE_MB</c> and counted by
+    /// <c>FILE_AUTOGROWTH_PERCENT</c>, the volumes behind <c>DISK_SPACE</c>, the memory clerks, the plan-cache
+    /// snapshot and the memory_stats row.
+    ///
+    /// <para>Those reads used to take each series' newest row with only an upper bound, so they numbered
+    /// the server's ENTIRE retained history to keep a few dozen rows (1.2 s for the database-size read alone
+    /// on a 17-day DARLING01 store, most of it decompressing chunks) and, worse, answered "latest EVER": a
+    /// dropped database's files stayed in the size total until retention aged them out — 31% over on that
+    /// server.
+    /// With the bound the answer is "present within the last day", which is the right meaning. A series
+    /// with no sample in the lookback is either gone or its collector is down, and in the second case the
+    /// fact is better absent than stale; the coverage machinery (#3524/#3551) already reports a dead
+    /// collector.</para>
+    ///
+    /// <para>A day, because it has to clear every cadence these collectors run at by a wide margin — the
+    /// slowest is database_size_stats, hourly by default — while staying short enough that a dropped
+    /// database leaves the answer the next day. A collector rescheduled slower than daily yields no fact.
+    /// The on-load config snapshots (server_config, database_config, trace_flags, server_properties) are
+    /// NOT bounded this way: they are written once per connect, so their newest capture can be weeks old
+    /// on a healthy server.</para>
+    /// </summary>
+    public static readonly TimeSpan LatestValueLookback = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The lower bound every "latest value" read binds: <see cref="TimeRangeEnd"/> minus
+    /// <see cref="LatestValueLookback"/> (#3896). Anchored on the window's END, not "now", so an anchored or
+    /// historical window reads the state as it stood then.
+    /// </summary>
+    public DateTime LatestValueStart => TimeRangeEnd - LatestValueLookback;
+
+    /// <summary>
     /// How much of the window the collector actually observed, stamped by the fact collector at the
     /// start of every pass from the wait-stats collection series (see <see cref="WindowCoverage"/> for
     /// the measurement). Null until that stamp happens — a context that has not been through a collector

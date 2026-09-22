@@ -57,12 +57,18 @@ LIMIT 10";
             finding.DrillDown!["file_latency_breakdown"] = items;
     }
 
+    /* #3896: the SAME bounds as the fact that fires this drill-down (PgFactCollector.FileAutogrowthSql) —
+       $2 the lookback start, $3 the window end — so the list names exactly the files the count counted. It
+       had no time bound at all: a dropped database's file sat in the list, with an ALTER DATABASE for a
+       database that no longer exists, for the whole 90-day database_size_stats retention. */
     public const string AutogrowthPercentFilesSql = @"
 WITH latest AS (
     SELECT database_name, file_id, file_type_desc, file_name, total_size_mb, is_percent_growth, growth_pct,
            ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
     FROM v_database_size_stats
     WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT database_name, file_type_desc, file_name, total_size_mb, growth_pct
 FROM latest
@@ -75,7 +81,8 @@ LIMIT 50";
 
     /// <summary>
     /// Lists the large (>= 10 GB) data/log files on PERCENTAGE autogrowth (WS3), latest
-    /// snapshot per file, excluding system databases — and attaches a copy-paste
+    /// snapshot per file within <see cref="AnalysisContext.LatestValueLookback"/> of the window's
+    /// end (#3896), excluding system databases — and attaches a copy-paste
     /// ALTER DATABASE ... MODIFY FILE fix per file (FILEGROWTH set to a size-tiered fixed MB).
     /// Same structured fields + SHARED renderer as the Lite/Dashboard collectors so the
     /// copy-paste is byte-identical across apps.
@@ -86,6 +93,8 @@ LIMIT 50";
 
         using var cmd = new NpgsqlCommand(AutogrowthPercentFilesSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

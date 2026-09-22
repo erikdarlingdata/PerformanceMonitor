@@ -155,6 +155,12 @@ LIMIT 1";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
+            /* #3896: the NEWEST capture only. database_config is an on-load snapshot — every database in one
+               capture shares its capture_time — so a database dropped since is simply absent from the newest
+               one, and a per-database latest-ever read kept counting it (and its auto_shrink, its recovery
+               model) until its old captures aged out. The drill-down that lists these databases
+               (DrillDownCollector.CollectConfigIssues) was already anchored this way. No lookback bound: an
+               on-load capture is as old as the app's last start. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -165,6 +171,7 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name ORDER BY capture_time DESC) AS rn
     FROM v_database_config
     WHERE server_id = $1
+    AND   capture_time = (SELECT MAX(capture_time) FROM v_database_config WHERE server_id = $1)
 )
 SELECT
     COUNT(*) AS database_count,
