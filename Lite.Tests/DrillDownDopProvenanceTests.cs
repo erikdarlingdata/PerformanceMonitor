@@ -197,6 +197,9 @@ public sealed class DrillDownDopProvenanceTests : IClassFixture<SharedDuckDbFixt
         {
             RootFactKey = factKey,
             StoryPath = factKey,
+            /* #3859: the collector reads the finding's TYPED keys now, not a split of the rendered path above,
+               so a planted finding must carry them or the drill-down it is planted to exercise never runs. */
+            PathKeys = [factKey],
             /* Past the 0.5 display gate in EnrichFindingsAsync — below it the expensive drill-downs are
                skipped wholesale and this collector never runs at all. */
             Severity = 1.0,

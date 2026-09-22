@@ -244,7 +244,13 @@ public sealed class DarlingMcpTools
                         story_path_hash = f.StoryPathHash,
                         fact_count = f.FactCount,
                         drill_down = f.DrillDown,
-                        next_tools = ToolRecommendations.GetForStoryPath(f.StoryPath),
+                        /* #3859 item 5: the chain's reads AND the reads for the config levers hanging off it, from
+                           the finding's TYPED keys (item 4 — this used to split story_path above on the arrow).
+                           BESIDE the two attaches wrapping this object, never inside either: StorySideLeaves
+                           renders the lever's CARD and FactRanked the root's objects, and this is the third thing
+                           a lever owes a reader — the read that acts on it. Lever-carrying findings therefore move
+                           bytes here; a finding with no lever is byte-for-byte what it was. */
+                        next_tools = ToolRecommendations.GetForStoryPath(StoryKeys.ForFinding(f)),
                         incident_id = f.IncidentId,
                         co_fired = CoFiredSummary.OtherTitles(advice?.Headline ?? f.RootFactKey, coFiredTitles),
                         advice = advice is null ? null : new
@@ -1358,12 +1364,18 @@ internal static class ToolRecommendations
     };
 
     /// <summary>
-    /// Returns tool recommendations for all fact keys in a story path.
-    /// Deduplicates across the path so each tool appears at most once.
+    /// Returns tool recommendations for every fact key one finding is about — its chain AND the config levers
+    /// hanging off it (<see cref="StoryKeys"/>). Deduplicates, so each tool appears at most once. The Lite twin of
+    /// this method carries the full account of both halves of #3859; in short: it takes the engine's TYPED keys
+    /// rather than splitting the rendered path on <c>" → "</c> (item 4), and the levers it can now see put their
+    /// own reads into <c>next_tools</c> — an accepted contract change that MOVES BYTES on every finding carrying a
+    /// lever, which on this SKU is where a <c>CONFIG_PG_*</c> knob hangs off a PostgreSQL chain and the reader was
+    /// previously told the lever exists without being pointed at the read for it (item 5).
     /// </summary>
-    public static List<object> GetForStoryPath(string storyPath)
+    public static List<object> GetForStoryPath(StoryKeys keys)
     {
-        var factKeys = storyPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries);
+        ArgumentNullException.ThrowIfNull(keys);
+        var factKeys = keys.All;
         var seen = new HashSet<string>();
         var result = new List<object>();
 

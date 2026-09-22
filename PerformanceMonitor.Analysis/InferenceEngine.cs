@@ -324,6 +324,12 @@ public class InferenceEngine
             ? path
             : path.Select((k, i) => i == 0 ? rootKey : k).ToList();
 
+        /* The RENDERED path — a display string, and (through its hash) the mute/occurrence identity. #3859: it is
+           no longer anybody's SOURCE for the fact keys. The typed effectivePath rides to the finding as PathKeys,
+           so the drill-down collectors and next_tools read keys instead of splitting this string on the arrow at
+           six sites; a key containing the arrow, or a change to this separator, used to corrupt all six silently.
+           Change this join and the payload's story_path changes — which the SQL Server exit checks pin — but no
+           consumer's key matching moves with it. */
         var storyPath = string.Join(" → ", effectivePath);
         var category = rootFact?.Source ?? "unknown";
 

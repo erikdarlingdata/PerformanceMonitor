@@ -486,7 +486,12 @@ public static class SameStatementPileupDetector
         /* The story path doubles as the mute/cooldown key (its hash), so it carries the statement
            identity: muting one statement's pileup must not silence every other statement's, and the
            notification cooldown must answer this statement's question with this statement's history
-           (#3459's rule). */
+           (#3459's rule).
+
+           #3859: the arrow here joins a fact key to a STATEMENT HASH, which is not a fact key and never was —
+           the one place the rendered path carries something the typed Path below deliberately does not. That is
+           why the consumers had to stop splitting this string: a split reader saw a 16-hex-char "fact key" on
+           every pileup finding and silently matched nothing, and the typed Path (root only) is the honest list. */
         var storyPath = RootFactKey + " → " + identity;
 
         var story = new AnalysisStory

@@ -216,7 +216,13 @@ public sealed class McpAnalysisTools
                         story_path_hash = f.StoryPathHash,
                         fact_count = f.FactCount,
                         drill_down = f.DrillDown,
-                        next_tools = ToolRecommendations.GetForStoryPath(f.StoryPath),
+                        /* #3859 item 5: the chain's reads AND the reads for the config levers hanging off it, from
+                           the finding's TYPED keys (item 4 — this used to split story_path above on the arrow).
+                           BESIDE the two attaches wrapping this object, never inside either: StorySideLeaves
+                           renders the lever's CARD and FactRanked the root's objects, and this is the third thing
+                           a lever owes a reader — the read that acts on it. Lever-carrying findings therefore move
+                           bytes here; a finding with no lever is byte-for-byte what it was. */
+                        next_tools = ToolRecommendations.GetForStoryPath(StoryKeys.ForFinding(f)),
                         incident_id = f.IncidentId,
                         co_fired = CoFiredSummary.OtherTitles(advice?.Headline ?? f.RootFactKey, coFiredTitles),
                         advice = advice is null ? null : new
@@ -1287,12 +1293,27 @@ internal static class ToolRecommendations
     internal static IReadOnlyCollection<string> FactKeys => ByFactKey.Keys;
 
     /// <summary>
-    /// Returns tool recommendations for all fact keys in a story path.
-    /// Deduplicates across the path so each tool appears at most once.
+    /// Returns tool recommendations for every fact key one finding is about — its chain AND the config levers
+    /// hanging off it (<see cref="StoryKeys"/>). Deduplicates, so each tool appears at most once.
+    ///
+    /// <para><b>#3859 item 4: keys, not a split string.</b> This took a rendered <c>storyPath</c> and split it on
+    /// <c>" → "</c> to get the keys back — one of six such readers. It now takes the typed keys the engine
+    /// recorded, so a fact key containing the arrow, or a change to the engine's join separator, cannot silently
+    /// stop this table from matching.</para>
+    ///
+    /// <para><b>#3859 item 5: the levers now reach next_tools, and that MOVES BYTES.</b> With the path alone, a
+    /// finding whose lever is a config key was told a lever exists (the <c>side_leaves</c> card and the sentence in
+    /// the advice) and then pointed at no read FOR it — the lever's own tool row was reachable only if that key
+    /// also happened to root a finding of its own, which #3691 stopped it from doing. So <c>next_tools</c> on every
+    /// finding that carries a lever now gains that lever's reads, appended after the chain's (see
+    /// <see cref="StoryKeys.All"/> for why that order). This is an accepted payload-contract change, not a
+    /// byte-identical one: a finding with no lever is unchanged, and the SQL Server pass, which carries levers
+    /// only where #3691 swept one, moves exactly where it swept one.</para>
     /// </summary>
-    public static List<object> GetForStoryPath(string storyPath)
+    public static List<object> GetForStoryPath(StoryKeys keys)
     {
-        var factKeys = storyPath.Split(" → ", StringSplitOptions.RemoveEmptyEntries);
+        ArgumentNullException.ThrowIfNull(keys);
+        var factKeys = keys.All;
         var seen = new HashSet<string>();
         var result = new List<object>();
 

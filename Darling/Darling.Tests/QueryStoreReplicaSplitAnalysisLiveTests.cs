@@ -306,6 +306,8 @@ public sealed class QueryStoreReplicaSplitAnalysisLiveTests
         {
             RootFactKey = "PLAN_REGRESSION",
             StoryPath = "PLAN_REGRESSION",
+            /* #3859: the collector matches on PathKeys, not on a split of the rendered path. */
+            PathKeys = ["PLAN_REGRESSION"],
             /* Past the display gate — below it the expensive drill-downs are skipped wholesale and this
                collector never runs at all. */
             Severity = 1.0,
