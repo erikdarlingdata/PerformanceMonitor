@@ -110,7 +110,7 @@ public sealed class PgServerConfigCollector : PostgresCollectorDefinitionBase<Pg
        the resolved forms, and 'database' therefore COLLIDES with a legitimate pg_settings source value on a
        backend whose own database overrides the setting. That collision is why source is not the
        discriminator between the two populations and the two new columns are: a reader asks
-       database_name IS NULL AND role_name IS NULL, never source <> 'database'.
+       database_name IS NULL AND role_name IS NULL, never a predicate on source.
 
        setconfig is text[] of 'name=value'. unnest expands it; split_part before the FIRST '=' is the GUC
        name and substr after it is the value, so a value that itself contains '=' (a search_path with a

@@ -107,12 +107,13 @@ public sealed class PgServerConfigScopeRungTests
         Assert.Empty(Regex.Matches(sql, "CREATE INDEX"));
         /* No passthrough on this table, so a CREATE OR REPLACE VIEW here would CREATE one the generator does
            not know about — the V14 frozen-column-list lesson's other half. */
-        Assert.DoesNotContain("VIEW", sql, StringComparison.OrdinalIgnoreCase);
+        var body = Regex.Replace(sql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
+        Assert.DoesNotContain("VIEW", body, StringComparison.OrdinalIgnoreCase);
         /* No DEFAULT and no backfill: the two clauses that would turn a catalog-only ALTER on a compressed
            hypertable into a rewrite. */
-        Assert.DoesNotContain("DEFAULT", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("UPDATE", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("NOT NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("DEFAULT", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("UPDATE", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("NOT NULL", body, StringComparison.Ordinal);
 
         var declared = PgServerConfigCollector.Instance.PayloadColumns.TakeLast(2).ToList();
         Assert.Equal(ScopeColumns, declared.Select(c => c.Name).ToArray());
@@ -163,8 +164,8 @@ public sealed class PgServerConfigScopeRungTests
         foreach (var phrase in new[]
         {
             "two nullable columns", "stays 72", "No Lite twin", "NULL is a value here, and it means server-wide",
-            "Nullable, no DEFAULT", "The V101 rule applies", "The reads are the correctness edge",
-            "What this rung deliberately does NOT do", "No passthrough refresh",
+            "no DEFAULT, no backfill", "The V101 rule applies", "The reads are the correctness edge",
+            "What this rung deliberately does NOT do", "no passthrough refresh",
         })
         {
             Assert.Contains(phrase, doc, StringComparison.Ordinal);
@@ -217,7 +218,10 @@ public sealed class PgServerConfigScopeRungTests
         Assert.Equal(2, arms.Length);
         foreach (var arm in arms)
         {
-            Assert.Equal(definition.PayloadColumns.Count, Regex.Matches(arm, @"\bAS \w+\b").Count);
+            /* Column aliases only — the SELECT list up to its FROM; table aliases (AS s, AS drs, AS d, AS r, AS cfg) are
+               not payload columns. */
+            var selectList = arm[..arm.IndexOf("FROM ", StringComparison.Ordinal)];
+            Assert.Equal(definition.PayloadColumns.Count, Regex.Matches(selectList, @"\bAS \w+\b").Count);
         }
 
         /* Both scope columns are projected NULL on the pg_settings arm and off the joined catalogs on the
@@ -245,7 +249,7 @@ public sealed class PgServerConfigScopeRungTests
         Assert.Contains("'database'", sql, StringComparison.Ordinal);
 
         var collector = RepoFile.ReadRepoFileLf("PerformanceMonitor.Collectors", "PgServerConfigCollector.cs");
-        Assert.Contains("database_name IS NULL AND role_name IS NULL, never source <> 'database'", collector, StringComparison.Ordinal);
+        Assert.Contains("database_name IS NULL AND role_name IS NULL, never a predicate on source", collector, StringComparison.Ordinal);
 
         /* No product read may use source as the scope discriminator. */
         foreach (var (file, text) in ProductSources())
@@ -345,10 +349,11 @@ public sealed class PgServerConfigScopeRungTests
             foreach (var match in FromTable.Matches(clean).Cast<Match>())
             {
                 /* The inner per-server anchor subqueries: `FROM pg_server_config` with no alias immediately
-                   followed by `WHERE server_id = $1)` — per SERVER, never per name, so they need no
-                   predicate and are not reads. */
+                   followed by `WHERE server_id = $1)` — or by the as-of form `WHERE server_id = $1 AND
+                   collection_time <= $2)` the fact collectors anchor on — per SERVER, never per name, so they
+                   need no predicate and are not reads. */
                 var tail = clean[match.Index..Math.Min(clean.Length, match.Index + 200)];
-                if (Regex.IsMatch(tail, @"^FROM\s+(?:collect\.)?pg_server_config\s*\n?\s*WHERE\s+server_id = \$1\)"))
+                if (Regex.IsMatch(tail, @"^FROM\s+(?:collect\.)?pg_server_config\s*\n?\s*WHERE\s+server_id = \$1(?:\s*\n?\s*AND\s+collection_time <= \$\d+)?\)"))
                 {
                     continue;
                 }
@@ -448,10 +453,17 @@ public sealed class PgServerConfigScopeRungTests
     {
         var tools = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgServerStateTools.cs");
 
-        Assert.Contains("database_overrides = overrides.Count > 0", tools, StringComparison.Ordinal);
-        Assert.Contains("database_overrides_note = overrides.Count > 0", tools, StringComparison.Ordinal);
-        /* The ternary's else arm is null, not an empty list — the absence IS the answer. */
-        Assert.Contains("                    : null,\n                database_overrides_note", tools, StringComparison.Ordinal);
+        /* ATTACHED, never a property: McpHelpers.JsonOptions writes nulls, so `database_overrides = … ? … : null`
+           would put "database_overrides": null on every page without overrides — the live pin caught exactly that
+           (PgServerConfigOverrideLivePostgresTests). The page is serialized as-is when there is nothing to say, and
+           the two keys are added to the JSON node only when there is. */
+        var code = StripComments(tools);
+        Assert.Contains("if (overrides.Count == 0)", code, StringComparison.Ordinal);
+        Assert.Contains("return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);", code, StringComparison.Ordinal);
+        Assert.Contains("node[\"database_overrides\"] = JsonSerializer.SerializeToNode(", code, StringComparison.Ordinal);
+        Assert.Contains("node[\"database_overrides_note\"] =", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_overrides = ", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_overrides_note = ", code, StringComparison.Ordinal);
         Assert.Contains("GetOverridesAsync(postgres, resolved.ServerId)", tools, StringComparison.Ordinal);
         /* Uncapped, deliberately: the settings list is paged and this is not. */
         Assert.DoesNotContain("GetOverridesAsync(postgres, resolved.ServerId, limit", tools, StringComparison.Ordinal);
