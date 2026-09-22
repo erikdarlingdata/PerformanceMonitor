@@ -798,11 +798,25 @@ public sealed class DarlingMcpHostService : BackgroundService
                    config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
                    config pivot or a schema-wide write. */
                 .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
-                /* Optional GCF (Graph Compact Format) output: a single call-tool filter that,
-                   when DARLING_OUTPUT_FORMAT=gcf, re-encodes each tool's JSON result as a GCF
-                   generic wire. Registered once; covers every tool. Opt-in, lossless, and
+                /* Two call-tool filters, each registered ONCE and each covering every tool with no
+                   per-tool change — the seam that exists precisely so a decision about all ~147 reads
+                   is made in one place.
+
+                   The unknown-argument guard (#3870) runs FIRST and can refuse before dispatch: a call
+                   carrying an argument no tool parameter declares is answered with the refusal envelope
+                   naming the key and listing what the tool accepts, instead of being run with the key
+                   silently dropped. The SDK binds arguments by name and ignores the rest, so
+                   get_collection_log with a hallucinated status_filter returned two hundred unfiltered
+                   rows and nothing anywhere said a knob had been discarded — for a surface whose callers
+                   are language models, a silently dropped key is a confidently wrong answer. Shared with
+                   Lite from PerformanceMonitor.Common so both SKUs refuse identically.
+
+                   Optional GCF (Graph Compact Format) output runs after: when DARLING_OUTPUT_FORMAT=gcf
+                   it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
                    never larger than the JSON (see GcfCallToolFilter / GcfOutput). */
-                .WithRequestFilters(filters => filters.AddCallToolFilter(GcfCallToolFilter.Instance));
+                .WithRequestFilters(filters => filters
+                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+                    .AddCallToolFilter(GcfCallToolFilter.Instance));
 
             _app = builder.Build();
 

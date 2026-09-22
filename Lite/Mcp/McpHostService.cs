@@ -111,7 +111,17 @@ public sealed class McpHostService : BackgroundService
                 .WithGeminiCompatibleTools<McpConfigHistoryTools>()
                 .WithGeminiCompatibleTools<McpDefaultTraceTools>()
                 .WithGeminiCompatibleTools<McpHealthParserTools>()
-                .WithGeminiCompatibleTools<McpAnalysisTools>();
+                .WithGeminiCompatibleTools<McpAnalysisTools>()
+                /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
+                   every tool with no per-tool change. A call carrying an argument no tool parameter
+                   declares is refused before dispatch — the refusal names the key and lists what the
+                   tool accepts — instead of being run with the key silently dropped. The SDK binds
+                   arguments by name and ignores the rest, so a misremembered parameter used to produce
+                   an answer to a different question with nothing anywhere saying so; for a surface whose
+                   callers are language models, a silently dropped key is a confidently wrong answer.
+                   The SAME filter object Darling's host registers (shared from
+                   PerformanceMonitor.Common), so the two SKUs cannot refuse differently. */
+                .WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
 
             _app = builder.Build();
 
