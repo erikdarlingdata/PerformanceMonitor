@@ -452,6 +452,34 @@ public sealed class PgLogEventsPipelineTests
         Assert.DoesNotMatch(@"new Regex\(""'\(", source);
     }
 
+    /// <summary>
+    /// Statement text that is KEPT rather than hashed (#3899's slow-statement entries): the two string forms the
+    /// quoted-literal pattern cannot see go too, a dollar-quoted string (with or without a tag, and one left open
+    /// to the end) and an E'' escape string whose backslash-escaped quote would otherwise end the plain match early
+    /// and leave the rest of the value standing. A positional parameter is not a value and stays.
+    /// </summary>
+    [Fact]
+    public void AStoredStatement_LosesDollarQuotedAndEscapeStrings_AndKeepsPositionalParameters()
+    {
+        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $$hunter2$$"));
+        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2$pw$"));
+        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD $pw$hunter2 cut off at the cap"));
+        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD E'hun\\'ter2'"));
+        Assert.Equal("ALTER ROLE r PASSWORD '?'", PgLogTextRedactor.RedactStoredStatement("ALTER ROLE r PASSWORD e'it''s'"));
+        Assert.Equal(
+            "SELECT a FROM t WHERE id = $1 AND n > ? AND name = '?' AND b = $12",
+            PgLogTextRedactor.RedactStoredStatement("SELECT a FROM t WHERE id = $1 AND n > 42 AND name = 'x' AND b = $12"));
+
+        /* An identifier ending in e before a quote is not an escape string's prefix, and the plain literal
+           after it still goes. */
+        Assert.Equal("SELECT namee || '?' FROM t", PgLogTextRedactor.RedactStoredStatement("SELECT namee || 'v' FROM t"));
+        Assert.Null(PgLogTextRedactor.RedactStoredStatement(null));
+        Assert.Equal("", PgLogTextRedactor.RedactStoredStatement(""));
+
+        /* The hashed form is unchanged: a DO body stays part of the shape a fingerprint distinguishes. */
+        Assert.Equal("DO $$ BEGIN PERFORM ?; END $$", PgLogTextRedactor.RedactStatement("DO $$ BEGIN PERFORM 1; END $$"));
+    }
+
     /* ---- the self-hosted collector and the shared tailer --------------------------------------------- */
 
     /// <summary>

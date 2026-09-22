@@ -11,7 +11,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
-using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -24,10 +23,13 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// The store's OWN per-statement timings as an MCP read (#3899): which statements the monitoring store spends
 /// its time on, attributed to the role that ran them. It exists for one question the product could not answer
-/// before, "the web viewer / MCP tools are slow — which query?", and its role split is what answers it:
-/// <c>viewer</c> is the web viewer, <c>mcp</c> is MCP tools, <c>admin</c> is the Darling Viewer desktop app,
-/// and the owner is the service itself. Reads the two SECURITY DEFINER functions
-/// <see cref="StoreStatementStats"/> creates; a store without them answers <c>unavailable</c> with the remedy.
+/// before, "the web viewer / MCP tools are slow — which query?", and its role split is what answers it on a
+/// MANAGED store, where each surface has its own login (<see cref="RoleIdentities"/> says which is which). A
+/// compose or bring-your-own store runs its web and MCP hosts as the owner login, so the answer says so rather
+/// than filing their statements under the service. Reads the two SECURITY DEFINER functions
+/// <see cref="StoreStatementStats"/> creates; a store without them, or without the library loaded, answers
+/// <c>precondition</c> with the remedy, decided from the catalog before the read rather than from an error
+/// after it.
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpStoreQueryStatsTools
@@ -37,6 +39,10 @@ public sealed class DarlingMcpStoreQueryStatsTools
 
     /// <summary>How much of a statement's text the default response carries.</summary>
     public const int PreviewLength = 240;
+
+    /// <summary>What the module shows in place of a statement's text when the reader's definer may not read
+    /// another role's.</summary>
+    internal const string InsufficientPrivilegeText = "<insufficient privilege>";
 
     /// <summary>The <c>order_by</c> values, mapped to the reader function's columns. The map IS the whitelist:
     /// a value not in it is refused, and only a value from it is ever interpolated into SQL.</summary>
@@ -51,13 +57,15 @@ public sealed class DarlingMcpStoreQueryStatsTools
             ["shared_blks_read"] = "shared_blks_read",
         };
 
-    /// <summary>The <c>role</c> values, and who each one is.</summary>
+    /// <summary>The <c>role</c> values, and who connects as each on a MANAGED store. The viewer login is not
+    /// only the web viewer: remote Darling Viewer seats default to it, and the service runs every custom-alert
+    /// rule's metric on a viewer-role pool.</summary>
     internal static readonly IReadOnlyDictionary<string, string> RoleIdentities =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["owner"] = "the service itself: collection, maintenance, alerting",
-            [DarlingManagedPostgres.AdminRoleName] = "the Darling Viewer desktop app and its Settings window",
-            [DarlingManagedPostgres.ViewerRoleName] = "the web viewer and read-only Viewer seats",
+            ["owner"] = "the service: collection, maintenance and alerting (on a compose or bring-your-own store, also the web viewer and MCP tools)",
+            [DarlingManagedPostgres.AdminRoleName] = "the Darling Viewer on the service's machine and its Settings window, and any remote seat given the admin role",
+            [DarlingManagedPostgres.ViewerRoleName] = "the web viewer, remote read-only Darling Viewer seats, and the service's custom-alert rule evaluation",
             [DarlingManagedPostgres.McpRoleName] = "MCP tools",
         };
 
@@ -66,20 +74,59 @@ public sealed class DarlingMcpStoreQueryStatsTools
     internal const string RoleKeySql =
         "CASE WHEN f.role_name = (SELECT pg_catalog.pg_get_userbyid(d.datdba) FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()) THEN 'owner' ELSE f.role_name END";
 
-    /// <summary>When the counters were last reset and how many entries the view has evicted since.</summary>
+    /// <summary>
+    /// What the tool needs to know before it reads, from the catalog alone, so every state a store can be in is
+    /// named rather than raised: whether the reader exists and this role may run it, the installed extension
+    /// version (none when it is not installed, or was dropped after the reader was built), whether the library
+    /// is loaded, whether utility statements are tracked, and whether this connection IS the store owner (a
+    /// compose or bring-your-own store's web and MCP hosts). Loaded is read from <c>pg_settings</c>, where the
+    /// module's own settings appear only once it is loaded, readable by any role (see
+    /// <see cref="StoreStatementStats.ProbeSql"/>). <c>has_function_privilege</c> over a missing function is
+    /// null, not an error, because <c>to_regprocedure</c> answers null and the function is strict.
+    /// </summary>
+    public static readonly string StateSql = $@"
+SELECT
+    pg_catalog.to_regprocedure('{PgSchemaGenerator.ConfigSchema}.{StoreStatementStats.FunctionName}()') IS NOT NULL AS reader_exists,
+    COALESCE(pg_catalog.has_function_privilege(pg_catalog.to_regprocedure('{PgSchemaGenerator.ConfigSchema}.{StoreStatementStats.FunctionName}()'), 'EXECUTE'), false) AS may_read,
+    (
+        SELECT e.extversion
+        FROM pg_catalog.pg_extension AS e
+        WHERE e.extname = 'pg_stat_statements'
+    ) AS extension_version,
+    EXISTS
+    (
+        SELECT 1
+        FROM pg_catalog.pg_settings AS s
+        WHERE s.name = 'pg_stat_statements.max'
+    ) AS loaded,
+    (
+        SELECT s.setting
+        FROM pg_catalog.pg_settings AS s
+        WHERE s.name = 'pg_stat_statements.track_utility'
+    ) AS track_utility,
+    current_user =
+    (
+        SELECT pg_catalog.pg_get_userbyid(d.datdba)
+        FROM pg_catalog.pg_database AS d
+        WHERE d.datname = pg_catalog.current_database()
+    ) AS connected_as_owner";
+
+    /// <summary>When the counters were last reset and how many eviction passes the module has run since.</summary>
     public static readonly string InfoSql =
         $"SELECT i.stats_reset, i.dealloc FROM {PgSchemaGenerator.ConfigSchema}.{StoreStatementStats.InfoFunctionName}() AS i";
 
     /// <summary>Each role's share of the store's statement time. The whole store's total is a window over the
     /// same grouping, so the share's denominator is the statement's own and never a sum of rows the reader
-    /// happened to fetch (the page contract's rule, #3613).</summary>
+    /// happened to fetch (the page contract's rule, #3613). The hidden-text count rides the same window: how
+    /// many statements the reader's definer may not read the text of.</summary>
     public static readonly string ByRoleSql = $@"
 SELECT
     {RoleKeySql} AS role_key,
     pg_catalog.count(*) AS statements,
     pg_catalog.sum(f.calls)::bigint AS calls,
     pg_catalog.sum(f.total_exec_ms) AS total_exec_ms,
-    pg_catalog.sum(pg_catalog.sum(f.total_exec_ms)) OVER () AS store_total_exec_ms
+    pg_catalog.sum(pg_catalog.sum(f.total_exec_ms)) OVER () AS store_total_exec_ms,
+    (pg_catalog.sum(pg_catalog.count(*) FILTER (WHERE f.query = '{InsufficientPrivilegeText}')) OVER ())::bigint AS hidden_text
 FROM {PgSchemaGenerator.ConfigSchema}.{StoreStatementStats.FunctionName}() AS f
 GROUP BY 1
 ORDER BY 4 DESC NULLS LAST";
@@ -113,7 +160,7 @@ ORDER BY ranked.{orderColumn} DESC NULLS LAST, ranked.queryid
 LIMIT $2";
 
     [McpServerTool(Name = "get_store_query_stats"), Description(
-        "Ranks the monitoring STORE's own SQL statements by their server-side cost, from pg_stat_statements in the store — not a monitored server's queries. It answers 'the web viewer / MCP tools are slow: which query?'. Every statement is attributed to the role that ran it: viewer (the web viewer), mcp (MCP tools), admin (the Darling Viewer desktop app and Settings), owner (the service itself: collection, maintenance, alerting). by_role gives each role's statement count, calls, total execution ms and share of the total; statements lists the top statements with calls, total/mean/max execution ms, rows, and shared blocks read and hit, plus temp blocks written. Figures are CUMULATIVE since stats_since, the last counter reset (a store restart does not reset them), and are server-side execution only: network transfer and result serialization are not in them. entries_evicted above zero means pg_stat_statements dropped its least-used entries, so a rarely-run statement can be missing from the ranking. The text is PostgreSQL's normalized form (constants replaced by $1, $2 ...) with comments stripped, cut to a preview unless full_text is true. Answers status unavailable, with the remedy, on a store where pg_stat_statements is not installed or not yet loaded (it loads on a store restart). Takes no server_name: the store is the subject.")]
+        "Ranks the monitoring STORE's own SQL statements by server-side cost, from pg_stat_statements in the store, not a monitored server's queries. Answers 'the web viewer / MCP tools are slow: which query?'. Each statement is attributed to the role that ran it; on a managed store viewer = the web viewer, remote read-only Viewer seats and custom-alert rule evaluation, mcp = MCP tools, admin = the local Darling Viewer, owner = the service (a compose or bring-your-own store runs its web viewer and MCP tools as owner too). by_role gives each role's share of the recorded time; statements lists the top statements with calls, total/mean/max ms, rows and block I/O, the text normalized ($1, $2) and cut to a preview unless full_text. Figures are cumulative since stats_since and server-side only; the note says what they leave out. Answers status precondition, with the remedy, when pg_stat_statements is missing, not loaded, too old or not granted. No server_name: the store is the subject.")]
     public static async Task<string> GetStoreQueryStats(
         NpgsqlDataSource postgres,
         [Description("Only statements run by this role: owner, admin, viewer or mcp. Omit for every role.")] string? role = null,
@@ -147,8 +194,28 @@ LIMIT $2";
 
         try
         {
+            StatsState state;
+            await using (var command = postgres.CreateCommand(StateSql))
+            {
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                await using var reader = await command.ExecuteReaderAsync();
+                await reader.ReadAsync();
+                state = new StatsState(
+                    ReaderExists: reader.GetBoolean(0),
+                    MayRead: reader.GetBoolean(1),
+                    ExtensionVersion: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Loaded: reader.GetBoolean(3),
+                    TrackUtility: reader.IsDBNull(4) ? null : reader.GetString(4),
+                    ConnectedAsOwner: !reader.IsDBNull(5) && reader.GetBoolean(5));
+            }
+
+            if (PreconditionReason(state) is { } reason)
+            {
+                return McpHelpers.Status("precondition", reason);
+            }
+
             DateTime? statsSince = null;
-            long? evicted = null;
+            long? evictionPasses = null;
             await using (var info = postgres.CreateCommand(InfoSql))
             {
                 info.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -156,11 +223,12 @@ LIMIT $2";
                 if (await reader.ReadAsync())
                 {
                     statsSince = reader.IsDBNull(0) ? null : reader.GetDateTime(0).ToUniversalTime();
-                    evicted = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                    evictionPasses = reader.IsDBNull(1) ? null : reader.GetInt64(1);
                 }
             }
 
             var byRole = new List<(string Role, long Statements, long Calls, double TotalMs, double StoreTotalMs)>();
+            long hiddenText = 0;
             await using (var command = postgres.CreateCommand(ByRoleSql))
             {
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -173,6 +241,7 @@ LIMIT $2";
                         reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                         reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                         reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+                    hiddenText = reader.IsDBNull(5) ? 0 : reader.GetInt64(5);
                 }
             }
 
@@ -197,16 +266,21 @@ LIMIT $2";
                         SharedBlksHit: reader.GetInt64(7),
                         SharedBlksRead: reader.GetInt64(8),
                         TempBlksWritten: reader.GetInt64(9),
-                        Query: full_text ? text : CompactSql(text, PreviewLength)));
+                        Query: full_text ? text : StoreStatementStats.CompactStatementText(text, PreviewLength)));
                 }
             }
 
             var (page, truncated) = McpHelpers.BoundPage(fetched, top);
+            var utilityTracked = string.Equals(state.TrackUtility, "on", StringComparison.OrdinalIgnoreCase);
 
             return JsonSerializer.Serialize(new
             {
                 stats_since = statsSince?.ToString("O", CultureInfo.InvariantCulture),
-                entries_evicted = evicted,
+                eviction_passes = evictionPasses,
+                extension_version = state.ExtensionVersion,
+                utility_statements_tracked = utilityTracked,
+                connected_as_owner = state.ConnectedAsOwner,
+                hidden_text_statements = hiddenText,
                 role = roleKey,
                 order_by = order_by!.ToLowerInvariant(),
                 top,
@@ -224,7 +298,10 @@ LIMIT $2";
                 statements = page.Select(s => new
                 {
                     role = s.Role,
-                    query_id = s.QueryId,
+                    /* int8 goes out as a STRING (#2548's rule, as get_pg_top_queries does): most query ids exceed
+                       2^53, and a JSON number is rounded by every JavaScript consumer, the web viewer's panels
+                       included, into an id that matches nothing. */
+                    query_id = s.QueryId?.ToString(CultureInfo.InvariantCulture),
                     calls = s.Calls,
                     total_exec_ms = s.TotalExecMs,
                     mean_exec_ms = s.MeanExecMs,
@@ -235,12 +312,8 @@ LIMIT $2";
                     temp_blks_written = s.TempBlksWritten,
                     query = s.Query,
                 }),
-                note = "Cumulative since stats_since, server-side execution only. by_role shares are of the store's total statement time across every role, so a role's share is where the store's own effort went, not how slow that role's calls felt. A statement that is slow per call ranks under mean_time or max_time; one that is cheap but constant ranks under total_time.",
+                note = BuildNote(state, utilityTracked, hiddenText, evictionPasses),
             }, McpHelpers.JsonOptions);
-        }
-        catch (PostgresException ex) when (UnavailableReason(ex.SqlState) is { } reason)
-        {
-            return McpHelpers.Status("unavailable", reason);
         }
         catch (Exception ex)
         {
@@ -248,87 +321,89 @@ LIMIT $2";
         }
     }
 
-    /// <summary>The remedy for each way a store can lack statement statistics, keyed by the SQLSTATE the reader
-    /// functions raise; null for anything else, which is a real error and goes out as one.</summary>
-    internal static string? UnavailableReason(string? sqlState) => sqlState switch
-    {
-        /* undefined_function: the reader functions were never created. */
-        "42883" =>
-            "Statement statistics are not set up on this store. The service creates them at start and on its hourly store-maintenance pass once pg_stat_statements is installed. A managed store preloads it from its first service-owned start of a build carrying #3899; a store you run yourself needs pg_stat_statements in shared_preload_libraries, a restart, and CREATE EXTENSION pg_stat_statements run by a superuser in this database.",
-        /* object_not_in_prerequisite_state: installed, but the library is not loaded. */
-        "55000" =>
-            "pg_stat_statements is installed but not loaded. shared_preload_libraries takes effect only on a store restart: a managed store loads it on its next service-owned start (the service log records when the preload was added); a store you run yourself needs it in shared_preload_libraries and a restart.",
-        /* insufficient_privilege: a role the service does not grant. */
-        "42501" =>
-            "This role may not read the store's statement statistics. The service grants them to the admin, viewer and mcp roles at start and hourly; any other role has no grant by design.",
-        _ => null,
-    };
+    /// <summary>What <see cref="StateSql"/> read.</summary>
+    internal sealed record StatsState(
+        bool ReaderExists,
+        bool MayRead,
+        string? ExtensionVersion,
+        bool Loaded,
+        string? TrackUtility,
+        bool ConnectedAsOwner);
 
     /// <summary>
-    /// A statement's text as a one-line preview: comments removed, whitespace collapsed, cut at
-    /// <paramref name="maxLength"/> with "..." when it was longer. The product's SQL carries long comment
-    /// blocks, which is most of what this removes. A quoted literal is copied through untouched, so a
-    /// <c>--</c> inside one survives; normalized text rarely has any, since constants are already <c>$n</c>.
+    /// The remedy for each way a store can lack statement statistics, in the order they have to be fixed in, or
+    /// null when the read can go ahead. Pure, so every branch is pinned without a server. The setup runs at every
+    /// service start and again hourly on a TimescaleDB store; a plain-PostgreSQL store runs it at its next start,
+    /// and each remedy says which.
     /// </summary>
-    internal static string CompactSql(string? text, int maxLength)
+    internal static string? PreconditionReason(StatsState state)
     {
-        if (string.IsNullOrEmpty(text))
+        const string Cadence = "The service builds the store's statement statistics at every start, and again hourly on a TimescaleDB store (a plain-PostgreSQL store waits for its next service start).";
+        const string ByoSetup = "A store you run yourself needs pg_stat_statements in shared_preload_libraries with pg_stat_statements.track_utility = off (a restart loads it), then CREATE EXTENSION pg_stat_statements run by a superuser in this database; Darling/tools/provision-roles.sql carries the steps.";
+
+        if (state.ExtensionVersion is null)
         {
-            return "";
+            return state.ReaderExists
+                ? "pg_stat_statements is no longer installed in this database: it was dropped after the service built its reader. The service creates it again on its next pass when it connects as a superuser; otherwise run CREATE EXTENSION pg_stat_statements as a superuser in this database. " + Cadence
+                : "Statement statistics are not set up on this store: pg_stat_statements is not installed in this database. A managed store installs it itself once its conf preloads it (from its first service-owned start of a build carrying #3899). " + ByoSetup + " " + Cadence;
         }
 
-        var builder = new StringBuilder(Math.Min(text.Length, maxLength + 64));
-        var inQuote = false;
-        var pendingSpace = false;
-        for (var i = 0; i < text.Length; i++)
+        if (!StoreStatementStats.ExtensionVersionAtLeast(state.ExtensionVersion, StoreStatementStats.MinimumReaderVersion))
         {
-            var c = text[i];
-            if (inQuote)
-            {
-                builder.Append(c);
-                inQuote = c != '\'';
-                continue;
-            }
-
-            if (c == '-' && i + 1 < text.Length && text[i + 1] == '-')
-            {
-                var newline = text.IndexOf('\n', i);
-                i = newline < 0 ? text.Length : newline;
-                pendingSpace = true;
-                continue;
-            }
-
-            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
-            {
-                var close = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
-                i = close < 0 ? text.Length : close + 1;
-                pendingSpace = true;
-                continue;
-            }
-
-            if (char.IsWhiteSpace(c))
-            {
-                pendingSpace = true;
-                continue;
-            }
-
-            if (pendingSpace && builder.Length > 0)
-            {
-                builder.Append(' ');
-            }
-
-            pendingSpace = false;
-            builder.Append(c);
-            inQuote = c == '\'';
-            if (builder.Length > maxLength)
-            {
-                break;
-            }
+            return $"pg_stat_statements {state.ExtensionVersion} is installed, older than {StoreStatementStats.MinimumReaderVersion}, the oldest version the store's reader can serve (pg_upgrade never updates an extension). Run ALTER EXTENSION pg_stat_statements UPDATE as a superuser in this database. " + Cadence;
         }
 
-        return builder.Length > maxLength
-            ? builder.ToString(0, maxLength).TrimEnd() + "..."
-            : builder.ToString();
+        if (!state.ReaderExists)
+        {
+            return "pg_stat_statements is installed, but the service has not built its reader in this database yet. " + Cadence;
+        }
+
+        if (!state.MayRead)
+        {
+            return "This role may not read the store's statement statistics. The service grants them to the admin, viewer and mcp roles when it builds them; any other role has no grant by design. " + Cadence;
+        }
+
+        if (!state.Loaded)
+        {
+            return "pg_stat_statements is installed but not loaded. shared_preload_libraries takes effect only on a store restart: a managed store loads it on its next service-owned start (the service log records when its conf preloaded it); a store you run yourself needs it in shared_preload_libraries and a restart.";
+        }
+
+        return null;
+    }
+
+    /// <summary>The note beside the figures: what they cover and, when it applies, what they cannot show.</summary>
+    internal static string BuildNote(StatsState state, bool utilityTracked, long hiddenText, long? evictionPasses)
+    {
+        var parts = new List<string>
+        {
+            "Cumulative since stats_since, server-side execution only. by_role shares are of the time pg_stat_statements recorded, so a role's share is where the recorded time went, not how slow that role's calls felt. A statement that is slow per call ranks under mean_time or max_time; one that is cheap but constant ranks under total_time.",
+        };
+
+        parts.Add(utilityTracked
+            ? "Utility statements are tracked on this store (pg_stat_statements.track_utility is on), so COPY, CALL, VACUUM and DDL are in these figures. Role DDL can carry a password literal: the reader refuses it, and the store should set track_utility off."
+            : "Utility statements are not tracked (pg_stat_statements.track_utility is off, as the store sets it), so COPY, CALL, VACUUM and DDL are not in these figures: the collectors' bulk ingest is COPY, so the owner's share understates collection. get_collector_cost has the collection side.");
+
+        if (state.ConnectedAsOwner)
+        {
+            parts.Add("This read connected as the store owner, which is how a compose or bring-your-own store runs its web viewer and MCP tools: their statements are counted under owner, together with the service's own. Only a managed store gives them their own viewer and mcp roles.");
+        }
+
+        if (hiddenText > 0)
+        {
+            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. GRANT pg_read_all_stats TO the owner role to show their text.");
+        }
+
+        if (state.ExtensionVersion is { } version
+            && !StoreStatementStats.ExtensionVersionAtLeast(version, StoreStatementStats.InfoViewVersion))
+        {
+            parts.Add($"pg_stat_statements {version} predates pg_stat_statements_info, so stats_since and eviction_passes are unknown; ALTER EXTENSION pg_stat_statements UPDATE, run by a superuser, adds them.");
+        }
+        else if (evictionPasses > 0)
+        {
+            parts.Add("eviction_passes counts the times the module dropped its least-used entries to make room (each pass drops about 5% of pg_stat_statements.max), so a rarely-run statement may be missing and a statement re-admitted after an eviction counts only from then.");
+        }
+
+        return string.Join(" ", parts);
     }
 
     private static double Round(double value) => Math.Round(value, 2);

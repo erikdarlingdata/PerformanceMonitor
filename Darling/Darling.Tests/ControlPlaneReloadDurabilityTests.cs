@@ -91,8 +91,14 @@ public sealed class ControlPlaneReloadDurabilityTests
                 .Where(l => l.Trim().Length > 0)
                 .ToArray();
 
+        /* The slow-statement line (#3899) is part of the same renderer's output, derived from the same value,
+           so it is left alone with the ceiling: the roles keep the line their last successful provisioning
+           gave them, beside the ceiling it was a third of. */
         Assert.Equal(
-            Statements(readable).Where(l => !l.Contains("SET statement_timeout", StringComparison.Ordinal)).ToArray(),
+            Statements(readable)
+                .Where(l => !l.Contains("SET statement_timeout", StringComparison.Ordinal))
+                .Where(l => !l.Contains("SET log_min_duration_statement", StringComparison.Ordinal))
+                .ToArray(),
             Statements(unreadable));
     }
 

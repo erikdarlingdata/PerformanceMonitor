@@ -48,6 +48,14 @@
 -- first, or use a dedicated cluster/database for the Darling store).
 -- ============================================================================================
 
+-- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
+--    ALTER ROLE ... PASSWORD literal, and while pg_stat_statements is loaded with utility tracking on (the
+--    module's default), it records that statement VERBATIM, password included, where any superuser or
+--    pg_read_all_stats member (a monitoring agent's pg_monitor login, say) can read it. This covers this
+--    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded, and
+--    superuser-only when it is, like the rest of this script.
+SET pg_stat_statements.track_utility = off;
+
 -- 1. Roles (CREATE ROLE has no IF NOT EXISTS -> guard with a DO block). Idempotent: re-running
 --    this script re-asserts the password below, so it doubles as a password rotation. A fresh role
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
@@ -77,13 +85,31 @@ ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
 --     which a BYO deployment does not create -- your own PostgreSQL governs any MCP-role exposure it wants.)
 ALTER ROLE viewer SET statement_timeout = '15s';
 
--- 1b. Slow-statement logging on viewer (#3899): a viewer statement that runs past 5s is written to the
---     server log with its text, so a slow web-viewer read can be named instead of guessed at. Bind
---     parameters are not logged. Keep the threshold in step with DarlingManagedRoles.SlowStatementLogThreshold.
---     Both settings are superuser-only. For per-statement timings, also add pg_stat_statements to
---     shared_preload_libraries (restart required) and run CREATE EXTENSION pg_stat_statements in this
---     database; the service creates its reader function on its next start or within the hour.
-ALTER ROLE viewer SET log_min_duration_statement = '5s';
+-- 1b. Slow-statement logging on viewer (#3899): a viewer statement that runs past a third of its 15s
+--     statement_timeout is written to the server log with its text, so a slow read can be named instead of
+--     guessed at, and the service's store-log sweep keeps it (literals masked). Bind parameters are not
+--     logged. Managed mode derives the same line from its own ceiling (a third of it): keep this in step if
+--     you change 1a. Both settings are superuser-only.
+--
+--     WHO this covers: in bring-your-own mode the viewer role is a Darling Viewer seat's identity
+--     (postgres.connectAs = "viewer"). The service's web dashboard and MCP server connect with
+--     postgres.connectionString, i.e. as the owner, so to log THEIR slow statements set the same two lines
+--     on the owner role (ALTER ROLE darling SET ...), which also logs the collectors' slow statements.
+--
+--     Per-statement timings (get_store_query_stats), as a superuser:
+--       a. In postgresql.conf, add pg_stat_statements to shared_preload_libraries (keep every library
+--          already there, timescaledb included) AND set pg_stat_statements.track_utility = off, then restart.
+--          track_utility = off is a security setting, not tuning: with it on, the module records every
+--          utility statement verbatim, this script's ALTER ROLE ... PASSWORD literals included (step 0 covers
+--          only this script's session). With ALTER SYSTEM instead, pass ONE quoted literal per library:
+--          ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_stat_statements';
+--          a single literal holding the whole list is stored as one library name, and the server will not
+--          start.
+--       b. CREATE EXTENSION pg_stat_statements;  in this database.
+--       c. If the owner role is not a superuser: GRANT pg_read_all_stats TO darling;  so the service's reader
+--          shows every role's statement text (without it, other roles' text reads <insufficient privilege>).
+--     The service builds its reader functions at its next start (and hourly on a TimescaleDB store).
+ALTER ROLE viewer SET log_min_duration_statement = '5000ms';
 ALTER ROLE viewer SET log_parameter_max_length = 0;
 
 -- 2. Schema usage + SELECT on everything that exists now (ALL TABLES covers tables AND views). collect

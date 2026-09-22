@@ -441,26 +441,39 @@ public sealed class DarlingManagedRolesTests
     }
 
     /// <summary>
-    /// #3899: the two read identities log a statement past the slow-statement line, WITHOUT its bind parameters
-    /// (mcp also writes the alert settings, whose values include secrets), and the config writer (admin) is not
-    /// among them. The BYO script sets the same threshold on its one read identity, so the two paths agree.
+    /// #3899: the two read identities log a statement past the slow-statement line, a third of their 15 s default
+    /// ceiling, WITHOUT its bind parameters (mcp also writes the alert settings, whose values include secrets),
+    /// and the config writer (admin) is not among them. The BYO script sets the same line on its one read
+    /// identity, so the two paths agree at the default, and it turns utility tracking off for its own session
+    /// BEFORE its first password-bearing statement, so its own role DDL never reaches pg_stat_statements.
     /// </summary>
     [Fact]
     public void Provisioning_LogsSlowStatementsOnTheReadRolesOnly_WithoutParameters()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
-        var threshold = DarlingManagedRoles.SlowStatementLogThreshold;
+        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03", 15);
 
-        Assert.Equal("5s", threshold);
-        Assert.Contains($"ALTER ROLE viewer SET log_min_duration_statement = '{threshold}';", sql, StringComparison.Ordinal);
-        Assert.Contains($"ALTER ROLE mcp    SET log_min_duration_statement = '{threshold}';", sql, StringComparison.Ordinal);
+        Assert.Equal(5000, DarlingManagedRoles.SlowStatementThresholdMs(15));
+        Assert.Contains("ALTER ROLE viewer SET log_min_duration_statement = '5000ms';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", sql, StringComparison.Ordinal);
         Assert.Contains("ALTER ROLE mcp    SET log_parameter_max_length = 0;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ALTER ROLE admin  SET log_min_duration_statement", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("ALTER ROLE admin SET log_min_duration_statement", sql, StringComparison.Ordinal);
 
         var byo = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
-        Assert.Contains($"ALTER ROLE viewer SET log_min_duration_statement = '{threshold}';", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE viewer SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
         Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
+
+        var utilityOff = byo.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
+        Assert.True(utilityOff >= 0, "provision-roles.sql no longer turns utility tracking off for its own session");
+        Assert.True(utilityOff < byo.IndexOf("CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
+            "provision-roles.sql sends a password before it turns utility tracking off");
+        Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
+            "provision-roles.sql sends a password before it turns utility tracking off");
+
+        /* The BYO remedy for the preload names the multi-literal ALTER SYSTEM form, never the one-literal list
+           that stores a single library name (#3904's review). */
+        Assert.Contains("ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_stat_statements';", byo, StringComparison.Ordinal);
+        Assert.DoesNotContain("'timescaledb,pg_stat_statements'", byo, StringComparison.Ordinal);
     }
 }

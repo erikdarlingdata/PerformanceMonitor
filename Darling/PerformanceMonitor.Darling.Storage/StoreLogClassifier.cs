@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.RegularExpressions;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -102,6 +104,16 @@ public static class StoreLogClassifier
     /// <summary>Everything below WARNING that matches no rule — checkpoints, connection authorisations,
     /// continuous-aggregate refresh chatter. Counted, never retained.</summary>
     public const string RoutineClass = "routine";
+
+    /// <summary>
+    /// A statement that ran past the store's slow-statement line (#3899). The one retained class whose text is
+    /// REWRITTEN before it is kept, by <see cref="TrySanitizeSlowStatement"/>: its message is the statement
+    /// rather than the duration line, so every run of one slow query groups into one row, and the kept entry
+    /// has its literals masked and its DETAIL lines (bind parameters) dropped. The classifier reads no role,
+    /// so an operator's store-wide <c>log_min_duration_statement</c> lands here too, admin's and the owner's
+    /// statements included, and the rewrite is what keeps a literal from reaching a reader of this class.
+    /// </summary>
+    public const string SlowStatementClass = "slow_statement";
 
     /// <summary>
     /// How many DISTINCT retained messages one class may keep per capture before the rest are folded into
@@ -224,15 +236,16 @@ public static class StoreLogClassifier
         new("lock_timeout", Error, MatchKind.StartsWith, "canceling statement due to lock timeout", true,
             "a statement hit the store's own lock_timeout waiting for a lock"),
 
-        /* Retained (#3899) - a statement from one of the read identities that ran past the slow-statement line
-           provisioning sets on them (DarlingManagedRoles.SlowStatementLogThreshold, viewer and mcp). PostgreSQL
-           writes it as LOG with the duration first and the statement after, on the same line and the
-           tab-indented continuation lines below it, so the raw entry carries the query. Retained for the reason
-           statement_timeout is: the text is what makes one actionable, and a count throws it away. Without this
-           rule every one lands in routine, counted and dropped. Bind parameters are not in it: the same
-           provisioning sets log_parameter_max_length = 0 on those roles. */
-        new("slow_statement", Log, MatchKind.StartsWith, "duration: ", true,
-            "a web-viewer or MCP statement ran past the store's slow-statement line - the entry carries the statement"),
+        /* Retained (#3899) - a statement that ran past the slow-statement line provisioning sets on the viewer
+           and mcp roles (a third of their statement_timeout, DarlingManagedRoles.SlowStatementThresholdMs), or
+           past any line an operator sets. PostgreSQL writes it as LOG with the duration first and the statement
+           after, on the same line and the tab-indented continuation lines below it. Retained for the reason
+           statement_timeout is: the text is what makes one actionable, and a count throws it away. Its text is
+           rewritten before it is kept (SlowStatementClass says how and why), and a duration line that names no
+           statement (log_duration's bare one, auto_explain's plan, whose Query Text is verbatim) is counted as
+           routine instead. */
+        new(SlowStatementClass, Log, MatchKind.StartsWith, "duration: ", true,
+            "a statement ran past the store's slow-statement line (a third of the viewer and mcp roles' statement_timeout) - kept as the statement, comments stripped, literals masked, bind parameters dropped"),
 
         /* EXCLUDING - the ~1,100/day floor. StartsWith and ERROR-scoped, so it cannot reach a FATAL or a
            PANIC and cannot match a message that merely mentions a cancel. */
@@ -268,7 +281,8 @@ public static class StoreLogClassifier
     /// <param name="Message">The message, prefix and severity field stripped, capped.</param>
     /// <param name="RawText">The entry's own lines verbatim, continuations included, capped. The parsed
     /// fields are an interpretation; this is the evidence, and a shape no rule recognises is still readable
-    /// by a person.</param>
+    /// by a person. The one exception is <see cref="SlowStatementClass"/>, whose entry is rewritten before it
+    /// is kept (its literals masked, its DETAIL lines dropped).</param>
     /// <param name="Retained">Whether the matched rule keeps text.</param>
     public readonly record struct Entry(
         string EventClass,
@@ -415,11 +429,19 @@ public static class StoreLogClassifier
                 }
 
                 var (eventClass, retained) = Match(currentSeverity, currentMessage);
+                var message = currentMessage;
+                var raw = currentRaw.ToString();
+                if (eventClass == SlowStatementClass
+                    && !TrySanitizeSlowStatement(currentMessage, raw, out message, out raw))
+                {
+                    (eventClass, retained) = (RoutineClass, false);
+                }
+
                 entries.Add(new Entry(
                     EventClass: eventClass,
                     Severity: currentSeverity,
-                    Message: Cap(currentMessage, MaxMessageLength),
-                    RawText: Cap(currentRaw.ToString(), MaxSampleLength),
+                    Message: Cap(message, MaxMessageLength),
+                    RawText: Cap(raw, MaxSampleLength),
                     Retained: retained));
 
                 currentSeverity = null;
@@ -787,4 +809,59 @@ public static class StoreLogClassifier
 
     private static string Cap(string value, int max) =>
         value.Length <= max ? value : value[..max];
+
+    /* The head of a statement-bearing duration line, as postgres.c writes it: "duration: %s ms  statement: %s"
+       for a simple query, and "parse", "bind" and "execute" (or "execute fetch from") with the prepared
+       statement's and portal's names for the extended protocol. The number is PostgreSQL's %.3f. */
+    private static readonly Regex s_slowStatementHead = new(
+        @"^duration: [0-9]+(?:\.[0-9]+)? ms  (?<kind>(?:statement|parse [^:]*|bind [^:]*|execute [^:]*):) ?(?<rest>.*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    /// <summary>
+    /// A <see cref="SlowStatementClass"/> entry as it is KEPT (#3899). The statement is the text after the
+    /// duration line's head plus the tab-indented lines below it, up to the first field line; everything from
+    /// that field line on (a DETAIL carrying bind parameters, above all) is dropped. The statement is compacted
+    /// (<see cref="StoreStatementStats.CompactStatementText"/>: comments out, whitespace collapsed) and then
+    /// masked (<see cref="PgLogTextRedactor.RedactStoredStatement"/>: every quoted, escape and dollar-quoted
+    /// literal and every bare number becomes <c>?</c>, positional parameters kept). The MESSAGE, which is what
+    /// entries group by, is the head's kind and name plus that statement, with no duration, so one slow query
+    /// is one row however often it ran; the kept ENTRY is the first line's prefix and duration with the same
+    /// statement after it, one sighting's evidence. False, and the caller counts the entry as routine, when the
+    /// first line is not a statement-bearing duration line (log_duration's bare one, auto_explain's plan): the
+    /// decision reads the first line only, so it cannot move with a read boundary.
+    /// </summary>
+    internal static bool TrySanitizeSlowStatement(string message, string rawText, out string sanitizedMessage, out string sanitizedRaw)
+    {
+        sanitizedMessage = message;
+        sanitizedRaw = rawText;
+
+        var head = s_slowStatementHead.Match(message);
+        if (!head.Success)
+        {
+            return false;
+        }
+
+        var lines = rawText.Split('\n');
+        var statement = new StringBuilder(head.Groups["rest"].Value);
+        for (var i = 1; i < lines.Length; i++)
+        {
+            if (FindField(lines[i]).Kind != FieldKind.None)
+            {
+                break;
+            }
+
+            statement.Append('\n').Append(lines[i].StartsWith('\t') ? lines[i][1..] : lines[i]);
+        }
+
+        /* Empty when a read boundary fell between the first line and its continuation lines (the sweep reads
+           capped slabs, #3021). The entry stays in this class regardless: the class is decided by the FIRST
+           line alone, like every other rule's, so the census cannot depend on where a slab happened to end. */
+        var masked = PgLogTextRedactor.RedactStoredStatement(
+            StoreStatementStats.CompactStatementText(statement.ToString(), int.MaxValue)) ?? string.Empty;
+        var firstLine = lines[0];
+        var prefixAndHead = firstLine[..(firstLine.Length - message.Length + head.Groups["rest"].Index)].TrimEnd();
+        sanitizedMessage = masked.Length == 0 ? head.Groups["kind"].Value : head.Groups["kind"].Value + " " + masked;
+        sanitizedRaw = masked.Length == 0 ? prefixAndHead : prefixAndHead + " " + masked;
+        return true;
+    }
 }

@@ -464,13 +464,16 @@ public sealed class DarlingManagedPostgres
     /// interpolates each generated password into an <c>ALTER ROLE ... PASSWORD '...'</c> literal on every
     /// start (<see cref="DarlingManagedRoles"/>), and pg_stat_statements records a utility statement's text
     /// without normalizing that literal. Off keeps utility statements out of the view entirely, so the reader
-    /// surface can never show a password; the reader function also refuses role DDL as a second guard.</para>
+    /// surface can never show a password; the reader function also refuses every statement whose text can
+    /// carry a credential, as a second guard.</para>
     ///
     /// <para><b>Restart semantics.</b> <c>shared_preload_libraries</c> is postmaster-context. This append runs
     /// before <c>pg_ctl start</c>, so a service-owned start loads the library on the very start that writes the
     /// block; the adopted-listener path in <see cref="EnsureRunningAsync"/> waits for the next service-owned
     /// start, as v2-v5 and v7 do. An <c>ALTER SYSTEM</c> override of the list in <c>postgresql.auto.conf</c>
-    /// wins over this block and is logged, never edited.</para>
+    /// wins over this block and is logged with the exact statement that fixes it, never edited; so is an
+    /// assignment added after the block, and a library named only on an earlier line the block replaces
+    /// (<see cref="LogStatementStatisticsPreloadCoverage"/>).</para>
     /// </summary>
     public const string ConfMarkerV13 = "# Managed by PerformanceMonitor Darling (v13 statement statistics) -- do not remove this block";
 
@@ -1118,9 +1121,16 @@ public sealed class DarlingManagedPostgres
     /// <summary>The library the v13 block adds to <c>shared_preload_libraries</c>.</summary>
     public const string StatementStatisticsLibrary = "pg_stat_statements";
 
-    /// <summary>The library v1 preloads, and the base the v13 merge falls back to when the file carries no
+    /// <summary>The library v1 preloads, and the base the v13 merge falls back to when the conf carries no
     /// active assignment. A managed conf always carries one by then, because v1 is appended first.</summary>
     internal const string TimescaleLibrary = "timescaledb";
+
+    /// <summary>The list-valued setting the v13 block restates.</summary>
+    internal const string PreloadSetting = "shared_preload_libraries";
+
+    /// <summary>PostgreSQL's own cap on configuration-file nesting (<c>CONF_FILE_MAX_DEPTH</c>), so an include
+    /// cycle ends where the server's own read of it would.</summary>
+    internal const int MaxConfIncludeDepth = 10;
 
     /// <summary>
     /// The v13 block (#3899): <c>shared_preload_libraries</c> re-stated as the effective list plus
@@ -1133,7 +1143,7 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV13).Append('\n');
-        builder.Append("shared_preload_libraries = '")
+        builder.Append(PreloadSetting).Append(" = '")
             .Append(MergePreloadLibraries(effectivePreloadList).Replace("'", "''", StringComparison.Ordinal))
             .Append("'\n");
         builder.Append(StatementStatisticsLibrary).Append(".track_utility = off\n");
@@ -1142,11 +1152,15 @@ public sealed class DarlingManagedPostgres
 
     /// <summary>
     /// The effective preload list plus <see cref="StatementStatisticsLibrary"/>, order and spelling preserved,
-    /// duplicates dropped. An absent or empty list merges from <see cref="TimescaleLibrary"/> rather than from
-    /// nothing: on a fresh cluster the only active assignment is v1's, and a merge that lost it would stop the
-    /// store loading TimescaleDB.
+    /// duplicates dropped, in the conf-file form (<see cref="FormatPreloadList"/>). An absent or empty list
+    /// merges from <see cref="TimescaleLibrary"/> rather than from nothing: on a fresh cluster the only active
+    /// assignment is v1's, and a merge that lost it would stop the store loading TimescaleDB.
     /// </summary>
-    internal static string MergePreloadLibraries(string? effectivePreloadList)
+    internal static string MergePreloadLibraries(string? effectivePreloadList) =>
+        FormatPreloadList(MergePreloadLibraryNames(effectivePreloadList));
+
+    /// <summary><see cref="MergePreloadLibraries"/>'s names, before they are written in either form.</summary>
+    internal static List<string> MergePreloadLibraryNames(string? effectivePreloadList)
     {
         var libraries = ParsePreloadList(effectivePreloadList);
         if (libraries.Count == 0)
@@ -1159,11 +1173,18 @@ public sealed class DarlingManagedPostgres
             libraries.Add(StatementStatisticsLibrary);
         }
 
-        return string.Join(",", libraries);
+        return libraries;
     }
 
-    /// <summary>A <c>shared_preload_libraries</c> value as its library names: comma-split, trimmed, optional
-    /// double quotes removed, blanks and case-insensitive duplicates dropped.</summary>
+    /// <summary>
+    /// A <c>shared_preload_libraries</c> value as its library names, read the way PostgreSQL's own
+    /// <c>SplitDirectoriesString</c> reads it: comma-separated, an unquoted name trimmed, a double-quoted name
+    /// taken whole (commas included, <c>""</c> an escaped quote), no case folding. Blanks and case-insensitive
+    /// duplicates are dropped. The quoted form matters because it is how <c>ALTER SYSTEM</c> stores a name it
+    /// had to quote, including the one-literal mistake (<c>'"timescaledb,pg_stat_statements"'</c> is ONE
+    /// library name, which PostgreSQL cannot load); splitting it on its commas, as the first version did, hid
+    /// exactly that mistake.
+    /// </summary>
     internal static List<string> ParsePreloadList(string? preloadList)
     {
         var libraries = new List<string>();
@@ -1172,9 +1193,61 @@ public sealed class DarlingManagedPostgres
             return libraries;
         }
 
-        foreach (var raw in preloadList.Split(','))
+        var i = 0;
+        while (i < preloadList.Length)
         {
-            var name = raw.Trim().Trim('"').Trim();
+            while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+            {
+                i++;
+            }
+
+            if (i >= preloadList.Length)
+            {
+                break;
+            }
+
+            string name;
+            if (preloadList[i] == '"')
+            {
+                var quoted = new StringBuilder();
+                i++;
+                while (i < preloadList.Length)
+                {
+                    if (preloadList[i] == '"')
+                    {
+                        if (i + 1 < preloadList.Length && preloadList[i + 1] == '"')
+                        {
+                            quoted.Append('"');
+                            i += 2;
+                            continue;
+                        }
+
+                        i++;
+                        break;
+                    }
+
+                    quoted.Append(preloadList[i]);
+                    i++;
+                }
+
+                name = quoted.ToString();
+                while (i < preloadList.Length && preloadList[i] != ',')
+                {
+                    i++;
+                }
+            }
+            else
+            {
+                var start = i;
+                while (i < preloadList.Length && preloadList[i] != ',')
+                {
+                    i++;
+                }
+
+                name = preloadList[start..i].Trim();
+            }
+
+            i++;
             if (name.Length > 0 && !libraries.Contains(name, StringComparer.OrdinalIgnoreCase))
             {
                 libraries.Add(name);
@@ -1184,12 +1257,31 @@ public sealed class DarlingManagedPostgres
         return libraries;
     }
 
+    /// <summary>Library names as a conf-file list value: comma-joined, a name double-quoted only when it has to
+    /// be (a comma, a double quote, or edge whitespace in it), which <see cref="ParsePreloadList"/> reads back
+    /// whole.</summary>
+    internal static string FormatPreloadList(IEnumerable<string> libraries) =>
+        string.Join(",", libraries.Select(library =>
+            library.IndexOfAny([',', '"']) >= 0 || library.Trim().Length != library.Length
+                ? "\"" + library.Replace("\"", "\"\"", StringComparison.Ordinal) + "\""
+                : library));
+
+    /// <summary>
+    /// Library names as the right-hand side of <c>ALTER SYSTEM SET shared_preload_libraries = ...</c>: ONE
+    /// single-quoted literal per library, comma-separated. The setting is <c>GUC_LIST_QUOTE</c>, so a single
+    /// literal holding the whole list is stored as one library name and the store will not start again
+    /// (reproduced on 18.4 by #3904's review, which caught the first version's warning advising exactly that).
+    /// </summary>
+    internal static string FormatAlterSystemPreloadList(IEnumerable<string> libraries) =>
+        string.Join(", ", libraries.Select(library => "'" + library.Replace("'", "''", StringComparison.Ordinal) + "'"));
+
     /// <summary>
     /// The value of the LAST active assignment of <paramref name="name"/> in postgresql.conf-format text, the
-    /// one PostgreSQL honours, or null when there is none. Commented lines are skipped, the <c>=</c> is optional
-    /// (PostgreSQL accepts <c>name value</c>), a quoted value is unquoted (<c>''</c> and <c>\'</c> both escape a
-    /// quote) and an unquoted one ends at whitespace or a trailing comment. A line naming a longer setting that
-    /// merely starts with <paramref name="name"/> is not a match.
+    /// one PostgreSQL honours within that text, or null when there is none. Commented lines are skipped, the
+    /// <c>=</c> is optional (PostgreSQL accepts <c>name value</c>), a quoted value is unquoted (<c>''</c> and
+    /// <c>\'</c> both escape a quote) and an unquoted one ends at whitespace or a trailing comment. A line naming
+    /// a longer setting that merely starts with <paramref name="name"/> is not a match. Reads the text alone;
+    /// <see cref="ReadConfAssignments"/> is the form that follows include directives.
     /// </summary>
     internal static string? FindLastConfAssignment(string? confText, string name)
     {
@@ -1201,28 +1293,163 @@ public sealed class DarlingManagedPostgres
         string? value = null;
         foreach (var raw in confText.Split('\n'))
         {
-            var line = raw.Trim();
-            if (line.Length == 0 || line[0] == '#' || !line.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+            if (TryParseConfLine(raw, out var key, out var parsed)
+                && key.Equals(name, StringComparison.OrdinalIgnoreCase))
             {
-                continue;
+                value = parsed;
             }
-
-            var rest = line[name.Length..];
-            if (rest.Length > 0 && rest[0] != '=' && !char.IsWhiteSpace(rest[0]))
-            {
-                continue;
-            }
-
-            rest = rest.TrimStart();
-            if (rest.StartsWith('='))
-            {
-                rest = rest[1..].TrimStart();
-            }
-
-            value = ParseConfValue(rest);
         }
 
         return value;
+    }
+
+    /// <summary>One active assignment of a setting: the file it is in (a full path), its 1-based line, and its
+    /// value as PostgreSQL reads it.</summary>
+    internal readonly record struct ConfAssignment(string File, int Line, string Value);
+
+    /// <summary>
+    /// Every active assignment of <paramref name="name"/> reachable from <paramref name="confPath"/>, in the order
+    /// PostgreSQL processes them, so the LAST is the one in force (before <c>postgresql.auto.conf</c>, which is
+    /// read after all of it). Follows <c>include</c>, <c>include_if_exists</c> and <c>include_dir</c> the way
+    /// the server does: a relative path resolves against the including file's directory, a directory
+    /// contributes its <c>*.conf</c> files not starting with a dot in name order, and nesting stops at
+    /// <see cref="MaxConfIncludeDepth"/>. A file that cannot be read contributes nothing (a missing
+    /// <c>include</c> stops the server itself, which is not this reader's to report).
+    ///
+    /// <para>Why includes are followed (#3904's review): the v13 block is appended at the END of
+    /// postgresql.conf, after every include above it, so a preload list an operator set in an included file is
+    /// one the block replaces. Merging from postgresql.conf's own text alone would drop that operator's
+    /// libraries without a word.</para>
+    /// </summary>
+    internal static List<ConfAssignment> ReadConfAssignments(string confPath, string name)
+    {
+        var found = new List<ConfAssignment>();
+        CollectConfAssignments(Path.GetFullPath(confPath), name, found, depth: 0);
+        return found;
+    }
+
+    private static void CollectConfAssignments(string path, string name, List<ConfAssignment> found, int depth)
+    {
+        if (depth > MaxConfIncludeDepth)
+        {
+            return;
+        }
+
+        string text;
+        try
+        {
+            text = File.ReadAllText(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(path) ?? string.Empty;
+        var lineNumber = 0;
+        foreach (var raw in text.Split('\n'))
+        {
+            lineNumber++;
+            if (!TryParseConfLine(raw, out var key, out var value))
+            {
+                continue;
+            }
+
+            if (key.Equals("include", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("include_if_exists", StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryResolveConfPath(directory, value, out var included))
+                {
+                    CollectConfAssignments(included, name, found, depth + 1);
+                }
+            }
+            else if (key.Equals("include_dir", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryResolveConfPath(directory, value, out var includeDirectory))
+                {
+                    continue;
+                }
+
+                string[] files;
+                try
+                {
+                    files = Directory.Exists(includeDirectory) ? Directory.GetFiles(includeDirectory) : [];
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    files = [];
+                }
+
+                foreach (var file in files
+                    .Where(f => Path.GetFileName(f) is { } n && n.EndsWith(".conf", StringComparison.Ordinal) && !n.StartsWith('.'))
+                    .OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal))
+                {
+                    CollectConfAssignments(file, name, found, depth + 1);
+                }
+            }
+            else if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                found.Add(new ConfAssignment(path, lineNumber, value));
+            }
+        }
+    }
+
+    /// <summary>An include directive's path, resolved against the including file's directory the way the
+    /// server resolves it; false for an empty value or one that is not a path this platform can resolve, which
+    /// contributes nothing rather than throwing on the start path.</summary>
+    private static bool TryResolveConfPath(string directory, string value, out string fullPath)
+    {
+        fullPath = string.Empty;
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            fullPath = Path.GetFullPath(Path.Combine(directory, value));
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>One postgresql.conf line as <c>name [=] value</c>, or false for a blank, a comment, or a line
+    /// that is not an assignment. The name is PostgreSQL's identifier shape, dots included for a module's own
+    /// settings.</summary>
+    private static bool TryParseConfLine(string raw, out string key, out string value)
+    {
+        key = string.Empty;
+        value = string.Empty;
+
+        var line = raw.Trim();
+        if (line.Length == 0 || line[0] == '#')
+        {
+            return false;
+        }
+
+        var end = 0;
+        while (end < line.Length && (char.IsLetterOrDigit(line[end]) || line[end] is '_' or '.' || line[end] >= '\u0080'))
+        {
+            end++;
+        }
+
+        if (end == 0 || (end < line.Length && line[end] != '=' && !char.IsWhiteSpace(line[end])))
+        {
+            return false;
+        }
+
+        key = line[..end];
+        var rest = line[end..].TrimStart();
+        if (rest.StartsWith('='))
+        {
+            rest = rest[1..].TrimStart();
+        }
+
+        value = ParseConfValue(rest);
+        return true;
     }
 
     private static string ParseConfValue(string text)
@@ -1269,36 +1496,89 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// The v13 <c>ALTER SYSTEM</c> check (#3899): logs one warning when <c>postgresql.auto.conf</c> assigns a
-    /// <c>shared_preload_libraries</c> list without <see cref="StatementStatisticsLibrary"/>. That file is read
-    /// after postgresql.conf, so its list wins and the v13 preload is inert until the override includes the
-    /// library. Changes nothing, the v12 precedent: the auto.conf is never edited. Never throws; an unreadable
-    /// auto.conf is logged at Debug and treated as no override.
+    /// The v13 every-start check (#3899): which <c>shared_preload_libraries</c> assignment is IN FORCE, across
+    /// postgresql.conf with its includes and then <c>postgresql.auto.conf</c> (read last, so an
+    /// <c>ALTER SYSTEM</c> override wins), and whether it still loads what it should. Changes nothing, the v12
+    /// precedent: neither file is edited here. Three outcomes are logged, each with its exact fix:
+    /// <list type="bullet">
+    /// <item><description>The list in force names a library holding a comma: the one-literal <c>ALTER SYSTEM</c>
+    /// mistake, stored as ONE name PostgreSQL cannot load, so the store will not start. An Error, and a remedy
+    /// that works on a store that is down.</description></item>
+    /// <item><description>The list in force lacks <see cref="StatementStatisticsLibrary"/>: an <c>ALTER SYSTEM</c>
+    /// override, or an assignment an operator put after the v13 block, and the store records no statement
+    /// statistics until it names the library.</description></item>
+    /// <item><description>A library named by an EARLIER assignment is missing from the one in force. The v13
+    /// block restated the list once, when it was appended, so an operator who later adds a library to an earlier
+    /// line (v1's, or their own above the block) has an edit PostgreSQL ignores, because the later assignment
+    /// replaces the whole list. #3904's review found nothing said so.</description></item>
+    /// </list>
+    /// Never throws; a file that cannot be read contributes nothing.
     /// </summary>
-    internal void LogStatementStatisticsAutoConfOverride(string dataDirectory)
+    internal void LogStatementStatisticsPreloadCoverage(string dataDirectory)
     {
-        var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
-        string? autoConf;
-        try
-        {
-            autoConf = File.Exists(autoConfPath) ? File.ReadAllText(autoConfPath) : null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            _logger.LogDebug("v13 statement statistics: could not read {AutoConf} to check for an ALTER SYSTEM preload override ({Message}).", autoConfPath, ex.Message);
-            return;
-        }
-
-        var overrideList = FindLastConfAssignment(autoConf, "shared_preload_libraries");
-        if (overrideList is null
-            || ParsePreloadList(overrideList).Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        var autoConfPath = Path.GetFullPath(Path.Combine(dataDirectory, "postgresql.auto.conf"));
+        var chain = ReadConfAssignments(Path.Combine(dataDirectory, "postgresql.conf"), PreloadSetting);
+        chain.AddRange(ReadConfAssignments(autoConfPath, PreloadSetting));
+        if (chain.Count == 0)
         {
             return;
         }
 
-        _logger.LogWarning(
-            "postgresql.auto.conf sets shared_preload_libraries = '{Value}' (an ALTER SYSTEM override) without {Library}. PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so the v13 block's preload is inert and the store records no statement statistics until the override includes it: ALTER SYSTEM SET shared_preload_libraries = '{Suggested}', then restart the store. This service does not edit postgresql.auto.conf.",
-            overrideList, StatementStatisticsLibrary, MergePreloadLibraries(overrideList));
+        var inForce = chain[^1];
+        var inForceLibraries = ParsePreloadList(inForce.Value);
+        var inAutoConf = string.Equals(inForce.File, autoConfPath, StringComparison.OrdinalIgnoreCase);
+
+        if (inForceLibraries.Any(library => library.Contains(',', StringComparison.Ordinal)))
+        {
+            var split = MergePreloadLibraryNames(string.Join(",", inForceLibraries));
+            _logger.LogError(
+                "{File} line {Line} sets shared_preload_libraries = '{Value}', which names ONE library holding commas: that is what ALTER SYSTEM stores when a whole list is passed as a single quoted literal. PostgreSQL cannot load it, so the store will not start (FATAL: could not access file). {Fix}",
+                inForce.File, inForce.Line, inForce.Value,
+                inAutoConf
+                    ? $"The store cannot start to run ALTER SYSTEM, so delete that line from postgresql.auto.conf by hand and start the store; then, to keep the list, run ALTER SYSTEM SET shared_preload_libraries = {FormatAlterSystemPreloadList(split)} (one quoted literal per library) and restart it again."
+                    : $"Edit that line to shared_preload_libraries = '{FormatPreloadList(split).Replace("'", "''", StringComparison.Ordinal)}' and start the store.");
+            return;
+        }
+
+        if (!inForceLibraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        {
+            var suggested = MergePreloadLibraryNames(inForce.Value);
+            if (inAutoConf)
+            {
+                _logger.LogWarning(
+                    "postgresql.auto.conf sets shared_preload_libraries = '{Value}' (an ALTER SYSTEM override) without {Library}. PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so the v13 block's preload is inert and the store records no statement statistics until the override includes it: ALTER SYSTEM SET shared_preload_libraries = {Suggested}, then restart the store. One quoted literal per library: a single literal holding the whole list is stored as one library name, and the store would not start. This service does not edit postgresql.auto.conf.",
+                    inForce.Value, StatementStatisticsLibrary, FormatAlterSystemPreloadList(suggested));
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "{File} line {Line} sets shared_preload_libraries = '{Value}' without {Library}, and it is the assignment in force: it is read after the v13 block, and a later assignment replaces the whole list, so the store records no statement statistics until it names the library. Change that line to shared_preload_libraries = '{Suggested}' and restart the store.",
+                    inForce.File, inForce.Line, inForce.Value, StatementStatisticsLibrary,
+                    FormatPreloadList(suggested).Replace("'", "''", StringComparison.Ordinal));
+            }
+
+            return;
+        }
+
+        var overridden = new List<(string Library, ConfAssignment Where)>();
+        foreach (var earlier in chain.Take(chain.Count - 1))
+        {
+            foreach (var library in ParsePreloadList(earlier.Value))
+            {
+                if (!inForceLibraries.Contains(library, StringComparer.OrdinalIgnoreCase)
+                    && !overridden.Any(o => o.Library.Equals(library, StringComparison.OrdinalIgnoreCase)))
+                {
+                    overridden.Add((library, earlier));
+                }
+            }
+        }
+
+        foreach (var (library, where) in overridden)
+        {
+            _logger.LogWarning(
+                "{Library} is named by the shared_preload_libraries assignment at {File} line {Line}, but the assignment in force is {InForceFile} line {InForceLine} ('{InForceValue}'), which replaces the whole list, so it is not loaded. Add it to that line if it should load, or remove it from the earlier one if it should not.",
+                library, where.File, where.Line, inForce.File, inForce.Line, inForce.Value);
+        }
     }
 
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
@@ -2195,18 +2475,22 @@ public sealed class DarlingManagedPostgres
            The ONE block that re-reads the file instead of trusting `conf`: its preload value is MERGED from the
            effective list, and on a fresh cluster that list was written by the v1 append above, after `conf`
            was read. The once-read text would hold only initdb's commented default, and a merge from it would
-           write a list without timescaledb. Restart-only, and appended before pg_ctl start, so a service-owned
-           start loads the library on this start. */
+           write a list without timescaledb. The re-read follows include directives (ReadConfAssignments), so a
+           list set in an included file above the block is merged rather than replaced. Restart-only, and
+           appended before pg_ctl start, so a service-owned start loads the library on this start. The coverage
+           check after it runs on EVERY start, because the block restates the list once and an edit made after
+           that is the one it would otherwise silently override. */
         if (!conf.Contains(ConfMarkerV13, StringComparison.Ordinal))
         {
-            var effectivePreload = FindLastConfAssignment(File.ReadAllText(confPath), "shared_preload_libraries");
+            var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
+            var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
             File.AppendAllText(confPath, BuildStatementStatisticsConfAppend(effectivePreload));
             _logger.LogInformation(
                 "Appended v13 statement statistics to postgresql.conf (shared_preload_libraries = '{Libraries}', {Library}.track_utility = off): the store keeps per-statement timings, so a slow web-viewer or MCP read can be named by get_store_query_stats instead of guessed at. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",
                 MergePreloadLibraries(effectivePreload), StatementStatisticsLibrary);
         }
 
-        LogStatementStatisticsAutoConfOverride(dataDirectory);
+        LogStatementStatisticsPreloadCoverage(dataDirectory);
     }
 
     /// <summary>
