@@ -931,13 +931,28 @@ public sealed class McpPayloadContractCensusTests
     /// <summary>
     /// The Darling reader SQL constants whose outer statement anchors on <c>= (SELECT MAX(collection_time |
     /// capture_time) …)</c> — a latest-snapshot read — and do NOT project the anchor column, so the tool above
-    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Two, both known:
+    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Three, all known:
     /// <c>IndexUsageSql</c> is the object-stats residual <see cref="McpLatestSnapshotStampTests.UnstampedLatestReadsPendingA10"/>
     /// already holds; <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row to
-    /// stamp. Shrink-only: stamping the trio is the A10 lane's.
+    /// stamp; and <c>IndexLockingSql</c> joined them in #3878.
+    ///
+    /// <para><b>Why this roster GREW, and why that is not the drift it looks like.</b> It was written
+    /// shrink-only, on the reasoning that a read either projects its anchor or is waiting for the A10 lane to
+    /// stamp it. <c>IndexLockingSql</c> was invisible to this census before #3878 for a reason that is
+    /// itself the defect: its anchor was a per-<c>database_name</c> <c>MAX(collection_time)</c> group inside a
+    /// CTE, and this scan deliberately ignores an anchor below depth zero because such an anchor picks a SET
+    /// rather than a snapshot. That was exactly true of the old shape — it picked one row per name the store
+    /// had ever seen, which is why a database renamed away was returned forever (#3876). Anchoring it on the
+    /// server's newest capture makes it a snapshot read for the first time, so the census sees it and asks the
+    /// standing question. Its answer is the same as its two neighbours': the row statement does not project
+    /// <c>collection_time</c> and <c>get_object_locking</c> publishes no <c>captured_at</c>, which is the A10
+    /// residual all three sit in. A roster entry gained by a read becoming MORE honest is the census working;
+    /// the shrink-only rule still governs departures, and all three leave together when A10 stamps the
+    /// family.</para>
     /// </summary>
     public static readonly string[] LatestAnchoredReadsWithoutTheirStamp =
     [
+        "DarlingObjectStatsReader.cs IndexLockingSql",
         "DarlingObjectStatsReader.cs IndexUsageMatchCountSql",
         "DarlingObjectStatsReader.cs IndexUsageSql",
     ];

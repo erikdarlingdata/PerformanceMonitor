@@ -254,13 +254,49 @@ public sealed class ViewerFinOpsSqlTests
 
     // ── Locking ──
 
+    /// <summary>
+    /// #3878 moved all three locking reads off per-<c>database_name</c> "latest" groups and onto the server's
+    /// newest capture, so what these fragments assert changed with them. The <c>$2</c>/<c>$3</c> positions and
+    /// the relation are unchanged parity facts; the ANCHOR is now pinned in all three, because it is the
+    /// property the fix is: a per-name <c>MAX(collection_time)</c> group makes every name the store ever saw
+    /// immortal, and a renamed-away database renders (and is selectable) forever. The grid, its filtered arm
+    /// and its DB selector are asserted together on purpose — fixing fewer than all three leaves the dead name
+    /// reachable through the ones left behind.
+    ///
+    /// <para>The database filter goes through <see cref="SqlTextPin"/> rather than a plain substring: the fix
+    /// qualified it to <c>ios.database_name</c> when the CTE that referenced the bare name went away, and
+    /// #3217's whole point is that a pin asserting a read still FILTERS must not red merely because an alias
+    /// appeared in front of the column.</para>
+    /// </summary>
     [Fact]
-    public void IndexLockingReads_AllAndByDbVariants_ReadColumnsThatExist()
+    public void IndexLockingReads_AllAndByDbVariants_AnchorOnServerLatest_ReadColumnsThatExist()
     {
+        const string serverLatestAnchor =
+            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)";
+
         Assert.Contains("LIMIT $2", ViewerDataService.IndexLockingAllSql, StringComparison.Ordinal);
-        Assert.Contains("AND database_name = $2", ViewerDataService.IndexLockingByDbSql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(serverLatestAnchor, ViewerDataService.IndexLockingAllSql,
+            "the locking grid no longer anchors on the server's latest capture — #3878's immortal per-name groups are back");
+
+        SqlTextPin.AssertExpresses("AND database_name = $2", ViewerDataService.IndexLockingByDbSql,
+            "the single-database arm no longer filters on the name it was handed");
         Assert.Contains("LIMIT $3", ViewerDataService.IndexLockingByDbSql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(serverLatestAnchor, ViewerDataService.IndexLockingByDbSql,
+            "the filtered arm can resurrect a renamed-away database the grid and the selector have dropped (#3878)");
+
         Assert.Contains("FROM v_index_object_stats", ViewerDataService.IndexLockingDatabasesSql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses(serverLatestAnchor, ViewerDataService.IndexLockingDatabasesSql,
+            "the DB selector no longer anchors on the server's latest capture — it will OFFER names that no longer exist (#3878)");
+
+        /* The shape the fix retired, in all three: a name-keyed "latest" group rejoined to the rows. */
+        foreach (var sql in new[]
+        {
+            ViewerDataService.IndexLockingAllSql, ViewerDataService.IndexLockingByDbSql,
+            ViewerDataService.IndexLockingDatabasesSql,
+        })
+        {
+            Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
+        }
 
         var ddl = PgSchemaGenerator.CreateTable(IndexObjectStatsCollector.Instance);
         Assert.Equal("index_object_stats", IndexObjectStatsCollector.Instance.TargetTable);

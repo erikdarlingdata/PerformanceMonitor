@@ -132,15 +132,32 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.Contains("user_seeks", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// This pin used to be named <c>IndexLockingSql_PerDatabaseLatest_…</c> and, in that name, asserted the
+    /// defect as intended behaviour: "latest" resolved PER <c>database_name</c>, which #3876 proved makes
+    /// every name the store has ever seen an immortal group, so a renamed-away database is returned forever.
+    /// #3878 substituted the server-latest anchor at this read and the Viewer's three, and renaming the test
+    /// with it is the point rather than a tidy-up: a behaviour pinned by name is a claim about what the read
+    /// is FOR, and that claim is what changed. The two halves the old name also carried — only contended rows,
+    /// most contended first — are unchanged and still asserted here.
+    ///
+    /// <para>A bare <c>MAX(collection_time)</c> is no longer a sufficient needle, because the shape being
+    /// retired contained one too. The anchor is pinned whole, and the retired grouping asserted absent, so
+    /// this cannot pass again by going back.</para>
+    /// </summary>
     [Fact]
-    public void IndexLockingSql_PerDatabaseLatest_NonzeroWaits_ContendedFirst()
+    public void IndexLockingSql_ServerLatestCapture_NonzeroWaits_ContendedFirst()
     {
         var sql = DarlingObjectStatsReader.IndexLockingSql;
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
         Assert.Contains("row_lock_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("page_io_latch_wait_in_ms", sql, StringComparison.Ordinal);
         Assert.Contains("index_lock_promotion_count", sql, StringComparison.Ordinal);
-        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
+        SqlTextPin.AssertExpresses(
+            "collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)",
+            sql,
+            "the read is no longer anchored on the server's latest capture — #3878's immortal per-name groups are back");
+        Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -289,6 +306,138 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             .Select(tbl => $"DELETE FROM {tbl} WHERE server_id = {ServerId};"));
         if (!keepServer) sql += $" DELETE FROM servers WHERE server_id = {ServerId};";
         using var cleanup = new NpgsqlCommand(sql, connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
+    }
+}
+
+/// <summary>
+/// #3878, the reporter's repro from #3876 executed against Darling's store: a database renamed between
+/// captures. The OLD name's contended rows exist only in an EARLIER capture, the NEW name's only in the
+/// newest — which is what a rename actually looks like in the store, because the collector re-derives the
+/// name from the server on every pass and never revisits old rows.
+///
+/// <para>Under the retired anchor, "latest" was resolved per <c>database_name</c>, so the old name kept a
+/// group of its own whose newest row was the last capture before the rename — forever. Anchored on the
+/// SERVER's newest capture, all four reads see only what the newest pass collected. All four are asserted in
+/// one test deliberately: they are one user-visible surface, and the interesting failure is a PARTIAL fix.
+/// The MCP tool would hand an agent a dead name as a live peer; the Viewer's grid would display it; its DB
+/// selector would OFFER it, which is how it could still be picked rather than merely seen; and the filtered
+/// arm is what a pick lands on, so leaving that one behind would make the dead name reachable by the very
+/// act of selecting it. The old name's rows are asserted still PRESENT in the store at their own capture
+/// time, because none of this rewrites history — it only stops reading it as the present.</para>
+///
+/// <para>Live-gated (<c>DARLING_TEST_PG</c>): the claim is about what SQL returns over planted rows, and the
+/// always-runs structural guards for the same property are the anchor pins in
+/// <c>DarlingMcpObjectStatsToolsSurfaceAndSqlTests</c> and <c>ViewerFinOpsSqlTests</c>.</para>
+/// </summary>
+[Collection("live-postgres")]
+public sealed class DarlingIndexLockingRenamedDatabaseLivePostgresTests
+{
+    private const string ServerName = "darling-locking-rename-3878";
+    private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+    private const string OldName = "SalesDb_Old";
+    private const string NewName = "SalesDb";
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    [Fact]
+    public async Task AfterADatabaseRename_AllFourLockingReads_ShowOnlyTheCurrentName()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live locking-rename test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var newest = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            var beforeRename = newest.AddDays(-30);
+
+            /* Pre-rename capture: contention under the OLD name only. */
+            await InsertContendedRowAsync(connection, ct, beforeRename, OldName, rowLockWaitMs: 40_000);
+            /* Newest capture: the same workload under the NEW name; the old name is absent from this pass. */
+            await InsertContendedRowAsync(connection, ct, newest, NewName, rowLockWaitMs: 70_000);
+
+            /* 1. The MCP reader behind get_object_locking. */
+            var mcpRows = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, ServerId, 200, ct);
+            Assert.Contains(mcpRows, r => r.DatabaseName == NewName && r.RowLockWaitInMs == 70_000);
+            Assert.DoesNotContain(mcpRows, r => r.DatabaseName == OldName);
+
+            /* ...and through the tool itself, so the envelope an agent reads is checked too. Parsed, never
+               substring-matched on quoted text: the serializer escapes apostrophes. */
+            var payload = await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, ServerName);
+            DarlingMcpTestData.AssertEnvelope(payload, ServerName, "objects");
+            var names = DatabaseNamesIn(payload);
+            Assert.Contains(NewName, names);
+            Assert.DoesNotContain(OldName, names);
+
+            /* 2. The Viewer's all-databases grid. */
+            var gridRows = await viewer.GetIndexLockingAsync(ServerId, 200, null, ct);
+            Assert.Contains(gridRows, r => r.DatabaseName == NewName && r.RowLockWaitInMs == 70_000);
+            Assert.DoesNotContain(gridRows, r => r.DatabaseName == OldName);
+
+            /* 3. The DB selector: a name it does not offer cannot be picked. */
+            var selector = await viewer.GetIndexLockingDatabasesAsync(ServerId, ct);
+            Assert.Contains(NewName, selector);
+            Assert.DoesNotContain(OldName, selector);
+
+            /* 4. The filtered arm, asked for the dead name directly — the one a stale bookmark or a
+               hand-typed filter would still reach. */
+            Assert.Empty(await viewer.GetIndexLockingAsync(ServerId, 200, OldName, ct));
+            Assert.NotEmpty(await viewer.GetIndexLockingAsync(ServerId, 200, NewName, ct));
+
+            /* History is intact: the pre-rename rows are still there, at the capture that saw them. */
+            using var history = new NpgsqlCommand(
+                "SELECT COUNT(*) FROM index_object_stats WHERE server_id = $1 AND database_name = $2", connection);
+            history.Parameters.AddWithValue(ServerId);
+            history.Parameters.AddWithValue(OldName);
+            Assert.Equal(1L, (long)(await history.ExecuteScalarAsync(ct))!);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The database names the tool's <c>objects</c> array carries, read as JSON rather than scanned
+    /// as text.</summary>
+    private static List<string> DatabaseNamesIn(string payload)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(payload);
+        var names = new List<string>();
+        foreach (var item in doc.RootElement.GetProperty("objects").EnumerateArray())
+        {
+            if (item.TryGetProperty("database_name", out var name) && name.GetString() is { } value)
+                names.Add(value);
+        }
+        return names;
+    }
+
+    private static Task InsertContendedRowAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct,
+        DateTime collectionTime, string databaseName, long rowLockWaitMs) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO index_object_stats (collection_id, collection_time, server_id, server_name, database_name, schema_name, object_id, table_name, index_id, index_name, index_type_desc, reserved_mb, used_mb, total_rows, row_lock_wait_count, row_lock_wait_in_ms, page_lock_wait_count, page_lock_wait_in_ms, index_lock_promotion_count, page_latch_wait_in_ms, page_io_latch_wait_in_ms)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+            CollectionIdGenerator.Next(), collectionTime, ServerId, ServerName, databaseName, "dbo", 100, "Orders", 1,
+            "PK_Orders", "CLUSTERED", 90m, 85m, 500_000L, 80L, rowLockWaitMs, 5L, 60L, 2L, 30L, 10L);
+
+    private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        using var cleanup = new NpgsqlCommand(
+            $"DELETE FROM index_object_stats WHERE server_id = {ServerId}; DELETE FROM servers WHERE server_id = {ServerId};",
+            connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
