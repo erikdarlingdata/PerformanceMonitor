@@ -9,7 +9,9 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
@@ -119,6 +121,47 @@ public sealed class DarlingPgRuntimeVersionPinTests
             "TimescaleDB archive than fetch-pg-runtime.ps1 currently pins.");
         Assert.True(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "lib", $"timescaledb-{pinnedTsVersion}.dll")),
             $"The assembled runtime has no timescaledb-{pinnedTsVersion}.dll — same staleness, library side.");
+    }
+
+    /// <summary>
+    /// #3906: an unstamped host is adopted only when its full PostgreSQL version equals the package's, and
+    /// the two sides come from different places. The host side is the extracted <c>pg_ctl --version</c>
+    /// line; the package side is the zip's <c>pg_ctl.exe</c> version resource, whose numeric block EDB
+    /// encodes as 18.0.4 for 18.4. So the seam is checked on the real binary: both readings must come out
+    /// as the pinned major.minor. If the resource stopped carrying the minor, every unstamped host would
+    /// be compared on TimescaleDB alone again, and a minor-only security release would never reach it.
+    /// </summary>
+    [Fact]
+    public void BundledRuntime_ZipResourceAndVersionLine_BothReadThePinnedMinor_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory to compare the zip's and the binary's version readings.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+
+        var pgCtl = Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe");
+        Assert.SkipUnless(File.Exists(pgCtl),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var pinned = Version.Parse(PinnedValue(FetchScriptText, "pgVersion"));
+
+        /* A zip laid out the way the shipped one is, holding only the entry the package side reads. */
+        var zip = Path.Combine(Path.GetTempPath(), $"pm-runtime-pin-{Guid.NewGuid():N}.zip");
+        try
+        {
+            using (var archive = ZipFile.Open(zip, ZipArchiveMode.Create))
+            {
+                archive.CreateEntryFromFile(pgCtl, "pgsql/bin/pg_ctl.exe");
+            }
+
+            Assert.Equal(ExpectedPostgresMajor, DarlingStoreUpgrade.TryReadZipPostgresMajor(zip));
+            Assert.Equal(pinned, DarlingStoreUpgrade.TryReadZipPostgresVersion(zip));
+            Assert.Equal(pinned, DarlingStoreUpgrade.ParsePostgresVersion(RunForOutput(pgCtl, "--version")));
+        }
+        finally
+        {
+            File.Delete(zip);
+        }
     }
 
     private static string RunForOutput(string fileName, string arguments)

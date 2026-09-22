@@ -13,16 +13,18 @@
 # Secrets never land in darling.json — use env:/file: references (#1804 stage 1), which are compose
 # `secrets:`-friendly.
 
-# Pinned to the SDK feature band global.json asks for, NOT the floating :10.0 tag. global.json requests
-# 10.0.302 with rollForward "latestPatch", which rolls only inside the 3xx band — so the moment the floating
-# tag advanced to an SDK 10.0.400 image, every container build died with "A compatible .NET SDK was not
-# found ... Requested SDK version: 10.0.302 / Installed SDKs: 10.0.400" and a bare exit code 155. It broke
-# dev and both open PRs at once, and it broke on a Microsoft image refresh rather than on any commit here.
+# Pinned to the SDK global.json asks for, NOT the floating :10.0 tag. global.json requests an exact SDK
+# with rollForward "latestPatch", which rolls only inside that SDK's feature band. When it asked for 10.0.302,
+# the floating tag advanced to an SDK 10.0.400 image, and every container build died with "A compatible .NET
+# SDK was not found ... Requested SDK version: 10.0.302 / Installed SDKs: 10.0.400" and a bare exit code 155.
+# It broke dev and both open PRs at once, and it broke on a Microsoft image refresh rather than on any commit here.
 #
 # The runner-side build never saw it because setup-dotnet resolves its SDK FROM global.json; only the
 # container had an independent opinion about which SDK to use. Pinning removes that second opinion: bump
 # this line and global.json together, deliberately, instead of being bumped by an upstream tag move.
-FROM mcr.microsoft.com/dotnet/sdk:10.0.302 AS build
+# Dependabot's dotnet-sdk updates edit only global.json, so DockerfileSdkPinTests fails their pull request
+# until this line matches (#3906).
+FROM mcr.microsoft.com/dotnet/sdk:10.0.401 AS build
 
 # The msbuild version property for the publish below, threaded in by nightly.yml (#3455) so the
 # service compiled into a :nightly image stamps the same 3.7.0-nightly.<date>.<run> string its image

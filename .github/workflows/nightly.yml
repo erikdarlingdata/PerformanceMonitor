@@ -403,8 +403,8 @@ jobs:
       # revert, and the loopback override that stops pg_upgrade dialing ::1 against our IPv4-only
       # listen_addresses. String assertions catch that constant being deleted; nothing but this
       # catches the override ceasing to TAKE EFFECT, and the failure mode is a fleet-wide hang.
-      # Only the DOWNLOADS are cached (~340MB of pinned archives): the script re-verifies them by
-      # SHA256 and re-assembles in seconds, so a warm cache costs no network.
+      # Only the DOWNLOADS are cached (~680MB of pinned archives, both fixture runtimes): the script
+      # re-verifies them by SHA256 and re-assembles in seconds, so a warm cache costs no network.
       - name: Cache upgrade-fixture downloads (previous-major runtime)
         uses: actions/cache@v6
         with:
@@ -412,7 +412,8 @@ jobs:
           key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
 
       # -SkipNew: the CURRENT runtime is already built/cached above as pg-runtime.zip, which is what
-      # DARLING_TEST_PGRUNTIME_NEWZIP points at. This step only needs the old side.
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at. This step only needs the old sides: the previous major,
+      # and (#3906) the previous release on the current major.
       - name: Build previous-major runtime for the upgrade fixture
         shell: pwsh
         run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
@@ -481,6 +482,10 @@ jobs:
           # sees a FRESH store, so nothing else can catch an upgrade path that breaks.
           DARLING_TEST_PGRUNTIME_OLD: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\old\pg-runtime
           DARLING_TEST_PGRUNTIME_NEWZIP: ${{ github.workspace }}\Darling\artifacts\pg-runtime.zip
+          # #3906: the previous release's runtime on the bundle's OWN major, for the same-major E2E. That
+          # swap (no pg_upgrade, same data directory) is what nearly every field host takes on a release
+          # that moves PostgreSQL's minor, and nothing else runs it with real data, stamped or not.
+          DARLING_TEST_PGRUNTIME_PREVIOUS: ${{ github.workspace }}\Darling\artifacts\upgrade-fixture\previous\pg-runtime
         run: dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -trx TestResults/darling-nightly.trx
 
       - name: Stop PostgreSQL
