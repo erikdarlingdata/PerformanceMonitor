@@ -90,13 +90,15 @@ public static class McpUnknownArgumentGuard
             return null;
         }
 
-        var accepted = AcceptedParameters(tool);
-
-        /* A tool that advertises no properties at all is not evidence that everything is unknown: the SDK's
-           default schema for a no-parameter tool is the bare {"type":"object"}, and a schema we could not
-           read is a guard bug, not a caller bug. Refusing on an empty accepted set would turn either into a
-           wall of false refusals across the whole surface, so an unreadable schema declines to judge. */
-        if (accepted.Count == 0)
+        /* A schema we cannot READ is a guard bug, not a caller bug, and refusing on one would turn a guard
+           into a wall of false refusals across the whole surface — so an unreadable schema declines to
+           judge. An EMPTY one is a different thing entirely: a tool that takes no parameters advertises a
+           perfectly readable object schema with no properties, and every key sent to it is unknown. The
+           census caught seven of those (list_servers, get_alert_settings, describe_custom_view_catalog and
+           four more) sailing through an earlier version of this guard that read "no properties" as "cannot
+           tell" — and a no-argument read is exactly where a stray filter key does the most damage, because
+           the caller believes it narrowed a fleet-wide answer. */
+        if (!TryReadAcceptedParameters(tool, out var accepted))
         {
             return null;
         }
@@ -120,15 +122,21 @@ public static class McpUnknownArgumentGuard
     /// what the binder was built from, and it already excludes the DI-injected service parameters that no
     /// caller may send — so quoting it back is both the honest list and the correct one.
     ///
-    /// <para>Ordinal-ignore-case because that is the binder's own matching, per the type doc.</para>
+    /// <para>Ordinal-ignore-case because that is the binder's own matching, per the type doc. Returns false
+    /// only when the schema is not a readable object — an object with no <c>properties</c> is a readable
+    /// schema for a tool that accepts nothing, and returns an empty set rather than a failure.</para>
     /// </summary>
-    private static HashSet<string> AcceptedParameters(McpServerTool tool)
+    private static bool TryReadAcceptedParameters(McpServerTool tool, out HashSet<string> accepted)
     {
-        var accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        accepted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var schema = tool.ProtocolTool.InputSchema;
-        if (schema.ValueKind == JsonValueKind.Object
-            && schema.TryGetProperty("properties", out var properties)
+        if (schema.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        if (schema.TryGetProperty("properties", out var properties)
             && properties.ValueKind == JsonValueKind.Object)
         {
             foreach (var property in properties.EnumerateObject())
@@ -137,7 +145,7 @@ public static class McpUnknownArgumentGuard
             }
         }
 
-        return accepted;
+        return true;
     }
 
     /// <summary>
@@ -147,7 +155,6 @@ public static class McpUnknownArgumentGuard
     private static CallToolResult Envelope(string toolName, List<string> unknown, HashSet<string> accepted)
     {
         var named = string.Join(", ", unknown.Select(key => $"'{key}'"));
-        var acceptedList = string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal));
 
         var sentence = unknown.Count == 1
             ? $"Unknown argument {named} for tool '{toolName}'."
@@ -166,9 +173,15 @@ public static class McpUnknownArgumentGuard
             sentence += $" Did you mean {string.Join(", ", suggestions)}?";
         }
 
-        sentence += $" Accepted parameters: {acceptedList}."
-            + " The call was refused rather than run without it, because an argument this tool does not"
-            + " declare would have been dropped and the answer would have been to a different question.";
+        /* A no-parameter tool says so, rather than printing "Accepted parameters: ." — it is also the
+           clearest possible correction, because the caller's whole argument object was the mistake. */
+        sentence += accepted.Count == 0
+            ? " This tool accepts no parameters."
+            : $" Accepted parameters: {string.Join(", ", accepted.OrderBy(name => name, StringComparer.Ordinal))}.";
+
+        sentence += " The call was refused rather than run without it, because an argument this tool does"
+            + " not declare would have been dropped and the answer would have been to a different"
+            + " question.";
 
         return new CallToolResult
         {
