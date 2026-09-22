@@ -425,8 +425,9 @@ public sealed class DarlingManagedPostgresTests
 
         /* A positive control on the enumeration itself: an empty or one-element set would make every
            assertion below vacuously true, and a reflection filter that stopped matching is exactly the
-           silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing). */
-        Assert.Equal(12, markers.Length);
+           silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
+           thirteen as of #3899 (v13 statement statistics). */
+        Assert.Equal(13, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -444,6 +445,169 @@ public sealed class DarlingManagedPostgresTests
                     $"{name} is a substring of {otherName}, so EnsureConfAppended's Contains check for {name} " +
                     "would be satisfied by a cluster that only ever gained the other block.");
             }
+        }
+    }
+
+    /// <summary>
+    /// The v13 block (#3899): two settings and nothing else — the preload list, MERGED so it keeps whatever the
+    /// file already loaded, and utility tracking off. The second is a security setting: provisioning puts each
+    /// role password in an ALTER ROLE literal every start, and with utility tracking on pg_stat_statements
+    /// records that statement verbatim (measured on the bundled 18.4 / 1.12).
+    /// </summary>
+    [Fact]
+    public void V13Block_MergesTheLibraryIntoTheEffectiveList_AndTurnsUtilityTrackingOff()
+    {
+        var block = DarlingManagedPostgres.BuildStatementStatisticsConfAppend("timescaledb,auto_explain");
+
+        Assert.Equal(1, CountOccurrences(block, DarlingManagedPostgres.ConfMarkerV13));
+        Assert.Equal(
+            new[] { "pg_stat_statements.track_utility", "shared_preload_libraries" },
+            SettingNames(block).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.Equal("timescaledb,auto_explain,pg_stat_statements", DarlingManagedPostgres.FindLastConfAssignment(block, "shared_preload_libraries"));
+        Assert.Equal("off", DarlingManagedPostgres.FindLastConfAssignment(block, "pg_stat_statements.track_utility"));
+    }
+
+    /// <summary>The merge adds the library once and keeps every other name, spelling and order; an empty or
+    /// absent list merges from timescaledb, the one library a managed store must never lose (#3899).</summary>
+    [Theory]
+    [InlineData(null, "timescaledb,pg_stat_statements")]
+    [InlineData("", "timescaledb,pg_stat_statements")]
+    [InlineData("timescaledb", "timescaledb,pg_stat_statements")]
+    [InlineData("timescaledb,auto_explain", "timescaledb,auto_explain,pg_stat_statements")]
+    [InlineData("timescaledb, pg_stat_statements", "timescaledb,pg_stat_statements")]
+    [InlineData("\"timescaledb\" , PG_STAT_STATEMENTS", "timescaledb,PG_STAT_STATEMENTS")]
+    [InlineData("auto_explain", "auto_explain,pg_stat_statements")]
+    public void MergePreloadLibraries_AddsTheLibraryOnce_AndKeepsEverythingElse(string? effective, string expected)
+        => Assert.Equal(expected, DarlingManagedPostgres.MergePreloadLibraries(effective));
+
+    /// <summary>The LAST live assignment is the one PostgreSQL honours; a commented default is not one, the
+    /// <c>=</c> is optional, both quote escapes are read, and a longer setting name is not a match (#3899).</summary>
+    [Theory]
+    [InlineData("#shared_preload_libraries = ''\t# (change requires restart)\n", null)]
+    [InlineData("shared_preload_libraries = 'timescaledb'\n", "timescaledb")]
+    [InlineData("shared_preload_libraries = 'timescaledb'\nshared_preload_libraries = 'timescaledb,auto_explain'   # mine\n", "timescaledb,auto_explain")]
+    [InlineData("shared_preload_libraries 'a,b'\n", "a,b")]
+    [InlineData("shared_preload_libraries = timescaledb # a comment\n", "timescaledb")]
+    [InlineData("shared_preload_libraries_extra = 'x'\n", null)]
+    [InlineData("shared_preload_libraries = 'it''s'\n", "it's")]
+    [InlineData("shared_preload_libraries = 'a\\'b'\n", "a'b")]
+    [InlineData("  SHARED_PRELOAD_LIBRARIES='x'\r\n", "x")]
+    [InlineData("", null)]
+    public void FindLastConfAssignment_ReadsTheLastLiveAssignment(string conf, string? expected)
+        => Assert.Equal(expected, DarlingManagedPostgres.FindLastConfAssignment(conf, "shared_preload_libraries"));
+
+    /// <summary>
+    /// THE fresh-cluster hazard (#3899), through the real heal. On a new cluster the only live preload assignment
+    /// is written by the v1 append in the SAME heal, after the method read the file once; a v13 merge from that
+    /// once-read text would see only initdb's commented default and write a list WITHOUT timescaledb. The heal
+    /// re-reads the file for v13, and this proves it: the last live assignment is timescaledb plus the library,
+    /// utility tracking is off, and a second heal appends no second v13 block.
+    /// </summary>
+    [Fact]
+    public void FreshConfHeal_KeepsTimescaleInThePreloadList_AndASecondHealAppendsNoSecondV13()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v13-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, "#shared_preload_libraries = ''\t# (change requires restart)\n#port = 5432\n");
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5995, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var first = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV13));
+            Assert.Equal("timescaledb,pg_stat_statements", DarlingManagedPostgres.FindLastConfAssignment(first, "shared_preload_libraries"));
+            Assert.Equal("off", DarlingManagedPostgres.FindLastConfAssignment(first, "pg_stat_statements.track_utility"));
+
+            pg.EnsureConfAppended(dataDirectory);
+            var second = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV13));
+            Assert.Equal("timescaledb,pg_stat_statements", DarlingManagedPostgres.FindLastConfAssignment(second, "shared_preload_libraries"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// An EXISTING cluster whose operator extended the preload list keeps it (#3899): the heal appends v13 with
+    /// the operator's list plus the library, not a fixed literal that would drop their addition — the
+    /// list-replacement hazard <see cref="HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting"/>
+    /// documents, applied to the one block that has to restate the list.
+    /// </summary>
+    [Fact]
+    public void ExistingConfHeal_KeepsTheOperatorsPreloadLibraries()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v13op-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath,
+                DarlingManagedPostgres.BuildConfAppend(5641)
+                + "shared_preload_libraries = 'timescaledb,auto_explain'   # the operator's own\n");
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5641, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+
+            var healed = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV13));
+            Assert.Equal(
+                "timescaledb,auto_explain,pg_stat_statements",
+                DarlingManagedPostgres.FindLastConfAssignment(healed, "shared_preload_libraries"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The v13 ALTER SYSTEM pin (#3899), the v12 shape: an auto.conf preload list WITHOUT the library yields one
+    /// warning naming the list as written, the precedence, and the exact statement that fixes it; a list that
+    /// already carries it, and no auto.conf at all, say nothing. The file is never edited.
+    /// </summary>
+    [Fact]
+    public void V13AlterSystemPreloadOverride_WithoutTheLibrary_IsLogged_AndNothingIsEdited()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v13auto-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var config = new PostgresConfig { Managed = true, Port = 5996, DataDirectory = dataDirectory };
+            var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+
+            var none = new CapturingTestLogger();
+            new DarlingManagedPostgres(config, none).LogStatementStatisticsAutoConfOverride(dataDirectory);
+            Assert.Equal("(no log lines captured)", none.Joined);
+
+            File.WriteAllText(autoConfPath, "# Do not edit this file manually!\nshared_preload_libraries = 'timescaledb,pg_stat_statements'\n");
+            var carried = new CapturingTestLogger();
+            new DarlingManagedPostgres(config, carried).LogStatementStatisticsAutoConfOverride(dataDirectory);
+            Assert.Equal("(no log lines captured)", carried.Joined);
+
+            const string AutoConf = "# Do not edit this file manually!\n# It will be overwritten by the ALTER SYSTEM command.\nshared_preload_libraries = 'timescaledb'\n";
+            File.WriteAllText(autoConfPath, AutoConf);
+            var logger = new CapturingTestLogger();
+            new DarlingManagedPostgres(config, logger).LogStatementStatisticsAutoConfOverride(dataDirectory);
+
+            var line = Assert.Single(logger.Joined.Split(" | "));
+            Assert.StartsWith("Warning: ", line, StringComparison.Ordinal);
+            Assert.Contains("shared_preload_libraries = 'timescaledb'", line, StringComparison.Ordinal);
+            Assert.Contains("AFTER postgresql.conf", line, StringComparison.Ordinal);
+            Assert.Contains("ALTER SYSTEM SET shared_preload_libraries = 'timescaledb,pg_stat_statements'", line, StringComparison.Ordinal);
+            Assert.Equal(AutoConf, File.ReadAllText(autoConfPath));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
         }
     }
 
@@ -1849,8 +2013,13 @@ public sealed class DarlingManagedPostgresTests
 
                 /* Live ASSIGNMENTS, not substring hits: initdb's generated conf already carries a commented
                    #shared_preload_libraries line, so a substring count reads 2 on a healthy file. That is
-                   what the first version of this assertion did, and CI is where it said so. */
-                Assert.Equal(1, CountAssignments(healedConf, "shared_preload_libraries"));
+                   what the first version of this assertion did, and CI is where it said so. TWO live
+                   assignments since #3899: v1's, and the v13 block's MERGED restatement, which is the effective
+                   one and still loads timescaledb. A re-applied v1 would make it three. */
+                Assert.Equal(2, CountAssignments(healedConf, "shared_preload_libraries"));
+                Assert.Equal(
+                    "timescaledb,pg_stat_statements",
+                    DarlingManagedPostgres.FindLastConfAssignment(healedConf, "shared_preload_libraries"));
 
                 /* A PRECONDITION of the reading below, not part of what the heal is judged on — and the trap
                    in this whole area. `timescaledb` in shared_preload_libraries loads the LOADER, and the
@@ -1977,7 +2146,7 @@ public sealed class DarlingManagedPostgresTests
         return count;
     }
 
-    private static int FindFreeTcpPort()
+    internal static int FindFreeTcpPort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -1987,7 +2156,7 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>Postgres releases its files a beat after fast shutdown — retry the temp-dir delete.</summary>
-    private static void TryDeleteRecursive(string path)
+    internal static void TryDeleteRecursive(string path)
     {
         for (var attempt = 0; attempt < 5; attempt++)
         {

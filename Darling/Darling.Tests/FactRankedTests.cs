@@ -41,7 +41,7 @@ public sealed class FactRankedTests
     /// come from the same read column through two <c>Convert.ToDouble</c> paths; the names are compared
     /// ordinally, because a schema-qualified PostgreSQL name is bytes, not a locale.</para>
     /// </summary>
-    public static void AssertInvariant(Fact fact)
+    internal static void AssertInvariant(Fact fact)
     {
         ArgumentNullException.ThrowIfNull(fact);
         if (fact.Ranked.Count == 0)

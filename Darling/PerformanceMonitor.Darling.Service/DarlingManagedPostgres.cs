@@ -446,6 +446,35 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV12 = "# Managed by PerformanceMonitor Darling (v12 wal sizing) -- do not remove this block";
 
     /// <summary>
+    /// The v13 marker (#3899): preload <c>pg_stat_statements</c>, so the store keeps per-statement timings and
+    /// "the web viewer / MCP tools are slow" can be answered with a ranked list by role instead of a guess.
+    /// Before this the store loaded only <c>timescaledb</c> and had <c>log_min_duration_statement = -1</c>, so
+    /// nothing in the product could say which query was slow; attributing one took the owner's credential and
+    /// a hand-set per-role GUC. The module ships in the bundled runtime (1.12 on PostgreSQL 18.4) and was
+    /// simply never loaded. <see cref="StoreStatementStats"/> creates the extension and the reader function
+    /// on each start once the preload is live.
+    ///
+    /// <para><b>A MERGE, never a literal.</b> <c>shared_preload_libraries</c> is list-valued and the last
+    /// occurrence REPLACES the list (measured, and documented on <see cref="ConfMarkerV11"/>), so a block
+    /// that wrote <c>'timescaledb,pg_stat_statements'</c> verbatim would drop anything an operator had added.
+    /// The block re-states the EFFECTIVE list read from the file at append time plus
+    /// <see cref="StatementStatisticsLibrary"/>; see <see cref="MergePreloadLibraries"/>.</para>
+    ///
+    /// <para><b><c>track_utility = off</c> is a security setting, not tuning.</b> Role provisioning
+    /// interpolates each generated password into an <c>ALTER ROLE ... PASSWORD '...'</c> literal on every
+    /// start (<see cref="DarlingManagedRoles"/>), and pg_stat_statements records a utility statement's text
+    /// without normalizing that literal. Off keeps utility statements out of the view entirely, so the reader
+    /// surface can never show a password; the reader function also refuses role DDL as a second guard.</para>
+    ///
+    /// <para><b>Restart semantics.</b> <c>shared_preload_libraries</c> is postmaster-context. This append runs
+    /// before <c>pg_ctl start</c>, so a service-owned start loads the library on the very start that writes the
+    /// block; the adopted-listener path in <see cref="EnsureRunningAsync"/> waits for the next service-owned
+    /// start, as v2-v5 and v7 do. An <c>ALTER SYSTEM</c> override of the list in <c>postgresql.auto.conf</c>
+    /// wins over this block and is logged, never edited.</para>
+    /// </summary>
+    public const string ConfMarkerV13 = "# Managed by PerformanceMonitor Darling (v13 statement statistics) -- do not remove this block";
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -1082,6 +1111,194 @@ public sealed class DarlingManagedPostgres
         builder.Append(ConfMarkerV11).Append('\n');
         builder.Append(StoreSelfMetrics.JobExecutionLoggingSetting).Append(" = on\n");
         return builder.ToString();
+    }
+
+    /* ===================== v13 statement statistics (#3899) ===================== */
+
+    /// <summary>The library the v13 block adds to <c>shared_preload_libraries</c>.</summary>
+    public const string StatementStatisticsLibrary = "pg_stat_statements";
+
+    /// <summary>The library v1 preloads, and the base the v13 merge falls back to when the file carries no
+    /// active assignment. A managed conf always carries one by then, because v1 is appended first.</summary>
+    internal const string TimescaleLibrary = "timescaledb";
+
+    /// <summary>
+    /// The v13 block (#3899): <c>shared_preload_libraries</c> re-stated as the effective list plus
+    /// <see cref="StatementStatisticsLibrary"/>, and <c>pg_stat_statements.track_utility = off</c>. See
+    /// <see cref="ConfMarkerV13"/> for why the list is merged rather than written, and why utility tracking
+    /// must be off. Carries no fingerprint or stamp line, so neither every-start check reads it.
+    /// </summary>
+    public static string BuildStatementStatisticsConfAppend(string? effectivePreloadList)
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV13).Append('\n');
+        builder.Append("shared_preload_libraries = '")
+            .Append(MergePreloadLibraries(effectivePreloadList).Replace("'", "''", StringComparison.Ordinal))
+            .Append("'\n");
+        builder.Append(StatementStatisticsLibrary).Append(".track_utility = off\n");
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The effective preload list plus <see cref="StatementStatisticsLibrary"/>, order and spelling preserved,
+    /// duplicates dropped. An absent or empty list merges from <see cref="TimescaleLibrary"/> rather than from
+    /// nothing: on a fresh cluster the only active assignment is v1's, and a merge that lost it would stop the
+    /// store loading TimescaleDB.
+    /// </summary>
+    internal static string MergePreloadLibraries(string? effectivePreloadList)
+    {
+        var libraries = ParsePreloadList(effectivePreloadList);
+        if (libraries.Count == 0)
+        {
+            libraries.Add(TimescaleLibrary);
+        }
+
+        if (!libraries.Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        {
+            libraries.Add(StatementStatisticsLibrary);
+        }
+
+        return string.Join(",", libraries);
+    }
+
+    /// <summary>A <c>shared_preload_libraries</c> value as its library names: comma-split, trimmed, optional
+    /// double quotes removed, blanks and case-insensitive duplicates dropped.</summary>
+    internal static List<string> ParsePreloadList(string? preloadList)
+    {
+        var libraries = new List<string>();
+        if (string.IsNullOrWhiteSpace(preloadList))
+        {
+            return libraries;
+        }
+
+        foreach (var raw in preloadList.Split(','))
+        {
+            var name = raw.Trim().Trim('"').Trim();
+            if (name.Length > 0 && !libraries.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                libraries.Add(name);
+            }
+        }
+
+        return libraries;
+    }
+
+    /// <summary>
+    /// The value of the LAST active assignment of <paramref name="name"/> in postgresql.conf-format text, the
+    /// one PostgreSQL honours, or null when there is none. Commented lines are skipped, the <c>=</c> is optional
+    /// (PostgreSQL accepts <c>name value</c>), a quoted value is unquoted (<c>''</c> and <c>\'</c> both escape a
+    /// quote) and an unquoted one ends at whitespace or a trailing comment. A line naming a longer setting that
+    /// merely starts with <paramref name="name"/> is not a match.
+    /// </summary>
+    internal static string? FindLastConfAssignment(string? confText, string name)
+    {
+        if (string.IsNullOrEmpty(confText))
+        {
+            return null;
+        }
+
+        string? value = null;
+        foreach (var raw in confText.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line[0] == '#' || !line.StartsWith(name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var rest = line[name.Length..];
+            if (rest.Length > 0 && rest[0] != '=' && !char.IsWhiteSpace(rest[0]))
+            {
+                continue;
+            }
+
+            rest = rest.TrimStart();
+            if (rest.StartsWith('='))
+            {
+                rest = rest[1..].TrimStart();
+            }
+
+            value = ParseConfValue(rest);
+        }
+
+        return value;
+    }
+
+    private static string ParseConfValue(string text)
+    {
+        if (!text.StartsWith('\''))
+        {
+            var end = 0;
+            while (end < text.Length && !char.IsWhiteSpace(text[end]) && text[end] != '#')
+            {
+                end++;
+            }
+
+            return text[..end];
+        }
+
+        var builder = new StringBuilder();
+        for (var i = 1; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '\\' && i + 1 < text.Length && text[i + 1] == '\'')
+            {
+                builder.Append('\'');
+                i++;
+            }
+            else if (c == '\'')
+            {
+                if (i + 1 < text.Length && text[i + 1] == '\'')
+                {
+                    builder.Append('\'');
+                    i++;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            else
+            {
+                builder.Append(c);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The v13 <c>ALTER SYSTEM</c> check (#3899): logs one warning when <c>postgresql.auto.conf</c> assigns a
+    /// <c>shared_preload_libraries</c> list without <see cref="StatementStatisticsLibrary"/>. That file is read
+    /// after postgresql.conf, so its list wins and the v13 preload is inert until the override includes the
+    /// library. Changes nothing, the v12 precedent: the auto.conf is never edited. Never throws; an unreadable
+    /// auto.conf is logged at Debug and treated as no override.
+    /// </summary>
+    internal void LogStatementStatisticsAutoConfOverride(string dataDirectory)
+    {
+        var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+        string? autoConf;
+        try
+        {
+            autoConf = File.Exists(autoConfPath) ? File.ReadAllText(autoConfPath) : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogDebug("v13 statement statistics: could not read {AutoConf} to check for an ALTER SYSTEM preload override ({Message}).", autoConfPath, ex.Message);
+            return;
+        }
+
+        var overrideList = FindLastConfAssignment(autoConf, "shared_preload_libraries");
+        if (overrideList is null
+            || ParsePreloadList(overrideList).Contains(StatementStatisticsLibrary, StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "postgresql.auto.conf sets shared_preload_libraries = '{Value}' (an ALTER SYSTEM override) without {Library}. PostgreSQL reads postgresql.auto.conf AFTER postgresql.conf, so the v13 block's preload is inert and the store records no statement statistics until the override includes it: ALTER SYSTEM SET shared_preload_libraries = '{Suggested}', then restart the store. This service does not edit postgresql.auto.conf.",
+            overrideList, StatementStatisticsLibrary, MergePreloadLibraries(overrideList));
     }
 
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
@@ -1745,7 +1962,7 @@ public sealed class DarlingManagedPostgres
     /// has only ever been reachable on Windows.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private void EnsureConfAppended(string dataDirectory)
+    internal void EnsureConfAppended(string dataDirectory)
     {
         var confPath = Path.Combine(dataDirectory, "postgresql.conf");
         if (!File.Exists(confPath))
@@ -1972,6 +2189,24 @@ public sealed class DarlingManagedPostgres
                     v12Settings.MaxWalSizeMb, v12Settings.MinWalSizeMb, FormatGb(v12FreeBytes), FormatGb(v12TotalBytes), v12CheckpointNote);
             }
         }
+
+        /* v13 (#3899): statement statistics. Keyed on its marker's absence like v9-v11, and placed after v12
+           because, like them, it carries no fingerprint or stamp line for either every-start check to misread.
+           The ONE block that re-reads the file instead of trusting `conf`: its preload value is MERGED from the
+           effective list, and on a fresh cluster that list was written by the v1 append above, after `conf`
+           was read. The once-read text would hold only initdb's commented default, and a merge from it would
+           write a list without timescaledb. Restart-only, and appended before pg_ctl start, so a service-owned
+           start loads the library on this start. */
+        if (!conf.Contains(ConfMarkerV13, StringComparison.Ordinal))
+        {
+            var effectivePreload = FindLastConfAssignment(File.ReadAllText(confPath), "shared_preload_libraries");
+            File.AppendAllText(confPath, BuildStatementStatisticsConfAppend(effectivePreload));
+            _logger.LogInformation(
+                "Appended v13 statement statistics to postgresql.conf (shared_preload_libraries = '{Libraries}', {Library}.track_utility = off): the store keeps per-statement timings, so a slow web-viewer or MCP read can be named by get_store_query_stats instead of guessed at. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",
+                MergePreloadLibraries(effectivePreload), StatementStatisticsLibrary);
+        }
+
+        LogStatementStatisticsAutoConfOverride(dataDirectory);
     }
 
     /// <summary>

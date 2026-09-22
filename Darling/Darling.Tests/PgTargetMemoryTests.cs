@@ -38,8 +38,8 @@ namespace Darling.Tests;
 public sealed class PgTargetMemoryTests
 {
     private const long KiB = 1024, MiB = KiB * 1024, GiB = MiB * 1024;
-    private const int StockServerId = 93201, QuietServerId = 93202, ShortServerId = 93203;
-    private const string StockServerName = "pg-memory-stock", QuietServerName = "pg-memory-quiet", ShortServerName = "pg-memory-short";
+    private const int StockServerId = 93201, QuietServerId = 93202, ShortServerId = 93203, PeakServerId = 93204;
+    private const string StockServerName = "pg-memory-stock", QuietServerName = "pg-memory-quiet", ShortServerName = "pg-memory-short", PeakServerName = "pg-memory-peak";
 
     /* ───────────────────────── the reads ───────────────────────── */
 
@@ -226,6 +226,13 @@ public sealed class PgTargetMemoryTests
         var worst = 4.0 * GiB + 500.0 * 64 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB;
         Assert.Equal(worst / (8.0 * GiB), sum.Value, precision: 9);
         Assert.Equal(sum.Value, sum.Metadata[PgTargetScorer.MemoryOvercommitRatioKey]);
+        /* The natural basis-0 twin (#3691 lane 47): no backend count rode in, so the graded ratio IS the configured one,
+           stamped under both names; the observed keys are absent, never 0. */
+        Assert.Equal(0, sum.Metadata[PgTargetScorer.MemoryOvercommitBasisKey]);
+        Assert.Equal(sum.Value, sum.Metadata[PgTargetScorer.MemoryConfiguredOvercommitRatioKey]);
+        Assert.Equal(0, sum.Metadata[PgTargetScorer.MemoryPeakBackendsSamplesKey]);
+        foreach (var absent in new[] { PgTargetScorer.MemoryPeakBackendsKey, PgTargetScorer.MemoryObservedBackendTermBytesKey, PgTargetScorer.MemoryObservedWorstCaseBytesKey })
+            Assert.False(sum.Metadata.ContainsKey(absent), absent);
         Assert.Equal(worst, sum.Metadata[PgTargetScorer.MemoryWorstCaseBytesKey]);
         Assert.Equal(8 * GiB, sum.Metadata[PgTargetScorer.MemoryConfiguredMinBytesKey]);
         Assert.Equal(1, sum.Metadata[PgTargetScorer.MemoryIsServerlessKey]);
@@ -242,6 +249,87 @@ public sealed class PgTargetMemoryTests
         Assert.Equal(PgTargetFactKeys.HostMemoryPressure, alone.Key);
         Assert.Equal(0, alone.Metadata[PgTargetScorer.MemoryIsServerlessKey]);
         Assert.False(alone.Metadata.ContainsKey(PgTargetScorer.MemoryConfiguredMinBytesKey));
+    }
+
+    /* ───────────────────────── the graded basis (#3691 lane 47) ───────────────────────── */
+
+    /// <summary>Erik's ruling on the D2 read (issue comment 5782361122): the card is graded on the backends that actually
+    /// showed up. max_connections 5000 × work_mem 4 MB × 3 on a 16 GiB host is a 3.92× PERMISSION; at a peak of 50 backends
+    /// the worst case is 0.30× — graded 0, no card, the permission stated as configured_overcommit_ratio. At a peak of
+    /// 4,000 the same settings fire at exactly the advisory base. With no sampled level the permission is graded as before
+    /// (basis 0), and a peak above max_connections clamps in the term while the raw peak rides as read.</summary>
+    [Fact]
+    public void TheGradedRatio_IsTheWindowsPeakBackends_ThePermissionIsStated_NoSampleGradesThePermission_AndAPeakAboveTheCeilingClamps()
+    {
+        var wide = Snapshot(new[] { ("max_connections", "5000", (string?)null), ("work_mem", "4096", (string?)"kB") });
+        var host = PgTargetFactCollector.SummariseHostMemory(Series(48, 0, 0.45, 16 * GiB), 3);
+        var configuredWorst = 4.0 * GiB + 5000.0 * 4 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB;
+        var configuredRatio = configuredWorst / (16.0 * GiB);
+        Assert.True(configuredRatio > 3.9 && configuredRatio < 4.0, "the permission is ~3.92× the box");
+
+        Fact Emit(double? peak, long samples, out List<Fact> all)
+        {
+            all = new List<Fact>();
+            var terms = PgTargetFactCollector.ReadTerms(wide)!.Value with { PeakBackends = peak, PeakBackendsSamples = samples };
+            PgTargetFactCollector.EmitMemoryFacts(Context(), all, host, terms, 300, isAurora: true);
+            new FactScorer().ScoreAll(all);
+            return Assert.Single(all, f => f.Key == PgTargetFactKeys.ConfigMemoryOvercommit);
+        }
+
+        /* (i) basis 1, peak 50: graded under 1, the permission over it, base 0, no card. */
+        var quiet = Emit(50, 1440, out var quietFacts);
+        var observedWorst = 4.0 * GiB + 50.0 * 4 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB;
+        Assert.Equal(1, quiet.Metadata[PgTargetScorer.MemoryOvercommitBasisKey]);
+        Assert.Equal(observedWorst / (16.0 * GiB), quiet.Value, precision: 9);
+        Assert.Equal(quiet.Value, quiet.Metadata[PgTargetScorer.MemoryOvercommitRatioKey]);
+        Assert.True(quiet.Value < 1.0);
+        Assert.Equal(configuredRatio, quiet.Metadata[PgTargetScorer.MemoryConfiguredOvercommitRatioKey], precision: 9);
+        Assert.True(quiet.Metadata[PgTargetScorer.MemoryConfiguredOvercommitRatioKey] > 1.0);
+        Assert.Equal(50, quiet.Metadata[PgTargetScorer.MemoryPeakBackendsKey]);
+        Assert.Equal(1440, quiet.Metadata[PgTargetScorer.MemoryPeakBackendsSamplesKey]);
+        Assert.Equal(50.0 * 4 * MiB * 3, quiet.Metadata[PgTargetScorer.MemoryObservedBackendTermBytesKey], precision: 3);
+        Assert.Equal(observedWorst, quiet.Metadata[PgTargetScorer.MemoryObservedWorstCaseBytesKey], precision: 3);
+        /* The configured terms still ride as read — the permission is stated in full, never dropped. */
+        Assert.Equal(configuredWorst, quiet.Metadata[PgTargetScorer.MemoryWorstCaseBytesKey], precision: 3);
+        Assert.Equal(5000.0 * 4 * MiB * 3, quiet.Metadata[PgTargetScorer.MemoryBackendTermBytesKey], precision: 3);
+        Assert.Equal(0.0, quiet.BaseSeverity);
+        Assert.Equal(0.0, quiet.Severity);
+        Assert.DoesNotContain(new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(quietFacts), s => s.RootFactKey == PgTargetFactKeys.ConfigMemoryOvercommit);
+
+        /* (ii) basis 1, peak 4,000: the concurrency approaches the ceiling and the card fires at exactly the advisory base
+           (the 2× band rides, and alone lifts nothing — D5). */
+        var busy = Emit(4000, 1440, out var busyFacts);
+        Assert.Equal(1, busy.Metadata[PgTargetScorer.MemoryOvercommitBasisKey]);
+        Assert.Equal((4.0 * GiB + 4000.0 * 4 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB) / (16.0 * GiB), busy.Value, precision: 9);
+        Assert.Equal(PgTargetScorer.ConfigAdvisoryBase, busy.BaseSeverity, precision: 9);
+        Assert.Equal(0.4, busy.Severity, precision: 9);
+        var card = Assert.Single(new InferenceEngine(new PgTargetRelationshipGraph()).BuildStories(busyFacts), s => s.RootFactKey == PgTargetFactKeys.ConfigMemoryOvercommit);
+        Assert.Equal(0.4, card.Severity, precision: 9);
+
+        /* (iii) basis 0: no sampled instant — today's behaviour exactly: the permission is the value, stamp 0, base 0.4.
+           A peak with zero samples is "not observed", never "zero backends". */
+        foreach (var (peak, samples) in new[] { ((double?)null, 0L), (50.0, 0L) })
+        {
+            var unsampled = Emit(peak, samples, out _);
+            Assert.Equal(0, unsampled.Metadata[PgTargetScorer.MemoryOvercommitBasisKey]);
+            Assert.Equal(configuredRatio, unsampled.Value, precision: 9);
+            Assert.Equal(unsampled.Value, unsampled.Metadata[PgTargetScorer.MemoryConfiguredOvercommitRatioKey]);
+            Assert.Equal(0, unsampled.Metadata[PgTargetScorer.MemoryPeakBackendsSamplesKey]);
+            Assert.False(unsampled.Metadata.ContainsKey(PgTargetScorer.MemoryPeakBackendsKey));
+            Assert.False(unsampled.Metadata.ContainsKey(PgTargetScorer.MemoryObservedBackendTermBytesKey));
+            Assert.False(unsampled.Metadata.ContainsKey(PgTargetScorer.MemoryObservedWorstCaseBytesKey));
+            Assert.Equal(PgTargetScorer.ConfigAdvisoryBase, unsampled.BaseSeverity, precision: 9);
+        }
+        Assert.Null((PgTargetFactCollector.ReadTerms(wide)!.Value with { PeakBackends = 50, PeakBackendsSamples = 0 }).ObservedBackendTermBytes);
+
+        /* (iv) a peak above max_connections: the raw peak rides as read, the term uses max_connections, and the graded
+           ratio equals the permission (never above it). */
+        var over = Emit(6000, 1440, out _);
+        Assert.Equal(1, over.Metadata[PgTargetScorer.MemoryOvercommitBasisKey]);
+        Assert.Equal(6000, over.Metadata[PgTargetScorer.MemoryPeakBackendsKey]);
+        Assert.Equal(over.Metadata[PgTargetScorer.MemoryBackendTermBytesKey], over.Metadata[PgTargetScorer.MemoryObservedBackendTermBytesKey], precision: 3);
+        Assert.Equal(configuredRatio, over.Value, precision: 9);
+        Assert.Equal(over.Value, over.Metadata[PgTargetScorer.MemoryConfiguredOvercommitRatioKey], precision: 9);
     }
 
     /* ───────────────────────── the bars and D5 ───────────────────────── */
@@ -456,6 +544,76 @@ public sealed class PgTargetMemoryTests
         }
     }
 
+    /// <summary>The overcommit card's three shapes (#3691 lane 47), composed from the stamps the REAL emit writes: basis 1
+    /// headlines the worst case at the window's peak and states the permission as its own sentence — never approached,
+    /// approached (≥ 50 %), or reached (clamped, with the reason); basis 0 says no backend count was sampled so the
+    /// permission is what was graded; the fact-less static names the rule. Counter-objectives and the no-DDL rule hold on
+    /// every shape.</summary>
+    [Fact]
+    public void TheAdvice_StatesWhichWorstCaseWasGraded_ThePeakWithThePermissionBeside_OrThePermissionAloneWhenNothingWasSampled()
+    {
+        var wide = Snapshot(new[] { ("max_connections", "5000", (string?)null), ("work_mem", "4096", (string?)"kB") });
+        var host = PgTargetFactCollector.SummariseHostMemory(Series(48, 0, 0.45, 16 * GiB), 3);
+        AdviceBlock Compose(double? peak, long samples)
+        {
+            var facts = new List<Fact>();
+            var terms = PgTargetFactCollector.ReadTerms(wide)!.Value with { PeakBackends = peak, PeakBackendsSamples = samples };
+            PgTargetFactCollector.EmitMemoryFacts(Context(), facts, host, terms, 300, isAurora: true);
+            new FactScorer().ScoreAll(facts);
+            return PgTargetAdvice.Compose(PgTargetFactKeys.ConfigMemoryOvercommit, facts.ToFactLookup())!;
+        }
+
+        /* Basis 1, never approached: the headline is the graded peak figure, within the box; the permission is stated. */
+        var quiet = Compose(50, 1440);
+        Assert.Equal("The worst-case memory at the window's peak of 50 backends is 4.8 GB — 0.3× the host's 16 GB, within the box", quiet.Headline);
+        foreach (var expected in new[]
+                 {
+                     "At the window's peak of 50 backends", "over 1440 sampled instants", "the same peak PG_SESSION_SATURATION divides by",
+                     "the backend term is 600 MB and the sum is 4.8 GB, 0.3× of", "that is the ratio graded.",
+                     "The settings permit 3.92× if all max_connections sorted at once — a ceiling the window's concurrency never approached: peak 50 of 5000; stated, not graded.",
+                     "max_connections 5000 × work_mem 4 MB", "Under 1.0× the model fits the box",
+                 })
+            Assert.Contains(expected, quiet.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("No backend count was sampled", quiet.Investigation, StringComparison.Ordinal);
+
+        /* Basis 1, approached (4,000 of 5,000 = 80 %): fires, and the sentence says the ceiling was approached. */
+        var busy = Compose(4000, 1440);
+        Assert.StartsWith("The worst-case memory at the window's peak of 4000 backends is ", busy.Headline, StringComparison.Ordinal);
+        Assert.EndsWith("— more than double", busy.Headline, StringComparison.Ordinal);
+        Assert.Contains("a ceiling the window's concurrency approached: peak 4000 of 5000; stated, not graded.", busy.Investigation, StringComparison.Ordinal);
+        Assert.Contains("At or past 1.0× the backends this window actually ran CAN exceed physical memory if each spills once", busy.Investigation, StringComparison.Ordinal);
+        Assert.Contains("advisory (0.4)", busy.Investigation, StringComparison.Ordinal);
+        /* The 50 % line is the boundary between the two words. */
+        Assert.Contains("approached: peak 2500 of 5000", Compose(2500, 1440).Investigation, StringComparison.Ordinal);
+        Assert.Contains("never approached: peak 2499 of 5000", Compose(2499, 1440).Investigation, StringComparison.Ordinal);
+
+        /* Basis 1, reached: a peak above the ceiling is said to be clamped, and why. */
+        var over = Compose(6000, 1440);
+        Assert.Contains("a ceiling the window's concurrency reached: peak 6000 of 5000, counted as 5000 (numbackends also counts autovacuum and parallel workers, which hold no connection slot)", over.Investigation, StringComparison.Ordinal);
+
+        /* Basis 0: the permission is graded, and the card says so. */
+        var unsampled = Compose(null, 0);
+        Assert.StartsWith("The configured memory worst case is ", unsampled.Headline, StringComparison.Ordinal);
+        Assert.Contains("No backend count was sampled in the window (pg_database_stats.numbackends carried no value), so this is the configured permission", unsampled.Investigation, StringComparison.Ordinal);
+        Assert.Contains("and that is what was graded", unsampled.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("stated, not graded", unsampled.Investigation, StringComparison.Ordinal);
+        Assert.Contains("At or past 1.0× the configuration CAN exceed physical memory if every backend spills once", unsampled.Investigation, StringComparison.Ordinal);
+
+        /* The static names the rule — the graded term is the observed peak, the all-slots figure stated beside it. */
+        var fixedText = PgTargetAdvice.Static(PgTargetFactKeys.ConfigMemoryOvercommit)!;
+        Assert.Contains("uses the window's peak pg_database_stats.numbackends (clamped to max_connections) whenever an instant sampled it", fixedText.Investigation, StringComparison.Ordinal);
+        Assert.Contains("with no sampled backend count the configured permission is what is graded", fixedText.Investigation, StringComparison.Ordinal);
+
+        foreach (var block in new[] { quiet, busy, over, unsampled, fixedText })
+        {
+            Assert.Contains("Raising work_mem globally is the classic overcommit path", block.Remediation, StringComparison.Ordinal);
+            var text = block.Headline + block.Investigation + block.Remediation;
+            foreach (var forbidden in new[] { "fsync", "synchronous_commit", "full_page_writes", "CREATE INDEX" })
+                Assert.DoesNotContain(forbidden, text, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(block.RemediationTsql);
+        }
+    }
+
     /* ───────────────────────── live: the careful test ───────────────────────── */
 
     /// <summary>The careful test. A stock-stamped server with a day of <c>pg_database_stats</c>, a config snapshot, and NO
@@ -612,6 +770,99 @@ public sealed class PgTargetMemoryTests
                 var pressure = facts.Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.HostMemoryPressure);
                 Assert.Equal(0.05, pressure.GetProperty("metadata").GetProperty(PgTargetScorer.HostMemorySustainedMinReclaimableShareKey).GetDouble(), precision: 3);
                 Assert.True(pressure.GetProperty("base_severity").GetDouble() >= 0.5);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>The collector reads the window's peak backends end to end (#3691 lane 47). The quiet Aurora server's own
+    /// settings (a 6.12× permission on a 16 GiB host — the quiet e2e's card) with <c>pg_database_stats.numbackends</c>
+    /// planted at 20 + 12 per instant across two databases and ONE instant at 30 + 20: through the REAL collector the fact
+    /// is basis 1 at the 50-backend peak — 0.85×, base 0, no card — the permission stated as
+    /// <c>configured_overcommit_ratio</c>, the peak and its sample count equal to what <c>PgTargetNumbackendsPeakSql</c>
+    /// returns on its own, and <c>analyze_server</c> roots nothing on the sum.</summary>
+    [Fact]
+    public async Task AnAuroraTarget_WithSampledBackends_IsGradedAtThePeak_AndThePermissionIsStatedNotGraded()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the memory-family peak-backends e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            var end = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = end.AddHours(-4);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, PeakServerId, PeakServerName, MonitoredEngineKind.AuroraPostgres, 16, ct);
+            await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, PeakServerId, PeakServerName, end.AddHours(-25), ct);
+            for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+            {
+                var peakInstant = minute == 121;
+                await PlantDatabaseStatsWithBackendsAsync(connection, PeakServerId, PeakServerName, windowStart.AddMinutes(minute - 1), peakInstant ? 30 : 20, peakInstant ? 20 : 12, ct);
+            }
+            await PlantConfigAsync(connection, PeakServerId, PeakServerName, end.AddMinutes(-30), ct);
+            for (var minute = 0; minute <= 240; minute += 5)
+                await PlantHostMemoryAsync(connection, PeakServerId, PeakServerName, windowStart.AddMinutes(minute), 16 * GiB, reclaimable: 0.45, ct);
+
+            var configuredWorst = 4.0 * GiB + 500.0 * 64 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB;
+            var observedWorst = 4.0 * GiB + 50.0 * 64 * MiB * 3 + 3.0 * 64 * MiB + 16.0 * MiB;
+
+            /* ── The collector alone: basis 1 at the 50-backend peak. */
+            var collector = new PgTargetFactCollector(postgres);
+            var context = new AnalysisContext { ServerId = PeakServerId, ServerName = PeakServerName, TimeRangeStart = windowStart, TimeRangeEnd = end, ServerUtcOffset = TimeSpan.Zero };
+            var collected = await collector.CollectFactsAsync(context);
+            var sum = Assert.Single(collected, f => f.Key == PgTargetFactKeys.ConfigMemoryOvercommit);
+            Assert.Equal(1, sum.Metadata[PgTargetScorer.MemoryOvercommitBasisKey]);
+            Assert.Equal(50, sum.Metadata[PgTargetScorer.MemoryPeakBackendsKey]);
+            Assert.True(sum.Metadata[PgTargetScorer.MemoryPeakBackendsSamplesKey] >= 240, "every in-window instant carried the level");
+            Assert.Equal(observedWorst / (16.0 * GiB), sum.Value, precision: 6);
+            Assert.Equal(sum.Value, sum.Metadata[PgTargetScorer.MemoryOvercommitRatioKey]);
+            Assert.Equal(configuredWorst / (16.0 * GiB), sum.Metadata[PgTargetScorer.MemoryConfiguredOvercommitRatioKey], precision: 6);
+            Assert.Equal(50.0 * 64 * MiB * 3, sum.Metadata[PgTargetScorer.MemoryObservedBackendTermBytesKey], precision: 0);
+            /* The same peak PG_SESSION_SATURATION reads — one statement, so the two facts cannot disagree. */
+            using (var levelRead = new NpgsqlCommand(PgTargetFactCollector.PgTargetNumbackendsPeakSql, connection))
+            {
+                levelRead.Parameters.AddWithValue(PeakServerId);
+                levelRead.Parameters.AddWithValue(windowStart);
+                levelRead.Parameters.AddWithValue(end);
+                using var reader = await levelRead.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.Equal(Convert.ToDouble(reader.GetValue(2), System.Globalization.CultureInfo.InvariantCulture), sum.Metadata[PgTargetScorer.MemoryPeakBackendsKey]);
+                Assert.Equal(Convert.ToDouble(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture), sum.Metadata[PgTargetScorer.MemoryPeakBackendsSamplesKey]);
+            }
+
+            /* ── Through the REAL analyze_server: the sum fits the box, so nothing roots on it; get_analysis_facts carries the stamps. */
+            var service = new DarlingAnalysisService(postgres);
+            var asOf = end.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            using (var doc = JsonDocument.Parse(await DarlingMcpTools.AnalyzeServer(service, postgres, PeakServerName, 4, as_of: asOf)))
+            {
+                /* Nothing else is planted to fire, so the honest outcome is the all-clear ("empty"); a findings array, if
+                   another family ever fires here, must still carry no story through the sum. */
+                if (doc.RootElement.TryGetProperty("findings", out var findingsElement))
+                    Assert.DoesNotContain(findingsElement.EnumerateArray(), f => (f.GetProperty("story_path").GetString() ?? string.Empty).Contains(PgTargetFactKeys.ConfigMemoryOvercommit, StringComparison.Ordinal));
+                else
+                    Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+            }
+            using (var doc = JsonDocument.Parse(await DarlingMcpTools.GetAnalysisFacts(service, postgres, PeakServerName, 4, PgTargetSources.MemorySource, as_of: asOf)))
+            {
+                var fact = doc.RootElement.GetProperty("facts").EnumerateArray().Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.ConfigMemoryOvercommit);
+                Assert.Equal(0.0, fact.GetProperty("base_severity").GetDouble());
+                Assert.Equal(observedWorst / (16.0 * GiB), fact.GetProperty("value").GetDouble(), precision: 6);
+                var metadata = fact.GetProperty("metadata");
+                Assert.Equal(1, metadata.GetProperty(PgTargetScorer.MemoryOvercommitBasisKey).GetDouble());
+                Assert.Equal(50, metadata.GetProperty(PgTargetScorer.MemoryPeakBackendsKey).GetDouble());
+                Assert.True(metadata.GetProperty(PgTargetScorer.MemoryConfiguredOvercommitRatioKey).GetDouble() > 1.0);
             }
 
             bodySucceeded = true;
@@ -791,9 +1042,29 @@ VALUES ($1, $2, $3, $4, 'appdb', 1000, 10, 100, 9000, $5, $6, 0, NULL)", connect
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>Two <c>pg_database_stats</c> rows at one instant carrying <c>numbackends</c> (V133) — the level the overcommit
+    /// fact's peak read sums across databases (#3691 lane 47). A NEW planter on purpose: the quiet and stock e2e planters
+    /// leave numbackends NULL so those servers stay basis 0 and keep their subject.</summary>
+    private static async Task PlantDatabaseStatsWithBackendsAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime at, int appBackends, int reportBackends, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset, numbackends)
+VALUES ($1, $2, $3, $4, 'appdb',   1000, 10, 100, 9000, 0, 0, 0, NULL, $5),
+       ($1, $2, $3, $4, 'reports', 1000, 10, 100, 9000, 0, 0, 0, NULL, $6)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(appBackends);
+        command.Parameters.AddWithValue(reportBackends);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var ids = $"({StockServerId}, {QuietServerId}, {ShortServerId})";
+        var ids = $"({StockServerId}, {QuietServerId}, {ShortServerId}, {PeakServerId})";
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_database_stats WHERE server_id IN {ids}; " +
             $"DELETE FROM pg_server_config WHERE server_id IN {ids}; " +

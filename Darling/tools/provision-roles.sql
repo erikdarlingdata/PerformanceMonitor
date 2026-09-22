@@ -77,6 +77,15 @@ ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
 --     which a BYO deployment does not create -- your own PostgreSQL governs any MCP-role exposure it wants.)
 ALTER ROLE viewer SET statement_timeout = '15s';
 
+-- 1b. Slow-statement logging on viewer (#3899): a viewer statement that runs past 5s is written to the
+--     server log with its text, so a slow web-viewer read can be named instead of guessed at. Bind
+--     parameters are not logged. Keep the threshold in step with DarlingManagedRoles.SlowStatementLogThreshold.
+--     Both settings are superuser-only. For per-statement timings, also add pg_stat_statements to
+--     shared_preload_libraries (restart required) and run CREATE EXTENSION pg_stat_statements in this
+--     database; the service creates its reader function on its next start or within the hour.
+ALTER ROLE viewer SET log_min_duration_statement = '5s';
+ALTER ROLE viewer SET log_parameter_max_length = 0;
+
 -- 2. Schema usage + SELECT on everything that exists now (ALL TABLES covers tables AND views). collect
 --    holds no secrets, so admin+viewer read all of it. config: admin (the writer, and the Settings
 --    window's identity) reads every column; viewer reads all config tables too -- MINUS the secret columns

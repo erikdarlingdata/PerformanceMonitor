@@ -182,7 +182,10 @@ ORDER BY w.collection_time";
     }
 
     /// <summary>The memory terms as normalised from the snapshot; every optional term nullable so the fact states which
-    /// were present rather than substituting a zero that claims a knob is unset.</summary>
+    /// were present rather than substituting a zero that claims a knob is unset. The last two are not configuration: they
+    /// are the window's peak <c>pg_database_stats.numbackends</c> level and how many sampled instants carried it (from
+    /// <see cref="PgTargetNumbackendsPeakSql"/>, attached after the host read), so the backend term can be formed from
+    /// the backends that actually showed up as well as from the ones the settings permit (#3691 lane 47).</summary>
     internal readonly record struct MemoryTerms(
         long SharedBuffersBytes,
         long WorkMemBytes,
@@ -192,7 +195,9 @@ ORDER BY w.collection_time";
         long? AutovacuumWorkMemBytes,
         double? AutovacuumMaxWorkers,
         long? WalBuffersBytes,
-        long? EffectiveCacheSizeBytes)
+        long? EffectiveCacheSizeBytes,
+        double? PeakBackends = null,
+        long PeakBackendsSamples = 0)
     {
         /// <summary><c>max_connections × work_mem × (1 + max_parallel_workers_per_gather)</c> — each backend may run one sort
         /// or hash at <c>work_mem</c> and each of its parallel workers another; an absent parallel knob multiplies by 1.</summary>
@@ -218,13 +223,50 @@ ORDER BY w.collection_time";
         {
             get { return SharedBuffersBytes + BackendTermBytes + AutovacuumTermBytes + Math.Max(0, WalBuffersBytes ?? 0); }
         }
+
+        /// <summary>
+        /// <c>min(peak numbackends, max_connections) × work_mem × (1 + max_parallel_workers_per_gather)</c> — the backend
+        /// term at the concurrency the window actually reached; null when no instant in the window sampled the level, so
+        /// the caller cannot mistake "not observed" for "zero backends".
+        ///
+        /// <para><b>Why the clamp.</b> A running server cannot hold more client backends than <c>max_connections</c>;
+        /// <c>numbackends</c> above it is a sampling artefact — the level also counts autovacuum and parallel workers,
+        /// which hold no connection slot, and the snapshot's <c>max_connections</c> may postdate a restart inside the
+        /// window — so the observed term never exceeds the configured one. Counting those workers at all makes the
+        /// observed term read a hair high while a vacuum or a parallel plan runs (they are multiplied by the parallel
+        /// factor again) — the safe direction.</para>
+        /// </summary>
+        public double? ObservedBackendTermBytes
+        {
+            get
+            {
+                return PeakBackendsSamples > 0 && PeakBackends is { } peak
+                    ? Math.Min(Math.Max(0, peak), MaxConnections) * WorkMemBytes * (1 + Math.Max(0, ParallelWorkersPerGather ?? 0))
+                    : null;
+            }
+        }
+
+        /// <summary>The worst case with the observed backend term in place of the configured one; every other term is the
+        /// same configured figure (shared_buffers, the autovacuum workers and wal_buffers do not scale with concurrency).
+        /// Null exactly when <see cref="ObservedBackendTermBytes"/> is.</summary>
+        public double? ObservedWorstCaseBytes
+        {
+            get
+            {
+                return ObservedBackendTermBytes is { } observed
+                    ? SharedBuffersBytes + observed + AutovacuumTermBytes + Math.Max(0, WalBuffersBytes ?? 0)
+                    : null;
+            }
+        }
     }
 
     /// <summary>
     /// <c>CONFIG_PG_MEMORY_OVERCOMMIT</c> and <c>PG_HOST_MEMORY_PRESSURE</c> (filled by lane 32 of #3691 — design §4b, the
     /// review's cross-server-transfer blocker: a configuration is judged against THIS host, never against a number that
     /// was right somewhere else). Two reads: the memory terms from the latest <c>pg_server_config</c> snapshot at or
-    /// before the window's end, and the host's memory from every <c>pg_cpu_utilization</c> row in the window.
+    /// before the window's end, and the host's memory from every <c>pg_cpu_utilization</c> row in the window — and,
+    /// since lane 47, a third when there is a composition to form: the window's peak <c>numbackends</c> through
+    /// <see cref="PgTargetNumbackendsPeakSql"/>, the statement <c>PG_SESSION_SATURATION</c> already divides by.
     ///
     /// <para><b>The three outcomes, in order of what the store had.</b> No <c>pg_cpu_utilization</c> row in the window
     /// (a stock target) ⇒ ONE fact, <c>PG_HOST_MEMORY_PRESSURE</c> in its <c>unavailable</c> shape with
@@ -234,7 +276,10 @@ ORDER BY w.collection_time";
     /// <c>reason_memory_columns_sparse</c> (pre-V136 rows, or a Performance Insights endpoint without <c>os.memory.*</c>).
     /// Otherwise the pressure fact is measured (value = the window's minimum reclaimable share; the SUSTAINED minimum the
     /// scorer grades beside it) and, when the snapshot yielded the three mandatory terms, the composition fact is
-    /// emitted with value = the ratio of the configured worst case to the window's MINIMUM <c>memory_total_bytes</c>.</para>
+    /// emitted with value = the ratio of the worst case AT THE WINDOW'S PEAK BACKEND COUNT to the window's MINIMUM
+    /// <c>memory_total_bytes</c> (<c>overcommit_basis = 1</c>), the configured worst case — every <c>max_connections</c>
+    /// slot sorting at once — stated beside it as <c>configured_overcommit_ratio</c>; when no instant sampled the level,
+    /// the configured ratio is the value and the basis is 0 (see <see cref="EmitMemoryFacts"/>).</para>
     ///
     /// <para><b>Why the minimum total, and not <c>configured_memory_bytes</c>, is the denominator on Serverless.</b>
     /// <c>configured_memory_bytes</c> is the vendor's nominal allocation for the minute's capacity (ACU × 2 GiB);
@@ -254,7 +299,7 @@ ORDER BY w.collection_time";
     /// <para>/* filled by lane 32 of #3691 — the marker stays, as v1's did. */ Conventions: every command sets
     /// <c>CommandTimeout = FactCommandTimeoutSeconds</c>, every store call passes <c>context.CancellationToken</c>,
     /// <c>$N</c> positional, no bare clock (StoreSqlClockDisciplineTests), the catch is the shared degrade shape around
-    /// each read. Both tables are CollectorCatalog targets already, so the FROM/JOIN census admits them with no edit.</para>
+    /// each read. All three tables (pg_database_stats since lane 25) are CollectorCatalog targets already, so the FROM/JOIN census admits them with no edit.</para>
     /// </summary>
     private async partial Task CollectMemoryFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -319,6 +364,30 @@ ORDER BY w.collection_time";
                MonitoredEngineKind — never a column's presence (#2530). Null when the registry fact is absent: unknown. */
             var registry = facts.Find(f => f.Key == PgTargetFactKeys.ServerMajorVersion);
             bool? isAurora = registry is null ? null : registry.Metadata.GetValueOrDefault("is_aurora") > 0;
+
+            /* ── The concurrency the window actually reached (#3691 lane 47, Erik's ruling on the D2 read): the SAME
+               statement PG_SESSION_SATURATION divides by (lane 25), so the two facts cannot disagree about the peak. Read
+               only when there is a composition to form — a window with no terms costs no extra query. Its own degrade:
+               a pre-V133 store raises 42703 on numbackends, which must not cost the pressure fact the host read already
+               earned; the reporter classifies it quiet and the composition falls back to the configured ratio (basis 0).
+               An abandonment is NOT swallowed (#2443). ── */
+            if (terms is { } configured && samples.Count > 0)
+            {
+                try
+                {
+                    var level = await ReadNumbackendsPeakAsync(connection, context);
+                    terms = configured with
+                    {
+                        PeakBackends = level.NumbackendsSamples > 0 ? level.PeakNumbackends : null,
+                        PeakBackendsSamples = level.PeakNumbackends is null ? 0 : level.NumbackendsSamples,
+                    };
+                }
+                catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
+                {
+                    ReportCollectionFailure(ex, context);
+                }
+            }
+
             EmitMemoryFacts(context, facts, SummariseHostMemory(samples, PgTargetScorer.HostMemoryPressureSustainSamples), terms, snapshotAgeSeconds, isAurora);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
@@ -425,16 +494,33 @@ ORDER BY w.collection_time";
 
         if (terms is not { } composed) return;
 
+        /* ── Which worst case is graded (#3691 lane 47 — Erik's ruling on the D2 read of 2026-09-22). ──
+           On the measured population (50 Aurora clusters) 24 of 50 scored the CONFIGURED ratio at or past 1.0, and 87 %
+           of that worst case was the backend term — max_connections × work_mem × (1 + parallel) — while the same
+           clusters' peak sessions never exceeded ~10 % of max_connections and numbackends tracked the capture peak within
+           10 %. A card that fires on half a fleet for connections that never arrive is a statement about a permission,
+           not about this server. So the ratio under overcommit_ratio (the key the scorer grades, unchanged) is the worst
+           case at the window's PEAK numbackends (basis 1) whenever an instant sampled the level; the configured worst
+           case survives as configured_overcommit_ratio, stated beside it and never graded. With no sampled instant — a
+           pre-V133 store, an empty pg_database_stats window, a failed level read — there is no evidence of concurrency,
+           the permission is the only statement the store supports, and it is graded as before (basis 0; the advice says
+           which). The denominator is unchanged by the ruling. */
         var denominator = (double)host.TotalMinBytes.Value;
+        var configuredRatio = composed.WorstCaseBytes / denominator;
+        var observedWorst = composed.ObservedWorstCaseBytes;
+        var graded = observedWorst is { } ow ? ow / denominator : configuredRatio;
         var overcommit = new Fact
         {
             Source = PgTargetSources.MemorySource,
             Key = PgTargetFactKeys.ConfigMemoryOvercommit,
-            Value = composed.WorstCaseBytes / denominator,
+            Value = graded,
             ServerId = context.ServerId,
             Metadata =
             {
-                [PgTargetScorer.MemoryOvercommitRatioKey] = composed.WorstCaseBytes / denominator,
+                [PgTargetScorer.MemoryOvercommitRatioKey] = graded,
+                [PgTargetScorer.MemoryOvercommitBasisKey] = observedWorst is null ? 0 : 1,
+                [PgTargetScorer.MemoryConfiguredOvercommitRatioKey] = configuredRatio,
+                [PgTargetScorer.MemoryPeakBackendsSamplesKey] = composed.PeakBackendsSamples,
                 [PgTargetScorer.MemoryTotalMinBytesKey] = host.TotalMinBytes.Value,
                 [PgTargetScorer.MemoryTotalMaxBytesKey] = host.TotalMaxBytes ?? host.TotalMinBytes.Value,
                 [PgTargetScorer.MemoryIsServerlessKey] = host.ConfiguredMinBytes is null ? 0 : 1,
@@ -444,6 +530,11 @@ ORDER BY w.collection_time";
             },
         };
         if (host.ConfiguredMinBytes is { } configuredMin) overcommit.Metadata[PgTargetScorer.MemoryConfiguredMinBytesKey] = configuredMin;
+        /* The raw peak rides as read (the clamp lives in the term, so a peak above max_connections stays visible);
+           absent, never 0, when no instant sampled it. */
+        if (composed.PeakBackendsSamples > 0 && composed.PeakBackends is { } peak) overcommit.Metadata[PgTargetScorer.MemoryPeakBackendsKey] = peak;
+        if (composed.ObservedBackendTermBytes is { } observedBackend) overcommit.Metadata[PgTargetScorer.MemoryObservedBackendTermBytesKey] = observedBackend;
+        if (observedWorst is { } observedWorstBytes) overcommit.Metadata[PgTargetScorer.MemoryObservedWorstCaseBytesKey] = observedWorstBytes;
         WriteTerms(overcommit, composed, snapshotAgeSeconds);
         /* engine-defined plausibility line, stated not graded: a planner assumption larger than the smallest box the
            window saw is a lie to the planner. Read against the MINIMUM total for the same reason the ratio is. */
