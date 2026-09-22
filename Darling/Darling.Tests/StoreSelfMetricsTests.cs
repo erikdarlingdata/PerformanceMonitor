@@ -9,7 +9,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -345,8 +348,15 @@ public sealed class StoreSelfMetricsTests
             Assert.Contains(StoreSelfMetrics.TimescaleInventoriedPredicateSql, sql, StringComparison.Ordinal);
             Assert.Contains("FROM timescaledb_information.hypertables h", sql, StringComparison.Ordinal);
             Assert.Contains("FROM timescaledb_information.continuous_aggregates ca", sql, StringComparison.Ordinal);
-            Assert.Contains("FROM _timescaledb_catalog.chunk ch", sql, StringComparison.Ordinal);
-            /* Name joins, never a regclass cast a vanished relation would make RAISE. */
+            /* #3918: chunks through the PUBLIC view, whose chunk_schema / chunk_name survive the 2.29 chunk
+               catalog rewrite, and compressed data through compress_relid, the one catalog column that names
+               it on every version (on 2.29+ it is in no chunk row at all). */
+            Assert.Contains("FROM timescaledb_information.chunks ch", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE ch.chunk_schema = n.nspname AND ch.chunk_name = c.relname", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM _timescaledb_catalog.compression_settings cs", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE cs.compress_relid = c.oid", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("_timescaledb_catalog.chunk ", sql, StringComparison.Ordinal);
+            /* Name joins and an OID comparison, never a regclass cast a vanished relation would make RAISE. */
             Assert.DoesNotContain("::regclass", StoreSelfMetrics.TimescaleInventoriedPredicateSql, StringComparison.Ordinal);
         }
         else
@@ -356,6 +366,127 @@ public sealed class StoreSelfMetricsTests
             Assert.DoesNotContain("FROM timescaledb_information", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("FROM _timescaledb_catalog", sql, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>
+    /// #3918: the census names only relations and columns that have the SAME shape on both TimescaleDB catalog
+    /// generations, so one statement serves a 2.28.1 store and a 2.29+ store with no version branch. 2.29.0
+    /// rebuilt <c>_timescaledb_catalog.chunk</c> (dropping <c>schema_name</c>, <c>table_name</c> and
+    /// <c>compressed_chunk_id</c> for <c>relid regclass</c>), and a column a statement names that the catalog
+    /// lacks fails at analysis, before a row is read: that is how the first cut of this fragment took the whole
+    /// hourly sweep down with 42703. The allow-list is every <c>alias.column</c> the fragment may name, each
+    /// checked on 2.28.1 and 2.30.1: the three public views' columns (each version's update script rebuilds
+    /// them under the same names), <c>compression_settings.compress_relid</c> (identical in both install
+    /// scripts), and <c>pg_class</c> / <c>pg_namespace</c>. A new reference fails here until someone has
+    /// checked it against both shapes, and an allowed one that stops being used fails too, so the list cannot
+    /// rot into a superset.
+    /// </summary>
+    [Fact]
+    public void TimescaleInventoriedPredicate_NamesOnlyColumnsBothCatalogShapesHave()
+    {
+        var predicate = StoreSelfMetrics.TimescaleInventoriedPredicateSql;
+
+        var relations = Regex.Matches(predicate, @"\bFROM\s+([a-z_]+\.[a-z_]+)\s+([a-z]+)\b")
+            .Select(m => $"{m.Groups[1].Value} {m.Groups[2].Value}")
+            .ToArray();
+        Assert.Equal(
+            new[]
+            {
+                "timescaledb_information.hypertables h",
+                "timescaledb_information.continuous_aggregates ca",
+                "timescaledb_information.chunks ch",
+                "_timescaledb_catalog.compression_settings cs",
+            },
+            relations);
+
+        var allowed = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["h"] = new[] { "hypertable_schema", "hypertable_name" },
+            ["ca"] = new[] { "materialization_hypertable_schema", "materialization_hypertable_name" },
+            ["ch"] = new[] { "chunk_schema", "chunk_name" },
+            ["cs"] = new[] { "compress_relid" },
+            ["c"] = new[] { "relname", "oid" },
+            ["n"] = new[] { "nspname" },
+        };
+
+        /* [a-z]+ before the dot, with no underscore, matches the aliases and never the schema-qualified
+           relation names above (every one of those schemas has an underscore right before its last word). */
+        var references = Regex.Matches(predicate, @"\b([a-z]+)\.([a-z_]+)\b")
+            .Select(m => (Alias: m.Groups[1].Value, Column: m.Groups[2].Value))
+            .ToArray();
+        Assert.NotEmpty(references);
+        Assert.All(references, r => Assert.True(
+            allowed.TryGetValue(r.Alias, out var columns) && columns.Contains(r.Column, StringComparer.Ordinal),
+            $"{r.Alias}.{r.Column} has not been checked against both TimescaleDB catalog shapes (2.28.1 and 2.29+)"));
+        foreach (var (alias, columns) in allowed)
+        {
+            foreach (var column in columns)
+            {
+                Assert.Contains((alias, column), references);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #3918, tree-wide: no Darling product source reads <c>_timescaledb_catalog.chunk</c>. Its columns are
+    /// TimescaleDB's private business and 2.29.0 rewrote them, so a read written against one shape fails at
+    /// analysis on the other, and the bundled version, a bring-your-own store and a store whose extension update
+    /// did not complete can each be on either. The public <c>timescaledb_information.chunks</c> view carries the
+    /// same facts under names every version's update script preserves, and a chunk's compressed relation is
+    /// <c>_timescaledb_catalog.compression_settings.compress_relid</c> on every version. Matches the SQL shape
+    /// (<c>FROM</c> or <c>JOIN</c> the table), so prose that names the catalog, like the explanation on
+    /// <see cref="StoreSelfMetrics.TimescaleInventoriedPredicateSql"/>, is not a hit.
+    /// </summary>
+    [Fact]
+    public void NoDarlingProductSqlReadsTheChunkCatalog()
+    {
+        var root = RepoRoot();
+        var offenders = new List<string>();
+        var scanned = 0;
+
+        foreach (var project in new[]
+        {
+            "PerformanceMonitor.Darling.Storage", "PerformanceMonitor.Darling.Service",
+            "PerformanceMonitor.Darling.Analysis", "PerformanceMonitor.Darling.Viewer",
+        })
+        {
+            var dir = Path.Combine(root, "Darling", project);
+            Assert.True(Directory.Exists(dir), $"product project not found: {dir}");
+
+            foreach (var path in Directory.EnumerateFiles(dir, "*.cs", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(dir, path);
+                var top = relative.Split(Path.DirectorySeparatorChar)[0];
+                if (string.Equals(top, "bin", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(top, "obj", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                scanned++;
+                var text = File.ReadAllText(path);
+                foreach (Match match in Regex.Matches(text, @"\b(?:FROM|JOIN)\s+_timescaledb_catalog\.chunk\b", RegexOptions.IgnoreCase))
+                {
+                    offenders.Add($"{project}/{relative}:{text.AsSpan(0, match.Index).Count('\n') + 1}");
+                }
+            }
+        }
+
+        /* An empty scan is how a guard starts reporting clean, so a moved tree fails here rather than passing. */
+        Assert.True(scanned >= 100, $"the product scan found only {scanned} source files; the projects have moved");
+        Assert.Empty(offenders);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile);
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 
     /// <summary>
@@ -658,6 +789,178 @@ FROM collect.store_metrics", connection);
         Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
         Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
         Assert.True(second.IsPressure, "one WAL-forced checkpoint in the interval IS the pressure arm");
+    }
+
+    /// <summary>
+    /// #3918: the sweep END TO END on a store that holds COMPRESSED data, on whatever TimescaleDB the rig runs
+    /// (CI's darling-pg job: the bundled version). One hypertable with three of its four one-day chunks
+    /// compressed, and a continuous aggregate over it with its materialization compressed, beside the product's
+    /// own hypertables. No policies anywhere, and a VACUUM before measuring, so nothing moves while the test
+    /// measures.
+    ///
+    /// <para><b>The load-bearing assertion is an EXACT partition identity.</b> The bytes the sweep put in its
+    /// <c>hypertable</c> and <c>continuous_aggregate</c> rows (TimescaleDB's own
+    /// <c>hypertable_detailed_size</c>: roots, chunks and compressed relations) must equal the bytes of exactly
+    /// the relations the census removes from its catch-all rows (the production fragments, evaluated here).
+    /// A compressed relation the census fails to remove is counted twice and makes the difference positive by
+    /// its size: the #3918 hazard on 2.29+, where compressed data is no longer a chunk catalog row. A relation
+    /// the census removes that no named row holds makes it negative. On 2.28.1 the identity pins the
+    /// <c>compress_relid</c> arm too, because the public <c>chunks</c> view hides compressed chunks there, so
+    /// the bundled version would double count them without it. Exact on seeded 2.28.1, fresh 2.30.1 and
+    /// upgraded 2.30.1 stores (measured).</para>
+    ///
+    /// <para>It also runs the MCP top-N read over the same census, raw and through its wrapper, because the
+    /// wrapper turns a failure into NULL and nothing else would notice: on 2.29+ before this fix it returned
+    /// NULL on every call and <c>largest_unenumerated</c> silently vanished from <c>get_store_metrics</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task Sweep_WithCompressedHypertableAndAggregate_AttributesEveryTimescaleByteExactlyOnce_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #3918 sweep test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        const string Table = "tick3918_compressed";
+        const string Aggregate = "tick3918_compressed_hourly";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        /* The hypertable: four one-day chunks, each seed midday-anchored (#1972) so none straddles midnight. */
+        await ExecAsync(connection,
+            $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Table}", "collection_time"), ct);
+        await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{Table}"), ct);
+        for (var day = 1; day <= 4; day++)
+        {
+            await SeedTickRowsAsync(connection, Table, daysBack: day, rows: 5_000, ct);
+        }
+
+        /* The aggregate over it, materialized by hand rather than by a refresh policy (a policy fires on
+           creation, #1788, and would move the materialization while the test measures it), then compressed. */
+        await ExecAsync(connection, $@"
+CREATE MATERIALIZED VIEW collect.{Aggregate} WITH (timescaledb.continuous) AS
+SELECT time_bucket(INTERVAL '1 hour', collection_time) AS bucket, server_id, count(*) AS samples, sum(value) AS total
+FROM collect.{Table}
+GROUP BY 1, 2
+WITH NO DATA", ct);
+        await ExecAsync(connection, $"CALL refresh_continuous_aggregate('collect.{Aggregate}', NULL, NULL)", ct);
+        await ExecAsync(connection, $"ALTER MATERIALIZED VIEW collect.{Aggregate} SET (timescaledb.compress = true)", ct);
+
+        /* The three OLDEST hypertable chunks, chosen by range rather than by age so the count cannot depend on
+           the hour the test runs, and every materialization chunk. */
+        await ExecAsync(connection, $@"
+SELECT count(compress_chunk(format('%I.%I', s.chunk_schema, s.chunk_name)::regclass))
+FROM (SELECT chunk_schema, chunk_name
+      FROM timescaledb_information.chunks
+      WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'
+      ORDER BY range_start
+      LIMIT 3) AS s", ct);
+        await ExecAsync(connection, $"SELECT count(compress_chunk(c)) FROM show_chunks('collect.{Aggregate}') AS c", ct);
+
+        /* Settle before measuring: a relation's first VACUUM adds free-space and visibility-map forks, which
+           pg_total_relation_size counts, so autovacuum must find nothing to do between the sweep and the check. */
+        await ExecAsync(connection, "VACUUM (ANALYZE)", ct);
+
+        /* Precondition: compressed data on BOTH sides, through the public stats function rather than the
+           catalog column under test. */
+        long compressedRelationBytes;
+        await using (var precondition = new NpgsqlCommand($@"
+SELECT
+    (SELECT count(*) FROM chunk_compression_stats('collect.{Table}') WHERE compression_status = 'Compressed'),
+    (SELECT count(*)
+       FROM timescaledb_information.continuous_aggregates AS ca
+       CROSS JOIN LATERAL chunk_compression_stats(format('%I.%I', ca.materialization_hypertable_schema, ca.materialization_hypertable_name)::regclass) AS s
+      WHERE ca.view_schema = 'collect' AND ca.view_name = '{Aggregate}' AND s.compression_status = 'Compressed'),
+    (SELECT coalesce(sum(pg_total_relation_size(cs.compress_relid)), 0)::bigint
+       FROM _timescaledb_catalog.compression_settings AS cs
+      WHERE cs.compress_relid IS NOT NULL)", connection))
+        {
+            await using var reader = await precondition.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(3, reader.GetInt64(0));
+            Assert.True(reader.GetInt64(1) >= 1, "the aggregate's materialization holds no compressed chunk");
+            compressedRelationBytes = reader.GetInt64(2);
+            Assert.True(compressedRelationBytes > 0, "no compressed relation holds any bytes");
+        }
+
+        /* The sweep. On 2.29+ before #3918 this threw 42703 from the catch-all statement. */
+        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        Assert.True(written > 0, "the sweep wrote nothing");
+
+        await using (var identity = new NpgsqlCommand($@"
+WITH sweep AS (
+    SELECT max(metric_time) AS metric_time
+    FROM collect.store_metrics
+    WHERE object_kind = '{StoreSelfMetrics.StoreObjectKind}'
+),
+named AS (
+    SELECT coalesce(sum(m.total_bytes), 0)::bigint AS bytes
+    FROM collect.store_metrics AS m
+    JOIN sweep ON m.metric_time = sweep.metric_time
+    WHERE m.object_kind IN ('{StoreSelfMetrics.HypertableObjectKind}', '{StoreSelfMetrics.ContinuousAggregateObjectKind}')
+),
+removed AS (
+    SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0)::bigint AS bytes, count(*) AS relations
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT ({StoreSelfMetrics.TimescaleInventoriedPredicateSql})
+)
+SELECT named.bytes, removed.bytes, removed.relations
+FROM named, removed", connection))
+        {
+            await using var reader = await identity.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            var namedBytes = reader.GetInt64(0);
+            var removedBytes = reader.GetInt64(1);
+            var removedRelations = reader.GetInt64(2);
+
+            Assert.True(namedBytes > compressedRelationBytes, $"the TimescaleDB rows hold {namedBytes} bytes, no more than the compressed relations alone");
+            Assert.True(
+                namedBytes == removedBytes,
+                $"the hypertable and aggregate rows hold {namedBytes} bytes but the census removed {removedBytes} bytes "
+                + $"({removedRelations} relations) from its catch-all rows: a difference of {namedBytes - removedBytes}. "
+                + "Positive is bytes the catch-all counts a SECOND time (the #3918 shape: compressed relations, "
+                + $"{compressedRelationBytes} bytes here, that the census failed to remove); negative is bytes the "
+                + "census removed that no named row holds.");
+        }
+
+        /* The whole-store reconciliation through the real reader: one sweep, both catch-all rows, inside the bar. */
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
+        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(latest);
+        Assert.NotNull(inventory);
+        Assert.Equal(0, inventory!.StaleRowCount);
+        Assert.True(inventory.CatchAllPresent, "a catch-all row is missing from the sweep");
+        Assert.True(inventory.Reconciled,
+            $"the inventory did not reconcile: database {inventory.DatabaseBytes}, attributed {inventory.AttributedBytes}, "
+            + $"residual {inventory.ResidualBytes}, bar {inventory.ToleranceBytes}");
+
+        /* The MCP top-N over the same census, raw first so a failure carries the server's own error, then
+           through the wrapper that turns one into NULL. */
+        await using (var topN = new NpgsqlCommand(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.LargestUnenumeratedSql, connection))
+        {
+            topN.Parameters.AddWithValue(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.LargestUnenumeratedLimit);
+            var relations = new List<string>();
+            await using var reader = await topN.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                relations.Add(reader.GetString(0));
+            }
+
+            Assert.InRange(relations.Count, 1, PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.LargestUnenumeratedLimit);
+            Assert.DoesNotContain(relations, r => r.StartsWith("_timescaledb_", StringComparison.Ordinal) || r.Contains(Table, StringComparison.Ordinal));
+        }
+
+        var logging = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(dataSource, ct);
+        Assert.NotNull(await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(dataSource, logging, ct));
     }
 
     /* ---------------- #2136 synthetic scale test ---------------- */
