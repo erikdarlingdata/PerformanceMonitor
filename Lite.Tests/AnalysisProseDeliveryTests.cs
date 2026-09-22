@@ -228,6 +228,32 @@ public class AnalysisProseDeliveryTests
         Assert.NotNull(record.ContextJson);
     }
 
+    /// <summary>
+    /// #3916 pin 8: Lite raises no toast for an analysis finding (no tray sink is wired into
+    /// AnalysisNotificationService), so a finding with no channel configured is stored
+    /// <c>unconfigured</c>, not <c>tray</c> — which read "Shown" for a toast nobody saw — and the sender
+    /// reports it undelivered, so it cannot arm the #2054 hold.
+    /// </summary>
+    [Fact]
+    public async Task AnUnconfiguredAnalysisRow_IsNotStoredTray()
+    {
+        var alert = await ComposedAlertAsync();
+        var settings = new FixedThresholdSettings();
+        var store = new CapturingHistoryStore();
+        var email = new EmailAlertService(
+            settings, store,
+            new WebhookAlertService(settings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>()),
+            new AppLoggerAdapter<EmailAlertService>());
+
+        var delivery = await email.SendFindingAlertAsync(alert);
+
+        var record = Assert.Single(store.Records);
+        Assert.NotEqual(AlertDelivery.ChannelTray, record.Delivery.Channel);
+        Assert.Equal(AlertDelivery.ChannelNoneConfigured, record.Delivery.Channel);
+        Assert.NotNull(delivery);
+        Assert.False(delivery!.Sent);
+    }
+
     /* ─────────────── the other direction ─────────────── */
 
     /// <summary>
