@@ -752,6 +752,17 @@ public sealed class RobustBaselineTests
         SampleCount = samples, DistinctDays = days, AbsStdDevFloor = 0,
     };
 
+    /// <summary>The zero-history shape above with a BOUNDED metric's absolute dispersion floor on it — the
+    /// combination #3859's exemption is about, which <see cref="ZeroHistoryBlockingBucket"/> cannot make
+    /// (blocking is server-relative and carries no floor, so its <c>AbsStdDevFloor</c> is fixed at 0).</summary>
+    private static BaselineBucket FlooredBucket(
+        double floor, double mean = 0, double stdDev = 0, double median = 0, double mad = 0) => new()
+    {
+        Tier = BaselineTier.Full, HourOfDay = 14, DayOfWeek = 2,
+        Mean = mean, StdDev = stdDev, Median = median, Mad = mad,
+        SampleCount = 257, DistinctDays = 30, AbsStdDevFloor = floor,
+    };
+
     [Fact]
     public void ZeroHistory_TheMatrix_TrustworthyAndZeroHistoryAreMutuallyExclusive_AndFloorsStillBind()
     {
@@ -792,6 +803,44 @@ public sealed class RobustBaselineTests
         Assert.Equal(0.0, young.Confidence);
         Assert.Equal(0.0, twoDays.Confidence);
         Assert.Equal(0.7, ZeroHistoryBlockingBucket(tier: BaselineTier.Flat).Confidence, precision: 3);
+    }
+
+    [Fact]
+    public void ZeroActivity_OnAFlooredMetric_ReportsZeroDispersion_NotTheFloor()
+    {
+        /* #3859 item 1, RULING recorded as a pin rather than a fix: the zero-activity arm in
+           EffectiveStdDev/EffectiveRobustSigma runs BEFORE AbsStdDevFloor is consulted, so a bounded metric
+           that carries a floor and sat at exactly zero reports 0 and not its floor. Both doc comments now say
+           so in words; this is what stops the words from being the only thing holding it.
+
+           THE PIN EXISTS SO NOBODY 'FIXES' THE EXEMPTION SILENTLY. The comments read for a long time as if the
+           floor were unconditional, and making them true — moving the Math.Max above the zero check — is a
+           one-line change that looks like a correction and reds nothing else. It would hand the gate a
+           dispersion no sample ever showed, IsZeroHistory would still be true but the extremity arm's inputs
+           would no longer describe a dead metric, and #3849's arm would be re-gated on exactly the bounded
+           metrics (memory 4.0, CPU 5.0) it was written to reach. The floor spreads a LIVE metric's dispersion;
+           it does not hide a dead one. If this test is in your way, that is the decision you are making.
+
+           Memory's real floor, read from the provider rather than retyped, on a bucket that clears the Full
+           floors with every statistic at zero — the shape a never-pressured hour actually returns. */
+        var floor = BaselineMath.AbsStdDevFloorFor(MetricNames.Memory);
+        Assert.True(floor > 0, "the pin is vacuous on a metric with no floor to apply");
+
+        var floored = FlooredBucket(floor);
+        Assert.Equal(0, floored.EffectiveStdDev);
+        Assert.Equal(0, floored.EffectiveRobustSigma);
+
+        /* And the arm the exemption exists for is still reachable THROUGH the floor — the consequence, not
+           just the arithmetic. The bucket reads zero-history and the gate is left to AnomalyGate (#3849's
+           arm, which this pin only READS). */
+        Assert.True(floored.IsZeroHistory);
+
+        /* The live half of the contract is untouched: the same floor on a bucket with real movement under it
+           still binds, so this is an exemption for zero activity and not the floor being abandoned. */
+        var live = FlooredBucket(floor, mean: 2.1, stdDev: 0.4, median: 2.0, mad: 0.1);
+        Assert.Equal(floor, live.EffectiveStdDev);
+        Assert.Equal(floor, live.EffectiveRobustSigma);
+        Assert.False(live.IsZeroHistory);
     }
 
     [Fact]
