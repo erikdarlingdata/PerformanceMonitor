@@ -770,6 +770,192 @@ public sealed class DarlingStoreUpgradeTests
             @"C:\Program Files\Darling\pg-runtime-prev",
             DarlingStoreUpgrade.PreviousRuntimeRootFor(@"C:\Program Files\Darling\pg-runtime"));
 
+    /// <summary>
+    /// #3919. The swap clears the last update's rescued runtime (<c>pg-runtime-prev</c>) before rescuing the
+    /// current one into it, and a file held open under it (an antivirus scan, an operator shell sitting in
+    /// the folder) makes that delete throw. The rescue right after it already treats "cannot rescue" as a
+    /// reason to SKIP the update, never to refuse to start, but the delete sat outside that guard: the
+    /// exception escaped <c>EnsureRuntimeAsync</c> and the store did not start that time. A release that
+    /// changes the bundled runtime sends every host down this path on its first start.
+    ///
+    /// <para>No PostgreSQL is needed and nothing is executed; see <see cref="PlantHostAwaitingARuntimeSwap"/>
+    /// for how the fixture reaches the rescue without one.</para>
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_APreviousRuntimeItCannotDelete_DefersTheSwapInsteadOfFailingTheStart()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-prev-locked-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            /* The last update's rescued runtime, with one of its files held open and no sharing allowed. */
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            var heldFile = Path.Combine(previousRoot, "pgsql", "bin", "postgres.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(heldFile)!);
+            File.WriteAllText(heldFile, "previous runtime");
+            using var hold = new FileStream(heldFile, FileMode.Open, FileAccess.Read, FileShare.None);
+
+            var log = new CapturingLogger();
+            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                /* nothing is running in this fixture */ (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            var warning = AssertSwapDeferred(advance, host, log);
+            Assert.Contains(previousRoot, warning, StringComparison.Ordinal);
+
+            /* ...and the error with it, which names the file being held. */
+            Assert.Contains(Path.GetFileName(heldFile), warning, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The other half of #3919's guard. Re-creating <c>pg-runtime-prev</c> right after clearing it can fail
+    /// as well: a scanner still holding the folder that was just deleted leaves it delete-pending, and a stray
+    /// FILE by that name blocks it outright. Either way there is nowhere to rescue the current runtime to, the
+    /// same condition with the same answer. The stray file is the deterministic way to get there: the folder
+    /// check sees no folder, nothing is deleted, and the create throws.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_APreviousRuntimeFolderItCannotCreate_DefersTheSwapToo()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-prev-file-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            File.WriteAllText(previousRoot, "a file where the folder should be");
+
+            var log = new CapturingLogger();
+            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            var warning = AssertSwapDeferred(advance, host, log);
+            Assert.Contains(previousRoot, warning, StringComparison.Ordinal);
+
+            /* Nothing is deleted to make room: the file is not the service's to remove. */
+            Assert.Equal("a file where the folder should be", File.ReadAllText(previousRoot));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The control for the two deferrals above: the same host, with a previous runtime nothing is holding,
+    /// clears it and swaps. Without this, a guard that deferred EVERY swap would pass both of them. It needs
+    /// no PostgreSQL either, because nothing after the extract executes a binary.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_APreviousRuntimeItCanClear_IsReplacedAndTheSwapProceeds()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-prev-clear-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            var staleFile = Path.Combine(previousRoot, "pgsql", "bin", "postgres.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(staleFile)!);
+            File.WriteAllText(staleFile, "previous runtime");
+
+            var log = new CapturingLogger();
+            var advance = await new DarlingStoreUpgrade(log).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.Equal(Path.Combine(previousRoot, "pgsql", "bin"), advance.PreviousBinDirectory);
+
+            /* The last update's leftovers are gone, the live runtime was rescued in their place, the package's
+               runtime is now live, and the stamp names the package. */
+            Assert.False(File.Exists(staleFile));
+            Assert.Equal(
+                HostAwaitingARuntimeSwap.LiveRuntime,
+                File.ReadAllText(Path.Combine(previousRoot, "pgsql", "bin", "pg_ctl.exe")));
+            Assert.Equal(HostAwaitingARuntimeSwap.PackageRuntime, File.ReadAllText(host.PgCtl));
+            Assert.Equal(DarlingStoreUpgrade.ComputeFileHash(host.Package), File.ReadAllText(host.StampPath).Trim());
+            Assert.DoesNotContain("Could not clear the previous runtime", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A host one start away from a runtime swap, and what the fixture wrote there.</summary>
+    private sealed record HostAwaitingARuntimeSwap(string RuntimeRoot, string PgCtl, string StampPath, string Package, string DataDirectory)
+    {
+        public const string LiveRuntime = "live runtime";
+
+        public const string PackageRuntime = "new runtime";
+
+        public const string PriorStamp = "0000000000000000000000000000000000000000000000000000000000000000";
+    }
+
+    /// <summary>
+    /// A host that <see cref="DarlingStoreUpgrade.TryAdvanceRuntimeAsync"/> walks all the way to the rescue
+    /// with no PostgreSQL present: a live runtime STAMPED with the package it came from, a different package
+    /// beside it, and a data directory with no <c>PG_VERSION</c>. A stamp that exists and differs skips the
+    /// no-stamp branch, the only one that runs <c>pg_ctl</c>, so the runtime's files can be plain text. The
+    /// missing <c>PG_VERSION</c> makes the downgrade guard abstain before it opens the zip. Any real zip does
+    /// as the package, since a hash that differs from the stamp is the whole trigger. With nothing running,
+    /// the next step is clearing <c>pg-runtime-prev</c> for the rescue.
+    /// </summary>
+    private static HostAwaitingARuntimeSwap PlantHostAwaitingARuntimeSwap(string root)
+    {
+        var runtimeRoot = Path.Combine(root, "pg-runtime");
+        var pgCtl = Path.Combine(runtimeRoot, "pgsql", "bin", "pg_ctl.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(pgCtl)!);
+        File.WriteAllText(pgCtl, HostAwaitingARuntimeSwap.LiveRuntime);
+
+        var stampPath = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+        File.WriteAllText(stampPath, HostAwaitingARuntimeSwap.PriorStamp);
+
+        var packageSource = Path.Combine(root, "package", "pgsql");
+        Directory.CreateDirectory(Path.Combine(packageSource, "bin"));
+        File.WriteAllText(Path.Combine(packageSource, "bin", "pg_ctl.exe"), HostAwaitingARuntimeSwap.PackageRuntime);
+        var package = Path.Combine(root, "pg-runtime.zip");
+        ZipFile.CreateFromDirectory(packageSource, package, CompressionLevel.NoCompression, includeBaseDirectory: true);
+
+        var dataDirectory = Path.Combine(root, "pg");
+        Directory.CreateDirectory(dataDirectory);
+
+        return new HostAwaitingARuntimeSwap(runtimeRoot, pgCtl, stampPath, package, dataDirectory);
+    }
+
+    /// <summary>
+    /// What a deferred swap must leave behind: no swap, the live runtime exactly as it was, and the OLD stamp,
+    /// so the next start sees the difference and tries again. Returns the one warning that says why, for the
+    /// caller's own checks. It is matched on its own wording because the "rescuing the current runtime to"
+    /// warning logged just before it names a path under the same folder, which would satisfy a bare path
+    /// check by itself.
+    /// </summary>
+    private static string AssertSwapDeferred(
+        DarlingStoreUpgrade.RuntimeAdvance advance, HostAwaitingARuntimeSwap host, CapturingLogger log)
+    {
+        Assert.False(advance.Swapped);
+        Assert.Null(advance.PreviousBinDirectory);
+        Assert.True(File.Exists(host.PgCtl), "the live runtime must still be in place; a deferred update never costs the store its binaries");
+        Assert.Equal(HostAwaitingARuntimeSwap.LiveRuntime, File.ReadAllText(host.PgCtl));
+        Assert.Equal(HostAwaitingARuntimeSwap.PriorStamp, File.ReadAllText(host.StampPath).Trim());
+
+        var warning = Assert.Single(
+            log.ToString().Split(Environment.NewLine),
+            line => line.Contains("Could not clear the previous runtime", StringComparison.Ordinal));
+        Assert.StartsWith("[Warning]", warning, StringComparison.Ordinal);
+        return warning;
+    }
+
     /* ==================================================================================
        The gated upgraded-in-place fixture.
        ================================================================================== */
