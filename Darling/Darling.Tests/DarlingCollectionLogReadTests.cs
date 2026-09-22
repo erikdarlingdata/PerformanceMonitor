@@ -391,6 +391,123 @@ public sealed class DarlingCollectionLogReadTests
                 dataSource, FilterServerName, 24, 200, min_duration_ms: 20_000);
             Assert.Contains("\"runs\"", finite, StringComparison.Ordinal);
 
+            /* ── 9. #3869: the status filter returns only matching statuses ── */
+            /*
+                The six rows seeded above are all SUCCESS, so the failures get their own two rows here: an
+                ERROR and a PERMISSIONS, seeded NEWEST so a status filter cannot be confused with a reach
+                effect, and cheap so the duration floor cannot reach them either. This is the shape the issue
+                describes — failures are neither slow nor confined to one collector, which is exactly why the
+                two shipped filters could not find them.
+            */
+            await SeedFilterStatusAsync(connection, ct, "wait_stats", t1, 9, "ERROR");
+            await SeedFilterStatusAsync(connection, ct, "query_store", t2, 8, "PERMISSIONS");
+
+            var byStatus = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, status: "ERROR");
+            var statusRoot = JsonDocument.Parse(byStatus).RootElement;
+
+            Assert.True(
+                statusRoot.TryGetProperty("run_count", out _),
+                "get_collection_log returned a status envelope, not a page, for a status the fixture holds — "
+                + "the filter did not reach the SQL.");
+            Assert.Equal(1, statusRoot.GetProperty("run_count").GetInt32());
+            foreach (var run in statusRoot.GetProperty("runs").EnumerateArray())
+                Assert.Equal("ERROR", run.GetProperty("status").GetString());
+
+            /*
+                The filter that produced the page rides the page, in the STORED spelling and under
+                status_FILTER rather than status. The name is not cosmetic: McpHelpers.Status puts the miss
+                word under `status` on this same tool's empty branch, so echoing the filter there would make
+                one key read "empty" on a miss and "ERROR" on a hit. Asserted explicitly so a later lane
+                renaming it to match its two neighbours has to read this.
+            */
+            Assert.Equal("ERROR", statusRoot.GetProperty("status_filter").GetString());
+            Assert.False(
+                statusRoot.TryGetProperty("status", out _),
+                "a data-bearing collection-log page must not carry a top-level `status`: that key is the "
+                + "miss word on the empty branch, and one key meaning two things by branch is the collision "
+                + "status_filter exists to avoid.");
+
+            /* Case-insensitive on the way in, canonical on the way out: UPPER($7) is what makes the stored
+               vocabulary's casing the thing that matches, so a caller typing lowercase is not silently told
+               there are no failures. */
+            var lowerCase = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, status: "error");
+            var lowerRoot = JsonDocument.Parse(lowerCase).RootElement;
+            Assert.Equal(1, lowerRoot.GetProperty("run_count").GetInt32());
+            Assert.Equal("ERROR", lowerRoot.GetProperty("status_filter").GetString());
+
+            /* The failure-hunting read the issue was filed for: "any non-SUCCESS rows" is two calls, and
+               each one reaches its rows past seven SUCCESS rows that a newest-first page would serve first. */
+            var denied = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, status: "PERMISSIONS");
+            Assert.Equal(1, JsonDocument.Parse(denied).RootElement.GetProperty("run_count").GetInt32());
+
+            /* ── 10. #3869: an unknown status VALUE is refused, naming the accepted set ── */
+            /*
+                The assertion that matters most on this filter. An equality filter on a misspelled status
+                returns an empty page, and on THIS tool an empty page reads as "no failures in the window" —
+                a false negative handed to someone mid-incident. So it must be a refusal that names the set,
+                the same loudness #3870 is giving an unknown ARGUMENT NAME.
+            */
+            var unknownStatus = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, status: "FAILURE");
+
+            Assert.Contains("Invalid status value 'FAILURE'", unknownStatus, StringComparison.Ordinal);
+
+            /* Every member of the vocabulary is named, so the caller can fix the call from the answer. */
+            foreach (var accepted in EnumeratedCollectorDriver.CollectionLogStatuses)
+                Assert.Contains(accepted, unknownStatus, StringComparison.Ordinal);
+
+            /* And it is a refusal, not a page and not a miss: both of those would let the read pass for an
+               answer about the window. */
+            Assert.DoesNotContain("\"runs\"", unknownStatus, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"empty\"", unknownStatus, StringComparison.Ordinal);
+            Assert.DoesNotContain("genuinely quiet", unknownStatus, StringComparison.Ordinal);
+
+            /* ── 11. #3869: a VALID status with no matching rows is the honest empty, not a quiet window ── */
+            var noSuchStatus = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, status: "SESSION_MISSING");
+            var noSuchRoot = JsonDocument.Parse(noSuchStatus).RootElement;
+            Assert.Equal("empty", noSuchRoot.GetProperty("status").GetString());
+            var noSuchText = noSuchRoot.GetProperty("message").GetString()!;
+
+            /* The filter is named back — through the shared describe helper, so the sentence says WHICH
+               filter produced the nothing — and the window is not called quiet, because eight rows sit in
+               it and a filtered read has not looked at the window at all. */
+            Assert.Contains("status SESSION_MISSING", noSuchText, StringComparison.Ordinal);
+            Assert.DoesNotContain("genuinely quiet", noSuchText, StringComparison.Ordinal);
+
+            /* ── 12. #3869: no status filter is unchanged behavior ── */
+            /*
+                The byte-identical pin. The default payload is what every shipped client already reads, so
+                the new parameter must add exactly one key holding null and change nothing else — including
+                the row set, which now contains the two failure rows because they are ordinary runs when
+                nothing filters them out.
+            */
+            var unfilteredAfter = await DarlingMcpDataTools.GetCollectionLog(dataSource, FilterServerName, 24, 200);
+            var afterRoot = JsonDocument.Parse(unfilteredAfter).RootElement;
+            Assert.Equal(8, afterRoot.GetProperty("run_count").GetInt32());
+            Assert.Equal("collection_time_desc", afterRoot.GetProperty("order").GetString());
+
+            /* Null rather than absent, matching collector_name and min_duration_ms: the echo block says what
+               produced the page, and a key that vanished when unset would make "no filter" and "a filter the
+               payload forgot to mention" the same observation. */
+            Assert.Equal(JsonValueKind.Null, afterRoot.GetProperty("status_filter").ValueKind);
+            Assert.Equal(JsonValueKind.Null, afterRoot.GetProperty("collector_name").ValueKind);
+
+            /* And the combination still filters in SQL ahead of the cap, so the three filters compose rather
+               than the last one winning: one ERROR row exists, and it is a wait_stats row. */
+            var combined = await DarlingMcpDataTools.GetCollectionLog(
+                dataSource, FilterServerName, 24, 200, collector_name: "query_store", status: "ERROR");
+            var combinedRoot = JsonDocument.Parse(combined).RootElement;
+            Assert.Equal("empty", combinedRoot.GetProperty("status").GetString());
+
+            /* Both filters named, so the caller can tell which half missed. */
+            var combinedText = combinedRoot.GetProperty("message").GetString()!;
+            Assert.Contains("collector_name 'query_store'", combinedText, StringComparison.Ordinal);
+            Assert.Contains("status ERROR", combinedText, StringComparison.Ordinal);
+
             bodySucceeded = true;
         }
         finally
@@ -432,6 +549,25 @@ INSERT INTO collection_log
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             CollectionIdGenerator.Next(), FilterServerId, FilterServerName, collector,
             DarlingMcpTestData.Naive(collectionTimeUtc), durationMs, "SUCCESS", null, 10, durationMs * 0.8, durationMs * 0.2);
+
+    /// <summary>
+    /// <see cref="SeedFilterAsync"/> with the status spelled out, for #3869's filter (every row the two
+    /// original filters needed was a SUCCESS, so the status was hardcoded there).
+    ///
+    /// <para>A separate seeder rather than a defaulted argument on that one: its six call sites read as
+    /// "collector, time, duration", and adding a trailing parameter to a helper whose arguments are all
+    /// positional numbers is how a later edit silently seeds a duration into a status.</para>
+    /// </summary>
+    private static async Task SeedFilterStatusAsync(
+        NpgsqlConnection connection, CancellationToken ct, string collector, DateTime collectionTimeUtc,
+        double durationMs, string status) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO collection_log
+    (log_id, server_id, server_name, collector_name, collection_time,
+     duration_ms, status, error_message, rows_collected, sql_duration_ms, duckdb_duration_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            CollectionIdGenerator.Next(), FilterServerId, FilterServerName, collector,
+            DarlingMcpTestData.Naive(collectionTimeUtc), durationMs, status, null, 0, durationMs * 0.8, durationMs * 0.2);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
