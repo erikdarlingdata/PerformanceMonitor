@@ -931,28 +931,35 @@ public sealed class McpPayloadContractCensusTests
     /// <summary>
     /// The Darling reader SQL constants whose outer statement anchors on <c>= (SELECT MAX(collection_time |
     /// capture_time) …)</c> — a latest-snapshot read — and do NOT project the anchor column, so the tool above
-    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Three, all known:
+    /// them cannot stamp the snapshot's time (#3541 A10, "latest is a time"). Two, both known:
     /// <c>IndexUsageSql</c> is the object-stats residual <see cref="McpLatestSnapshotStampTests.UnstampedLatestReadsPendingA10"/>
-    /// already holds; <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row to
-    /// stamp; and <c>IndexLockingSql</c> joined them in #3878.
+    /// already holds, and <c>IndexUsageMatchCountSql</c> is a <c>COUNT(*)</c> over the same anchor with no row
+    /// to stamp.
     ///
-    /// <para><b>Why this roster GREW, and why that is not the drift it looks like.</b> It was written
+    /// <para><b>This roster GREW once, in #3879, and #3880 shrank it back by ruling.</b> It is written
     /// shrink-only, on the reasoning that a read either projects its anchor or is waiting for the A10 lane to
-    /// stamp it. <c>IndexLockingSql</c> was invisible to this census before #3878 for a reason that is
-    /// itself the defect: its anchor was a per-<c>database_name</c> <c>MAX(collection_time)</c> group inside a
-    /// CTE, and this scan deliberately ignores an anchor below depth zero because such an anchor picks a SET
-    /// rather than a snapshot. That was exactly true of the old shape — it picked one row per name the store
-    /// had ever seen, which is why a database renamed away was returned forever (#3876). Anchoring it on the
-    /// server's newest capture makes it a snapshot read for the first time, so the census sees it and asks the
-    /// standing question. Its answer is the same as its two neighbours': the row statement does not project
-    /// <c>collection_time</c> and <c>get_object_locking</c> publishes no <c>captured_at</c>, which is the A10
-    /// residual all three sit in. A roster entry gained by a read becoming MORE honest is the census working;
-    /// the shrink-only rule still governs departures, and all three leave together when A10 stamps the
-    /// family.</para>
+    /// stamp it. <c>IndexLockingSql</c> was invisible to this census before #3878 for a reason that was itself
+    /// the defect: its anchor was a per-<c>database_name</c> <c>MAX(collection_time)</c> group inside a CTE,
+    /// and this scan deliberately ignores an anchor below depth zero because such an anchor picks a SET rather
+    /// than a snapshot. That was exactly true of the old shape — it picked one row per name the store had ever
+    /// seen, which is why a database renamed away was returned forever (#3876). Anchoring it on the server's
+    /// newest capture made it a snapshot read for the first time, so the census saw it and asked the standing
+    /// question, and #3879's lane answered with a roster row on the pre-existing-debt argument: its two
+    /// neighbours are unstamped too, and all three would leave together when A10 stamped the family.
+    /// <b>Erik ruled the other way</b> (#3880): a read that has just become one honest instant can say WHICH
+    /// instant, so stamp it rather than roster it. <c>IndexLockingSql</c> projects <c>ios.collection_time</c>,
+    /// <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs, and this list is back to the two
+    /// entries it held before #3879 — the shrink-only direction restored, with the growth episode kept on the
+    /// record here rather than quietly erased.</para>
+    ///
+    /// <para>The two survivors are not the same kind of gap. <c>IndexUsageSql</c> is a genuine A10 residual:
+    /// projecting its anchor and stamping <c>get_index_usage</c> is the same small edit #3880 made next door,
+    /// and it is available whenever the family is taken. <c>IndexUsageMatchCountSql</c> is structural — a
+    /// scalar <c>COUNT(*)</c> has no row for a stamp to ride on, so it leaves this list only if it ever
+    /// returns the anchor beside its count.</para>
     /// </summary>
     public static readonly string[] LatestAnchoredReadsWithoutTheirStamp =
     [
-        "DarlingObjectStatsReader.cs IndexLockingSql",
         "DarlingObjectStatsReader.cs IndexUsageMatchCountSql",
         "DarlingObjectStatsReader.cs IndexUsageSql",
     ];

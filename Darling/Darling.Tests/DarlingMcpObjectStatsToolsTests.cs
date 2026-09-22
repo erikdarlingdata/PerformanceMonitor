@@ -160,6 +160,48 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.DoesNotContain("GROUP BY database_name", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3880, Erik's ruling on the call #3878/#3879 recorded: the read PROJECTS its anchor column, so
+    /// <c>get_object_locking</c> can stamp the snapshot it answered from. The always-runs half of the live
+    /// assertion in <c>DarlingIndexLockingRenamedDatabaseLivePostgresTests</c>: the column is on the row
+    /// statement's select list (the general rule
+    /// <see cref="McpLatestSnapshotStampTests.EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement"/>
+    /// holds per read, and this names the tool) and the record carries it in the position the tool reads.
+    /// The negative half matters as much: a stamp fetched by a SECOND <c>MAX(collection_time)</c> read can
+    /// resolve to the next capture landing between the two queries, so there is exactly one such subquery in
+    /// this constant — the anchor itself.
+    ///
+    /// <para>That the PAYLOAD publishes <c>captured_at</c> is asserted where every other stamped read's is:
+    /// <c>get_object_locking</c> is a <c>Shape.Stamped</c> roster row in <see cref="McpLatestSnapshotStampTests"/>
+    /// on both SKUs since #3880, and that roster sweeps both tool bodies for the key and both descriptions
+    /// for the words. Repeating the body scan here would be a second spelling of one contract, and the one
+    /// that drifts is always the copy.</para>
+    /// </summary>
+    [Fact]
+    public void IndexLockingSql_ProjectsItsAnchorColumn_SoTheToolCanStampTheSnapshot()
+    {
+        var sql = DarlingObjectStatsReader.IndexLockingSql;
+        Assert.Contains("ios.collection_time,", sql, StringComparison.Ordinal);
+
+        /* The projection is on the ROW statement's select list, not only inside the anchor subquery: from the
+           statement's SELECT to its FROM. */
+        var from = sql.IndexOf("\nFROM ", StringComparison.Ordinal);
+        Assert.True(from > 0, "no column-zero FROM — the read's shape has changed; re-anchor this pin");
+        var select = sql.LastIndexOf("\nSELECT", from, StringComparison.Ordinal);
+        Assert.Contains("collection_time", sql[(select < 0 ? 0 : select)..from], StringComparison.Ordinal);
+
+        /* Exactly one MAX(collection_time): the anchor. A second one would be a stamp read that can see a
+           capture the returned rows did not come from. */
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"MAX\(collection_time\)"));
+
+        /* The stamp reaches the row type at ordinal 0, which is the mapping the reader's GetDateTime(0) and
+           the tool's rows[0].CollectionTime both depend on: a member inserted ahead of it would shift every
+           positional read silently. */
+        Assert.Equal(
+            nameof(DarlingObjectStatsReader.IndexLockingRow.CollectionTime),
+            typeof(DarlingObjectStatsReader.IndexLockingRow).GetConstructors().Single().GetParameters()[0].Name);
+    }
+
     [Fact]
     public void DatabaseSizeLatestSql_LatestSnapshot_CarriesSizeAndVolume()
     {
@@ -371,6 +413,12 @@ public sealed class DarlingIndexLockingRenamedDatabaseLivePostgresTests
             Assert.Contains(mcpRows, r => r.DatabaseName == NewName && r.RowLockWaitInMs == 70_000);
             Assert.DoesNotContain(mcpRows, r => r.DatabaseName == OldName);
 
+            /* #3880: every row the reader returns carries the NEWEST capture's stamp, because the anchor and
+               the stamp are now the same column of the same statement. The pre-rename capture is 30 days back
+               in this fixture, so a stamp taken from the wrong rows or re-read with a second MAX() over a
+               different predicate would be a MONTH off, not a rounding difference. */
+            Assert.All(mcpRows, r => Assert.Equal(newest, r.CollectionTime));
+
             /* ...and through the tool itself, so the envelope an agent reads is checked too. Parsed, never
                substring-matched on quoted text: the serializer escapes apostrophes. */
             var payload = await DarlingMcpObjectStatsTools.GetObjectLocking(postgres, ServerName);
@@ -378,6 +426,19 @@ public sealed class DarlingIndexLockingRenamedDatabaseLivePostgresTests
             var names = DatabaseNamesIn(payload);
             Assert.Contains(NewName, names);
             Assert.DoesNotContain(OldName, names);
+
+            /* The published stamp, read as JSON: present, round-trippable, and the newest capture's instant
+               rather than the rename-era one. #3541 A10's point is that a latest read says WHEN, and #3880's
+               is that a read anchored on ONE instant can say WHICH — this is that claim, executed. */
+            using (var doc = System.Text.Json.JsonDocument.Parse(payload))
+            {
+                var stamp = doc.RootElement.GetProperty("captured_at").GetString();
+                Assert.False(string.IsNullOrWhiteSpace(stamp));
+                var parsed = DateTime.Parse(stamp!, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind);
+                Assert.Equal(newest, parsed);
+                Assert.NotEqual(beforeRename, parsed);
+            }
 
             /* 2. The Viewer's all-databases grid. */
             var gridRows = await viewer.GetIndexLockingAsync(ServerId, 200, null, ct);

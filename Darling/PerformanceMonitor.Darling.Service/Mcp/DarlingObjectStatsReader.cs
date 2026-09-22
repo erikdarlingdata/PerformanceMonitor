@@ -96,7 +96,6 @@ internal static class DarlingObjectStatsReader
         double ReservedMb, long TotalRows, long UserSeeks, long UserScans, long UserLookups, long TotalReads,
         long UserUpdates, DateTime? LastUserAccessUtc, string Classification);
 
-    /// <summary>One per-index locking / latch-contention row.</summary>
     /// <summary>One index's locking / latch contention at the server's latest capture.
     /// <para><b>#3880: <c>CollectionTime</c> is the snapshot's own stamp</b>, projected on the row statement
     /// (never re-read with a second <c>MAX()</c>, which could stamp the NEXT capture) so

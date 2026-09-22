@@ -96,6 +96,13 @@ public sealed class McpLatestSnapshotStampTests
         (typeof(DarlingMcpJobTools), "get_running_jobs", "Lite/Mcp/McpJobTools.cs", Shape.Stamped),
         (typeof(DarlingMcpDataTools), "get_server_properties", "Lite/Mcp/McpServerInfoTools.cs", Shape.Stamped),
         (typeof(DarlingMcpSessionTools), "get_session_stats", "Lite/Mcp/McpSessionTools.cs", Shape.Stamped),
+        /* #3880: the first of the three object-stats residuals below to leave that list. Erik's ruling on the
+           call #3878/#3879 recorded: #3879 replaced this read's per-database_name MAX groups with the
+           server's newest capture, which made it one honest instant for the first time, and a read that
+           resolves one instant can say which instant — so it is stamped rather than rostered as debt on
+           McpPayloadContractCensusTests' shrink-only list. Stamped on BOTH SKUs in one lane (the twin is
+           #3877's), so this is a pair row like every other, not an asymmetry. */
+        (typeof(DarlingMcpObjectStatsTools), "get_object_locking", "Lite/Mcp/McpObjectStatsTools.cs", Shape.Stamped),
     ];
 
     /// <summary>
@@ -104,19 +111,25 @@ public sealed class McpLatestSnapshotStampTests
     /// <c>captured_at</c> without leaving this list, and so the gap is on the record rather than invisible.
     /// Reported to #3541 as the A10 residual.
     ///
-    /// <para><b>The parenthetical this comment used to carry is now false, and its correction is a reason the
-    /// residual is easier to close than it was.</b> It said
-    /// <c>DarlingObjectStatsReader.IndexLockingSql</c> "takes MAX per database, not one instant" — true when
-    /// written, and the defect #3878 removed: a per-<c>database_name</c> MAX group is not one instant, which
-    /// is precisely why it kept returning databases renamed away a month earlier (#3876). All four Darling
-    /// locking reads now anchor on <c>(SELECT MAX(collection_time) … WHERE server_id = $1)</c>, so this read
-    /// IS one instant, like the rest of the family — exactly the property a <c>captured_at</c> stamp needs to
-    /// be truthful about. It stays on this list because it is still UNSTAMPED, which is the only thing the
-    /// list claims; nothing about the anchor exempts it from the sweep below.</para>
+    /// <para><b>#3880 took the first of the three</b>, and the route it took is the route the other two have.
+    /// This comment used to carry a parenthetical — <c>DarlingObjectStatsReader.IndexLockingSql</c> "takes MAX
+    /// per database, not one instant" — that was true when written and was itself the defect #3878 removed: a
+    /// per-<c>database_name</c> MAX group is not one instant, which is precisely why the read kept returning
+    /// databases renamed away a month earlier (#3876). All four Darling locking reads now anchor on
+    /// <c>(SELECT MAX(collection_time) … WHERE server_id = $1)</c>, making the read one instant like the rest
+    /// of the family — exactly the property a <c>captured_at</c> stamp needs to be truthful about. #3879 left
+    /// it here anyway, unstamped, which is all this list ever claimed; Erik ruled the other way in #3880, the
+    /// SQL projects its anchor column, <c>get_object_locking</c> publishes <c>captured_at</c> on both SKUs,
+    /// and the tool is a <see cref="LatestTools"/> row above.</para>
+    ///
+    /// <para>The two that remain are an ordinary A10 residual each, not a different rule:
+    /// <c>get_index_usage</c> and <c>get_table_index_sizes</c> read the same daily snapshots through anchors
+    /// of the same shape, and the same one-line projection would stamp them. They stay because nobody has
+    /// measured what their callers read, not because the pattern does not reach them.</para>
     /// </summary>
     public static readonly string[] UnstampedLatestReadsPendingA10 =
     [
-        "get_index_usage", "get_object_locking", "get_table_index_sizes",
+        "get_index_usage", "get_table_index_sizes",
     ];
 
     /// <summary>
@@ -534,6 +547,11 @@ public sealed class McpLatestSnapshotStampTests
     [InlineData(nameof(DarlingJobReader.RunningJobsSql), "collection_time")]
     [InlineData(nameof(DarlingDataReader.LatestServerPropertiesSql), "collection_time")]
     [InlineData(nameof(DarlingSessionReader.LatestSessionStatsSql), "collection_time")]
+    /* #3880: the object-locking read, stamped by Erik's ruling rather than rostered as unstamped debt. It is
+       held to the SAME rule as every other stamped read, and the rule is the whole reason the stamp is worth
+       having here: the anchor column rides the row statement, so the instant published is the instant the
+       returned rows came from, never a fresher capture a second MAX() read happened to see. */
+    [InlineData(nameof(DarlingObjectStatsReader.IndexLockingSql), "collection_time")]
     public void EveryStampedRead_SelectsItsStampColumn_OnTheRowStatement(string sqlName, string column)
     {
         var sql = ReaderSql(sqlName);
@@ -690,6 +708,7 @@ public sealed class McpLatestSnapshotStampTests
         nameof(DarlingPgLoggingAuditReader.NewestSnapshotSql) => DarlingPgLoggingAuditReader.NewestSnapshotSql,
         nameof(DarlingPgServerConfigReader.CurrentConfigSql) => DarlingPgServerConfigReader.CurrentConfigSql,
         nameof(DarlingObjectStatsReader.DatabaseSizeLatestSql) => DarlingObjectStatsReader.DatabaseSizeLatestSql,
+        nameof(DarlingObjectStatsReader.IndexLockingSql) => DarlingObjectStatsReader.IndexLockingSql,
         nameof(DarlingJobReader.RunningJobsSql) => DarlingJobReader.RunningJobsSql,
         nameof(DarlingDataReader.LatestServerPropertiesSql) => DarlingDataReader.LatestServerPropertiesSql,
         nameof(DarlingSessionReader.LatestSessionStatsSql) => DarlingSessionReader.LatestSessionStatsSql,
