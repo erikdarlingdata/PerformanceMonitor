@@ -70,6 +70,7 @@ namespace PerformanceMonitorDashboard.Services
 
         public double AnalysisNotifySeverity        => Math.Clamp(_prefs.AnalysisNotifySeverity, 0.0, 2.0);
         public int    AnalysisNotifyCooldownMinutes => Math.Clamp(_prefs.AnalysisNotifyCooldownMinutes, 30, 10080);
+        public int    AnalysisPageCap               => Math.Clamp(_prefs.AlertPerEventMaxPerCycle, 1, 100);
 
         /* #2710: the deprecated Dashboard serves no web dashboard - no triage page to link to. */
         public string TriageBaseUrl => "";

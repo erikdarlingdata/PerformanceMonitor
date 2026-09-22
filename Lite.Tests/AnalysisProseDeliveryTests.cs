@@ -420,6 +420,7 @@ public class AnalysisProseDeliveryTests
 
         public double AnalysisNotifySeverity => NotifyThreshold;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 10;
         public string TriageBaseUrl => "";
     }
 

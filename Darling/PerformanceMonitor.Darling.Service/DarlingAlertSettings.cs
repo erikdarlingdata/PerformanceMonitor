@@ -352,6 +352,9 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* #2107: was a hardcoded 360 while the shared engine accepts a clamped [30, 10080] value and
        Lite always passed a configured one through — the Darling parity gap gotqn called out. */
     public int AnalysisNotifyCooldownMinutes => Math.Clamp(_config.Alerts.AnalysisNotifyCooldownMinutes, 30, 10080);
+    /// <summary>#3916: the analysis page cap per hold-back window IS the per-event cap — the same "how many
+    /// separate messages before they batch" knob, so one operator setting governs both.</summary>
+    public int AnalysisPageCap => PerEventMax;
 
     /// <summary>
     /// #3712: where an uncorroborated finding goes — resolved from the knob's TWO homes with <b>store non-NULL
