@@ -61,10 +61,10 @@ public sealed class ControlPlaneReloadDurabilityTests
     public void AnUnreadableComposeTimeout_LeavesTheRolesHorizonAlone()
     {
         var readable = DarlingManagedRoles.BuildProvisioningSql(
-            "AdminPassword01", "ViewerPassword02", "McpPassword03", 120);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 120);
 
         var unreadable = DarlingManagedRoles.BuildProvisioningSql(
-            "AdminPassword01", "ViewerPassword02", "McpPassword03", null);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, null);
 
         /* Positive control FIRST, through the identical regex the negative below uses: a scan that cannot
            see the statements it is asserting the absence of would pass on any input. */

@@ -143,7 +143,7 @@ public class ComposeStatementTimeoutStoreTests
     public void TheProvisioningDdl_AppliesTheConfiguredTimeout(int seconds, string expected)
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(
-            "AdminPassword01", "ViewerPassword02", "McpPassword03", seconds);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, seconds);
 
         Assert.Contains($"SET statement_timeout = '{expected}'", sql, StringComparison.Ordinal);
 
@@ -182,7 +182,7 @@ public class ComposeStatementTimeoutStoreTests
     [Fact]
     public void TheDefaultReproducesTheOldConstant()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("AdminPassword01", "ViewerPassword02", "McpPassword03");
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
         Assert.Contains("SET statement_timeout = '15s'", sql, StringComparison.Ordinal);
     }
