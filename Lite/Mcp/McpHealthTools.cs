@@ -398,10 +398,18 @@ public sealed class McpHealthTools
 
                    Composed from the shared classifier, like output_finding and note_summary above, so no
                    consumer re-derives either the predicate or the sentence differently. */
-                regressed_from_productive = r.RegressedFromProductive,
+                /* #3885 widened the flag from the skip class to EITHER regression class — a collector
+                   recording SUCCESS with zero rows on three consecutive runs after a productive history
+                   has stopped doing what it used to do, and that class is strictly harder to see because
+                   its successes are fresh and no staleness reading moves. Darling's payload carries the
+                   same four names off the same shared predicate, plus zero_row_success_runs, which rides
+                   unconditionally: on a HEALTHY row below the N=3 boundary it is what says how close this
+                   collector is to it. */
+                regressed_from_productive = r.AnyRegression,
                 last_productive_at = r.LastProductiveTime?.ToString("o"),
-                rows_in_prior_7d = r.RegressedFromProductive ? r.RowsStored : (long?)null,
-                regression_finding = r.RegressedFinding,
+                rows_in_prior_7d = r.AnyRegression ? r.RowsStored : (long?)null,
+                regression_finding = r.AnyRegressionFinding,
+                zero_row_success_runs = r.TrailingZeroRowSuccessRuns,
                 /* #1837: what a NON-failing run reported — an enumeration that came back with 0 items,
                    items whose enumeration probe failed. note_count == total_runs means every run in the
                    window came back that way, which is the "collecting nothing for weeks" case that reads

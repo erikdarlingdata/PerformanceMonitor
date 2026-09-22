@@ -290,9 +290,13 @@ public sealed class RegressedFromProductiveTests
 
         /* Off the PREDICATE, not off the band. A count keyed on the band would go quiet exactly when the
            regression got worse: the floor only moves a row that would have read HEALTHY, so day two's
-           FAILING row would stop being counted. */
+           FAILING row would stop being counted.
+
+           #3885 widened the predicate this reads from the skip class alone to AnyRegression - either
+           class, one count - so the anchor moved with it. The member is still a PREDICATE and not a band,
+           which is what this pin is about. */
         Assert.Contains(
-            "existing.Regressed + (health.RegressedFromProductive ? 1 : 0)",
+            "existing.Regressed + (health.AnyRegression ? 1 : 0)",
             reader,
             StringComparison.Ordinal);
         Assert.DoesNotContain("status == \"REGRESSED\"", reader, StringComparison.Ordinal);

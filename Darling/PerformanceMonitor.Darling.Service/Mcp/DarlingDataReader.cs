@@ -1356,10 +1356,11 @@ internal static class DarlingDataReader
     /// success/run/error timestamps, and the permission-denied count for the banding. SKIPPED counts as
     /// a healthy run. $1 server_id, $2 window start (naive UTC — the trailing 7 days).
     ///
-    /// <para>29 columns since #3819 (16 at #2460, plus #2472's four fan-out columns, #2804's
+    /// <para>30 columns since #3885 (16 at #2460, plus #2472's four fan-out columns, #2804's
     /// abandoned_count, #3010's last_denied_time, #3017's rows_stored/runs_with_rows, #3240's
-    /// extension_missing_count, #3754's session_missing_count and #3819's current_status /
-    /// last_non_skip_time / last_productive_time) — every addition APPENDED, never inserted, because both MCP surfaces read
+    /// extension_missing_count, #3754's session_missing_count, #3819's current_status /
+    /// last_non_skip_time / last_productive_time and #3885's trailing_zero_row_success_runs) — every
+    /// addition APPENDED, never inserted, because both MCP surfaces read
     /// this result set positionally. No longer column-identical to the WPF viewer's own
     /// <c>CollectionHealthSql</c>: the two duration statistics feed the MCP tool's sweep-pressure
     /// arithmetic, which the viewer's health grid does not serve. Lite's DuckDB read carries them at
@@ -1558,7 +1559,33 @@ internal static class DarlingDataReader
             -- above, so productive means one thing on this row. Compared against last_non_skip_time it
             -- says the productivity sits BEFORE the streak rather than inside it, which is the ORDER that
             -- makes this a regression rather than two unrelated facts.
-            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            -- #3885: how many runs, counting back from the NEWEST, were SUCCESS with zero rows and nothing
+            -- else. The column that makes the #3819 regression arm able to see the class it could not:
+            -- job_history recorded SUCCESS / 0 rows run after run on 41 of 43 servers of the largest
+            -- production store for up to a fortnight -- 1,900+ consecutive such runs on one of them -- and
+            -- banded HEALTHY throughout, because #3819 keys on a skip STATUS and this collector's status was
+            -- the most reassuring word the vocabulary has.
+            --
+            -- Exact, and FREE: recency_rank already exists in the subquery below (#3819 added it for
+            -- current_status), so this buys the streak's true width with no new window function and no new
+            -- sort. MIN of the rank of the newest run that BREAKS the streak, minus one, is the count of
+            -- runs ahead of it; NULL (no run breaks it -- every run in the window is a zero-row success)
+            -- falls back to COUNT(*), which is that same count. A streak broken by an error, a denial, a
+            -- skip or a productive run therefore reads 0 rather than reaching past it, because what this
+            -- measures is the collector's CURRENT state and any of those is a different current state.
+            --
+            -- The abandonment exclusion is the one success_count above uses, for the same #2926 reason: a
+            -- pre-#2803 abandoned cycle is stored as SUCCESS with zero rows and the budget note, which is
+            -- data LOSS rather than a source that went quiet, and counting it here would attribute an
+            -- abandonment to a regression. APPENDED, like every column since #2472, because this result set
+            -- is read positionally.
+            COALESCE(
+                MIN(CASE WHEN NOT (status = 'SUCCESS'
+                                   AND COALESCE(rows_collected, 0) = 0
+                                   AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                         THEN recency_rank END) - 1,
+                COUNT(*)) AS trailing_zero_row_success_runs
         FROM
         (
             -- #1855: rank each class of message newest-first so the two exemplar columns above can take
@@ -1742,6 +1769,11 @@ internal static class DarlingDataReader
                 CurrentStatus = reader.IsDBNull(26) ? null : reader.GetString(26),
                 LastNonSkipTime = reader.IsDBNull(27) ? null : reader.GetDateTime(27),
                 LastProductiveTime = reader.IsDBNull(28) ? null : reader.GetDateTime(28),
+                /* Appended (#3885), for the same reason every column before it was. The EXACT trailing
+                   width, off the subquery's existing recency_rank -- the fleet twin estimates the same
+                   quantity from two instants and the cadence because it has no ranked subquery to read
+                   and will not grow one (see FleetCollectionHealthSql). */
+                TrailingZeroRowSuccessRuns = reader.IsDBNull(29) ? 0 : Convert.ToInt64(reader.GetValue(29)),
             });
         }
 
@@ -2633,6 +2665,57 @@ internal sealed class CollectorHealth
             RowsStored, LastNonSkipTime, CurrentStatus)
         : null;
 
+    /* ── Produced then stopped (#3885) ────────────────────────────────────────────────────────────
+       The second regression class, and the one #3819 could not see: not a skip word but a SUCCESS
+       storing nothing, run after run, on a collector that had been productive. job_history sat
+       HEALTHY like that on 41 of 43 servers of the largest production store for up to a fortnight. */
+
+    /// <summary>
+    /// How many runs, counting back from the newest, were SUCCESS with zero rows and nothing else
+    /// (<c>trailing_zero_row_success_runs</c>). EXACT on this per-server read, which resolves it off the
+    /// ranked subquery #3819 already added; the fleet twin sets it from
+    /// <see cref="CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns"/> instead, because that
+    /// statement has no subquery to rank and #3735's statement-timeout headroom is not spent on one.
+    /// 0 on a surface that does not project it, which keeps <see cref="ProducedThenStopped"/> false
+    /// rather than making a claim from an absence.
+    /// </summary>
+    public long TrailingZeroRowSuccessRuns { get; set; }
+
+    /// <summary>
+    /// Whether this collector WAS producing rows and is now recording SUCCESS with zero rows every cycle
+    /// (#3885) — the regression class whose status word is the most reassuring one the vocabulary has,
+    /// which is why nothing on any health surface could see it. Event collectors and on-load collectors
+    /// are excluded inside the shared predicate, so a fortnight of zeros from a deadlock capture at rest
+    /// stays HEALTHY.
+    /// </summary>
+    public bool ProducedThenStopped => CollectorHealthClassifier.ProducedThenStopped(
+        CollectorName, TrailingZeroRowSuccessRuns, LastProductiveTime);
+
+    /// <summary>
+    /// The sentence a produced-then-stopped collector carries, or null when it is not one (#3885).
+    /// Composed from the shared formatter for the same reason <see cref="RegressedFinding"/> is.
+    /// </summary>
+    public string? ProducedThenStoppedFinding => ProducedThenStopped
+        ? CollectorHealthClassifier.FormatProducedThenStoppedFinding(
+            RowsStored, LastProductiveTime, TrailingZeroRowSuccessRuns)
+        : null;
+
+    /// <summary>
+    /// EITHER regression class — stopped skipping (#3819) or stopped producing (#3885). What the band
+    /// floor, the <c>regressed_from_productive</c> field and the fleet's one regressed count all read, so
+    /// widening the definition did not fork any of the three. The two predicates are disjoint by
+    /// construction: one requires the newest run to be a named skip, the other requires the newest runs
+    /// to be successes, so this is an OR over populations that cannot overlap.
+    /// </summary>
+    public bool AnyRegression => RegressedFromProductive || ProducedThenStopped;
+
+    /// <summary>
+    /// Whichever regression sentence applies, or null on a row that is neither (#3885). One slot rather
+    /// than two on the payload, because the two classes are disjoint and a reader asking "why is this
+    /// WARNING" wants the answer, not a pair of fields of which one is always null.
+    /// </summary>
+    public string? AnyRegressionFinding => RegressedFinding ?? ProducedThenStoppedFinding;
+
     /// <summary>
     /// Runs the #2673 whole-server wall-clock budget gave up on (#2804). Counted apart from errors for the
     /// same reason <see cref="YieldCount"/> is — a guard firing is not a fault — but unlike a yield it is
@@ -2838,5 +2921,8 @@ internal sealed class CollectorHealth
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
-        RegressedFromProductive);
+        /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
+           that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
+           would return HEALTHY forever. */
+        AnyRegression);
 }
