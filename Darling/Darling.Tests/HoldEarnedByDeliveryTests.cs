@@ -198,6 +198,13 @@ public sealed class HoldEarnedByDeliveryTests
             Sent.Add(alert);
             return Task.FromResult(Delivery);
         }
+
+        /* #3916 PR B: over the cap the flush sends ONE summary; these pins stay under it. */
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Sent.AddRange(named);
+            return Task.FromResult(Delivery);
+        }
     }
 
     /// <summary>Cooldown 30 minutes — the floor — so "past the cooldown" is reachable by a seed.</summary>
@@ -233,6 +240,7 @@ public sealed class HoldEarnedByDeliveryTests
         public int AnalysisNotifyCooldownMinutes => 30;
         public string TriageBaseUrl => "";
         public FindingRoute UncorroboratedFindingRoute => FindingRoute.Page;
+        public int AnalysisPageCap => 5;
     }
 
     private static AnalysisFinding Steady(string hash) => new()
@@ -295,11 +303,14 @@ public sealed class HoldEarnedByDeliveryTests
         var hash = caught ? "undeliv000000002" : "undeliv000000001";
 
         await service.NotifyAsync(new[] { Steady(hash) });
+        await service.FlushPendingAsync();
         await service.NotifyAsync(new[] { Steady(hash) });
+        await service.FlushPendingAsync();
         Assert.Single(sender.Sent);                    /* inside the cooldown: throttled */
 
         AgeBuckets(service, TimeSpan.FromMinutes(31));
         await service.NotifyAsync(new[] { Steady(hash) });
+        await service.FlushPendingAsync();
         Assert.Equal(2, sender.Sent.Count);            /* past it, steady severity: re-attempted */
     }
 
@@ -314,8 +325,10 @@ public sealed class HoldEarnedByDeliveryTests
         var service = Service(sender);
 
         await service.NotifyAsync(new[] { Steady("delivered0000002") });
+        await service.FlushPendingAsync();
         AgeBuckets(service, TimeSpan.FromMinutes(31));
         await service.NotifyAsync(new[] { Steady("delivered0000002") });
+        await service.FlushPendingAsync();
 
         Assert.Single(sender.Sent);
     }
@@ -334,6 +347,7 @@ public sealed class HoldEarnedByDeliveryTests
         var steady = Steady("delivered0000001");
         steady.Severity = 1.5;
         await service.NotifyAsync(new[] { steady });
+        await service.FlushPendingAsync();
 
         Assert.Empty(sender.Sent);
     }
@@ -351,8 +365,10 @@ public sealed class HoldEarnedByDeliveryTests
         var service = Service(sender, sink: (_, _) => toasts++);
 
         await service.NotifyAsync(new[] { Steady("dashsink00000001") });
+        await service.FlushPendingAsync();
         AgeBuckets(service, TimeSpan.FromMinutes(31));
         await service.NotifyAsync(new[] { Steady("dashsink00000001") });
+        await service.FlushPendingAsync();
 
         Assert.Single(sender.Sent);   /* steady story held past the cooldown, as before #3916 */
         Assert.Equal(1, toasts);
