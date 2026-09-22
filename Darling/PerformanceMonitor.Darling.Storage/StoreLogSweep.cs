@@ -183,6 +183,11 @@ WHERE capture_time < $1";
     /// budget.</summary>
     public const int MaxRemaskRowsPerPass = 5000;
 
+    /// <summary>How long one re-mask slice may run (#3920's review). It shares the hourly self-metrics budget,
+    /// and a slice that ran that budget out would take the collector-cost flush after it down too; a slice that
+    /// runs out of its own time gives up alone and resumes from its cursor next hour.</summary>
+    public static readonly TimeSpan RemaskSliceBudget = TimeSpan.FromSeconds(60);
+
     /// <summary>One page of rows to re-mask, in physical order after <c>$1</c> (null for the start).</summary>
     public const string RemaskPageSql = @"
 SELECT

@@ -6774,13 +6774,16 @@ LIMIT 1";
             /* #3915: rows stored before this build kept their entries unmasked (an ERROR's STATEMENT line, a
                DETAIL's key values), for the capture's 400-day retention. Re-masked one bounded slice per tick
                until the table's end, then not again this process; a new capture is masked on write. Its own
-               catch, like the capture's: a failure here must not cost the collector-cost flush below. */
+               catch, like the capture's, and its own time cap (#3920's review): neither a failure nor a slow
+               slice may cost the collector-cost flush below. */
             if (!_storeLogRemaskDone)
             {
+                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                remaskBudget.CancelAfter(StoreLogSweep.RemaskSliceBudget);
                 try
                 {
                     var (next, examined, rewritten) = await StoreLogSweep.RemaskStoredEventsAsync(
-                        connection, _storeLogRemaskCursor, budget.Token);
+                        connection, _storeLogRemaskCursor, remaskBudget.Token);
                     _storeLogRemaskCursor = next;
                     _storeLogRemaskDone = next is null;
                     if (rewritten > 0)
@@ -6790,7 +6793,8 @@ LIMIT 1";
                             rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
                     }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
                 {
                     _logger.LogWarning(
                         "Store log: re-masking rows captured before this build failed, and is retried next hour: {Message}",

@@ -47,6 +47,9 @@ public class StoreStatementStatsTests
            its text any more. */
         Assert.Contains($"WHEN s.query ~* {Literal(StoreStatementStats.ReadableStatementPattern)}", sql, StringComparison.Ordinal);
         Assert.Contains($"AND s.query !~* {Literal(StoreStatementStats.SensitiveStatementPattern)}", sql, StringComparison.Ordinal);
+        /* #3920's review: before PostgreSQL 16, pg_stat_statements keeps a SELECT ... INTO's constants as typed. */
+        Assert.Contains("AND NOT (pg_catalog.current_setting('server_version_num')::integer < 160000", sql, StringComparison.Ordinal);
+        Assert.Contains($"AND s.query ~* {Literal(StoreStatementStats.SelectIntoPattern)}) THEN s.query", sql, StringComparison.Ordinal);
         Assert.Contains($"ELSE {Literal(StoreStatementStats.WithheldText)}", sql, StringComparison.Ordinal);
         Assert.Contains("WHEN s.query IS NULL THEN NULL", sql, StringComparison.Ordinal);
         Assert.Contains($"WHEN s.query = {Literal(StoreStatementStats.InsufficientPrivilegeText)} THEN s.query", sql, StringComparison.Ordinal);
@@ -87,6 +90,11 @@ public class StoreStatementStatsTests
 
         Assert.DoesNotContain("\\", pattern, StringComparison.Ordinal);
         Assert.DoesNotContain("\\", StoreStatementStats.ReadableStatementPattern, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", StoreStatementStats.SelectIntoPattern, StringComparison.Ordinal);
+
+        /* #3920's review: the allowlist reads no comment, so a DML keyword inside one cannot open the gate. */
+        Assert.DoesNotContain("--", StoreStatementStats.ReadableStatementPattern, StringComparison.Ordinal);
+        Assert.DoesNotContain("/[*]", StoreStatementStats.ReadableStatementPattern, StringComparison.Ordinal);
         foreach (var keyword in new[] { "select", "insert", "update", "delete", "merge", "with", "values", "table" })
         {
             Assert.Contains(keyword, StoreStatementStats.ReadableStatementPattern, StringComparison.Ordinal);

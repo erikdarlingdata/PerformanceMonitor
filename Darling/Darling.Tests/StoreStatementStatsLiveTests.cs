@@ -359,9 +359,10 @@ public sealed class StoreStatementStatsLiveTests
     /// <summary>
     /// The two patterns as PostgreSQL's own regex engine judges them (#3915): C# cannot evaluate an ARE, so the
     /// claims about what each matches are asserted where they run. Readable: normalized DML after leading
-    /// whitespace, parentheses and comments. Sensitive: credential-bearing statements, comment-split ones and
-    /// libpq and URI forms included, and never a normalized parameter or a column merely ending in
-    /// <c>password</c>.
+    /// whitespace and parentheses, never after a comment (#3920's review: a DML keyword inside the comment opened
+    /// the gate). Sensitive: credential-bearing statements, comment-split and nested-comment ones and libpq and
+    /// URI forms included, and never a normalized parameter or a column merely ending in <c>password</c>. And
+    /// the SELECT ... INTO pattern the reader withholds before PostgreSQL 16.
     /// </summary>
     [Fact]
     public async Task ThePatternsMatchWhatTheyClaim_InPostgresOwnRegexEngine_AgainstScratchPostgres()
@@ -378,8 +379,15 @@ public sealed class StoreStatementStatsLiveTests
         {
             ("SELECT $1", true, false),
             ("  select $1 AS x", true, false),
-            ("/* leading */ SELECT $1", true, false),
-            ("-- line comment\nSELECT $1", true, false),
+            ("/* leading */ SELECT $1", false, false),
+            ("-- line comment\nSELECT $1", false, false),
+            ("-- nightly: update settings\nALTER SYSTEM SET ssl_passphrase_command = 'echo s3cr3t'", false, false),
+            ("--with\nSET app.api_key = 'sk_live_123'", false, false),
+            ("-- note\tupdate x\nALTER SYSTEM SET a = 'x'", false, false),
+            ("-- table maintenance\nCOPY t FROM PROGRAM 'curl -H x-api-key:abc123'", false, false),
+            ("/* a /* b */ select */ SET app.api_key = 'x'", false, false),
+            ("ALTER /* a /* b */ c */ ROLE app PASSWORD 'x'", false, true),
+            ("CREATE TABLE t (owner_role text, user_id int)", false, false),
             ("(SELECT $1) UNION (SELECT $2)", true, false),
             ("WITH a AS (SELECT $1) SELECT * FROM a", true, false),
             ("INSERT INTO t VALUES ($1)", true, false),
@@ -414,6 +422,22 @@ public sealed class StoreStatementStatsLiveTests
             await result.ReadAsync(ct);
             Assert.True(readable == result.GetBoolean(0), $"readable({text}) should be {readable}");
             Assert.True(sensitive == result.GetBoolean(1), $"sensitive({text}) should be {sensitive}");
+        }
+
+        foreach (var (text, selectInto) in new (string Text, bool SelectInto)[]
+        {
+            ("SELECT $1 AS pw INTO TEMP t", true),
+            ("select	$1 into t", true),
+            ("WITH a AS (SELECT $1) SELECT * INTO t FROM a", true),
+            ("SELECT $1", false),
+            ("SELECT intox FROM t", false),
+            ("INSERT INTO t VALUES ($1)", false),
+        })
+        {
+            await using var command = new NpgsqlCommand("SELECT $1 ~* $2", c);
+            command.Parameters.AddWithValue(text);
+            command.Parameters.AddWithValue(StoreStatementStats.SelectIntoPattern);
+            Assert.True(selectInto == (bool)(await command.ExecuteScalarAsync(ct))!, $"selectInto({text}) should be {selectInto}");
         }
     }
 

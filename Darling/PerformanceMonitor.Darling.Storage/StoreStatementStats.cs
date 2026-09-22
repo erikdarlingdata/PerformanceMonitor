@@ -83,16 +83,19 @@ public static class StoreStatementStats
 
     /// <summary>
     /// What may separate two SQL tokens: whitespace, a block comment or a line comment, in the regex dialect
-    /// below. A line comment ends at the first control character rather than exactly at the newline, which can
-    /// only make a match fail, never widen one.
+    /// below. Used only by <see cref="SensitiveStatementPattern"/>, a blocklist, where reading a comment short
+    /// (a line comment ends at the first control character, a block comment at its first <c>*/</c>) can only
+    /// add matches. The allowlist does not use it (#3920's review).
     /// </summary>
     private const string TokenGap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
 
     /// <summary>
-    /// The only statements whose TEXT the reader returns (#3915): normalized DML. After any leading whitespace,
-    /// parentheses and comments, the statement is a SELECT, INSERT, UPDATE, DELETE, MERGE, WITH, VALUES or
-    /// TABLE, and pg_stat_statements has replaced every constant in it with <c>$n</c>, so its text carries no
-    /// value. Every other statement (a utility statement, recorded only while <c>track_utility</c> is on, whose
+    /// The only statements whose TEXT the reader returns (#3915): normalized DML. After any leading whitespace
+    /// and parentheses, the statement is a SELECT, INSERT, UPDATE, DELETE, MERGE, WITH, VALUES or TABLE, and
+    /// pg_stat_statements has replaced every constant in it with <c>$n</c>, so its text carries no value. A
+    /// statement that OPENS with a comment is not shown (#3920's review): a comment-aware pattern read a DML
+    /// keyword inside the comment (<c>-- update settings</c> then <c>ALTER SYSTEM ...</c>) and could not follow
+    /// PostgreSQL's nested block comments, and no statement the service sends opens with one. Every other statement (a utility statement, recorded only while <c>track_utility</c> is on, whose
     /// literals are kept as typed) keeps its timings in the ranking and reads as <see cref="WithheldText"/>.
     /// An ALLOWLIST since #3915's review: the blocklist before it missed comment-split role DDL
     /// (<c>ALTER/**/ROLE</c>), connection strings in a DO body, and secret settings that are not called
@@ -100,7 +103,16 @@ public static class StoreStatementStats
     /// under either <c>standard_conforming_strings</c> setting.
     /// </summary>
     public const string ReadableStatementPattern =
-        "^(" + TokenGap + "|[(])*(select|insert|update|delete|merge|with|values|table)[[:>:]]";
+        "^[[:space:](]*(select|insert|update|delete|merge|with|values|table)[[:>:]]";
+
+    /// <summary>
+    /// A SELECT ... INTO, which is <c>CREATE TABLE AS</c>: a utility statement that pg_stat_statements before
+    /// PostgreSQL 16 records with its constants as typed (measured on 18: <c>SELECT $1 AS pw INTO TEMP t</c>).
+    /// The reader withholds a SELECT- or WITH-led statement naming <c>INTO</c> on a server older than 16, which
+    /// also withholds a <c>WITH ... INSERT INTO</c> there; its timings still rank.
+    /// </summary>
+    public const string SelectIntoPattern =
+        "^[[:space:](]*(select|with)[[:>:]].*[[:<:]]into[[:>:]]";
 
     /// <summary>What the reader returns in place of a statement it does not show.</summary>
     public const string WithheldText = "<text withheld: not a normalized SELECT, INSERT, UPDATE, DELETE or MERGE>";
@@ -258,7 +270,9 @@ WHERE e.extname = 'pg_stat_statements'";
             WHEN s.query IS NULL THEN NULL
             WHEN s.query = {QuoteLiteral(InsufficientPrivilegeText)} THEN s.query
             WHEN s.query ~* {QuoteLiteral(ReadableStatementPattern)}
-             AND s.query !~* {QuoteLiteral(SensitiveStatementPattern)} THEN s.query
+             AND s.query !~* {QuoteLiteral(SensitiveStatementPattern)}
+             AND NOT (pg_catalog.current_setting('server_version_num')::integer < 160000
+                      AND s.query ~* {QuoteLiteral(SelectIntoPattern)}) THEN s.query
             ELSE {QuoteLiteral(WithheldText)}
         END
     FROM {extension}.pg_stat_statements AS s

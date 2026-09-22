@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -111,6 +112,52 @@ public static class PgLogTextRedactor
         @"\bFailing row contains \(.*\)(?=[^)]*$)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
+    /* `Partition key of the failing row contains (tenant_email) = (bob@example.com).` - the no-partition-found
+       DETAIL, its values unquoted like a key tuple's and taken whole for the key tuple's reasons (#3920's
+       review): the key list stays, the value list goes, greedy to the last `)`. */
+    private static readonly Regex s_partitionKeyValue = new(
+        @"(?<key>\bPartition key of the failing row contains \(.*?\)) = \((?!\?\)).*\)(?=[^)]*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    /* `JSON data, line 1: {"card": 4111111111111111, ...` - the json parser's CONTEXT, which quotes the input
+       line up to the error with nothing escaped (#3920's review). Everything after the lead goes, to the end of
+       the line the parser wrote it on. */
+    private static readonly Regex s_jsonDataLine = new(
+        @"(?<lead>\bJSON data, line [0-9]+: )[^\n]*",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* A double-quoted run or a single-quoted literal, whichever opens first, so an apostrophe inside a quoted
+       name (`"o'k"`) never pairs with one outside it (#3920's review). Only the single-quoted kind is masked
+       here; the double-quoted kind is left for the allowlist pass below. The single-quoted half IS the plan
+       parser's pattern, not a copy of it. */
+    private static readonly Regex s_quotedRun = new(
+        @"""[^""]*""|" + PgPlanLogParser.s_quotedLiteral,
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* The two DETAIL shapes that carry another session's SQL (#3920's review): the deadlock report's
+       `Process N: <query>` lines, one per process after the wait-for lines (errdetail_log, each query cut at
+       track_activity_query_size), and the postmaster's `Failed process was running: <query>` after a backend
+       crash, cut the same way. A tab leads each in a stderr log's continuation lines, nothing in csvlog. */
+    private static readonly Regex s_detailQueryHead = new(
+        @"^\t?(?:Process [0-9]+: |Failed process was running: )",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* A CONTEXT frame that quotes the statement it was running, unescaped (#3920's review): SPI's
+       `SQL statement "..."` and PL/pgSQL's expression and assignment frames. */
+    private static readonly Regex s_contextSqlFrame = new(
+        @"^\t?(?:SQL statement|SQL expression|PL/pgSQL expression|PL/pgSQL assignment) """,
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* What can follow such a frame: the line after its closing quote starts one of these, or the field ends. */
+    private static readonly Regex s_contextFrameStart = new(
+        @"^\t?(?:PL/pgSQL function |SQL function |SQL statement ""|SQL expression ""|PL/pgSQL expression ""|PL/pgSQL assignment ""|parallel worker|while |COPY |JSON data, )",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>What a statement becomes when it cannot be read to its end (cut inside a literal, a quoted
+    /// identifier or a block comment, or written two ways at once): no mask can be trusted to have covered what
+    /// the cut hid, so no statement is kept at all.</summary>
+    public const string WithheldStatement = "<statement withheld: it could not be read to its end>";
+
     /* Every remaining double-quoted run, with what precedes it captured so the allowlist can be asked. The
        word-and-space lead is tried first so `relation "x"` reaches the allowlist with its noun; the fallback
        is ANY single character — a bare space, a newline at the head of a tab-continuation, punctuation — so
@@ -139,16 +186,145 @@ public static class PgLogTextRedactor
             return text;
         }
 
-        var scrubbed = PgPlanLogParser.s_quotedLiteral.Replace(text, "'?'");
-        scrubbed = s_exclusionTupleValues.Replace(scrubbed, "${key}=(?) conflicts with existing key ${key2}=(?)");
+        /* The value shapes before the single-quote pass (#3920's review): a key tuple's value, a partition key's,
+           a JSON line, is taken whole before an apostrophe inside it, or inside the quoted column name beside it,
+           can pair with another one and leave the value's middle standing. */
+        var scrubbed = s_exclusionTupleValues.Replace(text, "${key}=(?) conflicts with existing key ${key2}=(?)");
         scrubbed = s_keyTupleValue.Replace(scrubbed, "${key}=(?)");
+        scrubbed = s_partitionKeyValue.Replace(scrubbed, "${key} = (?)");
         scrubbed = s_failingRow.Replace(scrubbed, "Failing row contains (?)");
+        scrubbed = s_jsonDataLine.Replace(scrubbed, "${lead}?");
         scrubbed = s_quotedValueShape.Replace(scrubbed, "\"?\"");
+        scrubbed = s_quotedRun.Replace(scrubbed, m => m.Value[0] == '\'' ? "'?'" : m.Value);
 
         return s_doubleQuoted.Replace(scrubbed, m =>
             s_identifierNoun.IsMatch(m.Groups["lead"].Value)
                 ? m.Value
                 : m.Groups["lead"].Value + "\"?\"");
+    }
+
+    /// <summary>
+    /// A DETAIL field (#3920): prose through <see cref="RedactMessage"/>, except the SQL PostgreSQL writes into
+    /// it, a deadlock's <c>Process N: query</c> lines and a crash's <c>Failed process was running: query</c>.
+    /// That is masked as a statement is (<see cref="RedactStoredStatement"/>), and withheld when it cannot be
+    /// read to its end, which is common: the server cuts each query at <c>track_activity_query_size</c>. Each
+    /// query runs to the next <c>Process N:</c> line or the end of the field. Prose masking kept bare numbers
+    /// and dollar-quoted strings, so before this a deadlock kept both sessions' values. Null in, null out;
+    /// idempotent.
+    /// </summary>
+    public static string? RedactDetail(string? detail)
+    {
+        if (string.IsNullOrEmpty(detail))
+        {
+            return detail;
+        }
+
+        var lines = detail.Split('\n');
+        var output = new List<string>(lines.Length);
+        var prose = new List<string>();
+        var i = 0;
+        while (i < lines.Length)
+        {
+            var head = s_detailQueryHead.Match(lines[i]);
+            if (!head.Success)
+            {
+                prose.Add(lines[i]);
+                i++;
+                continue;
+            }
+
+            FlushProse(prose, output);
+            var query = new StringBuilder(lines[i][head.Length..]);
+            var next = i + 1;
+            while (next < lines.Length && !s_detailQueryHead.IsMatch(lines[next]))
+            {
+                query.Append('\n').Append(lines[next]);
+                next++;
+            }
+
+            output.Add(head.Value + (RedactStoredStatement(query.ToString()) ?? WithheldStatement));
+            i = next;
+        }
+
+        FlushProse(prose, output);
+        return string.Join('\n', output);
+    }
+
+    /// <summary>
+    /// A CONTEXT field (#3920): prose through <see cref="RedactMessage"/>, except a frame that quotes the
+    /// statement it was running (<c>SQL statement "..."</c>, PL/pgSQL's <c>expression</c> and
+    /// <c>assignment</c> frames), whose statement is masked as SQL. PostgreSQL does not escape that quote, so a
+    /// double quote inside the statement is not its end: the statement ends at the first closing quote before
+    /// which the text reads to its end (<see cref="RedactStoredStatement"/>) and after which the next line starts
+    /// another frame, or the field ends. A frame that no closing quote satisfies is withheld, with everything
+    /// after it. Null in, null out; idempotent.
+    /// </summary>
+    public static string? RedactContext(string? context)
+    {
+        if (string.IsNullOrEmpty(context))
+        {
+            return context;
+        }
+
+        var lines = context.Split('\n');
+        var output = new List<string>(lines.Length);
+        var prose = new List<string>();
+        var i = 0;
+        while (i < lines.Length)
+        {
+            var frame = s_contextSqlFrame.Match(lines[i]);
+            if (!frame.Success)
+            {
+                prose.Add(lines[i]);
+                i++;
+                continue;
+            }
+
+            FlushProse(prose, output);
+            string? masked = null;
+            var close = -1;
+            for (var end = i; end < lines.Length && masked is null; end++)
+            {
+                var closesHere = lines[end].EndsWith('"')
+                    && (end > i || lines[end].Length > frame.Length)
+                    && (end + 1 == lines.Length || s_contextFrameStart.IsMatch(lines[end + 1]));
+                if (!closesHere)
+                {
+                    continue;
+                }
+
+                var body = new StringBuilder(lines[i][frame.Length..]);
+                for (var k = i + 1; k <= end; k++)
+                {
+                    body.Append('\n').Append(lines[k]);
+                }
+
+                body.Length--;
+                masked = RedactStoredStatement(body.ToString());
+                close = end;
+            }
+
+            if (masked is null)
+            {
+                output.Add(frame.Value + WithheldStatement + "\"");
+                return string.Join('\n', output);
+            }
+
+            output.Add(frame.Value + masked + "\"");
+            i = close + 1;
+        }
+
+        FlushProse(prose, output);
+        return string.Join('\n', output);
+    }
+
+    private static void FlushProse(List<string> prose, List<string> output)
+    {
+        if (prose.Count > 0)
+        {
+            output.Add(RedactMessage(string.Join('\n', prose)) ?? string.Empty);
+            prose.Clear();
+        }
     }
 
     /// <summary>SQL: quoted literals AND bare numbers out, identifier-glued digits kept. Null in, null out.</summary>
@@ -173,11 +349,18 @@ public static class PgLogTextRedactor
     /// identifier (double-quoted ones included, apostrophes and all) and every operator are kept; comments,
     /// nested ones included, are dropped; whitespace collapses to single spaces.
     ///
-    /// <para><b>Backslash is an escape in every single-quoted literal</b>, not only in <c>E''</c>: a client
-    /// with <c>standard_conforming_strings</c> off writes <c>'it\'s'</c>, and reading that backslash as a
-    /// plain character would end the literal early and leave the rest standing. Wrong in the safe direction
-    /// on a standard string that ends in a backslash: the mask runs on to the next quote, or the text ends
-    /// inside a literal and is refused.</para>
+    /// <para><b>Backslash.</b> An escape in an <c>E''</c> literal always, never in <c>B''</c> or <c>X''</c>,
+    /// and in any other literal only when the CLIENT that sent it runs with <c>standard_conforming_strings</c>
+    /// off, which the text does not say. A run of backslashes decides where such a literal ends only when a
+    /// quote follows it, and the two settings then disagree exactly when the run is odd: off, the quote is
+    /// escaped and the literal runs on; on, the quote ends it. Neither reading can be trusted, so the text is
+    /// refused. #3920's review showed that the earlier rule, reading every backslash as an escape, skipped the
+    /// closing quote of <c>'C:\'</c> and unmasked the next literal. An even run, or one before any other
+    /// character, reads the same both ways.</para>
+    ///
+    /// <para>Whitespace and comments follow PostgreSQL's lexer, not .NET's: only
+    /// <c>space \t \n \r \f \v</c> separate tokens (a non-ASCII character is part of an identifier), and a
+    /// line comment ends at <c>\r</c> as well as <c>\n</c>.</para>
     ///
     /// <para><b>Fails closed.</b> Null when the text ends inside a literal, a quoted identifier or a block
     /// comment, which is what a statement cut at a cap or a read boundary looks like: no mask can be trusted
@@ -217,7 +400,7 @@ public static class PgLogTextRedactor
             var c = text[i];
             var next = i + 1 < text.Length ? text[i + 1] : '\0';
 
-            if (char.IsWhiteSpace(c))
+            if (c is ' ' or '\t' or '\n' or '\r' or '\f' or '\v')
             {
                 pendingSpace = true;
                 i++;
@@ -226,7 +409,7 @@ public static class PgLogTextRedactor
 
             if (c == '-' && next == '-')
             {
-                var newline = text.IndexOf('\n', i);
+                var newline = text.IndexOfAny(['\n', '\r'], i);
                 i = newline < 0 ? text.Length : newline + 1;
                 pendingSpace = true;
                 continue;
@@ -299,13 +482,32 @@ public static class PgLogTextRedactor
                 : -1;
             if (literalOpen >= 0)
             {
+                var escapeString = literalOpen == i + 1 && (c is 'E' or 'e');
+                var bitString = literalOpen == i + 1 && (c is 'B' or 'b' or 'X' or 'x');
                 var j = literalOpen + 1;
                 var closed = false;
                 while (j < text.Length)
                 {
-                    if (text[j] == '\\')
+                    if (text[j] == '\\' && escapeString)
                     {
                         j += 2;
+                        continue;
+                    }
+
+                    if (text[j] == '\\' && !bitString)
+                    {
+                        var run = j;
+                        while (run < text.Length && text[run] == '\\')
+                        {
+                            run++;
+                        }
+
+                        if (run < text.Length && text[run] == '\'' && (run - j) % 2 == 1)
+                        {
+                            return null;
+                        }
+
+                        j = run;
                         continue;
                     }
 

@@ -119,7 +119,7 @@ public static class StoreLogClassifier
     /// <summary>What a kept statement reads as when it cannot be read to its end (cut at a cap or a read
     /// boundary, or opening a literal it never closes): the masking fails closed rather than trusting a mask
     /// that cannot know what the cut hid.</summary>
-    public const string WithheldStatement = "<statement withheld: it could not be read to its end>";
+    public const string WithheldStatement = PgLogTextRedactor.WithheldStatement;
 
     /// <summary>
     /// How many DISTINCT retained messages one class may keep per capture before the rest are folded into
@@ -896,18 +896,33 @@ public static class StoreLogClassifier
                 : (RoutineClass, false, message, rawText);
         }
 
-        return (eventClass, true, PgLogTextRedactor.RedactMessage(message) ?? string.Empty, MaskEntry(rawText));
+        /* The message comes from the MASKED entry's first line, not from the raw first line masked alone
+           (#3920's review): a value that runs onto the next line (a literal holding a newline) is masked whole
+           only when its lines are masked together, and the first line alone kept its opening half. */
+        var maskedRaw = MaskEntry(rawText);
+        return (eventClass, true, PrimaryMessageOf(maskedRaw) ?? PgLogTextRedactor.RedactMessage(message) ?? string.Empty, maskedRaw);
+    }
+
+    /// <summary>The message on an entry's first line: what follows its primary severity, or null when the
+    /// first line carries none.</summary>
+    private static string? PrimaryMessageOf(string entry)
+    {
+        var firstLine = entry.Split('\n', 2)[0];
+        var field = FindField(firstLine);
+        return field.Kind == FieldKind.Primary ? firstLine[field.MessageStart..] : null;
     }
 
     /// <summary>
-    /// An entry's lines with every value masked (#3915), field by field: the primary message, DETAIL, HINT and
-    /// CONTEXT as prose (<see cref="PgLogTextRedactor.RedactMessage"/>: quoted values, key tuples and failing
-    /// rows out, identifiers after their noun and numbers kept), a STATEMENT or QUERY field as SQL
+    /// An entry's lines with every value masked (#3915), field by field: the primary message and HINT as prose
+    /// (<see cref="PgLogTextRedactor.RedactMessage"/>: quoted values, key tuples and failing rows out,
+    /// identifiers after their noun and numbers kept), DETAIL and CONTEXT as prose with the SQL PostgreSQL
+    /// writes into them masked as SQL (<see cref="PgLogTextRedactor.RedactDetail"/>,
+    /// <see cref="PgLogTextRedactor.RedactContext"/>, #3920), a STATEMENT or QUERY field as SQL
     /// (<see cref="PgLogTextRedactor.RedactStoredStatement"/>, one line, or <see cref="WithheldStatement"/>
-    /// when it cannot be read to its end), and LOCATION as written. Each field's tab-continuation lines are
-    /// masked with it, so a value that spans lines is masked whole. The prefix and field names stay, so the
-    /// sample still reads as the server's entry. Idempotent: masking masked text changes nothing, which is
-    /// what lets rows stored before this build be re-masked by the same function.
+    /// when it cannot be read to its end), and LOCATION's own line as written. Each field's tab-continuation
+    /// lines are masked with it, so a value that spans lines is masked whole. The prefix and field names stay,
+    /// so the sample still reads as the server's entry. Idempotent: masking masked text changes nothing, which
+    /// is what lets rows stored before this build be re-masked by the same function.
     /// </summary>
     internal static string MaskEntry(string rawText)
     {
@@ -918,7 +933,10 @@ public static class StoreLogClassifier
         {
             var line = lines[i];
             var field = line.StartsWith('\t') ? default : FindField(line);
-            var head = field.Kind == FieldKind.None ? string.Empty : line[..field.MessageStart];
+            /* The head as prose too (#3920's review): on a well-formed line it is the log_line_prefix and the
+               field name, which masking leaves as they are, but a line that merely contains a field token (a
+               command's stderr, say) would otherwise keep whatever came before it verbatim. */
+            var head = field.Kind == FieldKind.None ? string.Empty : PgLogTextRedactor.RedactMessage(line[..field.MessageStart]) ?? string.Empty;
             var block = new StringBuilder(field.Kind == FieldKind.None ? line : line[field.MessageStart..]);
 
             var next = i + 1;
@@ -929,11 +947,22 @@ public static class StoreLogClassifier
                 next++;
             }
 
-            var masked = field.Kind == FieldKind.Continuation && field.Name is "STATEMENT" or "QUERY"
-                ? PgLogTextRedactor.RedactStoredStatement(block.ToString()) ?? WithheldStatement
-                : field.Kind == FieldKind.Continuation && field.Name == "LOCATION"
-                    ? block.ToString()
-                    : PgLogTextRedactor.RedactMessage(block.ToString()) ?? string.Empty;
+            var text = block.ToString();
+            var masked = field.Kind != FieldKind.Continuation
+                ? PgLogTextRedactor.RedactMessage(text) ?? string.Empty
+                : field.Name switch
+                {
+                    "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
+                    "DETAIL" => PgLogTextRedactor.RedactDetail(text) ?? string.Empty,
+                    "CONTEXT" => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
+                    /* LOCATION's own line is a source file and line, kept. A line after it is not (a command's
+                       stderr under log_error_verbosity = verbose lands there) and is masked as prose (#3920's
+                       review). */
+                    "LOCATION" => text.IndexOf('\n') is var newline and >= 0
+                        ? text[..(newline + 1)] + (PgLogTextRedactor.RedactMessage(text[(newline + 1)..]) ?? string.Empty)
+                        : text,
+                    _ => PgLogTextRedactor.RedactMessage(text) ?? string.Empty,
+                };
 
             if (result.Length > 0)
             {
