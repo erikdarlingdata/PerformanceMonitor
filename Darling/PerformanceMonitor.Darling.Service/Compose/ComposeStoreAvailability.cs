@@ -18,16 +18,16 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// The compose runner's cached answer to "which retention rollups does this store have?" (#1665 — the
-/// composer's arm of the #1664 availability guard), plus the "partial window, and says so" notice for the
-/// routes that availability (or the value-remap/dimension-coverage gates) forced below what the window's age
-/// wanted. Caching mirrors the viewer's <c>GetRollupAvailabilityAsync</c> semantics exactly: once every
-/// rollup exists the answer is cached for the store's lifetime (a created CAGG is never dropped outside the
-/// service's own reshape sweep); while the store reports none/partial, re-probe at most every
-/// <see cref="ReprobeInterval"/> so an ensure sweep finishing mid-session converges without a restart; a
-/// failed probe answers <see cref="RollupAvailability.None"/> — raw always exists, so "route everything to
-/// raw" is the never-wrong fallback. Keyed per data source (not a bare static) so gated-live tests spinning
-/// several stores in one process can never bleed one store's shape into another's.
+/// The service's cached answer to "which retention rollups does this store have, and how far back has each
+/// materialized?" (#1665 — the composer's arm of the #1664 availability guard; since #3905 also the gate the
+/// daily-summary reader routes on), plus the "partial window, and says so" notice for the routes that
+/// availability (or the value-remap/dimension-coverage gates) forced below what the window's age wanted.
+/// Caching follows the viewer's <c>GetRollupAvailabilityAsync</c>: the answer is re-probed at most every
+/// <see cref="ReprobeInterval"/>, unconditionally since #1759 (see <see cref="GetRollupsAsync(NpgsqlDataSource, CancellationToken)"/>),
+/// so an ensure sweep or a backfill finishing mid-session converges without a restart; a failed probe answers
+/// <see cref="RollupAvailability.None"/> — raw always exists, so "route everything to raw" is the never-wrong
+/// fallback. Keyed per data source (not a bare static) so gated-live tests spinning several stores in one
+/// process can never bleed one store's shape into another's.
 /// </summary>
 internal static class ComposeStoreAvailability
 {
@@ -37,6 +37,14 @@ internal static class ComposeStoreAvailability
         public RollupCoverage Coverage = RollupCoverage.Unknown;
         public bool Probed;
         public DateTime ProbedAtUtc;
+
+        /// <summary>The probe the current callers share (#3905): non-null and incomplete while one is running.
+        /// A completed task here is history, and the next caller who finds the cache stale starts a new one.</summary>
+        public Task<(RollupAvailability Rollups, RollupCoverage Coverage)>? InFlight;
+
+        /// <summary>Probes started for this data source over its whole life. Diagnostic; see
+        /// <see cref="ProbesStartedFor"/>.</summary>
+        public int ProbesStarted;
     }
 
     private static readonly ConditionalWeakTable<NpgsqlDataSource, Entry> s_entries = new();
@@ -48,8 +56,7 @@ internal static class ComposeStoreAvailability
 
     /// <summary>
     /// The store's rollup availability AND each rollup's materialized-coverage floor, probed lazily and
-    /// cached per data source. Benignly racy: concurrent panel runs may probe twice; the probes are two
-    /// small catalog/aggregate lookups and last-write-wins caches the same answer.
+    /// cached per data source.
     ///
     /// <para><b>Coverage expires even when availability does not (#1759).</b> Availability is permanent once
     /// complete — a created aggregate is never dropped outside the service's own reshape sweep — but a
@@ -58,31 +65,106 @@ internal static class ComposeStoreAvailability
     /// life of the process, so an operator who just backfilled would keep getting raw fallbacks until a
     /// restart. The <see cref="ReprobeInterval"/> TTL therefore applies unconditionally, and the
     /// <c>AllPresent</c> shortcut is deliberately gone.</para>
+    ///
+    /// <para><b>One probe in flight per data source (#3905).</b> This used to be "benignly racy": concurrent
+    /// callers that found the cache stale each ran the probe, on the argument that it was two small lookups.
+    /// Neither half held. The daily-summary reader now reads coverage through here too, the web server page
+    /// fires its two daily reads together, and on the largest production store the coverage probe is
+    /// >= 1.7 s on a quiet minute, not a small lookup. So a stale cache is refreshed by exactly one probe and
+    /// every caller that arrives while it runs awaits that one: the single-flight shape of
+    /// <c>DarlingFleetReader.CollectionHealthMemo</c> (#3735), for its reasons. The shared probe runs on
+    /// <see cref="CancellationToken.None"/>, so a caller's token releases only that caller's wait, and the
+    /// probe cannot fault the shared task: a failure is the cached raw fallback below, as before.</para>
+    /// </summary>
+    internal static ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetRollupsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+        => GetRollupsAsync(postgres, ProbeAsync, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetRollupsAsync(NpgsqlDataSource, CancellationToken)"/> with the probe substitutable, so a
+    /// test can count and pace executions without a store. <paramref name="probe"/> is called with
+    /// <see cref="CancellationToken.None"/>: the cache, not the caller, decides the probe's lifetime.
     /// </summary>
     internal static async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetRollupsAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres,
+        Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
+        CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(probe);
+
         var entry = s_entries.GetOrCreateValue(postgres);
 
+        Task<(RollupAvailability Rollups, RollupCoverage Coverage)> shared;
+        TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)>? lead = null;
         lock (entry)
         {
             if (entry.Probed && DateTime.UtcNow - entry.ProbedAtUtc < ReprobeInterval)
             {
                 return (entry.Rollups, entry.Coverage);
             }
+
+            if (entry.InFlight is not { IsCompleted: false })
+            {
+                /* RunContinuationsAsynchronously: the waiters' continuations (the rest of each panel or daily
+                   read) must not run inline on whichever thread completes the probe. */
+                lead = new TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)>(TaskCreationOptions.RunContinuationsAsynchronously);
+                entry.InFlight = lead.Task;
+                entry.ProbesStarted++;
+            }
+
+            shared = entry.InFlight;
         }
 
+        if (lead is not null)
+        {
+            /* Started outside the lock, and not awaited here: this caller is one waiter among any number, and
+               its own cancellation below must not be the probe's. RunProbeAsync completes the source on every
+               path and never throws, so the discarded task cannot fault. */
+            _ = RunProbeAsync(entry, lead, postgres, probe);
+        }
+
+        return await shared.WaitAsync(cancellationToken);
+    }
+
+    /// <summary>How many probes <see cref="GetRollupsAsync(NpgsqlDataSource, CancellationToken)"/> has started
+    /// for <paramref name="postgres"/> — the figure a live test compares against the number of reads it raced
+    /// (#3905). Diagnostic; nothing reads it in production.</summary>
+    internal static int ProbesStartedFor(NpgsqlDataSource postgres)
+    {
+        var entry = s_entries.GetOrCreateValue(postgres);
+        lock (entry)
+        {
+            return entry.ProbesStarted;
+        }
+    }
+
+    private static async Task<(RollupAvailability Rollups, RollupCoverage Coverage)> ProbeAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken);
+        return (rollups, coverage);
+    }
+
+    private static async Task RunProbeAsync(
+        Entry entry,
+        TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)> lead,
+        NpgsqlDataSource postgres,
+        Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe)
+    {
         RollupAvailability rollups;
         RollupCoverage coverage;
         try
         {
-            rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
-            coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken);
+            (rollups, coverage) = await probe(postgres, CancellationToken.None);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             /* A store hiccup mid-probe must not fail the panel — raw is the safe answer for availability,
-               and "no coverage evidence" leaves the age ladder in charge. The re-probe interval retries soon. */
+               and "no coverage evidence" leaves the age ladder in charge. The re-probe interval retries soon.
+               Every exception, cancellation included: the probe runs on no caller's token, so nothing here
+               is a caller asking to stop, and the shared task must complete for every waiter. */
             rollups = RollupAvailability.None;
             coverage = RollupCoverage.Unknown;
             _ = ex;
@@ -96,7 +178,7 @@ internal static class ComposeStoreAvailability
             entry.ProbedAtUtc = DateTime.UtcNow;
         }
 
-        return (rollups, coverage);
+        lead.SetResult((rollups, coverage));
     }
 
     /// <summary>

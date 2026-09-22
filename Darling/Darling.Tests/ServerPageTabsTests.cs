@@ -1032,8 +1032,9 @@ public sealed class ServerPageTabsTests
             ["waitsPanel("] = new[] { "get_wait_stats", "get_wait_trend" },
             ["fileIoPanel("] = new[] { "get_file_io_trend" },
             /* #3653 A6: the Daily Health Calendar became a composite so the read's days_missing[] renders as a
-               line above the grid; it still fetches exactly the one read the table() descriptor did. */
-            ["dailyCalendarPanel("] = new[] { "get_daily_summary_range" },
+               line above the grid. #3905: it also renders today's tile, from the same one fetch, where the tile
+               used to be a get_daily_summary descriptor of its own. */
+            ["dailySummaryPanels("] = new[] { "get_daily_summary_range" },
             ["perfmonPanel("] = new[] { "get_perfmon_stats", "get_perfmon_trend" },
             ["topQueriesPanel("] = new[] { "get_top_queries_by_cpu", "get_query_trend" },
         };

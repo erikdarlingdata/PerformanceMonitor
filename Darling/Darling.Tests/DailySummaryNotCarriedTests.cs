@@ -92,25 +92,37 @@ public sealed class DailySummaryNotCarriedTests
             var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
 
             Assert.Contains("SELECT b.d, NULL::bigint AS c", sql, StringComparison.Ordinal);
-            Assert.Contains("FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS b(d)", sql, StringComparison.Ordinal);
-            Assert.Contains("WHERE b.d < $3", sql, StringComparison.Ordinal);
-            Assert.Contains("AND b.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS g(d)", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE g.d < $3", sql, StringComparison.Ordinal);
+            Assert.Contains("AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)", sql, StringComparison.Ordinal);
 
             /* Probe one: no rollup row for THIS server that day. */
             var lf = sql.Replace("\r\n", "\n", StringComparison.Ordinal);
             Assert.Contains(
-                $"NOT EXISTS (\n        SELECT 1 FROM collect.{relation} AS r\n        WHERE r.server_id = $1 AND r.bucket >= b.d AND r.bucket < b.d + INTERVAL '1 day')",
+                $"NOT EXISTS (\n            SELECT 1 FROM collect.{relation} AS r\n            WHERE r.server_id = $1 AND r.bucket >= g.d AND r.bucket < g.d + INTERVAL '1 day'\n            OFFSET 0)",
                 lf, StringComparison.Ordinal);
 
             /* Probe two: an admitted source row for THIS server that day — the source and its time column are
                the repair's, and the filter is the aggregate's own WHERE, verbatim. */
             var sourceProbe = $"SELECT 1 FROM collect.{target.Source} AS s\n        WHERE s.server_id = $1 AND s.{target.SourceTimeColumn} >= b.d AND s.{target.SourceTimeColumn} < b.d + INTERVAL '1 day'"
-                + (filter.Length == 0 ? ")" : "\n          AND " + filter + ")");
+                + (filter.Length == 0 ? "\n        OFFSET 0)" : "\n          AND " + filter + "\n        OFFSET 0)");
             Assert.Contains(sourceProbe, lf, StringComparison.Ordinal);
+
+            /* #3905: the fences. Each probe carries OFFSET 0, which PostgreSQL refuses to pull up into a join, so
+               each stays a per-day SubPlan; the candidate days are a fenced subquery holding probe one, and probe
+               two filters its output, so the source is probed only on the days the rollup probe found empty.
+               DailySummaryProbePlanLiveTests proves the resulting plan on a store. */
+            var member = lf[lf.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal)..];
+            Assert.Equal(3, member.Split("OFFSET 0").Length - 1);
+            var rollupProbeAt = member.IndexOf($"SELECT 1 FROM collect.{relation} AS r", StringComparison.Ordinal);
+            var fenceAt = member.IndexOf("        OFFSET 0\n    ) AS b\n    WHERE EXISTS (", StringComparison.Ordinal);
+            var sourceProbeAt = member.IndexOf($"SELECT 1 FROM collect.{target.Source} AS s", StringComparison.Ordinal);
+            Assert.True(rollupProbeAt > 0 && fenceAt > rollupProbeAt && sourceProbeAt > fenceAt,
+                "probe one sits inside the fenced candidate-day subquery and probe two filters its output");
 
             /* The three members, in order: rollup half, raw tail, not-carried. */
             Assert.Equal(2, sql.Split("UNION ALL").Length - 1);
-            var rollupAt = sql.IndexOf("SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c", StringComparison.Ordinal);
+            var rollupAt = sql.IndexOf("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", StringComparison.Ordinal);
             var rawAt = sql.IndexOf("FROM v_query_stats", StringComparison.Ordinal);
             var notCarriedAt = sql.IndexOf("SELECT b.d, NULL::bigint AS c", StringComparison.Ordinal);
             Assert.True(rollupAt > 0 && rawAt > rollupAt && notCarriedAt > rawAt);
@@ -150,8 +162,11 @@ public sealed class DailySummaryNotCarriedTests
             Assert.Contains("GROUP BY server_id, server_name, database_name, query_hash", create, StringComparison.Ordinal);
         }
 
-        /* And the rollup half counts that hash, so a rollup row's count is >= 1 by construction. */
-        Assert.Contains("SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c", DailySummarySql.RangeSqlFor(RetentionTier.Daily), StringComparison.Ordinal);
+        /* And the rollup half counts that hash, so a rollup row's count is >= 1 by construction: the distinct
+           (day, hash) pairs of the rollup's rows, counted per day (#3905's hashable spelling of the same count). */
+        var daily = DailySummarySql.RangeSqlFor(RetentionTier.Daily);
+        Assert.Contains("SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash", daily, StringComparison.Ordinal);
+        Assert.Contains("SELECT x.d, COUNT(x.query_hash) AS c", daily, StringComparison.Ordinal);
     }
 
     /// <summary>The routed form refuses a relation the registry does not know before it reaches the store.</summary>
@@ -218,11 +233,11 @@ public sealed class DailySummaryNotCarriedTests
         Assert.Contains("days_missing = row.UniqueQueries is null ? new[] { row.SummaryDate.ToString(\"yyyy-MM-dd\") } : Array.Empty<string>()", tools, StringComparison.Ordinal);
 
         var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
-        Assert.Contains("export function dailyCalendarPanel(server)", page, StringComparison.Ordinal);
+        Assert.Contains("export function dailySummaryPanels(server)", page, StringComparison.Ordinal);
         Assert.Contains("res.data.days_missing", page, StringComparison.Ordinal);
         Assert.Contains("row.unique_queries == null", page, StringComparison.Ordinal);
         Assert.Contains("[\"not materialized\"]", page, StringComparison.Ordinal);
-        Assert.Contains("dailyCalendarPanel(server),", page, StringComparison.Ordinal);
+        Assert.Contains("...dailySummaryPanels(server),", page, StringComparison.Ordinal);
         /* The descriptor it replaced is gone: one fetch of the one read, as before. */
         Assert.DoesNotContain("\"Daily Health Calendar\",\n        \"get_daily_summary_range\"", page.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 

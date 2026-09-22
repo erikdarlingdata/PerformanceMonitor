@@ -381,10 +381,20 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
            a separate question — a rollup created over pre-existing history answers old windows with silence.
            BOTH gates or neither: this tool and the viewer's calendar answer the same question off the same SQL,
            so routing them differently would have them report different query counts for the same day on exactly
-           the affected stores, with no way to tell which was right. Probed per call, uncached: get_daily_health
-           runs at human/model cadence and these are two small lookups. */
-        var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
-        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken);
+           the affected stores, with no way to tell which was right.
+
+           #3905: through ComposeStoreAvailability, the gate the compose panels already read: cached per data
+           source for its ReprobeInterval, one probe in flight at a time. This used to probe on every call on
+           the reasoning that it "runs at human/model cadence and these are two small lookups". The web server
+           page calls it twice per load, and on the largest production store the coverage probe alone measured
+           >= 1.7 s, because each min() over a compressed oldest chunk seq-scans and sorts that chunk's batch
+           list. A cached floor cannot produce a wrong count, only a different tier for at most the interval:
+           a floor moves back only on a backfill (stale, it under-claims, so a window stays where it was or
+           degrades), and forward only on a retention drop, which RetentionTierRouter's one-day RouteMargin keeps
+           every age-routed window clear of. The query CTE's ceiling is read live in the statement, and a day a
+           tier never carried is named NULL either way. The viewer's calendar has cached the same gate for the
+           same interval all along (ViewerDataService.GetRollupAvailabilityAsync). */
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
