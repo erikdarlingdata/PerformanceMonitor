@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -72,16 +72,22 @@ public sealed class RetiredBaselineAggregateTests
     {
         var worker = ReadWorkerSource();
 
+        /* #3817: both calls moved into the shared convergence list, so their ORDER is now the list's order
+           (pinned in StoreObjectConvergenceTests, where the one-order claim lives) and their REACHABILITY is
+           the ungated segment call's. Both halves of the original property are still asserted here — the drop
+           runs, and it runs before the ensure — because this file is where a reader looks for the retirement
+           drop's placement; what changed is that "before the ensure" is read off the list the product
+           iterates rather than off two adjacent awaits. */
         var dropAt = worker.IndexOf("TimescaleSupport.DropRetiredBaselineAggregatesAsync(", StringComparison.Ordinal);
         var ensureAt = worker.IndexOf("TimescaleSupport.EnsureBaselineFallbackViewsAsync(", StringComparison.Ordinal);
-        var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
+        var plainModeAt = worker.IndexOf("StoreObjectConvergenceStage.Ungated, startupConvergence, stoppingToken);", StringComparison.Ordinal);
 
         Assert.True(dropAt > 0, "the worker must run the retirement drop");
         /* Same reachability argument the fallback ensure carries (BaselineSupplyTests): after the
            TimescaleDB block's catch, so plain-PG stores' fallback VIEWS are cleaned too — the
            retired names exist in both implementations in the field. */
-        Assert.True(plainModeAt > 0 && dropAt > plainModeAt,
-            "the retirement drop must run after the TimescaleDB block, on every path — not inside it");
+        Assert.True(plainModeAt > 0,
+            "the retirement drop must be run by the UNGATED convergence segment — after the TimescaleDB block, on every path");
         Assert.True(ensureAt > dropAt,
             "drop retired names before the ensure sweep runs (order is hygiene, not correctness — the ensure list no longer contains them)");
     }

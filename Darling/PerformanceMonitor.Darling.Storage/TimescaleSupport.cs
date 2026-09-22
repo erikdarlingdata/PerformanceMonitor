@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -270,7 +270,16 @@ public static partial class TimescaleSupport
     /// <summary>The raw-name compression-enable overload — the collection_log path (see
     /// <see cref="CreateHypertableSql(string, string)"/>).</summary>
     public static string EnableCompressionSql(string table)
-        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')";
+        => $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = '{CompressionSegmentByColumn}')";
+
+    /// <summary>
+    /// The segmentby column every collector hypertable compresses on. Promoted to a constant by #3817 so the
+    /// statement above and the catalog comparison that decides whether to ISSUE it
+    /// (<see cref="ReadTablesNeedingCompressionEnableAsync"/>) read the same name: a guard that skipped the
+    /// ALTER by comparing against a second spelling of this would be exactly as wrong as no guard, and
+    /// silently so.
+    /// </summary>
+    public const string CompressionSegmentByColumn = "server_id";
 
     /// <summary>
     /// One collector table's background compression policy — chunks older than
@@ -7496,13 +7505,29 @@ ORDER BY i.indexname";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        /* #3817: ONE catalog read for the whole sweep, so the enable ALTER is issued only for tables that
+           do not already carry it. The ALTER takes an AccessExclusiveLock even as a no-op (measured — see
+           CompressionEnabledStateSql), which was free on the start path and is a lock convoy on the hourly
+           tick at :30, in the same minute the collectors are COPYing into these tables. A null answer means
+           the read failed and every ALTER is issued, exactly as before the guard. */
+        var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
+        var enabledAlready = 0;
+
         var applied = 0;
         foreach (var schema in HypertableTables)
         {
             try
             {
-                using (var enable = new NpgsqlCommand(EnableCompressionSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds })
+                /* The POLICY half still runs unconditionally: add_compression_policy's if_not_exists returns
+                   -1 against an existing policy and takes no exclusive lock on the hypertable, so it is
+                   idempotent in cost as well as in effect. Only the ALTER needed guarding. */
+                if (converged is not null && converged.Contains(schema.TargetTable))
                 {
+                    enabledAlready++;
+                }
+                else
+                {
+                    using var enable = new NpgsqlCommand(EnableCompressionSql(schema), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await enable.ExecuteNonQueryAsync(cancellationToken);
                 }
 
@@ -7520,9 +7545,105 @@ ORDER BY i.indexname";
             }
         }
 
-        logger?.LogInformation("TimescaleDB: compression policy ({Days}d) in place on {Applied}/{Total} collector table(s)",
-            CompressAfterDays, applied, HypertableTables.Count);
+        logger?.LogInformation(
+            "TimescaleDB: compression policy ({Days}d) in place on {Applied}/{Total} collector table(s); {AlreadyEnabled} already had compression enabled with the shipped segmentby, so no ALTER was issued for them (#3817 — that statement takes an AccessExclusiveLock even when it changes nothing)",
+            CompressAfterDays, applied, HypertableTables.Count, enabledAlready);
         return applied;
+    }
+
+    /// <summary>
+    /// Which hypertables in <c>collect</c> already have compression enabled, and with which
+    /// <c>segmentby</c> — ONE read for the whole sweep, so the enable ALTER below can be skipped on the
+    /// tables that already carry it (#3817).
+    ///
+    /// <para><b>Why this read exists, measured rather than reasoned.</b>
+    /// <c>ALTER TABLE ... SET (timescaledb.compress ...)</c> is idempotent in EFFECT but not in COST: it is
+    /// processed by TimescaleDB's utility hook and takes an <c>AccessExclusiveLock</c> on the hypertable for
+    /// the statement even when every setting already matches. Measured on TimescaleDB 2.28.1 / PostgreSQL
+    /// 17.10: with one session holding a plain <c>SELECT</c> (AccessShareLock) on the hypertable, the
+    /// re-issued no-op ALTER appears in <c>pg_locks</c> as <c>AccessExclusiveLock</c> with
+    /// <c>granted = false</c>, and an <c>INSERT</c> arriving behind it queues its <c>RowExclusiveLock</c>
+    /// behind the ALTER — a lock convoy in which one long reader plus one no-op DDL blocks every writer to
+    /// that table. That was harmless while these statements ran once per service start, before any collector
+    /// was writing; #3817 put them on the hourly store-maintenance tick at :30 past the minute, which is
+    /// inside the window the collectors are COPYing into these tables and the heaviest hourly refresh is
+    /// still open. So the ALTER has to become conditional, and this is the condition.</para>
+    ///
+    /// <para><b><c>timescaledb_information.compression_settings</c> rather than the 2.18+
+    /// <c>hypertable_compression_settings</c></b>, which reports the same facts more conveniently but is
+    /// younger than the 2.x floor this file targets; this view carries <c>hypertable_schema</c> +
+    /// <c>hypertable_name</c> + per-column <c>segmentby_column_index</c> and has been present throughout.
+    /// Joined LEFT from <c>hypertables</c> so a table with compression enabled and NO segmentby is
+    /// distinguishable from one that is not enabled at all — the first needs the ALTER (its settings differ
+    /// from what this product wants), the second needs it too, and only "enabled AND segmentby is exactly
+    /// ours" is skippable.</para>
+    ///
+    /// <para>Scoped to the <c>collect</c> schema for the reason <see cref="CompressionPolicyStateSql"/>
+    /// gives: a bring-your-own store may carry its own <c>wait_stats</c> hypertable elsewhere, and this
+    /// product has no business reading, let alone altering, that one.</para>
+    /// </summary>
+    public const string CompressionEnabledStateSql = @"
+SELECT
+    h.hypertable_name,
+    h.compression_enabled,
+    (
+        SELECT string_agg(cs.attname, ',' ORDER BY cs.segmentby_column_index)
+        FROM timescaledb_information.compression_settings AS cs
+        WHERE cs.hypertable_schema = h.hypertable_schema
+        AND   cs.hypertable_name = h.hypertable_name
+        AND   cs.segmentby_column_index IS NOT NULL
+    ) AS segmentby
+FROM timescaledb_information.hypertables AS h
+WHERE h.hypertable_schema = 'collect'";
+
+    /// <summary>
+    /// Every <c>collect</c> hypertable that does NOT already have compression enabled with exactly
+    /// <see cref="CompressionSegmentByColumn"/> as its segmentby — the set the enable ALTER must be issued
+    /// for, and nothing else (#3817). A table absent from the read (not a hypertable yet, or a catalog too
+    /// old for the view) is treated as NEEDING the ALTER: the conservative direction, because the cost of a
+    /// needless ALTER is one lock and the cost of a skipped one is a table that never compresses.
+    ///
+    /// <para>Failure-isolated to the same conservative answer: if the read throws, this returns <c>null</c>
+    /// and the caller issues every ALTER exactly as it did before this guard existed. A store that cannot
+    /// answer one catalog query must not silently stop converging its compression settings.</para>
+    /// </summary>
+    public static async Task<IReadOnlySet<string>?> ReadTablesNeedingCompressionEnableAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            var converged = new HashSet<string>(StringComparer.Ordinal);
+            using var probe = new NpgsqlCommand(CompressionEnabledStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var table = reader.GetString(0);
+                var enabled = !reader.IsDBNull(1) && reader.GetBoolean(1);
+                var segmentBy = reader.IsDBNull(2) ? null : reader.GetString(2);
+
+                /* Both halves, or the ALTER still has to run: a store whose segmentby was changed out from
+                   under this product (or created by an older build with a different one) must converge, which
+                   is the whole reason this is a settings comparison and not a boolean. */
+                if (enabled && string.Equals(segmentBy, CompressionSegmentByColumn, StringComparison.Ordinal))
+                {
+                    converged.Add(table);
+                }
+            }
+
+            return converged;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "TimescaleDB: could not read the hypertables' compression settings, so this pass issues the compression-enable statement for every table as it did before the #3817 guard: {Message}",
+                ex.Message);
+            return null;
+        }
     }
 
     /// <summary>
@@ -7903,8 +8024,16 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                 await convert.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            using (var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds })
+            /* #3817: same guard as the collector sweep's, same reason — the enable ALTER takes an
+               AccessExclusiveLock even when it changes nothing (measured; CompressionEnabledStateSql carries
+               the measurement), and this method is now on the hourly tick rather than only the start path.
+               collection_log is written by every collector cycle, so the convoy applies to it as much as to
+               the collector tables. Its own read because this method takes no set from its caller; one row
+               back, and a null answer issues the ALTER exactly as before. */
+            var converged = await ReadTablesNeedingCompressionEnableAsync(connection, logger, cancellationToken);
+            if (converged is null || !converged.Contains(CollectionLogTable))
             {
+                using var enable = new NpgsqlCommand(EnableCompressionSql(CollectionLogTable), connection) { CommandTimeout = SetupTimeoutSeconds };
                 await enable.ExecuteNonQueryAsync(cancellationToken);
             }
 

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -196,16 +196,24 @@ public sealed class MaterializationHoleRepairTests
     {
         var worker = ReadWorkerSource();
 
-        var ensureAt = worker.IndexOf("TimescaleSupport.EnsureContinuousAggregatesAsync(", StringComparison.Ordinal);
+        /* #3817 re-anchored the two ensures either side of this launch: they now live in the shared
+           convergence list both cadences walk, so the start path names SEGMENTS here instead of calls. The
+           property is the same one and is the reason the list is walked in two slices at all — the repair is
+           launched between the segment that ends with the aggregate ensure and the segment that begins with
+           the dedup/compression pair, which is exactly what "after the ensure, before compression" meant. The
+           retention ensure did NOT move (it has its own hourly tenant), so that anchor is unchanged. */
+        /* The SEGMENT CALLS, not the stage names — the enum members and the list's per-step tags spell those
+           tokens far earlier in the file, so a bare-name anchor would measure the declaration. */
+        var ensureAt = worker.IndexOf("StoreObjectConvergenceStage.Timescale, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var launchAt = worker.IndexOf("holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);", StringComparison.Ordinal);
-        var compressionAt = worker.IndexOf("TimescaleSupport.EnsureAggregateCompressionAsync(", StringComparison.Ordinal);
+        var compressionAt = worker.IndexOf("StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, startupConvergence, stoppingToken);", StringComparison.Ordinal);
         var retentionAt = worker.IndexOf("TimescaleSupport.EnsureRetentionPoliciesAsync(", StringComparison.Ordinal);
         var plainModeAt = worker.IndexOf("continuing in plain-PostgreSQL mode", StringComparison.Ordinal);
         var drainAt = worker.IndexOf("await holeRepair;", StringComparison.Ordinal);
         var stoppedAt = worker.IndexOf("collection loop stopped", StringComparison.Ordinal);
 
         Assert.True(ensureAt > 0 && launchAt > 0 && compressionAt > 0 && retentionAt > 0 && plainModeAt > 0 && drainAt > 0 && stoppedAt > 0);
-        Assert.True(ensureAt < launchAt, "the repair must be launched after the ensure that creates every aggregate");
+        Assert.True(ensureAt < launchAt, "the repair must be launched after the segment whose last step is the ensure that creates every aggregate");
         Assert.True(launchAt < compressionAt && launchAt < retentionAt, "the repair is launched before the compression and retention ensures");
         Assert.True(launchAt < plainModeAt, "the repair is launched inside the TimescaleDB block");
         Assert.True(drainAt < stoppedAt, "the repair is drained before the loop reports stopped");

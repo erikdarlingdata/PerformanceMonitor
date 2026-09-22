@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -289,8 +289,16 @@ public sealed class RetentionReevaluationTests
     {
         var worker = ReadWorkerSource();
 
-        /* The startup call, unchanged in shape and still exactly one. */
+        /* The startup call, unchanged in shape and still exactly one — and it is unchanged for a reason
+           #3817 had to decide rather than inherit: that lane moved eleven neighbouring ensures off this block
+           into a shared list both cadences walk, and left THIS one alone, because the retention sweep already
+           has an hourly tenant (this file's subject) and running it from the convergence list as well would
+           sweep it twice an hour and double every transition line it writes. The literal call site is
+           therefore still the start path's own. */
         Assert.Equal(1, CountOf(worker, "await TimescaleSupport.EnsureRetentionPoliciesAsync(timescaleConnection, _logger, stoppingToken);"));
+        /* And the retention sweep is NOT reachable from the convergence list, which is the other half of that
+           decision and the half a later edit could quietly undo. */
+        Assert.DoesNotContain("EnsureRetentionPoliciesAsync(connection, logger, ct)", worker, StringComparison.Ordinal);
 
         /* The tick: due-time guard, stamp, flag gate, compression check, retention pass — in that order,
            with nothing between the two awaits that could skip the second on the first's outcome. The flag gate
@@ -303,10 +311,18 @@ public sealed class RetentionReevaluationTests
         var flagGateAt = worker.IndexOf("if (_timescaleAvailable)", stampAt, StringComparison.Ordinal);
         var compressionAt = worker.IndexOf("await EvaluateCompressionJobHealthAsync(stoppingToken);", StringComparison.Ordinal);
         var retentionAt = worker.IndexOf("await ReevaluateRetentionPoliciesAsync(stoppingToken);", StringComparison.Ordinal);
+        /* #3817 is the FOURTH tenant and sits after this pass, so the "next thing" that used to bound the
+           retention call's position is now the convergence call, and the store-metrics block bounds THAT.
+           Both bounds are kept: dropping the outer one would let a later edit hoist the whole gated group out
+           of the tick without this pin noticing. */
+        var convergenceAt = worker.IndexOf("await ConvergeStoreObjectsAsync(stoppingToken);", StringComparison.Ordinal);
         var nextBlockAt = worker.IndexOf("/* #2068: the store self-metrics sweep.", StringComparison.Ordinal);
-        Assert.True(flagGateAt > stampAt && compressionAt > flagGateAt && retentionAt > compressionAt && nextBlockAt > retentionAt,
-            "the retention re-evaluation is awaited after the compression check inside the tick's _timescaleAvailable gate");
+        Assert.True(flagGateAt > stampAt && compressionAt > flagGateAt && retentionAt > compressionAt
+            && convergenceAt > retentionAt && nextBlockAt > convergenceAt,
+            "the retention re-evaluation is awaited after the compression check inside the tick's _timescaleAvailable gate, "
+          + "and the store-object convergence after it");
         Assert.Equal(1, CountOf(worker, "await ReevaluateRetentionPoliciesAsync(stoppingToken);"));
+        Assert.Equal(1, CountOf(worker, "await ConvergeStoreObjectsAsync(stoppingToken);"));
 
         var between = worker[compressionAt..retentionAt];
         Assert.DoesNotContain("if (", between, StringComparison.Ordinal);
@@ -394,7 +410,12 @@ public sealed class RetentionReevaluationTests
         Assert.Contains("To arm immediately instead, restart the", verb, StringComparison.Ordinal);
 
         var readme = RepoFile.ReadRepoFile("Darling", "README.md");
-        Assert.Contains("retention coverage re-evaluation | First sweep after startup, then hourly at :30 past the minute", readme, StringComparison.Ordinal);
+        /* The cadence row names this pass and gives the cadence. Anchored on the two halves separately since
+           #3817 joined the row as its fourth tenant and put its own name between them — the property is that
+           the row names the re-evaluation and states the cadence, not that the two are adjacent, and a pin
+           that demanded adjacency would red for every future tenant of a row built to hold them. */
+        Assert.Contains("the retention coverage re-evaluation", readme, StringComparison.Ordinal);
+        Assert.Contains("First sweep after startup, then hourly at :30 past the minute", readme, StringComparison.Ordinal);
         Assert.Contains("no restart needed (#3812)", readme, StringComparison.Ordinal);
     }
 
