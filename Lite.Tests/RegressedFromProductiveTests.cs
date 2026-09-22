@@ -276,16 +276,19 @@ public sealed class RegressedFromProductiveTests
     {
         var source = ReadRepoFile(relative);
 
-        Assert.Contains("regressed_from_productive = r.RegressedFromProductive,", source, StringComparison.Ordinal);
+        Assert.Contains("regressed_from_productive = r.AnyRegression,", source, StringComparison.Ordinal);
         Assert.Contains("last_productive_at = r.LastProductiveTime?.ToString(\"o\"),", source, StringComparison.Ordinal);
-        Assert.Contains("regression_finding = r.RegressedFinding,", source, StringComparison.Ordinal);
+        Assert.Contains("regression_finding = r.AnyRegressionFinding,", source, StringComparison.Ordinal);
+        /* #3885 item 3: the output-class arm rides the same four names off one shared predicate (AnyRegression),
+           plus the count that distinguishes it — a zero-row run streak is the shape the status arm cannot see. */
+        Assert.Contains("zero_row_success_runs = r.TrailingZeroRowSuccessRuns,", source, StringComparison.Ordinal);
 
         /* The rows figure is served under a name that claims a scope ONLY where that reading holds. On a
            row that is not regressed it is just rows_stored, which is already on the row under its own
            name - serving it twice, once under a name claiming seven pre-regression days, is how a field
            starts making a claim its derivation does not support. */
         Assert.Contains(
-            "rows_in_prior_7d = r.RegressedFromProductive ? r.RowsStored : (long?)null,",
+            "rows_in_prior_7d = r.AnyRegression ? r.RowsStored : (long?)null,",
             source,
             StringComparison.Ordinal);
     }
