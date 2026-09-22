@@ -453,11 +453,17 @@ public sealed class DarlingCollectionLogReadTests
             var unknownStatus = await DarlingMcpDataTools.GetCollectionLog(
                 dataSource, FilterServerName, 24, 200, status: "FAILURE");
 
-            Assert.Contains("Invalid status value 'FAILURE'", unknownStatus, StringComparison.Ordinal);
+            /* Asserted on the PARSED message, not the raw JSON: the house JsonOptions runs the default
+               System.Text.Json encoder, which escapes an apostrophe to \u0027 on the wire, so a raw
+               Contains over text carrying quotes can never match. Same read style as the combined-filter
+               assert below. */
+            using var unknownRoot = JsonDocument.Parse(unknownStatus);
+            var unknownText = unknownRoot.RootElement.GetProperty("message").GetString()!;
+            Assert.Contains("Invalid status value 'FAILURE'", unknownText, StringComparison.Ordinal);
 
             /* Every member of the vocabulary is named, so the caller can fix the call from the answer. */
             foreach (var accepted in EnumeratedCollectorDriver.CollectionLogStatuses)
-                Assert.Contains(accepted, unknownStatus, StringComparison.Ordinal);
+                Assert.Contains(accepted, unknownText, StringComparison.Ordinal);
 
             /* And it is a refusal, not a page and not a miss: both of those would let the read pass for an
                answer about the window. */
