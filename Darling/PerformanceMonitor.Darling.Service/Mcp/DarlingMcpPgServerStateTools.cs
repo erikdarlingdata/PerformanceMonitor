@@ -601,7 +601,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out.")]
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out. PER-DATABASE AND PER-ROLE OVERRIDES ARE A SEPARATE SECTION: the settings list is the SERVER's configuration, and database_overrides - present only when the cluster has any - carries the values one database or one role was given with ALTER DATABASE/ROLE SET, which are what sessions there actually run with rather than the server-wide value beside them.")]
     public static async Task<string> GetPgServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -642,6 +642,17 @@ public sealed class DarlingMcpPgServerStateTools
             var truncated = page.Rows.Count > limit;
             var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
             var pendingRestart = rows.Where(r => r.PendingRestart).Select(r => r.Name).ToList();
+
+            /* #3691 (V138): the per-database and per-role overrides, from the same newest snapshot as the
+               rows above (both statements anchor on MAX(collection_time) for this server, so they agree
+               without an instant threaded between them). A second read on a tool path, not the alert path,
+               behind the table's (server_id, collection_time) index on a snapshot of a few hundred rows.
+
+               UNCAPPED, deliberately, where the settings list is paged: pg_db_role_setting holds one row per
+               scope that has ever been given a setting, which on a real cluster is a handful and on the
+               measured population is zero - and a truncated override list is worse than none, because the
+               question it answers is "is my value overridden anywhere" and a cap turns a No into a maybe. */
+            var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId);
 
             return JsonSerializer.Serialize(new
             {
@@ -690,6 +701,43 @@ public sealed class DarlingMcpPgServerStateTools
                     category = r.Category,
                     description = r.ShortDescription,
                 }),
+                /* #3691 (V138): ABSENT rather than empty when the cluster has no overrides, which is the
+                   attach pattern this tool family uses for a section that is not always an answer
+                   (JsonOptions writes nulls, so an empty list would render as a key with [] and read as
+                   "we checked and there are none" on a pre-V138 snapshot too, where the truth is that the
+                   collector was not reading the catalog yet). A caller that sees no key should read the
+                   note, not infer.
+
+                   Why this is not folded into the settings list: an override is keyed by SCOPE plus name
+                   while a server setting is keyed by name, so two rows called work_mem on one page would
+                   need a column read to tell which one a session actually gets - and every count above
+                   (settings_returned, non_default_count, non_default_returned) is a count of the
+                   server-wide population, which is what those names have always promised. The overrides sit
+                   beside them, not among them. */
+                database_overrides = overrides.Count > 0
+                    ? overrides.Select(o => new
+                    {
+                        /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET,
+                           a role with no database is ALTER ROLE ... SET (that role in every database), and
+                           both is ALTER ROLE ... IN DATABASE ... SET. Neither-NULL cannot appear here - that
+                           is a server-wide row, and the read excludes it. */
+                        database_name = o.DatabaseName,
+                        role_name = o.RoleName,
+                        name = o.Name,
+                        setting = o.Setting,
+                    })
+                    : null,
+                database_overrides_note = overrides.Count > 0
+                    ? "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
+                      + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
+                      + "database, or as that role, runs with the override rather than with the server-wide "
+                      + "value listed above - so a setting that appears in both places has TWO answers and "
+                      + "which one applies depends on who is connecting. The stored text is what was SET, "
+                      + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
+                      + "connection at connect time, and the catalog records only the instruction. No unit, "
+                      + "default or context is carried on these rows because the catalog does not hold them "
+                      + "- read those off the server-wide row for the same setting name."
+                    : null,
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
