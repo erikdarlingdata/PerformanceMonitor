@@ -804,6 +804,14 @@ LIMIT 6";
            month. Stamped on every z-family fact, not just the zero-history ones, because it is the same
            quality signal IsTrustworthy's day floor reads and an operator reading any baseline fact wants it. */
         metadata["baseline_distinct_days"] = baseline.DistinctDays;
+        /* #3859: on the FLAT tier that count is a CEILING PROXY, not a measurement, and the fact says so.
+           CollapseToFlat takes MAX(DistinctDays) over the hour buckets (a calendar day recurs across the 24,
+           so summing would double-count) and each (hour, dow) bucket holds at most ~5 same-weekday dates in a
+           30-day window, so a Flat bucket reports about 5 however much history it pooled. The admission lives
+           at the CollapseToFlat site where nothing downstream can read it; this stamp is what stops a
+           get_analysis_facts reader treating the ceiling as a measurement. Stamped only where it is true. */
+        if (baseline.Tier == BaselineTier.Flat)
+            metadata["baseline_distinct_days_is_proxy"] = 1;
     }
 
     /// <summary>Kind-Unspecified for parameter binds — Npgsql 6+ rejects Kind-Utc against <c>timestamp</c>.</summary>

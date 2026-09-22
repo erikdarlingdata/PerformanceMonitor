@@ -128,6 +128,17 @@ public class PgAnomalyDetector : IAnomalyDetector
            every z-family fact, not only the zero-history ones: it is the same quality signal IsTrustworthy's day
            floor reads, and an operator reading any baseline fact wants it beside baseline_samples. */
         metadata["baseline_distinct_days"] = baseline.DistinctDays;
+        /* #3859: on the FLAT tier that count is a CEILING PROXY, not a measurement, and the fact says so.
+           CollapseToFlat takes MAX(DistinctDays) over the hour buckets rather than a global DISTINCT-days
+           query - a calendar day recurs across the 24 buckets so summing would double-count - and each
+           (hour, dow) bucket holds at most ~5 same-weekday dates in a 30-day window, so a Flat bucket
+           reports about 5 however much history it actually pooled. The admission lives at the CollapseToFlat
+           site, where it is a comment nothing downstream can read; this stamp is what stops a
+           get_analysis_facts reader treating the ceiling as a measurement, which is the whole defect. Stamped
+           only where it is true - the Full and HourOnly tiers count their own days, and an unconditional flag
+           would say nothing. */
+        if (baseline.Tier == BaselineTier.Flat)
+            metadata["baseline_distinct_days_is_proxy"] = 1;
     }
 
     /// <summary>

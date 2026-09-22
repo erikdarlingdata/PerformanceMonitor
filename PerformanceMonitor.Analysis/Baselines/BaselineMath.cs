@@ -204,6 +204,15 @@ public static class BaselineMath
             // A calendar day recurs across the 24 hour buckets, so summing would double-count;
             // MAX is a ~5 ceiling (each (hour, dow) bucket holds at most ~5 same-weekday dates in a
             // 30-day window) — a cheap proxy that avoids an extra global DISTINCT-days query.
+            //
+            // #3859: THIS admission is the one that matters downstream, and a comment cannot travel.
+            // The number is stamped as baseline_distinct_days on every z-family fact and surfaced
+            // through get_analysis_facts, where an operator reading a Flat-tier fact sees a ceiling
+            // and has no way to tell it from a count. So the three AddBaselineContext bodies stamp
+            // baseline_distinct_days_is_proxy = 1 beside it on the Flat tier — keyed on this Tier,
+            // which is why the stamp is conditional there rather than unconditional. If the proxy is
+            // ever replaced by a real global DISTINCT-days read, that stamp goes with it; the three
+            // are held in agreement by the delegation-equality census in SharedBaselineModelPinTests.
             DistinctDays = allBuckets.Max(b => b.DistinctDays),
             AbsStdDevFloor = allBuckets[0].AbsStdDevFloor,
             Tier = BaselineTier.Flat
