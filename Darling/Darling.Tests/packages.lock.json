@@ -786,6 +786,7 @@
           "PerformanceMonitor.Common": "[3.8.0, )",
           "PerformanceMonitor.Darling.Analysis": "[3.8.0, )",
           "PerformanceMonitor.Darling.Storage": "[3.8.0, )",
+          "PerformanceMonitor.Notifications": "[3.8.0, )",
           "PerformanceMonitor.PlanAnalysis": "[3.8.0, )",
           "System.IO.FileSystem.AccessControl": "[5.0.0, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.12, )"

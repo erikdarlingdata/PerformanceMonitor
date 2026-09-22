@@ -408,7 +408,12 @@ public sealed class RetentionHoldRatioKnobRungTests
         /* The slice has to be the two methods, not a fragment: an off-by-one on either bound silently
            shrinks it and every DoesNotContain above starts passing for the wrong reason. */
         Assert.Contains("_activeRetentionHold[key] = true;", body, StringComparison.Ordinal);
-        Assert.Contains("Retention Hold Cleared", body, StringComparison.Ordinal);
+        /* #3833 promoted the resolution title from an inline literal to RetentionHoldClearedMetric so the
+           triage endpoint's ResolutionAliases can share the spelling; the marker that proves this slice
+           reaches the resolution emit is therefore the constant's REFERENCE at that call site. The rung's
+           no-constants rule is about the threshold ratios, not the metric's identity — a name is not a
+           seam a store row can retune. */
+        Assert.Contains("RetentionHoldClearedMetric,", body, StringComparison.Ordinal);
         Assert.True(body.Length > 2000, $"the sliced body is only {body.Length} chars, which cannot be these two methods");
 
         return body;
