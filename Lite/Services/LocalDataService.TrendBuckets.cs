@@ -16,18 +16,21 @@ namespace PerformanceMonitorLite.Services;
 
 /*
  * The bucketed trend reads behind the MCP tools (#3897) — get_file_io_trend, get_lock_wait_trend,
- * get_query_duration_trend and get_procedure_duration_trend. Each is the per-collection read the desktop chart
- * runs (GetFileIoLatencyTrendAsync, GetLockWaitTrendAsync, GetQueryDurationTrendAsync,
- * GetProcedureDurationTrendAsync — left exactly as they are, because a chart wants every collection) with the
- * collections then gathered into buckets of $N minutes, so an MCP answer stays near TrendBuckets.McpPointBudget
- * points instead of one point per collection per series: a day of file I/O was 12,500 rows and 1.4 MB.
+ * get_query_duration_trend and get_procedure_duration_trend, then the rest of the trend family (#3960): the wait,
+ * CPU, tempdb, memory and perfmon trends. Each is the per-collection read the desktop chart runs
+ * (GetFileIoLatencyTrendAsync, GetLockWaitTrendAsync, GetQueryDurationTrendAsync, GetProcedureDurationTrendAsync,
+ * GetWaitStatsTrendAsync, GetCpuUtilizationAsync, GetTempDbTrendAsync, GetMemoryTrendAsync, GetPerfmonTrendAsync —
+ * left exactly as they are, because a chart wants every collection) with the collections then gathered into
+ * buckets of $N minutes, so an MCP answer stays near TrendBuckets.McpPointBudget points instead of one point per
+ * collection per series: a day of file I/O was 12,500 rows and 1.4 MB.
  *
  * Darling's twins are DarlingTrendReader (file I/O, the duration pair via DurationTrendRouting's bucketed
  * builders) and DarlingBlockingTrendReader (lock waits); the SQL differs only in dialect — DuckDB's time_bucket
  * where PostgreSQL has date_bin, both on TrendBuckets.OriginSql so a width that does not divide a day still
  * bins the same rows the same way on both SKUs. The rules are the same: counts summed, rates and ratios
- * recomputed from the bucket's sums (never averaged averages), the worst single collection kept as the peak,
- * every point stamped at its bucket's start and the first at the window's start.
+ * recomputed from the bucket's sums (never averaged averages), levels averaged (never summed), the worst single
+ * collection kept as the peak, every point stamped at its bucket's start and the first at the window's start —
+ * except CPU, whose points sit on the samples' own clock on both SKUs.
  */
 public partial class LocalDataService
 {
@@ -411,6 +414,360 @@ ORDER BY 1";
                 FirstCollectionTime = reader.GetDateTime(4),
                 UnratedInBucket = reader.IsDBNull(5) ? 0 : (long)ToDouble(reader.GetValue(5)),
             });
+        }
+
+        return items;
+    }
+
+    /* ─────────────── the rest of the trend family (#3960): wait, CPU, tempdb, memory, perfmon ─────────────── */
+
+    /// <summary>
+    /// One wait type bucketed (#3960) — the desktop read's (<see cref="GetWaitStatsTrendAsync"/>) raw CTE gathered
+    /// into buckets. Only a collection whose rate is knowable counts (a no-ELSE CASE nulls the rest, the rows that
+    /// read drops), and a bucket holding none is left out; a bucket's rate is its summed wait over the seconds its
+    /// rated collections covered, and its peak the busiest single collection. Darling's twin is
+    /// <c>DarlingDataReader.WaitTrendBucketedSql</c>.
+    /// </summary>
+    internal async Task<List<WaitBucketPoint>> GetWaitBucketsAsync(int serverId, string waitType, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+
+        command.CommandText = $@"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        delta_wait_time_ms,
+        delta_signal_wait_time_ms,
+        CASE WHEN sample_interval_seconds IS NULL
+             THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+             ELSE NULLIF(sample_interval_seconds, 0)
+        END AS interval_seconds
+    FROM v_wait_stats
+    WHERE server_id = $1
+    AND   wait_type = $2
+    AND   collection_time >= $3
+    AND   collection_time <= $4
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) END AS rated_wait_ms,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) END AS rated_signal_ms,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
+    FROM raw
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($5 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $3) AS bucket_start,
+    SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+    SUM(rated_signal_ms) / SUM(rated_seconds) AS signal_wait_time_ms_per_second,
+    MAX(wait_time_ms_per_second) AS peak_wait_time_ms_per_second
+FROM rated
+GROUP BY 1
+HAVING COUNT(rated_seconds) > 0
+ORDER BY 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = waitType });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<WaitBucketPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new WaitBucketPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : ToDouble(reader.GetValue(3))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// CPU bucketed (#3960) — <see cref="GetCpuUtilizationAsync"/>'s window (the stored UTC instant, the offset only for
+    /// a pre-v63 row), averaged per bucket of the server-local <c>sample_time</c> the tool has always published and
+    /// the MCP tool used to average to the minute itself. The busiest sample's SQL and total CPU ride beside the
+    /// averages; a NULL reading counts as 0, as that read always read it. Stamped at each bucket's start, unclamped,
+    /// as Darling's twin (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
+    /// </summary>
+    internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, int utcOffsetMinutes, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null, asOfUtc, utcOffsetMinutes);
+        var startUtc = startTime.AddMinutes(-utcOffsetMinutes);
+        var endUtc = endTime.AddMinutes(-utcOffsetMinutes);
+
+        command.CommandText = $@"
+SELECT
+    time_bucket(to_minutes(CAST($5 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}) AS bucket_start,
+    AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
+    AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
+    AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
+    AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+    MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
+    MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
+    COUNT(*) AS samples
+FROM v_cpu_utilization_stats
+WHERE server_id = $1
+AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
+AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
+GROUP BY 1
+ORDER BY 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = (long)utcOffsetMinutes });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<CpuBucketPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CpuBucketPoint(
+                reader.GetDateTime(0),
+                ToDouble(reader.GetValue(1)),
+                ToDouble(reader.GetValue(2)),
+                ToDouble(reader.GetValue(3)),
+                ToDouble(reader.GetValue(4)),
+                (int)ToInt64(reader.GetValue(5)),
+                (int)ToInt64(reader.GetValue(6)),
+                ToInt64(reader.GetValue(7))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// tempdb bucketed (#3960) — <see cref="GetTempDbTrendAsync"/>'s rows gathered into buckets: each space figure
+    /// averaged, the fullest collection's reserved and version-store space as the peaks, the most sessions any
+    /// collection saw, and the single largest consumer (its session and its MB, the earliest on a tie). Darling's
+    /// twin is <c>DarlingDataReader.TempDbTrendBucketedSql</c>.
+    /// </summary>
+    internal async Task<List<TempDbBucketPoint>> GetTempDbBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+
+        command.CommandText = $@"
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(COALESCE(user_object_reserved_mb, 0)) AS user_objects_mb,
+    AVG(COALESCE(internal_object_reserved_mb, 0)) AS internal_objects_mb,
+    AVG(COALESCE(version_store_reserved_mb, 0)) AS version_store_mb,
+    AVG(COALESCE(total_reserved_mb, 0)) AS total_reserved_mb,
+    AVG(COALESCE(unallocated_mb, 0)) AS unallocated_mb,
+    MAX(COALESCE(total_reserved_mb, 0)) AS peak_total_reserved_mb,
+    MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
+    MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
+    (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
+    MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+FROM v_tempdb_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY 1
+ORDER BY 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<TempDbBucketPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new TempDbBucketPoint(
+                reader.GetDateTime(0),
+                ToDouble(reader.GetValue(1)),
+                ToDouble(reader.GetValue(2)),
+                ToDouble(reader.GetValue(3)),
+                ToDouble(reader.GetValue(4)),
+                ToDouble(reader.GetValue(5)),
+                ToDouble(reader.GetValue(6)),
+                ToDouble(reader.GetValue(7)),
+                ToInt64(reader.GetValue(8)),
+                (int)ToInt64(reader.GetValue(9)),
+                ToDouble(reader.GetValue(10))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// The memory levels bucketed (#3960) — <see cref="GetMemoryTrendAsync"/>'s samples, each level averaged per
+    /// bucket (a level is never summed). Darling's twin is <c>DarlingTrendReader.MemoryTrendBucketedSql</c>.
+    /// </summary>
+    internal async Task<List<MemoryBucketPoint>> GetMemoryBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+
+        command.CommandText = $@"
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(COALESCE(total_server_memory_mb, 0)) AS total_server_memory_mb,
+    AVG(COALESCE(target_server_memory_mb, 0)) AS target_server_memory_mb,
+    AVG(COALESCE(buffer_pool_mb, 0)) AS buffer_pool_mb,
+    AVG(COALESCE(plan_cache_mb, 0)) AS plan_cache_mb
+FROM v_memory_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+GROUP BY 1
+ORDER BY 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<MemoryBucketPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new MemoryBucketPoint(
+                reader.GetDateTime(0),
+                ToDouble(reader.GetValue(1)),
+                ToDouble(reader.GetValue(2)),
+                ToDouble(reader.GetValue(3)),
+                ToDouble(reader.GetValue(4))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// The memory-grant series in the same buckets (#3960) — <see cref="GetMemoryGrantTrendAsync"/>'s per-snapshot
+    /// totals averaged and maxed per bucket, so get_memory_trend joins the two series on the bucket they share.
+    /// Darling's twin is <c>DarlingTrendReader.MemoryGrantTrendBucketedSql</c>.
+    /// </summary>
+    internal async Task<List<GrantBucketPoint>> GetGrantBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+
+        command.CommandText = $@"
+WITH grants AS
+(
+    SELECT
+        collection_time,
+        SUM(granted_memory_mb) AS total_granted_mb
+    FROM v_memory_grant_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(COALESCE(total_granted_mb, 0)) AS avg_granted_mb,
+    MAX(COALESCE(total_granted_mb, 0)) AS peak_granted_mb
+FROM grants
+GROUP BY 1
+ORDER BY 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<GrantBucketPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new GrantBucketPoint(reader.GetDateTime(0), ToDouble(reader.GetValue(1)), ToDouble(reader.GetValue(2))));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// A perfmon counter bucketed (#3960) — <see cref="GetPerfmonTrendAsync"/>'s per-collection sums gathered into
+    /// buckets with every reading the envelope may need (<see cref="TrendPayloads.PerfmonTrend"/>): the average,
+    /// largest and last value, and the deltas summed per interval class — rated, unknowable 0, unrecorded NULL — with
+    /// the seconds the rated ones accrued over. The rate's peak is the busiest single rated collection. Darling's twin
+    /// is <c>DarlingTrendReader.PerfmonTrendBucketedSql</c>.
+    /// </summary>
+    internal async Task<List<PerfmonBucketPoint>> GetPerfmonBucketsAsync(int serverId, string counterName, int hoursBack, DateTime asOfUtc, int bucketMinutes)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+
+        command.CommandText = $@"
+WITH collections AS
+(
+    SELECT
+        collection_time,
+        SUM(cntr_value) AS cntr_value,
+        SUM(delta_cntr_value) AS delta_cntr_value,
+        MAX(sample_interval_seconds) AS sample_interval_seconds,
+        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+    FROM v_perfmon_stats
+    WHERE server_id = $1
+    AND   counter_name = $2
+    AND   collection_time >= $3
+    AND   collection_time <= $4
+    GROUP BY collection_time
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($5 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $3) AS bucket_start,
+    AVG(cntr_value) AS avg_value,
+    MAX(cntr_value) AS max_value,
+    (array_agg(cntr_value ORDER BY collection_time DESC))[1] AS last_value,
+    SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds > 0) AS rated_delta,
+    SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS rated_seconds,
+    COUNT(*) FILTER (WHERE sample_interval_seconds = 0) AS unknowable_collections,
+    SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds = 0) AS unknowable_delta,
+    SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds IS NULL) AS unrecorded_delta,
+    MAX(CAST(delta_cntr_value AS DOUBLE PRECISION) / NULLIF(sample_interval_seconds, 0)) AS peak_per_second,
+    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+FROM collections
+GROUP BY 1
+ORDER BY 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = counterName });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var items = new List<PerfmonBucketPoint>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new PerfmonBucketPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToInt64(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : ToInt64(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : ToInt64(reader.GetValue(5)),
+                reader.IsDBNull(6) ? 0 : ToInt64(reader.GetValue(6)),
+                reader.IsDBNull(7) ? null : ToInt64(reader.GetValue(7)),
+                reader.IsDBNull(8) ? null : ToInt64(reader.GetValue(8)),
+                reader.IsDBNull(9) ? null : ToDouble(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : (int)ToInt64(reader.GetValue(10))));
         }
 
         return items;

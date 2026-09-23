@@ -77,10 +77,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     [Theory]
-    [InlineData("get_memory_trend", "server_name,hours_back,as_of")]
-    [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back,as_of")]
-    /* #3897: bucket_minutes (and on the file I/O trend database_name) appended BEHIND as_of, so a positional
-       caller of the pre-#3897 contract still binds; Lite's twins carry the same lists. */
+    /* #3897 / #3960: bucket_minutes (and on the file I/O trend database_name) appended BEHIND as_of, so a
+       positional caller of the earlier contract still binds; Lite's twins carry the same lists. */
+    [InlineData("get_memory_trend", "server_name,hours_back,as_of,bucket_minutes")]
+    [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back,as_of,bucket_minutes")]
     [InlineData("get_file_io_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
     [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back,as_of")]
     [InlineData("get_query_duration_trend", "server_name,hours_back,as_of,bucket_minutes")]
@@ -106,8 +106,8 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     }
 
     /// <summary>#3529's description half, superseded by the #3548 join: the tool now DELIVERS granted
-    /// memory (joined per point from the grants series), so the description may promise it again — but it
-    /// must name the null gap rather than promising an always-filled field, and still point at
+    /// memory (joined per bucket from the grants series since #3960), so the description may promise it again —
+    /// but it must name the null gap rather than promising an always-filled field, and still point at
     /// get_memory_grants as the series' own tool.</summary>
     [Fact]
     public void MemoryTrend_Description_PromisesTheJoinedGrantSeries_AndNamesTheNullGap()
@@ -115,7 +115,7 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "get_memory_trend");
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.Contains("granted memory joined per point", description, StringComparison.Ordinal);
+        Assert.Contains("granted memory from the memory-grant series joined per bucket", description, StringComparison.Ordinal);
         Assert.Contains("total_granted_mb is null", description, StringComparison.Ordinal);
         Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
     }

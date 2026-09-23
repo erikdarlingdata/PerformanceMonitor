@@ -53,6 +53,11 @@ public sealed class TrendPayloadBudgetLiveTests
     private const int WeekMinutes = 7 * 24 * 60;
     private const int RawMinutes = 72 * 60;
 
+    /// <summary>#3960: the one PostgreSQL statement seeded for <c>get_pg_query_duration_trend</c>'s census, as
+    /// both the SQL literal (<see cref="SeedAsync"/>) and the tool's string parameter.</summary>
+    private const long PgQueryId = 987654321L;
+    private const string PgQueryIdText = "987654321";
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
@@ -90,6 +95,16 @@ public sealed class TrendPayloadBudgetLiveTests
                 {
                     Measure(measured, "get_query_duration_trend", hours, await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, hours_back: hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 }
+
+                /* #3960: the rest of the trend family, on the same fixture. get_wait_trend rides the LCK_M_S
+                   series wait_stats already carries for get_lock_wait_trend above — one more read over rows that
+                   exist regardless, not a reason to seed a second wait_type. */
+                Measure(measured, "get_wait_trend", hours, await DarlingMcpDataTools.GetWaitTrend(postgres, "LCK_M_S", ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                Measure(measured, "get_cpu_utilization", hours, await DarlingMcpDataTools.GetCpuUtilization(postgres, ServerName, hours), "samples", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                Measure(measured, "get_tempdb_trend", hours, await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                Measure(measured, "get_memory_trend", hours, await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                Measure(measured, "get_perfmon_trend", hours, await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Batch Requests/sec", ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                Measure(measured, "get_pg_query_duration_trend", hours, await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, PgQueryIdText, hours), "points", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
             }
 
             /* The large-server shape the issue extrapolated to 30 MB: the last four hours also hold 300 tenant
@@ -127,9 +142,36 @@ public sealed class TrendPayloadBudgetLiveTests
             Measure(measured, "get_pg_database_trend@" + pgDatabaseWidth, 168,
                 await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, hours_back: 168, bucket_minutes: pgDatabaseWidth), "points", CapCeilingBytes, TrendBuckets.PgDatabaseMaxPoints);
 
+            /* #3960: the rest of the family's largest answers, same recipe. */
+            var waitWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.WaitMaxPoints);
+            Measure(measured, "get_wait_trend@" + waitWidth, 168,
+                await DarlingMcpDataTools.GetWaitTrend(postgres, "LCK_M_S", ServerName, 168, bucket_minutes: waitWidth), "trend", CapCeilingBytes, TrendBuckets.WaitMaxPoints);
+
+            var cpuWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.CpuMaxPoints);
+            Measure(measured, "get_cpu_utilization@" + cpuWidth, 168,
+                await DarlingMcpDataTools.GetCpuUtilization(postgres, ServerName, 168, bucket_minutes: cpuWidth), "samples", CapCeilingBytes, TrendBuckets.CpuMaxPoints);
+
+            var tempDbWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.TempDbMaxPoints);
+            Measure(measured, "get_tempdb_trend@" + tempDbWidth, 168,
+                await DarlingMcpDataTools.GetTempDbTrend(postgres, ServerName, 168, bucket_minutes: tempDbWidth), "trend", CapCeilingBytes, TrendBuckets.TempDbMaxPoints);
+
+            var memoryWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.MemoryMaxPoints);
+            Measure(measured, "get_memory_trend@" + memoryWidth, 168,
+                await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 168, bucket_minutes: memoryWidth), "trend", CapCeilingBytes, TrendBuckets.MemoryMaxPoints);
+
+            var perfmonWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.PerfmonMaxPoints);
+            Measure(measured, "get_perfmon_trend@" + perfmonWidth, 168,
+                await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Batch Requests/sec", ServerName, 168, bucket_minutes: perfmonWidth), "trend", CapCeilingBytes, TrendBuckets.PerfmonMaxPoints);
+
+            var pgQueryDurationWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.PgQueryDurationMaxPoints);
+            Measure(measured, "get_pg_query_duration_trend@" + pgQueryDurationWidth, 168,
+                await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, PgQueryIdText, 168, bucket_minutes: pgQueryDurationWidth), "points", CapCeilingBytes, TrendBuckets.PgQueryDurationMaxPoints);
+
             /* And one minute narrower than that is refused, not served. */
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 168, bucket_minutes: fileIoWidth - 1)));
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, hours_back: 168, bucket_minutes: pgIoWidth - 1)));
+            Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpDataTools.GetWaitTrend(postgres, "LCK_M_S", ServerName, 168, bucket_minutes: waitWidth - 1)));
+            Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, PgQueryIdText, 168, bucket_minutes: pgQueryDurationWidth - 1)));
 
             TestContext.Current.TestOutputHelper?.WriteLine(string.Join(Environment.NewLine, measured));
             bodySucceeded = true;
@@ -146,7 +188,7 @@ public sealed class TrendPayloadBudgetLiveTests
     {
         var root = JsonDocument.Parse(answer).RootElement;
         Assert.False(
-            root.TryGetProperty("status", out var status) && status.GetString() is not ("io_trend" or "database_trend"),
+            root.TryGetProperty("status", out var status) && status.GetString() is not ("io_trend" or "database_trend" or "query_duration_trend"),
             $"{tool} over {hours}h answered a {(root.TryGetProperty("status", out var s) ? s.GetString() : "?")} instead of data: {answer[..Math.Min(answer.Length, 400)]}");
 
         var points = root.GetProperty(pointsKey).GetArrayLength();
@@ -266,6 +308,56 @@ SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, 'StackOverflow2013',
        SUM(spills) OVER w, SUM(spill_bytes) OVER w, SUM(deadlock) OVER w, NULL::timestamp
 FROM s
 WINDOW w AS (ORDER BY n)", 5_000_000L, weekStart, WeekMinutes);
+
+        /* #3960: the rest of the trend family, on the same week. One series each is enough for a payload size
+           and cap census -- get_wait_trend's own series count comes from wait_stats' LCK_M_S rows above. */
+        await PlantAsync(connection, ct, @"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time,
+     sqlserver_cpu_utilization, other_process_cpu_utilization)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, $2 + n * interval '1 minute',
+       40 + (n % 30), 10 + (n % 5)
+FROM generate_series(0, $5) AS n", 7_000_000L, weekStart, WeekMinutes);
+
+        await PlantAsync(connection, ct, @"
+INSERT INTO tempdb_stats
+    (collection_id, collection_time, server_id, server_name,
+     user_object_reserved_mb, internal_object_reserved_mb, version_store_reserved_mb,
+     total_reserved_mb, unallocated_mb, total_sessions_using_tempdb, top_session_id, top_session_tempdb_mb)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4,
+       100 + (n % 50), 50 + (n % 20), 25 + (n % 10),
+       175 + (n % 80), 825 - (n % 80), 5 + (n % 10), 55 + (n % 3), 12 + (n % 5)
+FROM generate_series(0, $5) AS n", 8_000_000L, weekStart, WeekMinutes);
+
+        await PlantAsync(connection, ct, @"
+INSERT INTO memory_stats
+    (collection_id, collection_time, server_id, server_name,
+     total_server_memory_mb, target_server_memory_mb, buffer_pool_mb, plan_cache_mb)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4,
+       40000 + (n % 500), 49152, 35000 + (n % 400), 5000 + (n % 100)
+FROM generate_series(0, $5) AS n", 9_000_000L, weekStart, WeekMinutes);
+
+        await PlantAsync(connection, ct, @"
+INSERT INTO memory_grant_stats
+    (collection_id, collection_time, server_id, server_name, resource_semaphore_id, pool_id, granted_memory_mb)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, 0, 2, 50 + (n % 30)
+FROM generate_series(0, $5) AS n", 10_000_000L, weekStart, WeekMinutes);
+
+        await PlantAsync(connection, ct, @"
+INSERT INTO perfmon_stats
+    (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name,
+     cntr_value, delta_cntr_value, sample_interval_seconds)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, 'SQLServer:SQL Statistics', 'Batch Requests/sec', '',
+       5000000 + n * 900, 900 + (n % 50) * 3, 60
+FROM generate_series(0, $5) AS n", 11_000_000L, weekStart, WeekMinutes);
+
+        await PlantAsync(connection, ct, $@"
+INSERT INTO pg_statement_stats
+    (collection_id, collection_time, server_id, server_name, queryid,
+     delta_calls, delta_total_exec_time_ms, sample_interval_seconds)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, {PgQueryId},
+       10 + (n % 20), (10 + (n % 20)) * 2.5, 60
+FROM generate_series(0, $5) AS n", 12_000_000L, weekStart, WeekMinutes);
     }
 
     /// <summary>One generate_series plant: $1 an id base past anything the generator has handed out, $2 the first
@@ -283,7 +375,13 @@ WINDOW w AS (ORDER BY n)", 5_000_000L, weekStart, WeekMinutes);
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        foreach (var table in new[] { "file_io_stats", "wait_stats", "query_stats", "pg_io_stats", "pg_database_stats", "servers" })
+        foreach (var table in new[]
+        {
+            "file_io_stats", "wait_stats", "query_stats", "pg_io_stats", "pg_database_stats",
+            /* #3960 */
+            "cpu_utilization_stats", "tempdb_stats", "memory_stats", "memory_grant_stats", "perfmon_stats", "pg_statement_stats",
+            "servers",
+        })
         {
             using var delete = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id = $1", connection) { CommandTimeout = 300 };
             delete.Parameters.AddWithValue(ServerId);

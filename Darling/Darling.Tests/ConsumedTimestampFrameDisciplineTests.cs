@@ -968,10 +968,17 @@ public sealed class ConsumedTimestampFrameDisciplineTests
             "event_time", "default_trace_events", 1,
             "#3202: the read projects event_time_utc and the payload stamps THAT, so the field name is the "
             + "column's while the value is not"),
-        (SiteLabel.DeSkewedAtRead, "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs",
-            "sample_time", "cpu_utilization_stats", 1,
-            "#1262: get_cpu_utilization de-skews sample_time in SQL by the per-batch quantised offset, then "
-            + "buckets the de-skewed value, so the emitted expression is the bucket key"),
+        /* #3960 REMOVED this row (get_cpu_utilization's sample_time, cpu_utilization_stats, DarlingMcpDataTools.cs):
+           the SQL still de-skews sample_time exactly as before (CpuUtilizationBucketedSql wraps CpuUtilizationSql
+           unchanged), but the JSON emission moved from an inline `sample_time = g.Key.ToString("o")` projection into
+           the shared TrendPayloads.CpuUtilization builder's generic Stamp(DateTime) helper — which every bucketed
+           trend's timestamp now goes through, PerformanceMonitor.Common/Mcp, outside McpSourceFiles' reach, and with
+           no field name textually beside its ToString("o") for McpPayloadEmission to key on. The census cannot see a
+           site it cannot reach; the site itself did not regress (TrendPayloadBudgetLiveTests and
+           DarlingMcpTrendToolsTests.MemoryTrend_Description_PromisesTheJoinedGrantSeries_AndNamesTheNullGap's
+           siblings still exercise get_cpu_utilization's values against a live store). A future column that reaches
+           TrendPayloads still de-skews at read in its own SQL is equally invisible here; broadening this census to
+           scan PerformanceMonitor.Common's shared builders is future work, not #3960's. */
 
         /* ── desktop renders: the column's frame against the renderer's (#3207) ──
 
@@ -994,10 +1001,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
        #3419 took the de-skewed label from 34 to 26 without fixing anything: the eight plan_correction
        sites are not sites at all, because the column is UTC in the store and the four surfaces that reach
        it now emit it unconverted. A site whose column and whose consumer are in the same frame has nothing
-       for this census to say about it. */
+       for this census to say about it.
+
+       #3960 took it from 26 to 25: get_cpu_utilization's sample_time row is gone, not fixed nor broken — the
+       row above explains why the census can no longer reach that site now that it buckets through the shared
+       TrendPayloads.CpuUtilization builder. */
     private const int McpPayloadUnmarkedSites = 1;
     private const int DesktopRenderMismatchSites = 0;
-    private const int DeSkewedAtReadSites = 26;
+    private const int DeSkewedAtReadSites = 25;
 
     /* ═══════════════════════ 5. resolving which table a site's column came from ═══════════════════════ */
 
@@ -1258,18 +1269,22 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// from the file's own reach. Pinned at set equality so the decline cannot grow quietly, which is the
     /// only thing that makes "cannot key on the column name" a cost rather than an excuse.
     ///
-    /// <para>All nineteen are Query Store, system_health, long-query or PostgreSQL reads, and #3206's own
+    /// <para>All eighteen are Query Store, system_health, long-query or PostgreSQL reads, and #3206's own
     /// sweep checked each of them rather than assuming: <c>query_store_stats.last_execution_time</c> is
     /// genuinely naive UTC, Lite's Default Trace read already de-skews (#2967), and
     /// <c>memory_pressure_events.sample_time</c> is UTC per #2932. None is an offender — but this guard is
-    /// not what establishes that, and it does not pretend to.</para>
+    /// not what establishes that, and it does not pretend to.
+    ///
+    /// <para>#3960 REMOVED Lite <c>McpCpuTools.cs</c>'s row (get_cpu_utilization's sample_time, declined here
+    /// because a Lite tool file carries no FROM/JOIN for the census to resolve a table from): the emission moved
+    /// into the shared <c>TrendPayloads.CpuUtilization</c> builder, the same move and the same reasoning as the
+    /// DeSkewedAtRead row this change removes from Darling's side, below.</para>
     /// </summary>
     private static readonly (string File, string Column, int Sites)[] DeclinedAmbiguousMcpSites =
     [
         ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "last_execution_time", 1),
         ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPgCpuUtilizationTools.cs", "sample_time", 1),
         ("Lite/Mcp/McpBlockingTools.cs", "event_time", 2),
-        ("Lite/Mcp/McpCpuTools.cs", "sample_time", 1),
         ("Lite/Mcp/McpDefaultTraceTools.cs", "event_time", 1),
         ("Lite/Mcp/McpHealthParserTools.cs", "event_time", 9),
         ("Lite/Mcp/McpLongQueryTools.cs", "event_time", 1),
@@ -1746,10 +1761,14 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     {
         var evidence = new (string Column, string ReaderFile, string Conversion)[]
         {
+            /* #3960 REMOVED the ("sample_time", DarlingDataReader.cs, "MAX(sample_time) OVER (...)") row that
+               stood here: the conversion still runs, unchanged, inside CpuUtilizationSql (CpuUtilizationBucketedSql
+               wraps it verbatim) — only the once-inline JSON emission this evidence backed moved to the shared
+               TrendPayloads.CpuUtilization builder, which the DeSkewedAtRead inventory above can no longer see
+               (see that array's own #3960 comment). Keeping this row would assert "sample_time" is still a
+               DeSkewedAtRead column, which is no longer true of the CENSUS even though it stays true of the SQL. */
             ("event_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs",
                 "dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc"),
-            ("sample_time", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs",
-                "MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time"),
             ("blocked_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",
                 "blocked_last_tran_started - make_interval(mins => svr.offset_minutes) AS blocked_last_tran_started"),
             ("blocking_last_tran_started", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingBlockingReader.cs",

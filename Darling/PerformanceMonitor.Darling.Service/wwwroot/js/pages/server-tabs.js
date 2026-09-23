@@ -3569,6 +3569,8 @@ const PG_WAIT_TREND_COLUMNS = [
 const PG_QUERY_DURATION_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "mean_exec_ms", label: "Mean ms/exec", format: "num2" },
+  /* #3960: a row is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
+  { key: "peak_mean_exec_ms", label: "Peak ms/exec", format: "num2", small: true },
   { key: "calls", label: "Calls", format: "int" },
   { key: "calls_per_second", label: "Calls/sec", format: "num2" },
   { key: "total_exec_ms", label: "Total ms", format: "num1", small: true },
