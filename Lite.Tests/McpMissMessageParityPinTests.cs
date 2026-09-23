@@ -182,7 +182,7 @@ public sealed class McpMissMessageParityPinTests
            get_analysis_facts (the baseline_confidence disambiguation), plus the instructions rows. */
         "confidence is an EVIDENCE score, not a probability: 0.20 for the fired symptom alone, plus up to 0.48 for the share of the root fact's amplifier checks (its expected companions) that matched and up to 0.32 for the depth of the evidence chain",
         "Rank by severity for impact and by confidence for how much of the engine's own corroboration showed up; do not multiply them.",
-        "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape (pre-#3538) and they must not be read as corroborated.",
+        "Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape and they must not be read as corroborated.",
         "For ANOMALY_* facts the metadata carries baseline_confidence — the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server.",
 
         /* #3691: the facts read runs the anomaly detector on both SKUs, and the sentence teaching a caller

@@ -13,10 +13,11 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// #3898 D3 head pins for the "sqlCore" family's Lite twins: <c>analyze_server</c> and <c>compare_analysis</c>.
-/// Darling's twin is <c>Darling.Tests/McpToolGuideHeadsSqlCoreTests</c>, which also holds the cross-SKU lockstep
-/// pin. Both apps' tool bodies mirror each other field-for-field, so the original prose (and now the head and
-/// tail) is byte-identical on both SKUs.
+/// #3898 D3 head pins for the "sqlCore" family's Lite twins: <c>analyze_server</c> and <c>compare_analysis</c>,
+/// joined by <c>get_analysis_facts</c> and <c>get_analysis_findings</c> in a later lane. Darling's twin is
+/// <c>Darling.Tests/McpToolGuideHeadsSqlCoreTests</c>, which also holds the cross-SKU lockstep pin. Both apps'
+/// tool bodies mirror each other field-for-field, so the original prose (and now the head and tail) is
+/// byte-identical on both SKUs.
 /// </summary>
 public sealed class McpToolGuideHeadsSqlCoreTests
 {
@@ -24,6 +25,8 @@ public sealed class McpToolGuideHeadsSqlCoreTests
     [
         "analyze_server",
         "compare_analysis",
+        "get_analysis_facts",
+        "get_analysis_findings",
     ];
 
     private static readonly (string Tool, string Fact)[] HeadFacts =
@@ -39,6 +42,17 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         ("compare_analysis", "unavailable = BOTH windows had zero facts"),
         ("compare_analysis", "coverage_caveat flags a partly-collected side"),
         ("compare_analysis", "band_source/band_rules say which"),
+        ("get_analysis_facts", "WITHOUT graph traversal: facts, not findings"),
+        ("get_analysis_facts", "so a fact here did not necessarily produce a finding"),
+        ("get_analysis_facts", "differs from a finding's confidence in analyze_server"),
+        ("get_analysis_facts", "collection_caveats is absent on a clean read"),
+        ("get_analysis_facts", "ranked is absent unless 2+ objects ride"),
+        ("get_analysis_findings", "Persisted findings from PAST analysis runs, not a new analysis"),
+        ("get_analysis_findings", "empty: no findings in the window, a true zero"),
+        ("get_analysis_findings", "truncated (see truncation_note) flags a read cap, so occurrence stats may under-report"),
+        ("get_analysis_findings", "confidence_basis flags rows persisted before this scoring existed as path-shape, not corroboration"),
+        ("get_analysis_findings", "remediation_command/structured_remediation are advisory, never executed"),
+        ("get_analysis_findings", "Recurrence fields are LABELS at unchanged severity"),
     ];
 
     [Fact]
@@ -66,5 +80,37 @@ public sealed class McpToolGuideHeadsSqlCoreTests
     public void CompareAnalysis_TailCarriesTheBaselineDurationRuleTrimmedFromTheParameter()
     {
         Assert.Contains("same duration as the comparison period", McpToolGuideTests.Served("compare_analysis").Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D2: two parameter descriptions were trimmed to clear the 200-character cap once their tools
+    /// converted. <c>source</c>'s full accepted-value enumeration (was 515 chars) and <c>include_drilldown</c>'s
+    /// examples and default-false rationale (was 235 chars) both ride on their tool's own tail instead of being
+    /// lost — the same pattern <c>compare_analysis.baseline_hours_back</c> set above.</summary>
+    [Fact]
+    public void TrimmedParameterOverflows_RideOnTheirOwnTail()
+    {
+        Assert.Contains("source accepts: anomaly, bad_actor, blocking", McpToolGuideTests.Served("get_analysis_facts").Tail!, StringComparison.Ordinal);
+        Assert.Contains("queries, sessions, tempdb, waits; omit it for all.", McpToolGuideTests.Served("get_analysis_facts").Tail!, StringComparison.Ordinal);
+        Assert.Contains("parameter-sensitive plans or top spill queries behind the finding", McpToolGuideTests.Served("get_analysis_findings").Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>The facts payload's total_facts/shown/filters were never documented; the coordinator added
+    /// one tail sentence in #4083, so an agent reading shown: 0 can tell a filtered-out read from no facts.</summary>
+    [Fact]
+    public void FactsPayloadCounts_AreDocumentedInTheTail()
+    {
+        Assert.Contains("total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them", McpToolGuideTests.Served("get_analysis_facts").Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D4: <c>get_analysis_findings</c>' two issue references ("(pre-#3538)" naming the confidence-basis
+    /// migration, "(#3653)" naming the recurrence-label change) are off the wire on both head and tail; the
+    /// guardrail each carried (a pre-migration row is path-shape, not corroboration; the three recurrence fields
+    /// and what they mean) stays, worded without the ref. get_analysis_facts carried no issue references.</summary>
+    [Fact]
+    public void GetAnalysisFindings_CarriesNoIssueReferences()
+    {
+        var full = McpToolGuideTests.Served("get_analysis_findings").Served + McpToolGuideTests.Served("get_analysis_findings").Tail;
+        Assert.DoesNotContain("#3538", full, StringComparison.Ordinal);
+        Assert.DoesNotContain("#3653", full, StringComparison.Ordinal);
     }
 }
