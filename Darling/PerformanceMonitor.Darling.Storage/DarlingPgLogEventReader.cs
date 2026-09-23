@@ -360,10 +360,14 @@ public static class DarlingPgLogEventReader
                 UserName: reader.IsDBNull(5) ? null : reader.GetString(5),
                 ApplicationName: reader.IsDBNull(6) ? null : reader.GetString(6),
                 Pid: reader.IsDBNull(7) ? null : reader.GetInt32(7),
-                Message: reader.IsDBNull(8) ? string.Empty : reader.GetString(8),
-                /* As stored: PgLogEvent.From normalized the SQL in them on the way in (#3920, #3944). */
-                Detail: reader.IsDBNull(9) ? null : reader.GetString(9),
-                Context: reader.IsDBNull(10) ? null : reader.GetString(10),
+                /* #3920, #3944: PgLogEvent.From normalized the SQL in these on the way in, and they are brought to
+                   this build's rules again on the way out. Rows an earlier build stored kept the SQL shapes this one
+                   added (a remote command, a portal's or a STRICT row count's parameters, an auto_explain plan) with
+                   prose masking only, bare numbers included. The three functions are idempotent and leave prose as
+                   written, so a newer row comes back unchanged, and the 30-day retention ages the older ones out. */
+                Message: PerformanceMonitor.Collectors.PgLogTextRedactor.WithholdPlan(reader.IsDBNull(8) ? string.Empty : reader.GetString(8)) ?? string.Empty,
+                Detail: reader.IsDBNull(9) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactDetail(reader.GetString(9)),
+                Context: reader.IsDBNull(10) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactContext(reader.GetString(10)),
                 StatementFingerprint: reader.IsDBNull(11) ? null : reader.GetString(11),
                 RawLineHash: reader.GetString(12),
                 TimesSeen: reader.GetInt32(13),

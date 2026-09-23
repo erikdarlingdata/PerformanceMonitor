@@ -593,9 +593,25 @@ public static class StoreLogClassifier
         return groups;
     }
 
-    /// <summary>The first rule whose severity and text both match, else the two defaults.</summary>
+    /* PostgreSQL's statement logging, which writes SQL where a message stands: log_statement's `statement: ` and
+       `execute <name>: `, and log_min_duration_statement's `duration: N ms  statement: ` with its parse, bind and
+       execute kinds. */
+    private static readonly Regex s_statementLogHead = new(
+        @"^(?:statement: |execute |duration: )",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>Whether an entry's message is a line of statement logging, whose text is SQL rather than
+    /// prose.</summary>
+    private static bool IsStatementLog(string severity, string message) =>
+        severity == "LOG" && s_statementLogHead.IsMatch(message);
+
+    /// <summary>The first rule whose severity and text both match, else the two defaults. A
+    /// <see cref="MatchKind.Contains"/> rule never claims a LOG line of statement logging (#3944's review): its
+    /// text would be matching the logged statement, a retained class keeps the entry's message as written, and that
+    /// message is SQL, so only the slow-statement rule, which normalizes it, may claim one.</summary>
     private static (string EventClass, bool Retained) Match(string severity, string message)
     {
+        var statementLog = IsStatementLog(severity, message);
         foreach (var rule in Rules)
         {
             if (Array.IndexOf(rule.Severities, severity) < 0)
@@ -607,7 +623,7 @@ public static class StoreLogClassifier
             {
                 MatchKind.SeverityOnly => true,
                 MatchKind.StartsWith => message.StartsWith(rule.Text, StringComparison.Ordinal),
-                MatchKind.Contains => message.Contains(rule.Text, StringComparison.Ordinal),
+                MatchKind.Contains => !statementLog && message.Contains(rule.Text, StringComparison.Ordinal),
                 _ => false,
             };
 
@@ -1035,8 +1051,9 @@ public static class StoreLogClassifier
     /// re-keys the message. Computed from the stored SAMPLE, whose first line carries the message the row was
     /// grouped on, so the key and the sample come out consistent. Idempotent, so a row already brought up comes back
     /// unchanged, with one exception: a sample the <see cref="MaxSampleLength"/> cap cut inside a normalized token
-    /// re-reads with that statement withheld, which the sweep's pass writes back once. Two shapes keep no text: a
-    /// slow-statement row whose first line names no statement, and a row whose sample opens on a tab-led line.
+    /// re-reads with that statement withheld, which the sweep's pass writes back once. Three shapes keep no text: a
+    /// slow-statement row whose first line names no statement, a row whose sample opens on a tab-led line, and a
+    /// row of any other class whose sample is a line of statement logging.
     /// </summary>
     public static (string? Message, string? Sample) MaskStoredEvent(string eventClass, string? message, string? sample)
     {
@@ -1053,7 +1070,19 @@ public static class StoreLogClassifier
             return (null, null);
         }
 
-        var lineMessage = PrimaryMessageOf(sample) ?? message ?? sample.Split('\n', 2)[0];
+        /* Releases before #3944 also let a Contains rule claim a line of statement logging (Match), so a row of
+           another class can hold a logged statement as written. Its message is SQL that only the slow-statement
+           class normalizes, and under any other class it would have been routine, which keeps no text. */
+        var firstLine = sample.Split('\n', 2)[0];
+        var primary = FindField(firstLine);
+        if (eventClass != SlowStatementClass
+            && primary.Kind == FieldKind.Primary
+            && IsStatementLog(primary.Name, firstLine[primary.MessageStart..]))
+        {
+            return (null, null);
+        }
+
+        var lineMessage = PrimaryMessageOf(sample) ?? message ?? firstLine;
         var (_, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample);
         if (!retained)
         {

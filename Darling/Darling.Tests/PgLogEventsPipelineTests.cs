@@ -735,6 +735,51 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
+    /// #3944's review, on lines PostgreSQL 18.6 wrote: the values a statement ran with are one DETAIL list in SQL's
+    /// own quoting, and are normalized like SQL. PL/pgSQL writes <c>parameters:</c> under
+    /// <c>print_strict_params</c> on the ERROR a STRICT row count raises (its variables by name, or <c>$n</c> for
+    /// <c>EXECUTE ... USING</c>), and a logged statement carries <c>Parameters:</c> (errdetail_params). Prose masking
+    /// had covered their quoted values; kept as written, the ERROR's detail would have stored them. PL/pgSQL's
+    /// unquoted <c>query:</c> CONTEXT frame is SQL the same way.
+    /// </summary>
+    [Fact]
+    public void AStatementsParameterValues_AreNormalizedLikeItsSql()
+    {
+        var log = P + "[39980] ERROR:  query returned no rows\n"
+            + P + "[39980] DETAIL:  parameters: p_secret = 'Leak3944a', p_n = '4111'\n"
+            + P + "[39980] CONTEXT:  PL/pgSQL function probe_strict(text,integer) line 5 at SQL statement\n"
+            + P + "[39980] STATEMENT:  SELECT probe_strict('Leak3944a', 4111);\n"
+            + P + "[39980] ERROR:  query returned more than one row\n"
+            + P + "[39980] DETAIL:  parameters: $1 = 'Leak3944b', $2 = '4112'\n"
+            + P + "[39980] HINT:  Make sure the query returns a single row, or use LIMIT 1.\n"
+            + P + "[39980] CONTEXT:  PL/pgSQL function probe_dyn(text) line 5 at EXECUTE\n"
+            + P + "[39980] STATEMENT:  SELECT probe_dyn('Leak3944b');\n";
+
+        var events = Classify(log);
+        Assert.Equal(2, events.Count);
+        Assert.Contains(events, e => e.Message == "query returned no rows" && e.Detail == "parameters: p_secret = '?', p_n = '?'");
+        Assert.Contains(events, e => e.Message == "query returned more than one row" && e.Detail == "parameters: $1 = '?', $2 = '?'");
+        foreach (var e in events)
+        {
+            Assert.DoesNotContain("Leak3944", e.Message + e.Detail + e.Context, StringComparison.Ordinal);
+            Assert.Equal(e.Detail, PgLogTextRedactor.RedactDetail(e.Detail));
+        }
+
+        /* errdetail_params' own spelling, a value holding a quote and a newline, a NULL, and a list that cannot be
+           read to its end. */
+        Assert.Equal(
+            "Parameters: $1 = '?', $2 = NULL",
+            PgLogTextRedactor.RedactDetail("Parameters: $1 = 'it''s\n\tLeak3944c', $2 = NULL"));
+        Assert.Equal(
+            "parameters: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactDetail("parameters: p = 'Leak3944d"));
+
+        Assert.Equal(
+            "query: SELECT x FROM t WHERE k = '?'\n\tPL/pgSQL function f() line 3 at assignment",
+            PgLogTextRedactor.RedactContext("query: SELECT x FROM t WHERE k = 'Leak3944e'\n\tPL/pgSQL function f() line 3 at assignment"));
+    }
+
+    /// <summary>
     /// #3920's fourth review (M3). Normalizing stays linear on a hostile field: the CONTEXT frame's candidate closes
     /// and the DETAIL's query splits are capped, and SQL in a field too long to read whole is withheld. Round 3
     /// re-lexed the frame body at every candidate close, so a 180 KB CONTEXT took 21 s, and the self-hosted tail
@@ -1308,6 +1353,32 @@ public sealed class PgLogEventsLivePostgresTests
             Assert.False(McpHelpers.IsErrorEnvelope(badSeverity), badSeverity);
             JsonAssert.Contains("\"parameter\": \"min_severity\"", badSeverity);
             Assert.Contains("not a PostgreSQL severity label", McpHelpers.ErrorMessageOf(badSeverity), StringComparison.Ordinal);
+
+            /* #3920, #3944: a row an earlier build stored with its SQL masked as prose only, bare numbers kept (a
+               remote command's constant, an auto_explain plan's), comes back through the reader brought to this
+               build's rules; the prose around it comes back as written. */
+            var older = new PgLogEvent(
+                OccurredAtUtc: DateTime.UtcNow.AddMinutes(-2), Family: PgLogFamilies.Error, Severity: "WARNING",
+                SqlState: null, DatabaseName: "app_db", UserName: "app", ApplicationName: null, Pid: 4117,
+                Message: "duration: 12.500 ms  plan:\nQuery Text: SELECT * FROM cards WHERE pan_tail = 41173944",
+                Detail: "value 42 is out of range",
+                Context: "remote SQL command: SELECT id FROM public.t WHERE ((n = 41183944))\nPL/pgSQL function g() line 3 at PERFORM",
+                StatementFingerprint: null, RawLineHash: "older-build-row-3944", Metrics: default);
+            await WriteAsync(postgres, [older], ct);
+            var warnings = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "error", "WARNING", 100);
+            Assert.DoesNotContain("41173944", warnings, StringComparison.Ordinal);
+            Assert.DoesNotContain("41183944", warnings, StringComparison.Ordinal);
+            using (var parsed = System.Text.Json.JsonDocument.Parse(warnings))
+            {
+                var row = parsed.RootElement.GetProperty("events").EnumerateArray()
+                    .Single(e => e.GetProperty("message").GetString()!.StartsWith("duration: ", StringComparison.Ordinal));
+                Assert.Equal("duration: 12.500 ms  plan:\n" + PgLogTextRedactor.WithheldPlan, row.GetProperty("message").GetString());
+                Assert.Equal("value 42 is out of range", row.GetProperty("detail").GetString());
+                Assert.Equal(
+                    "remote SQL command: SELECT id FROM public.t WHERE ((n = ?))\nPL/pgSQL function g() line 3 at PERFORM",
+                    row.GetProperty("context").GetString());
+            }
+
             bodySucceeded = true;
         }
         finally

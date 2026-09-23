@@ -318,10 +318,51 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
+    /// #3944's review, on lines PostgreSQL 18.6 wrote. Statement logging is SQL where a message stands, so a
+    /// Contains rule never claims it: a slow statement that mentions a retained class's phrase stays a slow
+    /// statement, normalized and its bind parameters dropped, and log_statement's own line stays routine, instead of
+    /// both being kept as written under <c>worker_slots_exhausted</c>. And the values a PL/pgSQL STRICT error ran
+    /// with (<c>print_strict_params</c>) are normalized like SQL in the ERROR's DETAIL.
+    /// </summary>
+    [Fact]
+    public void StatementLoggingAndAStatementsParameters_AreReadAsSql()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "LOG:  duration: 6012.500 ms  execute <unnamed>: SELECT count(*) FROM log WHERE m LIKE '%out of background worker%' AND k = $1",
+            DefaultPrefix + "DETAIL:  Parameters: $1 = 'Leak3944g'",
+            DefaultPrefix + "LOG:  execute <unnamed>: SELECT 'out of background worker', $1",
+            DefaultPrefix + "DETAIL:  Parameters: $1 = 'Leak3944h'",
+            DefaultPrefix + "LOG:  statement: SELECT 'out of background worker', 'Leak3944i'",
+            DefaultPrefix + "ERROR:  query returned no rows",
+            DefaultPrefix + "DETAIL:  parameters: p_secret = 'Leak3944j', p_n = '4111'",
+            DefaultPrefix + "CONTEXT:  PL/pgSQL function probe_strict(text,integer) line 5 at SQL statement",
+            DefaultPrefix + "LOG:  failed to launch job 1003 \"Compression Policy [1003]\": out of background workers",
+            "",
+        ]));
+
+        foreach (var group in census.Groups)
+        {
+            Assert.DoesNotContain("Leak3944", group.MessageText + group.SampleLine, StringComparison.Ordinal);
+        }
+
+        var slow = Assert.Single(census.Groups, g => g.EventClass == StoreLogClassifier.SlowStatementClass);
+        Assert.Equal("execute <unnamed>: SELECT count(*) FROM log WHERE m LIKE '?' AND k = $1", slow.MessageText);
+        Assert.Equal(2, census.Groups.Where(g => g.EventClass == StoreLogClassifier.RoutineClass).Sum(g => g.Occurrences));
+
+        var strict = Assert.Single(census.Groups, g => g.MessageText == "query returned no rows");
+        Assert.Contains("DETAIL:  parameters: p_secret = '?', p_n = '?'", strict.SampleLine, StringComparison.Ordinal);
+
+        /* TimescaleDB's own line is still the class the rule names. */
+        Assert.Equal("worker_slots_exhausted", Assert.Single(census.Groups, g => g.Severity == "LOG" && g.MessageText is not null && g.EventClass != StoreLogClassifier.SlowStatementClass).EventClass);
+    }
+
+    /// <summary>
     /// #3944's review: releases through 3.8.0 opened an entry on any line holding a field token, a statement's
     /// tab-led continuation included, so a stored row can be a fragment of another entry's SQL whose lexer state is
-    /// unknowable. It keeps no text. And a slow statement's stored key survives a sample the cap cut inside a
-    /// normalized token: the sample re-reads withheld, the key does not fold into one withheld key.
+    /// unknowable. It keeps no text, and neither does a line of statement logging those releases let a Contains rule
+    /// claim. And a slow statement's stored key survives a sample the cap cut inside a normalized token: the sample
+    /// re-reads withheld, the key does not fold into one withheld key.
     /// </summary>
     [Fact]
     public void AStoredFragment_KeepsNoText_AndACappedSlowStatement_KeepsItsKey()
@@ -337,6 +378,22 @@ public class StoreLogClassifierTests
         Assert.Equal(key, keptKey);
         Assert.Equal(DefaultPrefix + "LOG:  duration: 6000.000 ms  statement: " + StoreLogClassifier.WithheldStatement, sample);
         Assert.Equal((keptKey, sample), StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowStatementClass, keptKey, sample));
+
+        /* A line of statement logging an older build filed under a Contains rule's class keeps no text either:
+           its message is SQL. The class's own line is brought up as usual. */
+        Assert.Equal(
+            ((string?)null, (string?)null),
+            StoreLogClassifier.MaskStoredEvent(
+                "worker_slots_exhausted",
+                "statement: SELECT 'out of background worker', 'Leak3944k'",
+                DefaultPrefix + "LOG:  statement: SELECT 'out of background worker', 'Leak3944k'"));
+        Assert.Equal(
+            ("failed to launch job ? \"?\": out of background workers",
+                DefaultPrefix + "LOG:  failed to launch job 1003 \"Compression Policy [1003]\": out of background workers"),
+            StoreLogClassifier.MaskStoredEvent(
+                "worker_slots_exhausted",
+                "failed to launch job 1003 \"Compression Policy [1003]\": out of background workers",
+                DefaultPrefix + "LOG:  failed to launch job 1003 \"Compression Policy [1003]\": out of background workers"));
     }
 
     /// <summary>

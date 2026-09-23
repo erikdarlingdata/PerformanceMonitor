@@ -48,8 +48,11 @@ public static class PgLogTextRedactor
        waits for <lock> on <object>; blocked by process M.", then writes each process's query as "Process N:
        <query>" (errdetail_log, each cut at track_activity_query_size). A crashed backend's report is one query,
        "Failed process was running: <query>", and a logged EXECUTE names its PREPARE as "prepare: <statement>"
-       (errdetail_execute). A tab leads each continuation line in a stderr log, nothing in csvlog. Any other
-       DETAIL is prose, kept as written. */
+       (errdetail_execute). The values a statement ran with are one list to the field's end, in SQL's own quoting
+       (#3944's review): PL/pgSQL's "parameters: name = 'value', ..." under print_strict_params, on the ERROR a
+       STRICT row count raised, and "Parameters: $1 = 'value', ..." under a logged statement (errdetail_params).
+       Prose masking had covered their quoted values. A tab leads each continuation line in a stderr log, nothing
+       in csvlog. Any other DETAIL is prose, kept as written. */
     private static readonly Regex s_deadlockWaitFor = new(
         @"^\t?Process (?<pid>[0-9]+) waits for .*; blocked by process (?<blocker>[0-9]+)\.$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -59,7 +62,7 @@ public static class PgLogTextRedactor
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex s_singleQueryHead = new(
-        @"^(?:Failed process was running: |prepare: )",
+        @"^(?:Failed process was running: |prepare: |[Pp]arameters: )",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* A CONTEXT frame that quotes the statement it was running, unescaped (#3920's review): SPI's
@@ -69,16 +72,17 @@ public static class PgLogTextRedactor
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* A CONTEXT frame that writes SQL WITHOUT quoting it, to the frame's end (#3944's review): postgres_fdw's
-       `remote SQL command: <sql>`, whose pushed-down constants are literals, and the values a statement was bound
+       `remote SQL command: <sql>`, whose pushed-down constants are literals, the values a statement was bound
        with (`unnamed portal with parameters: $1 = '...'`, `portal "p" parameter $1 = '...'`, written under
-       log_parameter_max_length_on_error), which read as SQL too. Prose masking had covered their quoted values. */
+       log_parameter_max_length_on_error), which read as SQL too, and PL/pgSQL's `query: <sql>` under its
+       "query did not return data" error. Prose masking had covered their quoted values. */
     private static readonly Regex s_contextSqlLine = new(
-        @"^\t?(?:remote SQL command: |(?:unnamed portal|portal ""[^""]*"") (?:with parameters: |parameter ))",
+        @"^\t?(?:remote SQL command: |query: |(?:unnamed portal|portal ""[^""]*"") (?:with parameters: |parameter ))",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* What can follow an SQL frame: the line after its closing quote starts one of these, or the field ends. */
     private static readonly Regex s_contextFrameStart = new(
-        @"^\t?(?:PL/pgSQL function |SQL function |SQL statement ""|SQL expression ""|PL/pgSQL expression ""|PL/pgSQL assignment ""|parallel worker|while |COPY |JSON data, |remote SQL command: |unnamed portal |portal "")",
+        @"^\t?(?:PL/pgSQL function |SQL function |SQL statement ""|SQL expression ""|PL/pgSQL expression ""|PL/pgSQL assignment ""|parallel worker|while |COPY |JSON data, |remote SQL command: |query: |unnamed portal |portal "")",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>What a statement becomes when it cannot be read to its end (cut inside a literal, a quoted
@@ -104,10 +108,11 @@ public static class PgLogTextRedactor
     /// <summary>
     /// A DETAIL field (#3920, #3944): the SQL PostgreSQL writes into it normalized as a stored statement is
     /// (<see cref="RedactStoredStatement"/>), and withheld when it cannot be read to its end, which is common: the
-    /// server cuts each query at <c>track_activity_query_size</c>. Only three shapes carry SQL: a crash's
-    /// <c>Failed process was running: query</c> and a logged EXECUTE's <c>prepare: statement</c>, each one query to
-    /// the end of the field, and a deadlock report, whose wait-for lines are prose and are followed by each
-    /// process's <c>Process N: query</c>. Every other DETAIL, and a deadlock report's wait-for lines, are kept as
+    /// server cuts each query at <c>track_activity_query_size</c>. Only these shapes carry SQL: a crash's
+    /// <c>Failed process was running: query</c>, a logged EXECUTE's <c>prepare: statement</c> and the values a
+    /// statement ran with (<c>parameters: ...</c>, <c>Parameters: ...</c>), each one query to the end of the field,
+    /// and a deadlock report, whose wait-for lines are prose and are followed by each process's
+    /// <c>Process N: query</c>. Every other DETAIL, and a deadlock report's wait-for lines, are kept as
     /// written.
     ///
     /// <para><b>Where one deadlock query ends</b> (#3920's fourth review). A <c>Process N:</c> line starts the next
@@ -187,12 +192,13 @@ public static class PgLogTextRedactor
     /// A CONTEXT field (#3920, #3944): a frame that quotes the statement it was running (<c>SQL statement "..."</c>,
     /// PL/pgSQL's <c>expression</c> and <c>assignment</c> frames) has that statement normalized
     /// (<see cref="RedactStoredStatement"/>), and so does a frame that writes SQL unquoted to its end (postgres_fdw's
-    /// <c>remote SQL command:</c>, a portal's bound parameters); every other line is kept as written. PostgreSQL does
-    /// not escape the quote, so a double quote inside the statement is not its end: the statement ends at the first
-    /// closing quote (a line end, unquoted) before which the text reads to its end and after which the next line
-    /// starts another frame, or the field ends, testing at most <see cref="MaxBoundaryTests"/> closes. A frame that
-    /// no close satisfies, or one in a field longer than <see cref="MaxSqlFieldLength"/>, is withheld with everything
-    /// after it, because what follows may be the rest of its statement. Null in, null out; idempotent.
+    /// <c>remote SQL command:</c>, a portal's bound parameters, PL/pgSQL's <c>query:</c>); every other line is kept
+    /// as written. PostgreSQL does not escape the quote, so a double quote inside the statement is not its end: the
+    /// statement ends at the first closing quote (a line end, unquoted) before which the text reads to its end and
+    /// after which the next line starts another frame, or the field ends, testing at most
+    /// <see cref="MaxBoundaryTests"/> closes. A frame that no close satisfies, or one in a field longer than
+    /// <see cref="MaxSqlFieldLength"/>, is withheld with everything after it, because what follows may be the rest
+    /// of its statement. Null in, null out; idempotent.
     ///
     /// <para><b>An SQL frame is read as SQL on whatever line it opens</b> (#3944). #3920's fourth review read one
     /// only where a frame could start, so a COPY value running onto a line shaped like a frame stayed part of that
