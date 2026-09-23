@@ -4672,6 +4672,74 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- the store's TimescaleDB extension (#3908) ---------------- */
+
+    /// <summary>
+    /// Fleet-level key for the store's TimescaleDB extension, beside <see cref="StoreUpgradeKey"/>: the same
+    /// metric, a different condition, so a start that upgrades the PostgreSQL major and then cannot move the
+    /// extension raises both.
+    /// </summary>
+    private const string StoreTimescaleKey = "storetimescale";
+
+    /// <summary>
+    /// What one service start found about the store's TimescaleDB extension (#3908): the update to the runtime's
+    /// version failed (<paramref name="Failed"/>), or the extension is behind that version after start and nothing
+    /// moved it. <paramref name="FromVersion"/> is what the store is on, null when it could not be read. A
+    /// platform-neutral copy of the Windows-only bootstrap's outcome, like <see cref="StoreUpgradeReport"/>.
+    /// </summary>
+    internal sealed record StoreTimescaleReport(bool Failed, string? FromVersion, string? ToVersion, string? FailureMessage);
+
+    /// <summary>
+    /// Reports a store whose TimescaleDB extension is not the runtime's version (#3908), ONCE per service start,
+    /// with the discipline of <see cref="EvaluateStoreUpgradeAsync"/>: a start's outcome is an event, fired when
+    /// the alert engine first exists and never re-evaluated. Under the same metric as the major upgrade, because
+    /// it is the same family and the same operator action. CRITICAL either way: the store runs and collects, but
+    /// on an older extension than the release was built and tested with, and a runtime moves TimescaleDB for a
+    /// reason, typically a published advisory against the old version.
+    /// </summary>
+    public async Task EvaluateStoreTimescaleAsync(StoreTimescaleReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var from = report.FromVersion is null ? "its current TimescaleDB" : $"TimescaleDB {report.FromVersion}";
+            var to = report.ToVersion is null ? "the runtime's TimescaleDB" : $"TimescaleDB {report.ToVersion}";
+            var reason = string.IsNullOrWhiteSpace(report.FailureMessage)
+                ? string.Empty
+                : $" Reason: {report.FailureMessage.Trim().TrimEnd('.')}.";
+
+            var state = report.Failed
+                ? $"The store is running and collecting on {from}, whose library this runtime still carries, so nothing is down. The update is retried on the next service start."
+                : $"The store is running and collecting on {from}. Nothing moved it this start. It moves the next time this service starts the store itself, before anything can connect; a server started by something else, or one this service adopted, keeps this version until then.";
+
+            await FireAsync(
+                StoreKey(StoreTimescaleKey), _storeLabel, StoreUpgradeMetric,
+                from, to,
+                detail: $"The monitor's own store {(report.Failed ? "could not move" : "has not moved")} from {from} to {to}, the version its runtime ships.{reason} {state} " +
+                    "Until it moves, the store runs an older extension than the one this release was built and tested with.",
+                severity: AlertSeverityLevel.Critical,
+                shortMessage: report.Failed
+                    ? $"store {to} update FAILED, still running on {from}"
+                    : $"store is on {from}, runtime ships {to}",
+                /* Versions are identities, not quantities (#1881): they stay in the text. */
+                numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
+            _logger?.LogError("Store TimescaleDB self-alert failed: {Message}", ex.Message);
+        }
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     /// <summary>

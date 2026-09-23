@@ -420,6 +420,9 @@ public sealed class DarlingWorker : BackgroundService
        first hypertable conversion is real work. That pass is the one a start path would have spent minutes on
        too, and cutting it short costs only the steps it had not reached: they are idempotent, so the next
        hour resumes at the one that was interrupted rather than redoing the ladder. */
+    /// <summary>The convergence list, read-only, for tests that build a store the way the product does (#3908).</summary>
+    internal static IReadOnlyList<StoreObjectConvergenceStep> StoreObjectConvergence => s_storeObjectConvergence;
+
     private static readonly TimeSpan s_storeObjectConvergenceBudget = TimeSpan.FromMinutes(5);
 
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
@@ -1316,6 +1319,9 @@ public sealed class DarlingWorker : BackgroundService
            every ordinary start. */
         DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport = null;
 
+        /* #3908: what this start did to the store's TimescaleDB extension, alerted beside the upgrade report. */
+        DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport = null;
+
         if (config.Postgres.Managed)
         {
             if (!OperatingSystem.IsWindows())
@@ -1356,6 +1362,7 @@ public sealed class DarlingWorker : BackgroundService
                 {
                     storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
                     storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
+                    storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
                     break;
                 }
                 catch (OperationCanceledException)
@@ -1388,7 +1395,7 @@ public sealed class DarlingWorker : BackgroundService
 
         try
         {
-            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, stoppingToken);
+            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, storeTimescaleReport, stoppingToken);
         }
         finally
         {
@@ -1574,6 +1581,23 @@ public sealed class DarlingWorker : BackgroundService
         };
 
     /// <summary>
+    /// Maps the bootstrap's TimescaleDB outcome to the alert payload (#3908). Null unless the extension could not
+    /// be moved or is behind the runtime after start: an update that landed is routine maintenance the log
+    /// already records, the same call <see cref="BuildStoreUpgradeReport"/> makes.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static DarlingSelfAlertEvaluator.StoreTimescaleReport? BuildStoreTimescaleReport(
+        DarlingStoreUpgrade.TimescaleUpdateOutcome outcome)
+        => outcome.Status switch
+        {
+            DarlingStoreUpgrade.TimescaleUpdateStatus.Failed => new DarlingSelfAlertEvaluator.StoreTimescaleReport(
+                true, outcome.From, outcome.To, outcome.Message),
+            DarlingStoreUpgrade.TimescaleUpdateStatus.Behind => new DarlingSelfAlertEvaluator.StoreTimescaleReport(
+                false, outcome.From, outcome.To, outcome.Message),
+            _ => null,
+        };
+
+    /// <summary>
     /// Maps the web host's published TLS-certificate snapshot to the report the evaluator consumes (#3514):
     /// a null snapshot — nothing served, or <c>Clear()</c>ed when the dashboard stopped — becomes
     /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its validity window,
@@ -1602,6 +1626,7 @@ public sealed class DarlingWorker : BackgroundService
         DarlingConfig config,
         string storeConnectionString,
         DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport,
+        DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -2124,6 +2149,12 @@ public sealed class DarlingWorker : BackgroundService
         if (storeUpgradeReport is not null)
         {
             await _selfAlerts.EvaluateStoreUpgradeAsync(storeUpgradeReport, stoppingToken);
+        }
+
+        /* #3908: the store's TimescaleDB extension, the same once-per-start event. */
+        if (storeTimescaleReport is not null)
+        {
+            await _selfAlerts.EvaluateStoreTimescaleAsync(storeTimescaleReport, stoppingToken);
         }
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.

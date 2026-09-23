@@ -605,6 +605,14 @@ public sealed class DarlingManagedPostgres
     internal DarlingStoreUpgrade.StoreUpgradeOutcome LastUpgradeOutcome { get; private set; }
         = DarlingStoreUpgrade.StoreUpgradeOutcome.None;
 
+    /// <summary>
+    /// What this start did to the store's TimescaleDB extension (#3908), carried out of the bootstrap beside
+    /// <see cref="LastUpgradeOutcome"/> and alerted on separately.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal DarlingStoreUpgrade.TimescaleUpdateOutcome LastTimescaleOutcome { get; private set; }
+        = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
+
     public string DataDirectory => _dataDirectory;
 
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
@@ -2258,9 +2266,16 @@ public sealed class DarlingManagedPostgres
            completely unmentioned. Never throws, never deletes. */
         DarlingInstallDirectoryReport.Report(AppContext.BaseDirectory, _logger);
 
-        if (!File.Exists(Path.Combine(_dataDirectory, "PG_VERSION")))
+        /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
+           extension for the quiesced update to move. */
+        var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
+        if (!existingCluster)
         {
             await InitializeClusterAsync(binDirectory, cancellationToken);
+
+            /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
+               the second start has nothing to read (#3908). */
+            _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
         }
         else
         {
@@ -2279,6 +2294,44 @@ public sealed class DarlingManagedPostgres
 
         var password = ReadStoredPassword();
 
+        /* #3908: move the store's TimescaleDB extension to this runtime's version BEFORE the store opens, on a
+           private port with TimescaleDB's background workers off, so the only sessions are the update's own. After
+           the conf append, so the cluster starts on the conf it will run with; before the network plan and the
+           start, so the configured port is unbound and no web, MCP or Viewer session can reach it. Gated on the
+           data directory's record (DarlingStoreUpgrade.NeedsQuiescedTimescaleUpdate): a store already on the
+           runtime's version costs nothing, and one not read yet (a new store's second start included) costs one
+           extra start and stop. Never on a server
+           this service did not start, which cannot be quiesced; the post-start read reports that one. It never
+           reverts the runtime: every store this service has shipped is on a TimescaleDB whose libraries the
+           runtime carries, so a store whose update failed opens on its own version, and the alert says so. */
+        var alreadyRunning = await IsRunningAsync(binDirectory, cancellationToken);
+
+        /* A re-entry (the worker's bootstrap retry) finds the server this process already started. The quiesced
+           step cannot run under it, and the attempt that did run it holds the outcome to report. */
+        if (!(alreadyRunning && _startedByThisProcess))
+        {
+            LastTimescaleOutcome = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
+        }
+
+        /* The data directory's major must be the runtime's: after an upgrade whose runtime revert could not run
+           (#3927), a start here would put the new binaries on the old cluster. */
+        if (existingCluster
+            && !alreadyRunning
+            && _bundledMajor > 0
+            && DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) == _bundledMajor
+            && DarlingStoreUpgrade.NeedsQuiescedTimescaleUpdate(DarlingStoreUpgrade.ReadTimescaleRecord(_dataDirectory), _bundledTimescaleVersion))
+        {
+            LastTimescaleOutcome = await _storeUpgrade.UpdateTimescaleQuiescedAsync(
+                binDirectory, _dataDirectory, password, _bundledTimescaleVersion!, cancellationToken);
+
+            /* It confirms its own stop. When it could not, one more attempt, and then a refusal rather than
+               adopting the private-port server as the store. */
+            if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
+            {
+                throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+            }
+        }
+
         /* Resolve the opt-in network exposure (darling-network-endpoints) BEFORE start so listen_addresses
            and the ssl trio can ride the -o runtime override. Fail-closed: an invalid/incomplete exposure
            config (or a cert-gen failure) returns a LOOPBACK plan carrying the degrade reason, logged
@@ -2295,7 +2348,7 @@ public sealed class DarlingManagedPostgres
                 networkPlan.DegradeReason);
         }
 
-        if (await IsRunningAsync(binDirectory, cancellationToken))
+        if (alreadyRunning)
         {
             /* Already running — a previous service crash's surviving postmaster, or an operator
                started it by hand. Use it, never stop it (the flag stays false). */
@@ -2312,10 +2365,10 @@ public sealed class DarlingManagedPostgres
         var connectionString = BuildConnectionString(_config.Port, password);
         await EnsureDatabaseAsync(connectionString, cancellationToken);
 
-        /* #1706: everything that needs a LIVE server — verify the upgrade landed, apply a same-major
-           TimescaleDB extension update (the #1705 case, which needs no pg_upgrade at all), and run the
-           post-upgrade analyze staging. Deliberately AFTER the start above rather than inside the upgrade,
-           so the server this process started stays one this process will stop. */
+        /* #1706: everything a major upgrade needs from a LIVE server — verify it landed and run the post-upgrade
+           analyze staging. Deliberately AFTER the start above rather than inside the upgrade, so the server this
+           process started stays one this process will stop. The TimescaleDB update this used to include runs
+           before the start now (#3908). */
         if (_bundledMajor > 0)
         {
             LastUpgradeOutcome = await _storeUpgrade.CompleteAfterStartAsync(
@@ -2326,8 +2379,26 @@ public sealed class DarlingManagedPostgres
                 UserName,
                 password,
                 _bundledMajor,
-                _bundledTimescaleVersion ?? string.Empty,
                 cancellationToken);
+        }
+
+        /* #3908: read back where the store's TimescaleDB ended up, record it, and settle what this start reports. */
+        if (!string.IsNullOrEmpty(_bundledTimescaleVersion))
+        {
+            var (timescale, installed) = await _storeUpgrade.VerifyTimescaleAfterStartAsync(
+                connectionString, _dataDirectory, _bundledTimescaleVersion, LastTimescaleOutcome, cancellationToken);
+            LastTimescaleOutcome = timescale;
+
+            /* A major upgrade's own alert names the TimescaleDB versions too. pg_upgrade restored the store's
+               version and the quiesced update moved it, or did not: report where it ended up, and leave the
+               extension out of that alert when it did not move, so the two alerts cannot disagree. */
+            if (LastUpgradeOutcome.Status == DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded && installed is not null)
+            {
+                LastUpgradeOutcome = LastUpgradeOutcome with
+                {
+                    ToTimescale = string.Equals(installed, LastUpgradeOutcome.FromTimescale, StringComparison.Ordinal) ? null : installed,
+                };
+            }
         }
 
         /* Reconcile pg_hba + reload + verify, the adopted-listener guard, and the firewall against the LIVE
@@ -2399,17 +2470,37 @@ public sealed class DarlingManagedPostgres
                field store ran its original PostgreSQL and TimescaleDB forever. Compare the shipped zip
                against the stamp recorded at extraction time; a difference means the package carries a new
                runtime, and the rescued previous one becomes pg_upgrade's --old-bindir. */
+            /* #3908: a server the quiesced TimescaleDB update left on its private port is stopped first. Adopted,
+               it would defer the runtime update below and every one after it, and the normal start could not
+               reach it on the configured port. */
+            if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
+            {
+                throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+            }
+
             if (File.Exists(_runtimeZipPath))
             {
                 _runtimeAdvance = await _storeUpgrade.TryAdvanceRuntimeAsync(
                     _runtimeRoot, _runtimeZipPath, _dataDirectory, TryIsRunningAsync, cancellationToken);
             }
 
+            DarlingStoreUpgrade.PinLegacyRuntimeStamp(_runtimeRoot, _logger);
             return binDirectory;
         }
 
         if (File.Exists(_runtimeZipPath))
         {
+            /* #3908: an existing store whose runtime folder is gone (a clean reinstall of this release over a
+               later one) must not get a runtime that cannot open its TimescaleDB. The swap path already refuses
+               that; this is the same check for the path that extracts with nothing to swap. */
+            if (DarlingStoreUpgrade.MissingTimescaleLibraries(_dataDirectory, _runtimeZipPath) is { Count: > 0 } missing)
+            {
+                throw new InvalidOperationException(
+                    $"The store at {_dataDirectory} is on TimescaleDB {string.Join(" or ", missing)} (recorded in {Path.Combine(_dataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName)}), " +
+                    $"and {_runtimeZipPath} carries no libraries for it, so the runtime it would extract could not open the store. " +
+                    "Install a release whose runtime carries that TimescaleDB version, or restore the pg-runtime folder that last opened this store. Nothing has been extracted or changed.");
+            }
+
             _logger.LogInformation("Extracting the bundled Postgres runtime from {Zip} (first run)", _runtimeZipPath);
             await Task.Run(
                 () => ZipFile.ExtractToDirectory(_runtimeZipPath, _runtimeRoot, overwriteFiles: true),
@@ -2421,6 +2512,9 @@ public sealed class DarlingManagedPostgres
                 File.WriteAllText(
                     Path.Combine(_runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName),
                     DarlingStoreUpgrade.ComputeFileHash(_runtimeZipPath));
+                /* #3908: a fresh install needs the pin too. Its store is created on this runtime's TimescaleDB,
+                   which a rolled-back 3.3-3.8 runtime cannot load. */
+                DarlingStoreUpgrade.PinLegacyRuntimeStamp(_runtimeRoot, _logger);
                 return binDirectory;
             }
 
@@ -3126,6 +3220,11 @@ public sealed class DarlingManagedPostgres
             _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
         }
     }
+
+    /// <summary>The refusal when a server the quiesced TimescaleDB update started will not stop (#3908).</summary>
+    private string QuiescedOrphanMessage(string binDirectory)
+        => $"The store at {_dataDirectory} is running on a private port, left there by a TimescaleDB update this service started, and it would not stop. " +
+           $"Stop it with \"{Path.Combine(binDirectory, "pg_ctl.exe")}\" stop -D \"{_dataDirectory}\" -m immediate, then restart the service. The store's data is not affected.";
 
     [SupportedOSPlatform("windows")]
     private string PreviousRuntimeHint()
