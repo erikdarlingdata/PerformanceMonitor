@@ -4,7 +4,7 @@ param get_blocking_stats.as_of 167
 param get_blocking_stats.hours_back 191
 param get_blocking_stats.server_name 28
 
-tool get_collection_health 21026
+tool get_collection_health 583
 param get_collection_health.server_name 28
 
 tool get_collection_log 4405
