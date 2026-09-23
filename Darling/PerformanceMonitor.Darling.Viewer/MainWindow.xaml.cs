@@ -1511,6 +1511,10 @@ public partial class MainWindow : Window
                        stamped from the one registry row, so a card cannot end up claiming Aurora-ness the
                        engine token does not support. */
                     summary.IsAurora = server.IsAurora;
+                    /* #3967: and the registration, for the same reason — it is a registry fact, and it is what
+                       tells a server whose history retention has dropped (Offline) from one that has never
+                       collected. The sidebar dot reads the same field off the same row. */
+                    summary.RegisteredAt = server.RegisteredAt;
                     summary.ApplyFreshness(nowUtc);
                     found.Add(summary);
                 }

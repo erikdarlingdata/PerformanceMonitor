@@ -50,6 +50,10 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// construct a SQL Server row keep compiling, and so the two reader call sites stay the only places that
     /// have to know the column exists.
     /// </param>
+    /// <param name="registeredAt">
+    /// <c>servers.created_date</c> (#3967), defaulted for the same two reasons. Null for a server the operator
+    /// added that the service has not connected to yet, which is the honest answer: nothing has registered it.
+    /// </param>
     public DarlingServer(
         int serverId,
         string serverName,
@@ -59,7 +63,8 @@ public sealed class DarlingServer : INotifyPropertyChanged
         decimal monthlyCostUsd = 0,
         string? engineKind = null,
         int engineEdition = CollectorEngineCapability.UnknownEngineEdition,
-        int? postgresMajorVersion = null)
+        int? postgresMajorVersion = null,
+        DateTime? registeredAt = null)
     {
         ServerId = serverId;
         ServerName = serverName;
@@ -70,6 +75,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
         EngineKind = engineKind;
         EngineEdition = engineEdition;
         PostgresMajorVersion = postgresMajorVersion;
+        RegisteredAt = registeredAt;
     }
 
     public int ServerId { get; }
@@ -133,6 +139,15 @@ public sealed class DarlingServer : INotifyPropertyChanged
     /// </summary>
     public string VersionLabel =>
         MonitoredEngineVersion.DescribeEngineVersion(EngineKind, SqlMajorVersion, PostgresMajorVersion);
+
+    /// <summary>
+    /// <c>servers.created_date</c>: the service's first successful connect to this server, or null when it has
+    /// not connected yet (#3967). The newest-collection reads behind the dot and the Overview card have no
+    /// window, but the collection log's retention bounds what they can see, and this is what tells a server
+    /// whose whole history retention has dropped (Offline) from one that has never collected (awaiting). See
+    /// <see cref="ServerSummaryItem.ClassifyFreshness(DateTime?, DateTime?, DateTime)"/>.
+    /// </summary>
+    public DateTime? RegisteredAt { get; }
 
     // ── Runtime-only sidebar state (not from Postgres; drives the ported Lite server-row chrome) ──
 
@@ -276,7 +291,7 @@ public sealed class DarlingServer : INotifyPropertyChanged
     public void ApplyFreshness(DateTime? lastCollectionUtc, DateTime nowUtc)
     {
         var flags = ServerCollectionStatusRules.FlagsFor(
-            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, nowUtc));
+            ServerSummaryItem.ClassifyFreshness(lastCollectionUtc, RegisteredAt, nowUtc));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -393,9 +408,14 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// both-queries requirement (#3145): it is the PostgreSQL vocabulary's own major, and without it the
     /// sidebar's version label has nothing but <c>sql_major_version</c> — which is <c>0</c> on every
     /// PostgreSQL target — to describe the row with.</para>
+    ///
+    /// <para><c>created_date</c> (#3967) rides along with the same both-queries requirement: it is the server's
+    /// first successful connect, and <see cref="DarlingServer.RegisteredAt"/> is what lets the sidebar dot and
+    /// the Overview card read a server whose history retention has dropped as Offline rather than awaiting its
+    /// first collection.</para>
     /// </summary>
     public const string ServersSql =
-        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version FROM servers ORDER BY display_name";
+        "SELECT server_id, server_name, display_name, is_enabled, sql_major_version, COALESCE(monthly_cost_usd, 0), engine_kind, COALESCE(sql_engine_edition, 0), postgres_major_version, created_date FROM servers ORDER BY display_name";
 
     /// <summary>
     /// The authoritative read-only probe (V8 security hardening): does the connected role hold UPDATE on
@@ -2256,7 +2276,8 @@ SELECT
                 reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
         return servers;

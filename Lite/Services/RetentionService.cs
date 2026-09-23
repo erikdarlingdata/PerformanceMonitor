@@ -31,6 +31,25 @@ public class RetentionService
     /// </summary>
     public const int ArchiveRetentionMonths = 3;
 
+    /// <summary>
+    /// The oldest instant whose rows Lite is certain to still hold at <paramref name="utcNow"/>: what a read
+    /// with no window can still see, and the <c>searchedFromUtc</c> the Overview card's freshness band is
+    /// handed so a server whose whole history has aged out reads Offline rather than never collected (#3967).
+    ///
+    /// <para><b>Why a month start and not the cutoff itself.</b> An archive file is named for the month (or
+    /// the day) it was WRITTEN, and <see cref="CleanupOldArchives"/> deletes a file once that date is before
+    /// the cutoff, <see cref="ArchiveRetentionMonths"/> back. A month's file therefore goes whole, holding rows
+    /// up to a month younger than the cutoff. A row is written into a file of its own month or a later one,
+    /// because archival never runs before the row is collected, so it is certain to survive only from the
+    /// first month start at or after the cutoff.</para>
+    /// </summary>
+    public static DateTime OldestRetainedInstant(DateTime utcNow)
+    {
+        var cutoff = DateTime.SpecifyKind(utcNow.AddMonths(-ArchiveRetentionMonths), DateTimeKind.Unspecified);
+        var monthStart = new DateTime(cutoff.Year, cutoff.Month, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        return monthStart == cutoff ? monthStart : monthStart.AddMonths(1);
+    }
+
     private readonly string _archivePath;
     private readonly ILogger<RetentionService>? _logger;
 
