@@ -25,6 +25,7 @@ public sealed class McpToolGuideHeadsAlertingTests
     [
         "get_alert_settings",
         "get_notification_routes",
+        "get_alert_history",
     ];
 
     [Fact]
@@ -82,5 +83,38 @@ public sealed class McpToolGuideHeadsAlertingTests
         var routesTail = McpToolGuideTests.Served("get_notification_routes").Tail!;
         Assert.Contains("routes_supported is false here", routesTail, StringComparison.Ordinal);
         Assert.Contains("The taxonomy is the shared", routesTail, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3c: get_alert_history's head, byte-identical to Darling's (D6) — the
+    /// fired/delivered/dismissed distinction, the page-bound-by-limit-not-hours_back trap, and the
+    /// empty-vs-quiet hazard. See <c>Darling.Tests/McpToolGuideHeads.Alerting.cs</c> for the Darling-side copy of
+    /// this same assertion set.</summary>
+    [Fact]
+    public void GetAlertHistoryHead_StatesFiredVsDeliveredVsDismissedAndThePageBound()
+    {
+        var head = McpToolGuideTests.Served("get_alert_history").Served;
+        Assert.Contains("each row FIRED", head, StringComparison.Ordinal);
+        Assert.Contains("notification_type says whether it was DELIVERED", head, StringComparison.Ordinal);
+        Assert.Contains("DISMISSED (UI-acknowledged), excluded by default", head, StringComparison.Ordinal);
+        Assert.Contains("THE PAGE IS BOUNDED BY limit, NOT hours_back", head, StringComparison.Ordinal);
+        Assert.Contains("An EMPTY page can mean no alerts fired, or that every alert here was dismissed", head, StringComparison.Ordinal);
+        Assert.Contains("A null send_error proves nothing about delivery", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>D9: load-bearing facts that moved off get_alert_history's head stay reachable in Lite's own
+    /// tail: the 'tray' disposition (every non-muted alert gets one, and it does NOT report the email/webhook
+    /// outcome), the parquet-archive dismissal gap unique to this edition, and the severity/routing taxonomy
+    /// (#3712 refs stripped per D4, the facts kept).</summary>
+    [Fact]
+    public void LiteGetAlertHistoryTail_StillCarriesTheTrayDispositionAndArchiveGap()
+    {
+        var tail = McpToolGuideTests.Served("get_alert_history").Tail!;
+        Assert.Contains("'tray' is this instance's own balloon notification", tail, StringComparison.Ordinal);
+        Assert.Contains("it does NOT report the email or webhook outcome", tail, StringComparison.Ordinal);
+        Assert.Contains("On this edition an alert that was dismissed AFTER aging into the parquet archive is removed by the archive view itself", tail, StringComparison.Ordinal);
+        Assert.Contains("severity_source says where it came from", tail, StringComparison.Ordinal);
+        Assert.Contains("routing is the corroboration gate's decision for an 'Analysis", tail, StringComparison.Ordinal);
+        Assert.Contains("Dismissal is an acknowledgement, not a verdict", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("(#3712)", tail, StringComparison.Ordinal);
     }
 }
