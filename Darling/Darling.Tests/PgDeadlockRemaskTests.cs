@@ -577,7 +577,7 @@ public sealed class PgDeadlockRemaskTests
         await PlantAlertAsync(connection, now.AddDays(-1), null, goneJson, ct);
         var behind = new PgDeadlockRemask.RemaskProgress();
         behind.Alerts.WalkRewritten = 1;
-        behind.AlertCursor = await ScalarTextAsync(connection, "SELECT max(ctid)::text FROM config_alert_log", ct);
+        behind.AlertCursor = DateTime.Parse(await ScalarTextAsync(connection, "SELECT to_char(max(alert_time), 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_alert_log", ct), CultureInfo.InvariantCulture);
         await PgDeadlockRemask.RunAsync(connection, behind, s_key, NullLoggerFor(), ct);
         Assert.True(behind.Alerts.Done);
         Assert.Equal(3, behind.Alerts.Walks);
@@ -900,6 +900,75 @@ CREATE TRIGGER remask_bound_report BEFORE UPDATE ON pg_deadlocks FOR EACH ROW EX
         Assert.Contains(s_key.DeadlockAlertKey(goneHash), bound, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4036's round-2 review, finding 4: a row that moves physically during a walk is still reached. A Viewer
+    /// dismiss-all writes a new copy of every row, and VACUUM FULL, CLUSTER or pg_repack move every row; a copy that
+    /// lands behind a <c>ctid</c> cursor during an otherwise clean walk was never read, and the stage was marked done
+    /// over it. CLUSTER is the deterministic stand-in here: run after the walk's first row, it moves a raw alert that
+    /// sorts after a full page of current ones to the table's first block. Paged by <c>alert_time</c>, which no
+    /// UPDATE or relocation changes, the walk still reaches it.
+    /// </summary>
+    [Fact]
+    public async Task AnAlertMovedBehindTheWalk_IsStillReached()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+
+        /* A full page of alerts in #4005's form, then one raw alert, later than all of them, on a server whose id
+           sorts first, so CLUSTER on (server_id, metric_name, alert_time) puts it in the first block. */
+        var current = AlertContextSerializer.Serialize(new AlertContext
+        {
+            Incidents = [new AlertIncident(PgDeadlockLogParser.ReportIdentity(now.AddDays(-3), 7), ["UPDATE t SET a = $1"])],
+        });
+        await PlantAlertsAsync(connection, PgDeadlockRemask.MaxAlertRowsPerPass, current, now.AddDays(-2), ct);
+        var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
+        await ExecuteAsync(connection, $@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, muted, context_json)
+VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.DeadlockWatermarkMetric}', 1, 1, true, 'webhook', false,
+        '{AlertContextSerializer.Serialize(new AlertContext { Incidents = [new AlertIncident(goneHash, ["UPDATE creds SET pw = 'Leak4012' WHERE id = 7"])] }).Replace("'", "''", StringComparison.Ordinal)}')", ct);
+
+        var moved = false;
+        string? movedTo = null;
+        var progress = new PgDeadlockRemask.RemaskProgress
+        {
+            RowCounted = (stage, _) =>
+            {
+                if (moved || stage.Name != "alert")
+                {
+                    return;
+                }
+
+                moved = true;
+                using var mover = new NpgsqlConnection(scratch.ConnectionString);
+                mover.Open();
+                using var cluster = new NpgsqlCommand("CLUSTER config_alert_log USING idx_config_alert_log_time", mover);
+                cluster.ExecuteNonQuery();
+                using var where = new NpgsqlCommand("SELECT ctid::text FROM config_alert_log WHERE server_id = 1", mover);
+                movedTo = (string?)where.ExecuteScalar();
+            },
+        };
+
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(moved);
+
+        /* Behind every row the walk's first page read. */
+        Assert.Equal("(0,1)", movedTo);
+        Assert.True(progress.Alerts.Done);
+        Assert.False(progress.Alerts.GaveUp);
+
+        var dump = await DumpAsync(connection, "SELECT context_json FROM config_alert_log WHERE server_id = 1", ct);
+        Assert.DoesNotContain(goneHash, dump, StringComparison.Ordinal);
+        Assert.Contains(s_key.DeadlockAlertKey(goneHash), dump, StringComparison.Ordinal);
+        AssertNoSecret(dump);
+    }
+
     /* The expected context of a rewritten alert: its incidents at the given positions carry the rebuilt marker,
        after their other members. */
     private static string Marked(string json, params int[] incidents)
@@ -1189,7 +1258,13 @@ WHERE victim_pid = 10004", ct);
         var (kept, keptContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012abcd00000000");
         await PlantAlertAsync(connection, now.AddDays(-1).AddMinutes(3), null, keptContext, ct, kept);
         var (gone, goneContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012dead00000000");
-        await PlantAlertAsync(connection, now.AddDays(-40), null, goneContext, ct, gone);
+        /* Its finding is gone (no finding carries its story hash), recorded since #3721 as every such alert is. */
+        await PlantAlertAsync(connection, now.AddDays(-1).AddMinutes(4), null, goneContext, ct, gone);
+
+        /* #4036's round-2 review, finding 6: a row recorded before FindingAlertSectionSince cannot carry the section,
+           and its context is not read; planted with one all the same, it is left exactly as it is. */
+        var (early, earlyContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012e0e000000000");
+        await PlantAlertAsync(connection, PgDeadlockRemask.FindingAlertSectionSince.AddMinutes(-1), null, earlyContext, ct, early);
         Assert.Contains(PgDeadlockLogParser.HashOf(LegacyGraph), keptContext, StringComparison.Ordinal);
         Assert.Contains("4721", keptContext, StringComparison.Ordinal);
 
@@ -1199,6 +1274,8 @@ WHERE victim_pid = 10004", ct);
         Assert.Equal(2, progress.FindingAlerts.Walks);
 
         var alerts = await ReadAlertsAsync(connection, ct);
+        Assert.Contains((earlyContext, (string?)null), alerts);
+        alerts.Remove((earlyContext, null));
         foreach (var (context, _) in alerts)
         {
             AssertNoSecret(context);
@@ -1483,7 +1560,7 @@ FROM generate_series(1, $6) AS g", connection);
     private static async Task<(int Alerts, int Findings, int Reports, int Failed)> RunPassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         int alerts = 0, findings = 0, reports = 0, failed = 0;
-        string? alertCursor = null;
+        DateTime? alertCursor = null;
         do
         {
             var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, alertCursor, s_key, true, null, ct);
@@ -1513,7 +1590,7 @@ FROM generate_series(1, $6) AS g", connection);
         }
         while (alertCursor is not null);
 
-        string? findingCursor = null;
+        long? findingCursor = null;
         do
         {
             var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, findingCursor, null, ct);
