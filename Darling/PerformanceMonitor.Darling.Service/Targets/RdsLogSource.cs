@@ -207,6 +207,16 @@ public sealed class RdsLogSource
     /// upgrade and other logs, and sorted by last-written rather than by name — the filename embeds a
     /// timestamp, but sorting text would order 2026-08-9 after 2026-08-10.
     ///
+    /// <para><b>Also filtered to exclude <c>.csv</c>/<c>.json</c> siblings</b> (#3997), the same defect and
+    /// the same fix as the self-hosted tail's <c>newest</c> CTE (<see cref="PerformanceMonitor.Collectors.PgServerLogTail"/>).
+    /// RDS for PostgreSQL writes a target's <c>csvlog</c> output as the stderr file's own name with
+    /// <c>.csv</c> appended — <c>error/postgresql.log.2026-08-25-18</c> beside
+    /// <c>error/postgresql.log.2026-08-25-18.csv</c> — so <c>FilenameContains = "postgresql"</c> matches
+    /// both and <c>OrderByDescending(LastWritten)</c> alone can return either one, exactly as
+    /// <c>pg_ls_logdir()</c>'s mtime ordering can on the self-hosted route. <c>PgPlanLogParser</c> and
+    /// <c>PgDeadlockLogParser</c> read whatever text this hands them as stderr-format regardless of
+    /// transport, so a csvlog file chosen here fails the same way a csvlog file chosen there does.</para>
+    ///
     /// <para><b>An instance with no openable PostgreSQL log file raises rather than answering
     /// "nothing".</b> A caller can act on two outcomes — the log was opened and held nothing new, or no log
     /// was opened — and only the first licenses the "no new … in the RDS log window" note the runner stamps
@@ -237,14 +247,23 @@ public sealed class RdsLogSource
            collection entirely on an answer that carried no file, so ordering a null raises
            ArgumentNullException and buries this branch behind "Value cannot be null. (Parameter
            'source')". It short-circuits the whole chain, so absent and empty both arrive as null and reach
-           the one message below. */
+           the one message below.
+
+           The name filter excludes .csv/.json siblings (#3997) — see the method's own remarks. AWS's own
+           docs state that enabling csvlog on RDS for PostgreSQL always writes stderr alongside it, so
+           filtering these out is not expected to ever empty the list on its own; it exists for the same
+           reason the self-hosted tail's exclusion does; a target where it somehow did would fall through to
+           the same "no log file" refusal below, which is the honest answer either way. */
         return files.DescribeDBLogFiles?
             .OrderByDescending(f => f.LastWritten)
             .Select(f => f.LogFileName)
-            .FirstOrDefault(name => !string.IsNullOrEmpty(name))
+            .FirstOrDefault(name => !string.IsNullOrEmpty(name)
+                && !name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException(
                 $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
-                + "filtered on 'postgresql' returned nothing it could name. NO LOG WAS OPENED this cycle, "
+                + "filtered on 'postgresql' returned nothing it could name that was not a csvlog/jsonlog "
+                + "sibling (#3997). NO LOG WAS OPENED this cycle, "
                 + "so this is not an empty log — whatever this window held is unread. This records as a "
                 + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
                 + "that is stopped, still being created, or has just rotated its logs answers this way and "

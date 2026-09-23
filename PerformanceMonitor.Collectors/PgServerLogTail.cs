@@ -36,6 +36,19 @@ namespace PerformanceMonitor.Collectors;
 /// negative offset via <c>greatest(size - TailBytes, 0)</c>, so a fresh small log is read whole and a large
 /// one from its end.</para>
 ///
+/// <para><b><c>newest</c> excludes <c>.csv</c> and <c>.json</c> siblings</b> (#3997). A target whose
+/// <c>log_destination</c> includes <c>csvlog</c> or <c>jsonlog</c> writes every message to a second file
+/// beside the stderr one — measured live, same second, same content, name unchanged but for the suffix
+/// (<c>postgresql-2026-09-23_070937.log</c> and <c>...csv</c>). <c>pg_ls_logdir()</c>'s <c>modification</c>
+/// is a stat mtime with no ordering guarantee between two files written the same instant, so
+/// <c>ORDER BY modification DESC LIMIT 1</c> alone can return either sibling — measured: both files above
+/// carry the identical mtime. Every consumer's parser matches the stderr line shape (<c>log_line_prefix</c>
+/// followed by a severity label); a csvlog record is comma-delimited and a jsonlog record opens with
+/// <c>{</c>, so a cycle that picked either sibling read nothing a parser recognises and reported a quiet
+/// target instead of a wrong one. The filter mirrors <c>StoreLogSweep.IsStderrLogFile</c> — the store's own
+/// log sweep made the identical call for the identical reason — so there is one rule for "is this file
+/// stderr-format" rather than two that could drift.</para>
+///
 /// <para><b>The listing is GATED on <c>logging_collector</c></b> (#3410): off means the server logs to
 /// stderr, the log directory may legitimately not exist, and 58P01 every cycle on a deliberate
 /// configuration is the wrong report. The predicate is pseudoconstant, so the planner enforces it as a
@@ -44,6 +57,18 @@ namespace PerformanceMonitor.Collectors;
 /// appends in its own column shape — and the consumer's <c>ReadAsync</c> turns it into
 /// <see cref="PgLoggingCollectorOffException"/>, the named non-fatal skip that keeps "off" from reading as
 /// a quiet server.</para>
+///
+/// <para><b>A second, narrower gap gets the same treatment</b> (#3997): <c>logging_collector</c> can be ON
+/// with <c>log_destination</c> configured as <c>csvlog</c> alone, with <c>newest</c> coming back with
+/// literally nothing in it. <see cref="NoStderrLogFileMarkerSql"/> is the second <c>UNION ALL</c> arm every
+/// consumer appends, true exactly when that happens while the collector is otherwise on, and each consumer's
+/// <c>ReadAsync</c> turns it into <see cref="PgNoStderrLogFileException"/> — the same named-skip treatment as
+/// the collector-off case, and for the same reason: silently reading zero rows here is indistinguishable from
+/// a target with nothing to report. Never satisfied at the same time as
+/// <see cref="LoggingCollectorOffMarkerSql"/> — one requires the setting to be off, the other requires it to
+/// be on — so a consumer's two marker checks are mutually exclusive by construction, not by convention. Its
+/// own remarks measure exactly how narrow "literally nothing in it" is in practice, and #4019 is the open
+/// question that measurement raised.</para>
 ///
 /// <para><b>It is a WINDOW, not a resume marker, and that is what decides coverage.</b> The read is always
 /// the last <see cref="TailBytes"/> of the current file, so consecutive cycles see overlapping text only
@@ -81,6 +106,7 @@ WITH newest AS (
     SELECT name, size
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
+      AND name !~* '\.(csv|json)$'
     ORDER BY modification DESC
     LIMIT 1
 ),
@@ -99,4 +125,17 @@ tail AS (
     /// </summary>
     public const string LoggingCollectorOffMarkerSql =
         "pg_catalog.current_setting('logging_collector') <> 'on'";
+
+    /// <summary>
+    /// The predicate the second marker arm carries (#3997): true exactly when <c>logging_collector</c> is on
+    /// — so <see cref="LoggingCollectorOffMarkerSql"/> is false — and <c>newest</c> still came back empty,
+    /// which only the <c>.csv</c>/<c>.json</c> exclusion above can cause, since the collector process
+    /// guarantees a current file the moment it is on. References <c>newest</c> rather than re-listing the
+    /// directory, so a target where <c>pg_ls_logdir()</c> is itself expensive is not asked twice, and so the
+    /// two markers read from the exact same listing rather than two that could disagree about what is
+    /// there. Each consumer appends <c>UNION ALL SELECT &lt;marker in its own columns&gt; WHERE</c> + this,
+    /// same shape as the marker above.
+    /// </summary>
+    public const string NoStderrLogFileMarkerSql =
+        "pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)";
 }

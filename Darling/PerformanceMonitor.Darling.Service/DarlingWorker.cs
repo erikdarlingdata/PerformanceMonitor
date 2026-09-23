@@ -9782,6 +9782,24 @@ LIMIT 1";
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (PgNoStderrLogFileException ex)
+        {
+            /* #3997's narrower sibling to the arm above: logging_collector is ON, but log_destination
+               carries no stderr format, so the shared tail's newest CTE excluded every file it saw as a
+               csvlog/jsonlog sibling and there is nothing left for the pg_read_file route to read. Same
+               disposition as PgLoggingCollectorOffException and for the same reasons — a setting on the
+               monitored server, satisfiable and re-derived every cycle, not broken on the monitoring side,
+               and a SUCCESS row with zero rows would read as a target with nothing to report rather than
+               one this route cannot read at all. Same slot rule too: only the pg_read_file route produces
+               this marker, so the elapsed time is a target query and belongs in sqlMs. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
             /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside

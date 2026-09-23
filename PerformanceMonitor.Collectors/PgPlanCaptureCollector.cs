@@ -123,7 +123,11 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        The marker row the gate emits instead of log rows when logging_collector is off (#3410) is spelled
        in this query's own three columns; ReadAsync turns it into PgLoggingCollectorOffException, and the
        runner records the named non-fatal skip — not-collected with the reason, never a silent zero that
-       reads as a target with nothing slow on it. */
+       reads as a target with nothing slow on it. A second marker arm (#3997) covers the narrower gap where
+       logging_collector is on but log_destination carries no stderr format — csvlog/jsonlog only — so the
+       shared tail's newest CTE excludes every file it sees; ReadAsync turns that one into
+       PgNoStderrLogFileException, and the two arms are mutually exclusive by construction (one needs the
+       setting off, the other needs it on). */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
     (m[1])::bigint                                   AS query_id,
@@ -137,6 +141,9 @@ FROM tail,
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 2000";
 
     public override string Name => "pg_plan_capture";
@@ -192,6 +199,16 @@ LIMIT 2000";
                 && string.Equals(reader.GetString(2), PgLoggingCollectorOffException.Marker, StringComparison.Ordinal))
             {
                 throw new PgLoggingCollectorOffException();
+            }
+
+            /* The second marker row (#3997): logging_collector is on but every file in the directory was a
+               csvlog/jsonlog sibling, so the shared tail found no stderr-format file this cycle. Same shape
+               as the check above — a NULL query id plus this marker text cannot be a real capture. */
+            if (reader.IsDBNull(0)
+                && !reader.IsDBNull(2)
+                && string.Equals(reader.GetString(2), PgNoStderrLogFileException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgNoStderrLogFileException();
             }
 
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
