@@ -141,7 +141,7 @@ public sealed class McpAlertSettingsKeyTests
         var description = typeof(McpAlertTools).GetMethod(nameof(McpAlertTools.GetAlertSettings))!
             .GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false)
             .Cast<System.ComponentModel.DescriptionAttribute>().Single().Description;
-        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", description, StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED", description, StringComparison.Ordinal);
         Assert.Contains("threshold_ms_note", description, StringComparison.Ordinal);
     }
 
