@@ -70,13 +70,13 @@ internal static class McpInstructions
         |------|---------|----------------|
         | `get_wait_stats` | Top wait types aggregated over time period, heaviest first; page bounded by `limit`, `truncated` says the window observed more | `server_name`, `hours_back` (default 24), `limit` (default 20), `as_of` |
         | `get_wait_types` | Lists distinct wait types observed (use before `get_wait_trend`). An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server no wait stats have ever been stored for (`unavailable`) | `server_name`, `hours_back`, `as_of` |
-        | `get_wait_trend` | Time-series for a specific wait type | `wait_type` (required), `server_name`, `hours_back`, `as_of` |
+        | `get_wait_trend` | Time-series for one wait type | `wait_type` (required), `server_name`, `hours_back`, `as_of`, `bucket_minutes` |
         | `get_waiting_tasks` | Currently/recently waiting queries with details, newest capture first. Page bounded by `limit`; `truncated` and `oldest_returned_collection_time` say what it reached | `server_name`, `hours_back` (default 1), `limit`, `as_of` |
 
         ### CPU Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_cpu_utilization` | SQL Server CPU vs other process CPU over time | `server_name`, `hours_back` (default 4), `as_of` |
+        | `get_cpu_utilization` | SQL Server CPU vs other process CPU over time | `server_name`, `hours_back` (default 4), `as_of`, `bucket_minutes` |
         | `get_cpu_scheduler_pressure` | Latest scheduler snapshot within `hours_back` of `as_of`: runnable queue depth, worker-thread utilization, queued/blocked requests, pressure warnings, banded `pressure_level` + `recommendation`; `captured_at` / `age_seconds` | `server_name`, `hours_back` (default 24; the span SEARCHED for the newest snapshot), `as_of` |
 
         ### Contention Tools
@@ -119,7 +119,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_memory_stats` | Latest memory snapshot: physical, buffer pool, plan cache; `captured_at` | `server_name` |
-        | `get_memory_trend` | Memory usage over time. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back`, `as_of` |
+        | `get_memory_trend` | Memory usage over time. An empty result distinguishes a quiet window (`empty`, widen `hours_back`) from a server nothing has ever been collected for (`unavailable`, collection is not running) | `server_name`, `hours_back`, `as_of`, `bucket_minutes` |
         | `get_memory_clerks` | Top memory consumers by clerk type. An empty result is `unavailable`, never a quiet period — a live SQL Server always has clerks, so nothing retained means the collector has not run or its rows aged out | `server_name` |
         | `get_memory_grants` | Per-pool grant pressure: `grants[]` = newest snapshot in the window (`captured_at` / `age_seconds`) AND `window[]` = peak waiters (+ when), peak grant, available floor, summed timeout / forced deltas over EVERY snapshot in the window | `server_name`, `hours_back` (default 1), `as_of` |
         | `get_resource_semaphore` | Per-semaphore workspace memory vs target/max ceiling: `grants[]` = newest snapshot in the window (`captured_at` / `age_seconds`) AND `window[]` = the same peak / floor / summed-delta aggregate per (semaphore, pool) | `server_name`, `hours_back` (default 24), `as_of` |
@@ -134,7 +134,7 @@ internal static class McpInstructions
         ### TempDB Tools
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
-        | `get_tempdb_trend` | TempDB space: user objects, internal objects, version store | `server_name`, `hours_back`, `as_of` |
+        | `get_tempdb_trend` | TempDB space: user objects, internal objects, version store | `server_name`, `hours_back`, `as_of`, `bucket_minutes` |
 
         ### Storage & Index Tools
         | Tool | Purpose | Key Parameters |
@@ -147,7 +147,7 @@ internal static class McpInstructions
         | Tool | Purpose | Key Parameters |
         |------|---------|----------------|
         | `get_perfmon_stats` | Latest perfmon counters (batch requests/sec, etc.); `captured_at` | `server_name`, `counter_name`, `instance_name` |
-        | `get_perfmon_trend` | Time-series for a specific perfmon counter | `counter_name` (required), `server_name`, `hours_back`, `as_of` |
+        | `get_perfmon_trend` | Time-series for one perfmon counter | `counter_name` (required), `server_name`, `hours_back`, `as_of`, `bucket_minutes` |
 
         ### Alert Tools
         | Tool | Purpose | Key Parameters |

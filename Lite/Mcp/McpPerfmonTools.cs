@@ -63,14 +63,15 @@ public sealed class McpPerfmonTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetPerfmonTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -80,7 +81,12 @@ public sealed class McpPerfmonTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetPerfmonTrendAsync(resolved.ServerId, counter_name, hours_back, asOfUtc: windowEnd);
+            /* #3960: bucketed as on Darling; the desktop chart's per-collection read (GetPerfmonTrendAsync) is untouched. */
+            var budget = TrendBudget.Mcp(TrendBuckets.PerfmonMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var points = await dataService.GetPerfmonBucketsAsync(resolved.ServerId, counter_name, hours_back, windowEnd, bucketMinutes);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
@@ -126,31 +132,15 @@ public sealed class McpPerfmonTools
                that has one, because a counter's type does not change and the read reports a type only where
                the point's instance rows agree; null when no point has one. A gauge's points publish null
                delta_value and null sample_interval_seconds — the collector writes neither for a level — and
-               value is the reading. Twin of Darling's DarlingMcpTrendTools. */
-            var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
-            var result = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                delta_value = p.DeltaValue,
-                /* The delta's denominator. 0 means no delta was knowable, so delta_value = 0 with an
-                   interval of 0 must NOT be read as "no activity"; derive rates as
-                   delta_value / sample_interval_seconds rather than assuming a fixed cadence (#2234). */
-                sample_interval_seconds = p.SampleIntervalSeconds
-            });
+               value is the bucket's average reading. sample_interval_seconds is the delta's denominator: 0 means
+               no delta was knowable, so delta_value = 0 with an interval of 0 must NOT be read as "no activity"
+               (#2234). TrendPayloads.PerfmonTrend builds both SKUs' envelope. */
             /* #3653 A5: the window's baseline discontinuities as the trailing key — see BaselineDiscontinuities. */
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                counter_name,
-                cntr_type = seriesType,
-                counter_kind = PerfmonCounterTypes.Word(seriesType),
-                hours_back,
-                trend = result,
-                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.PerfmonTrend(
+                resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex)
         {

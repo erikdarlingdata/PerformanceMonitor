@@ -163,7 +163,14 @@ public sealed class PerfmonCounterTypeTests
         foreach (var path in new[] { "Lite/Mcp/McpPerfmonTools.cs", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTrendTools.cs" })
         {
             var source = Lite.Tests.ParitySource.ReadFile(path);
-            Assert.Contains("PerfmonCounterTypes.Word(", source, StringComparison.Ordinal);
+            /* #3960: get_perfmon_trend on both SKUs now builds its envelope through the shared
+               TrendPayloads.PerfmonTrend, which is the one place left calling PerfmonCounterTypes.Word(seriesType)
+               for a BUCKETED point — get_perfmon_stats (get_perfmon_stats' own body, in McpPerfmonTools.cs and
+               DarlingMcpDataTools.cs) still calls it directly for its un-bucketed latest snapshot. Either shape
+               proves the file classifies counter_kind through the one vocabulary. */
+            Assert.True(
+                source.Contains("PerfmonCounterTypes.Word(", StringComparison.Ordinal) || source.Contains("TrendPayloads.PerfmonTrend(", StringComparison.Ordinal),
+                $"{path}: neither classifies counter_kind directly nor routes through the shared TrendPayloads.PerfmonTrend builder");
             Assert.Contains("counter_kind", source, StringComparison.Ordinal);
         }
 

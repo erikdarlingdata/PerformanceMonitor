@@ -53,12 +53,23 @@ public sealed class DarlingMcpDataTools
 {
     /* ═══════════════════════════ resource metrics ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_cpu_utilization"), Description("Gets CPU utilization over time showing SQL Server CPU %, other process CPU %, total CPU %, and idle %. Data is downsampled to 1-minute averages. Use this to identify CPU pressure periods, then use get_top_queries_by_cpu to find the culprit queries.")]
-    public static async Task<string> GetCpuUtilization(
+    [McpServerTool(Name = "get_cpu_utilization"), Description("Gets CPU utilization over time in time buckets: SQL Server CPU %, other process CPU %, total CPU % and idle %, with each bucket's busiest sample. Use this to identify CPU pressure periods, then use get_top_queries_by_cpu to find the culprit queries.")]
+    public static Task<string> GetCpuUtilization(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4.")] int hours_back = 4,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
+        GetCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.CpuMaxPoints));
+
+    /// <summary>
+    /// get_cpu_utilization under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the web
+    /// viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. The samples are bucketed in SQL — the tool
+    /// used to read every sample of the window and average them to the minute here, which at a week and an Azure SQL
+    /// DB source's 15-second cadence was 40,000 rows for 10,000 points.
+    /// </summary>
+    internal static async Task<string> GetCpuUtilization(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -66,43 +77,20 @@ public sealed class DarlingMcpDataTools
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
+
         try
         {
-            var rows = await DarlingDataReader.GetCpuUtilizationAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
-            if (rows.Count == 0)
+            var points = await DarlingDataReader.GetCpuBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes);
+            if (points.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_utilization")
                     ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
 
-            /* Downsample to 1-minute buckets to avoid overwhelming LLM context (Lite's projection). */
-            var bucketed = rows
-                .GroupBy(r => new DateTime(r.SampleTime.Year, r.SampleTime.Month, r.SampleTime.Day,
-                    r.SampleTime.Hour, r.SampleTime.Minute, 0, r.SampleTime.Kind))
-                .OrderBy(g => g.Key)
-                .Select(g => new
-                {
-                    sample_time = g.Key.ToString("o"),
-                    sql_server_cpu = (int)Math.Round(g.Average(r => r.SqlServerCpu)),
-                    other_process_cpu = (int)Math.Round(g.Average(r => r.OtherProcessCpu)),
-                    total_cpu = (int)Math.Round(g.Average(r => r.SqlServerCpu + r.OtherProcessCpu)),
-                    idle_cpu = (int)Math.Round(g.Average(r => Math.Max(0, 100 - (r.SqlServerCpu + r.OtherProcessCpu)))),
-                    samples_in_bucket = g.Count()
-                });
-
-            /* #3653 A15/A16: the old note said "15-second ring buffer samples" — Lite's twin said the same and
-               #3696 corrected it there; this is that sentence ported verbatim (Lite.Tests pins the two notes
-               byte-identical). The ring buffer (RING_BUFFER_SCHEDULER_MONITOR, the source on-prem / Managed
-               Instance / RDS) writes ONE record per minute — CpuUtilizationCollector's dedup note measures "a
-               real ~60s gap to the next" — so a 1-minute bucket normally holds one sample there; the 15-second
-               cadence belongs to sys.dm_db_resource_stats, the Azure SQL DB source, which is not a ring
-               buffer. samples_in_bucket on every bucket is the measured count, so the note names both
-               cadences and defers to it. */
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                note = "Values are 1-minute bucket averages. Source cadence: one RING_BUFFER_SCHEDULER_MONITOR record per minute on-prem, Managed Instance and RDS (so a bucket usually holds one sample); one sys.dm_db_resource_stats row per 15 seconds on Azure SQL DB. samples_in_bucket is the measured count per bucket.",
-                samples = bucketed
-            }, McpHelpers.JsonOptions);
+            /* #3653 A15/A16: the source-cadence sentence both SKUs publish is TrendPayloads.CpuCadenceNote, the one
+               place it is spelled (the ring buffer writes one record a minute on-prem, MI and RDS; Azure SQL DB's
+               sys.dm_db_resource_stats one every 15 seconds; samples_in_bucket is the measured count). */
+            return TrendPayloads.CpuUtilization(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex)
         {
@@ -226,13 +214,20 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets a time-series trend for a specific wait type, showing how wait time changes over time. Use get_wait_stats first to discover the dominant wait types." + BaselineDiscontinuities.DescriptionSentence)]
-    public static async Task<string> GetWaitTrend(
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_stats first to discover the dominant wait types." + BaselineDiscontinuities.DescriptionSentence)]
+    public static Task<string> GetWaitTrend(
         NpgsqlDataSource postgres,
         [Description("The exact wait type name, e.g. CXPACKET, PAGEIOLATCH_SH.")] string wait_type,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
+        GetWaitTrend(postgres, wait_type, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.WaitMaxPoints));
+
+    /// <summary>get_wait_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
+    /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
+    internal static async Task<string> GetWaitTrend(
+        NpgsqlDataSource postgres, string wait_type, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -240,11 +235,14 @@ public sealed class DarlingMcpDataTools
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
+
         try
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingDataReader.GetWaitTrendAsync(postgres, resolved.ServerId, wait_type, start, now);
+            var points = await DarlingDataReader.GetWaitBucketsAsync(postgres, resolved.ServerId, wait_type, start, now, bucketMinutes);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-values probe, not after it. Both are on
@@ -272,27 +270,15 @@ public sealed class DarlingMcpDataTools
                     new { collected_wait_types = collected });
             }
 
-            var result = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                wait_time_ms_per_second = p.WaitTimeMsPerSecond,
-                signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond
-            });
-
             /* #3653 A5: wait_stats is the FIRST identity-epoch carrier (#3705), so this is the trend whose
                step a restart or failover most directly manufactures; the markers ride the payload's trailing
                key exactly as on the DarlingMcpTrendTools family (see that class's remarks), over the same
                window as the points. */
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                wait_type,
-                hours_back,
-                trend = result,
-                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.WaitTrend(
+                resolved.ServerName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex)
         {
@@ -437,12 +423,19 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time: user objects, internal objects, version store, total reserved, and unallocated space. Also shows top TempDB consumer session. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation.")]
-    public static async Task<string> GetTempDbTrend(
+    [McpServerTool(Name = "get_tempdb_trend"), Description("Gets TempDB space usage over time in time buckets: user objects, internal objects, version store, total reserved and unallocated space, and the top consumer session. High version store can indicate long-running transactions under RCSI/SNAPSHOT isolation.")]
+    public static Task<string> GetTempDbTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
+        GetTempDbTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.TempDbMaxPoints));
+
+    /// <summary>get_tempdb_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
+    /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
+    internal static async Task<string> GetTempDbTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -450,32 +443,17 @@ public sealed class DarlingMcpDataTools
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
+
         try
         {
-            var rows = await DarlingDataReader.GetTempDbTrendAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
-            if (rows.Count == 0)
+            var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes);
+            if (points.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats")
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
-            var result = rows.Select(r => new
-            {
-                time = r.CollectionTime.ToString("o"),
-                user_objects_mb = Math.Round(r.UserObjectReservedMb, 1),
-                internal_objects_mb = Math.Round(r.InternalObjectReservedMb, 1),
-                version_store_mb = Math.Round(r.VersionStoreReservedMb, 1),
-                total_reserved_mb = Math.Round(r.TotalReservedMb, 1),
-                unallocated_mb = Math.Round(r.UnallocatedMb, 1),
-                sessions_using_tempdb = r.TotalSessionsUsingTempDb,
-                top_consumer_session_id = r.TopSessionId,
-                top_consumer_mb = Math.Round(r.TopSessionTempDbMb, 1)
-            });
-
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                trend = result
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.TempDbTrend(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex)
         {

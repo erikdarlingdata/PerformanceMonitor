@@ -431,7 +431,11 @@ public sealed class PerfmonCounterTypeLivePostgresTests
             Assert.All(mcpGauge, p => Assert.Null(p.DeltaValue));
             Assert.All(mcpGauge, p => Assert.Null(p.SampleIntervalSeconds));
 
-            using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Total Server Memory (KB)", ServerName)))
+            /* #3960: bucket_minutes: 1 pins per-collection granularity, since this test is about TYPE
+               classification, not about bucketing — t1/t3 are 10 minutes apart and the default 24h window's
+               auto-sized bucket (10 minutes) could otherwise fold them into one point depending on wall-clock
+               alignment against TrendBuckets.OriginSql. */
+            using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Total Server Memory (KB)", ServerName, bucket_minutes: 1)))
             {
                 Assert.Equal("gauge", trend.RootElement.GetProperty("counter_kind").GetString());
                 Assert.Equal(PerfmonCounterTypes.PerfCounterLargeRawCount, trend.RootElement.GetProperty("cntr_type").GetInt32());
@@ -442,7 +446,7 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 Assert.Equal(8_000_000, points[1].GetProperty("value").GetInt64());
             }
 
-            using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Batch Requests/sec", ServerName)))
+            using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Batch Requests/sec", ServerName, bucket_minutes: 1)))
             {
                 Assert.Equal("rate", trend.RootElement.GetProperty("counter_kind").GetString());
                 var points = trend.RootElement.GetProperty("trend").EnumerateArray().ToList();
@@ -451,7 +455,7 @@ public sealed class PerfmonCounterTypeLivePostgresTests
                 Assert.Equal(300, points[1].GetProperty("sample_interval_seconds").GetInt64());
             }
 
-            using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Lock waits", ServerName)))
+            using (var trend = JsonDocument.Parse(await DarlingMcpTrendTools.GetPerfmonTrend(postgres, "Lock waits", ServerName, bucket_minutes: 1)))
             {
                 Assert.Equal(JsonValueKind.Null, trend.RootElement.GetProperty("counter_kind").ValueKind);
             }

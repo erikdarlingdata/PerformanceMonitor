@@ -94,12 +94,20 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpTrendTools
 {
-    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage trend over time: total server memory, target memory, buffer pool, plan cache, and granted memory joined per point from the memory-grant series. total_granted_mb is null on points the grants series does not cover — a granted_note explains any gap; use get_memory_grants for grant detail. Useful for identifying memory growth patterns or pressure periods." + BaselineDiscontinuities.DescriptionSentence)]
-    public static async Task<string> GetMemoryTrend(
+    [McpServerTool(Name = "get_memory_trend"), Description("Gets memory usage over time in time buckets: total server, target, buffer pool and plan cache memory, with granted memory from the memory-grant series joined per bucket. total_granted_mb is null where that series has no snapshot (granted_note says why); use get_memory_grants for grant detail." + BaselineDiscontinuities.DescriptionSentence)]
+    public static Task<string> GetMemoryTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
+        GetMemoryTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.MemoryMaxPoints));
+
+    /// <summary>get_memory_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
+    /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. The memory samples and the memory-grant
+    /// snapshots are bucketed at the same width and joined on the bucket (<see cref="TrendPayloads.MemoryTrend"/>).</summary>
+    internal static async Task<string> GetMemoryTrend(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -107,10 +115,13 @@ public sealed class DarlingMcpTrendTools
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
+
         try
         {
             var now = windowEnd;
-            var points = await DarlingTrendReader.GetMemoryTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var points = await DarlingTrendReader.GetMemoryBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes);
             if (points.Count == 0)
             {
                 /*
@@ -135,47 +146,17 @@ public sealed class DarlingMcpTrendTools
                         $"No memory stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the memory_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_memory_stats will be equally empty until it does.");
             }
 
-            var grants = await DarlingTrendReader.GetMemoryGrantTrendAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
-            var granted = AlignGrantSeries(
-                points.Select(p => p.CollectionTime).ToArray(),
-                grants.Select(g => (g.CollectionTime, g.TotalGrantedMb)).ToArray());
+            /* Joined from the memory-grant series (#3548), SUM(granted_memory_mb) across pools per snapshot — the
+               series the viewer's Memory Overview overlay charts — bucketed at the SAME width and joined on the
+               bucket (#3960), where it used to be the nearest snapshot within 30 seconds of each memory sample. A
+               bucket no grant snapshot fell into publishes null, never a fabricated 0 (#3529); a genuine 0.0 still
+               appears where snapshots exist with nothing granted. Lite's tool builds the same payload. */
+            var grants = await DarlingTrendReader.GetGrantBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes);
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
 
-            var result = points.Select((p, i) => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                total_server_memory_mb = p.TotalServerMemoryMb,
-                target_server_memory_mb = p.TargetServerMemoryMb,
-                buffer_pool_mb = p.BufferPoolMb,
-                plan_cache_mb = p.PlanCacheMb,
-                /* Joined from the memory-grant series (#3548): the nearest memory_grant_stats snapshot
-                   within 30 seconds of this memory sample, SUM(granted_memory_mb) across pools — the same
-                   series the viewer's Memory Overview overlay charts. null when no snapshot aligns, never
-                   a fabricated 0: a literal zero read as "granted was 0 all window" and steered callers
-                   away from memory grants at exactly the wrong moment (#3529). A genuine 0.0 still appears
-                   when a snapshot exists with nothing granted. Field-for-field parity with Lite's tool,
-                   which joins it the same way. */
-                total_granted_mb = granted[i]
-            });
-
-            /* The note exists to explain null points; a fully covered window gets no note at all rather
-               than a null-valued key (JsonOptions writes nulls). */
-            return granted.Any(v => v is null)
-                ? JsonSerializer.Serialize(new
-                {
-                    server = resolved.ServerName,
-                    hours_back,
-                    granted_note = GrantGapNote,
-                    trend = result,
-                    discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-                }, McpHelpers.JsonOptions)
-                : JsonSerializer.Serialize(new
-                {
-                    server = resolved.ServerName,
-                    hours_back,
-                    trend = result,
-                    discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-                }, McpHelpers.JsonOptions);
+            return TrendPayloads.MemoryTrend(
+                resolved.ServerName, hours_back, points, grants, bucketMinutes, bucket_minutes is not null,
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex)
         {
@@ -183,58 +164,21 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    /// <summary>
-    /// Half the 1-minute cadence floor both collectors share (<c>CollectorScheduleDefaults</c>). The two
-    /// series each stamp their own capture clock per collector run, so same-cycle rows sit seconds
-    /// apart and can never be equality-joined — while a grants series on a slower cadence must NOT smear
-    /// onto every memory point. Within half the finest cadence, at most one snapshot can claim a point.
-    /// </summary>
-    private static readonly TimeSpan GrantJoinTolerance = TimeSpan.FromSeconds(30);
-
-    /// <summary>Why a point is null, stated once per payload — and only when a null point exists.</summary>
-    private const string GrantGapNote =
-        "total_granted_mb is null where no memory-grant snapshot lies within 30 seconds of the memory sample — the memory_grant_stats series is collected on its own schedule, so a gap means no grant measurement at that moment, not zero granted. Use get_memory_grants for the full grant picture.";
-
-    /// <summary>
-    /// Nearest-match join of the memory-grant series onto the memory-trend points (#3548): for each trend
-    /// point, the closest grants snapshot within <see cref="GrantJoinTolerance"/>, else null — no grant
-    /// measurement at that moment, which is not the same claim as a genuine 0.0 from a snapshot with
-    /// nothing granted. Both inputs are time-ascending (both reads ORDER BY collection_time), so one
-    /// forward pointer finds every nearest neighbor. Twin of Lite's
-    /// <c>McpMemoryTools.AlignGrantSeries</c> — the two must stay in step so both SKUs join the same way.
-    /// </summary>
-    private static double?[] AlignGrantSeries(
-        DateTime[] trendTimes,
-        (DateTime Time, double TotalGrantedMb)[] grants)
-    {
-        var aligned = new double?[trendTimes.Length];
-        if (grants.Length == 0) return aligned;
-
-        var g = 0;
-        for (var t = 0; t < trendTimes.Length; t++)
-        {
-            var target = trendTimes[t];
-            while (g + 1 < grants.Length && (grants[g + 1].Time - target).Duration() <= (grants[g].Time - target).Duration())
-            {
-                g++;
-            }
-
-            if ((grants[g].Time - target).Duration() <= GrantJoinTolerance)
-            {
-                aligned[t] = grants[g].TotalGrantedMb;
-            }
-        }
-
-        return aligned;
-    }
-
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets a time-series trend for a specific performance counter. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what each point's number is: 'gauge' — value IS the reading (a level such as Memory Grants Pending), delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone (a collection interval is minutes, not a second) and never a point whose sample_interval_seconds is 0 (no delta was knowable there); 'other' — delta_value is a per-interval change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the counter's instances mix types, so classify by name (a name ending in /sec is a rate) as every reader did before the type was stored." + BaselineDiscontinuities.DescriptionSentence)]
-    public static async Task<string> GetPerfmonTrend(
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
+    public static Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
+        GetPerfmonTrend(postgres, counter_name, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PerfmonMaxPoints));
+
+    /// <summary>get_perfmon_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own,
+    /// the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
+    internal static async Task<string> GetPerfmonTrend(
+        NpgsqlDataSource postgres, string counter_name, string? server_name, int hours_back, string? as_of, int? bucket_minutes,
+        TrendBudget budget)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -242,11 +186,14 @@ public sealed class DarlingMcpTrendTools
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
 
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
+
         try
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingTrendReader.GetPerfmonTrendAsync(postgres, resolved.ServerId, counter_name, start, now);
+            var points = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
@@ -294,33 +241,20 @@ public sealed class DarlingMcpTrendTools
                counter reset, or a gap past the policy), so delta_value = 0 with an interval of 0 must
                NOT be read as "no activity". Derive rates as delta_value / sample_interval_seconds
                rather than assuming a fixed cadence — fleet gaps run p50 299 s, p99 830 s, so dividing
-               by the configured 60 s is wrong by whatever the jitter was (#2233, #2234).
+               by the configured 60 s is wrong by whatever the jitter was (#2233, #2234). A bucket sums its
+               deltas and the seconds they accrued over (#3960), so that division still holds per point.
 
                counter_kind is the series' stored type read three ways (V132, #3653 A7): the type of any
                point that has one, because a counter's type does not change and the read reports a type
                only where the point's instance rows agree; null when no point has one. A gauge's points
                publish null delta_value and null sample_interval_seconds — the collector writes neither for a
-               level — and value is the reading. Twin of Lite's McpPerfmonTools. */
-            var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
-            var result = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                value = p.Value,
-                delta_value = p.DeltaValue,
-                sample_interval_seconds = p.SampleIntervalSeconds
-            });
+               level — and value is the bucket's average reading. Lite's McpPerfmonTools builds the same
+               payload (TrendPayloads.PerfmonTrend). */
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                counter_name,
-                cntr_type = seriesType,
-                counter_kind = PerfmonCounterTypes.Word(seriesType),
-                hours_back,
-                trend = result,
-                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.PerfmonTrend(
+                resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex)
         {
