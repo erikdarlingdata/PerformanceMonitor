@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -14,6 +15,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Mcp;
 using Xunit;
@@ -106,16 +108,17 @@ public sealed class McpToolGuideTests
     [Fact]
     public void GetToolGuide_WithNoArguments_IsTheIndex()
     {
-        /* HostCatalog wires up exactly McpHealthParserTools, McpDiscoveryTools and McpToolGuideTools, so this
-           fixture's own guide-bearing roster is a local, self-contained fact about THIS test's host, not a
-           family pin (that lives in McpToolGuideHeadsHealthParserTests). */
-        var fixtureToolsWithGuides = new[]
-        {
-            "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
-            "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
-            "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
-            "list_servers",
-        };
+        /* HostCatalog wires up exactly McpHealthParserTools, McpDiscoveryTools and McpToolGuideTools, so the expected roster is every tool on those
+           types whose Description carries the marker. It is derived, not hand-kept: a hand-kept roster made
+           every content PR that converts one of these tools edit the same lines (#3898). */
+        var fixtureToolsWithGuides = new[] { typeof(McpHealthParserTools), typeof(McpDiscoveryTools), typeof(McpToolGuideTools) }
+            .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
+            .Select(method => (Tool: method.GetCustomAttribute<McpServerToolAttribute>(), Description: method.GetCustomAttribute<DescriptionAttribute>()))
+            .Where(m => m.Tool?.Name is not null && m.Description?.Description.Contains(McpToolGuide.Marker, StringComparison.Ordinal) == true)
+            .Select(m => m.Tool!.Name!)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Contains("get_health_parser_system_health", fixtureToolsWithGuides);
 
         using var doc = JsonDocument.Parse(McpToolGuideTools.GetToolGuide(HostCatalog(), null, null));
         var withGuides = doc.RootElement.GetProperty("tools_with_guides").EnumerateArray().Select(e => e.GetString()).ToArray();
