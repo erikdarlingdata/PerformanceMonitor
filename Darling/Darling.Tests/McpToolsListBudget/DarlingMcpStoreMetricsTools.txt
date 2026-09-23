@@ -1,5 +1,5 @@
 # DarlingMcpStoreMetricsTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_store_metrics 7681
+tool get_store_metrics 608
 param get_store_metrics.days_back 100
 param get_store_metrics.limit 36
 param get_store_metrics.object_kind 139

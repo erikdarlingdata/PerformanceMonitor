@@ -1,5 +1,5 @@
 # DarlingMcpStoreLogTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_store_log 2426
+tool get_store_log 595
 param get_store_log.as_of 167
 param get_store_log.hours_back 38
 param get_store_log.limit 52
