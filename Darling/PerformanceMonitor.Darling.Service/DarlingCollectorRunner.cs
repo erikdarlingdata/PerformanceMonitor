@@ -631,7 +631,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -649,7 +649,12 @@ public sealed class DarlingCollectorRunner
         /* Null provider = no scope for any collector = every database the server enumerates, which is
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
+        /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
+           text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
+        _logHashKey = logHashKey;
     }
+
+    private readonly PgLogHashKey? _logHashKey;
 
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
        in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
@@ -733,7 +738,9 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsLogEventsAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logger: _logger);
+        /* #4004: no key, no hashing - the same refusal the pg_read_file route's BuildQuery makes. */
+        var logHashKey = _logHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
+        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger);
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
@@ -1123,6 +1130,7 @@ public sealed class DarlingCollectorRunner
             ServerName = server.StorageName,
             CollectionTime = collectionTime,
             Deltas = _deltas,
+            LogHashKey = _logHashKey,
             Target = server.Target,
             Watermark = watermark,
             WatermarkFromUtcColumn = watermarkFromUtcColumn,
@@ -3007,6 +3015,7 @@ public sealed class DarlingCollectorRunner
             ServerName = server.StorageName,
             CollectionTime = DateTime.UtcNow,
             Deltas = _deltas,
+            LogHashKey = _logHashKey,
             Target = server.Target,
             Watermark = null,
             NumericWatermark = null,

@@ -220,14 +220,21 @@ public class AuroraOnlySqlIsGatedTests
         }
     }
 
+    /// <summary>The file's path below the repo root, led by a separator so a first-level directory matches too.</summary>
+    private static string InRepo(string root, string file) =>
+        Path.DirectorySeparatorChar + Path.GetRelativePath(root, file);
+
     private static string[] FilesNamingAuroraSurfaces()
     {
         var root = RepoRoot();
 
+        /* The three exclusions are judged on the path BELOW the repo root: a checkout that itself lives under a
+           `.claude` directory (an agent's isolated copy at .claude/worktrees/<name>) would otherwise exclude every
+           file and fail as "nothing names the surface". */
         return Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(root, f).Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(root, f).Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(root, f).Contains($"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             /* Tests are excluded deliberately: a test naming the surface is asserting ABOUT it, which is
                the opposite of depending on it. */
             .Where(f => !f.Contains(".Tests", StringComparison.OrdinalIgnoreCase))

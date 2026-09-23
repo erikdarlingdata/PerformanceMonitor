@@ -86,7 +86,20 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
     /// <summary>Server-wide: one log holds every database's events.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>
+    /// The tail query, or a refusal when the host has no log-hash key (#4004): refused HERE, before the query runs, so a
+    /// service whose key file could not be used never pulls 4 MB of log it could only hash without a key.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The context carries no <see cref="CollectorContext.LogHashKey"/>;
+    /// the message is <see cref="PgLogHashKey.UnavailableMessage"/>, which the run records.</exception>
+    public override CollectorQuery BuildQuery(CollectorContext context)
+    {
+        _ = RequireKey(context);
+        return new(QueryText);
+    }
+
+    private static PgLogHashKey RequireKey(CollectorContext context) =>
+        context.LogHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -109,10 +122,11 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
         /* As written, with an SQL frame's statement normalized. The CONTEXT companion — for a lock wait, the
            tuple and relation. */
         new CollectorColumn("context", CollectorColumnType.Varchar),
-        /* Hash of the REDACTED statement; the statement itself is never stored. */
+        /* Keyed hash of the REDACTED statement (#4004); the statement itself is never stored, and no read surface
+           returns the hash. */
         new CollectorColumn("statement_fingerprint", CollectorColumnType.Varchar),
-        /* Identity across sightings — this route re-reads the tail every cycle, so the reads dedupe on it
-           as the deadlock reads do on deadlock_hash. */
+        /* Identity across sightings, keyed (#4004) — this route re-reads the tail every cycle, so the reads dedupe on
+           it as the deadlock reads do on deadlock_hash. */
         new CollectorColumn("raw_line_hash", CollectorColumnType.Varchar),
         /* V130 (#3602, #3603): the family-specific numbers, appended AFTER the identity column so the V129
            column order is undisturbed and the ALTER an upgraded store ran lands them in the same positions
@@ -141,6 +155,7 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
     public override async ValueTask<List<PgLogEvent>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<PgLogEvent>();
+        var classifier = new PgLogEventClassifier(RequireKey(context));
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -155,14 +170,23 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
 
             /* The whole pipeline, shared with the RDS transport. A non-UTC zone throws out of here and
                abandons the batch, which is the trade the deadlock parser argues for (#2993). */
-            rows.AddRange(PgLogEventClassifier.Default.Classify(body));
+            rows.AddRange(classifier.Classify(body));
         }
 
         return rows;
     }
 
+    /// <exception cref="InvalidOperationException">The event was never stamped with the store's keyed identities
+    /// (#4004): built by <see cref="PgLogEvent.From"/> but not passed through a <see cref="PgLogEventClassifier"/>.
+    /// Both transports write through here, so no row reaches the store without its keyed <c>raw_line_hash</c>.</exception>
     public override void WritePayload(PgLogEvent row, ICollectorRowWriter writer, CollectorContext context)
     {
+        if (string.IsNullOrEmpty(row.RawLineHash))
+        {
+            throw new InvalidOperationException(
+                "A PostgreSQL log event reached the store writer without its keyed identity (#4004); every event must pass through PgLogEventClassifier.");
+        }
+
         writer
             /* Naive UTC, per the store contract: Kind=Utc against a `timestamp` column is refused by Npgsql. */
             .Value(DateTime.SpecifyKind(row.OccurredAtUtc, DateTimeKind.Unspecified))

@@ -3640,7 +3640,6 @@ const PG_LOG_EVENT_COLUMNS = [
   { key: "message", label: "Message" },
   { key: "detail", label: "Detail" },
   { key: "context", label: "Context" },
-  { key: "statement_fingerprint", label: "Statement Fingerprint", small: true },
   { key: "times_seen", label: "Sightings", format: "int", small: true },
 ];
 
