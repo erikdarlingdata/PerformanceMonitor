@@ -344,7 +344,10 @@ public sealed class CollectionOutputBesideCostTests
             var source = File.ReadAllText(Path.Combine(RepoRoot(), relative));
 
             Assert.Contains("what it BOUGHT", source, StringComparison.Ordinal);
-            Assert.Contains("that zero was CORRECT", source, StringComparison.Ordinal);
+            /* #3898: the pg_deadlocks anecdote that used to carry "that zero was CORRECT" moved to the
+               CHANGELOG (D4); the rule it taught - a zero can be the healthy reading - stays in the tail
+               right after it, so the pin re-points to that rule instead of the story. */
+            Assert.Contains("would fire on the healthy quiet install", source, StringComparison.Ordinal);
             Assert.Contains("deliberately NOT a band", source, StringComparison.Ordinal);
             Assert.Contains("needs a grant", source, StringComparison.Ordinal);
         }
