@@ -1391,12 +1391,19 @@ if ($ListRollbacks -or $PruneOnly) {
 # lands on disk. icacls, not Set-Acl, for the same reason Lock-DarlingInstallTree uses it: it is what the
 # fix-it-by-hand advice would tell an operator to run, and it needs no SeSecurityPrivilege. $path must
 # already exist; the caller owns its lifetime and deletes it when done.
+#
+# /reset comes first because /inheritance:r strips only INHERITED entries. A folder created under a parent
+# that passes nothing on gets its creator's default DACL as EXPLICIT entries (the creating account with full
+# control, among them), and those survived the strip; CI's elevated runner is one such parent. /reset
+# replaces every explicit entry with what the parent passes on, which /inheritance:r then removes, so the
+# two grants below are the whole DACL.
 function Protect-DarlingStagingFolder([string]$path) {
     $wk = [System.Security.Principal.WellKnownSidType]
     $systemSid = (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)).Value
     $adminsSid = (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)).Value
 
     $steps = @(
+        @('/reset'),
         @('/inheritance:r'),
         @('/grant', "*${systemSid}:(OI)(CI)F", '/grant', "*${adminsSid}:(OI)(CI)F"),
         @('/setowner', "*$adminsSid"))

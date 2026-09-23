@@ -1027,6 +1027,53 @@ function Get-CimInstance {
         }
     }
 
+    /// <summary>#4043: the staging lock leaves SYSTEM and Administrators ONLY even when the folder starts with
+    /// explicit entries. A parent that passes nothing on gives a new folder its creator's default DACL as
+    /// explicit entries, which <c>icacls /inheritance:r</c> alone does not strip; CI's elevated runner hit this
+    /// with three rules where two were expected. The parent here is built to pass nothing on, so any box
+    /// reproduces it, elevated or not.</summary>
+    [Fact]
+    public void ProtectDarlingStagingFolder_StripsExplicitEntriesTheFolderWasCreatedWith()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(upgrade, "Protect-DarlingStagingFolder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $parent = Join-Path $env:TEMP ('pm4043-np-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            try {
+                # Full control for the creator on the parent itself, inheritable to nothing.
+                icacls.exe $parent /inheritance:r /grant:r "*${me}:F" | Out-Null
+                $path = Join-Path $parent 'staging'
+                New-Item -ItemType Directory -Path $path -Force | Out-Null
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                'explicitBefore=' + @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType)).Count
+                try { Protect-DarlingStagingFolder $path } catch { 'protectThrew=' + $_.Exception.Message }
+                $rules = @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType))
+                'ruleCount=' + $rules.Count
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $allowed = @(
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)).Value,
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)).Value)
+                'onlySystemAndAdmins=' + (@($rules | Where-Object { $allowed -notcontains $_.IdentityReference.Value }).Count -eq 0)
+            }
+            finally {
+                icacls.exe $parent /grant "*${me}:(OI)(CI)F" /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        /* The precondition, so the test cannot pass by the folder simply starting empty: it must begin with
+           explicit entries for the lock to strip. */
+        Assert.Contains(answers, a => a.StartsWith("explicitBefore=", StringComparison.Ordinal) && a != "explicitBefore=0");
+        Assert.Contains("ruleCount=2", answers);
+        Assert.Contains("onlySystemAndAdmins=True", answers);
+    }
+
     /// <summary>
     /// #4034, executed as shipped against a real tree. A folder created directly under the system drive root
     /// inherits "Authenticated Users: Modify" from it (the documented install location's hole). After the lock the
