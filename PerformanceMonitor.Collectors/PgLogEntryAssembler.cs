@@ -101,17 +101,16 @@ public static class PgLogEntryAssembler
        the label the whole path crosses no label anywhere, and the label read is the line's first.
 
        Tried LAST, so a line the first two read is read exactly as before: the engine takes the first alternative
-       that completes the line, and the old space family is this one with an empty gap. A managed line whose user or
-       database holds a space (`...:app@my db:[5555]:`) would otherwise be read by this one first, with the zone
-       running to that space, and the zone check would refuse the whole read.
+       that completes the line, and the old space family is this one with an empty gap.
 
        Its zone holds no colon and no bracket, so this alternative reads only lines whose first token is
-       colon-free, and there that token is the zone. A first token with a colon in it belongs to the managed family,
-       tried before this one. Allowed a colon, this zone ran over a managed line's whole prefix, its pid and its
-       translated label (`UTC:...:[4503]:ANWEISUNG:`) to the first space, the gap found `[1]` inside the statement,
-       and the zone check refused every read of the target. A numeric zone with a colon (`+05:30`) under this
-       prefix reads through the managed family instead, up to its first colon, with the same verdict; the deadlock
-       parser's header argues that trade. */
+       colon-free, and there that token is the zone. A first token with a colon in it belongs to the managed family.
+       Allowed a colon, this zone ran over a managed line's prefix to its first space: tried first, it read a
+       managed line whose database holds a space (`UTC:...:app@my db:[5555]:`) with the zone `UTC:...:app@my`; tried
+       last, it still ran over a translated label (`UTC:...:[4503]:ANWEISUNG:`), the gap found `[1]` inside the
+       statement, and either way the zone check refused every read of the target. A numeric zone with a colon
+       (`+05:30`) under this prefix reads through the managed family instead, up to its first colon, with the same
+       verdict; the deadlock parser's header argues that trade. */
     private static readonly string s_prefixRunStep =
         @"(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
         + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])";

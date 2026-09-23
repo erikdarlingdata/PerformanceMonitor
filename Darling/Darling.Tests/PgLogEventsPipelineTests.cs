@@ -1198,9 +1198,10 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #4041's ordering: the new alternative is tried after the managed family, so a managed line whose database
-    /// name holds a space is read exactly as before. Tried first, it ran the zone to that space
-    /// (<c>UTC:192.0.2.10(52345):app_rw@my</c>) and the zone check refused every read of the target.
+    /// #4041: the new alternative's zone is colon-free and it is tried after the managed family, so a managed line
+    /// whose database name holds a space is read exactly as before. With a zone that could hold colons, tried first,
+    /// it ran the zone to that space (<c>UTC:192.0.2.10(52345):app_rw@my</c>) and the zone check refused every read
+    /// of the target.
     /// </summary>
     [Fact]
     public void AManagedLineWithASpaceBeforeItsPid_IsStillReadByTheManagedFamily()
