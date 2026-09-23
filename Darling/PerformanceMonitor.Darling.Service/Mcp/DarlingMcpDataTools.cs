@@ -772,7 +772,7 @@ public sealed class DarlingMcpDataTools
         if (validation != null) return validation;
         execution_type = NormalizeExecutionType(execution_type);
         if (execution_type == "INVALID")
-            return McpHelpers.Status("invalid", "execution_type must be Regular, Aborted, or Exception.");
+            return McpHelpers.Refusal("execution_type", "execution_type must be Regular, Aborted, or Exception.");
 
         try
         {

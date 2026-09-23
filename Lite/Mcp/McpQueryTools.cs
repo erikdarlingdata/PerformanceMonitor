@@ -260,7 +260,7 @@ public sealed class McpQueryTools
             if (topError != null) return topError;
             execution_type = NormalizeExecutionType(execution_type);
             if (execution_type == "INVALID")
-                return McpHelpers.Status("invalid", "execution_type must be Regular, Aborted, or Exception.");
+                return McpHelpers.Refusal("execution_type", "execution_type must be Regular, Aborted, or Exception.");
 
             var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, executionType: execution_type);
             if (rows.Count == 0)
