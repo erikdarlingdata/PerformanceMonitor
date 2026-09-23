@@ -100,7 +100,16 @@ database Darling connects to**, not in `postgres` for good measure:
 ```sql
 GRANT pg_read_server_files TO darling_monitor;
 GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling_monitor;
 ```
+
+The third grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
+`pg_read_file()` returns `text`, which PostgreSQL validates against the client encoding before this
+process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
+login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
+byte sits in the window, blinding all three collectors at once. `pg_read_binary_file()` returns `bytea`,
+which carries no such check, and the three collectors switch to it on their own the moment it is granted —
+no restart, no config change.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
 identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from

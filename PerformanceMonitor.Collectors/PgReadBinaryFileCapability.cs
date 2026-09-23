@@ -92,4 +92,27 @@ public static class PgReadBinaryFileCapability
 
     /// <summary>Drops every cached verdict. Tests only — a real restart already starts with an empty cache.</summary>
     public static void Reset() => s_cache.Clear();
+
+    /// <summary>
+    /// The cached verdict for <paramref name="targetKey"/> WITHOUT a round trip and without refreshing an
+    /// expired entry — <see cref="PgReadBinaryFileAdvisory"/>'s read, taken after <see cref="IsGrantedAsync"/>
+    /// has already run this cycle for the same target (every collector <c>DarlingCollectorRunner</c> checks
+    /// this for calls it before <c>BuildQuery</c>), so a second probe would be redundant. Returns false with
+    /// <paramref name="granted"/> unset when nothing is cached — which is also the honest answer for a target
+    /// this capability was never checked for, e.g. a managed target that reaches its log through the RDS API
+    /// and never calls <see cref="IsGrantedAsync"/> at all.
+    /// </summary>
+    public static bool TryGetCachedVerdict(string targetKey, out bool granted)
+    {
+        ArgumentNullException.ThrowIfNull(targetKey);
+
+        if (s_cache.TryGetValue(targetKey, out var cached))
+        {
+            granted = cached.Granted;
+            return true;
+        }
+
+        granted = false;
+        return false;
+    }
 }

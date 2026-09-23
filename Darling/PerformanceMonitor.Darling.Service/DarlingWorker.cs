@@ -9130,7 +9130,11 @@ LIMIT 1";
                 + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) — the "
                 + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
-                + WhereToGrantIt(connectedDatabase)),
+                + WhereToGrantIt(connectedDatabase)
+                + " While issuing that grant, also GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, "
+                + "bigint, bigint) to the same role (#4046): a byte that is not valid UTF-8 makes "
+                + "pg_read_file() fail the whole tail read, pg_read_binary_file() does not, and the "
+                + "collector switches to it on its own once it is granted."),
 
             CollectorTargetFault.Permissions => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
@@ -9517,6 +9521,17 @@ LIMIT 1";
             /* #4046: a log read that skipped lines stamped outside the target's UTC log_timezone carries their count;
                this puts the sentence that names the setting and the issue beside it, on the same HostNote channel. */
             result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);
+
+            /* #4046: the once-a-day nudge for a self-hosted target still on the text route, BEFORE it ever
+               hits the 22021 byte — gated to pg_log_events alone so a target with all three log-tail
+               collectors scheduled gets one note a day, not whichever of the three wins the 24-hour gate.
+               Never fires for Aurora/RDS: they reach the log through the AWS API and never populate
+               PgReadBinaryFileCapability's cache, so WithReadBinaryFileAdvisoryNote's cache read finds
+               nothing for them. */
+            if (string.Equals(collectorName, "pg_log_events", StringComparison.Ordinal))
+            {
+                result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(result, runtime.StorageName);
+            }
 
             /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
                per-database fault split takes its arm's level — see LogPerDatabaseFaultSplit's remarks. A

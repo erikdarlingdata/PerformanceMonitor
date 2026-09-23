@@ -73,8 +73,11 @@ public static class PgBinaryTailText
                 }
             }
 
-            /* Every character escape() emits outside the two forms above is printable ASCII (32-126) by
-               construction — one UTF-16 char, one byte. */
+            /* Every character escape() emits outside the two forms above is a literal single-byte octet
+               escape() left untouched — NOT only printable ASCII (32-126): verified live that bytes
+               0x01-0x1F and 0x7F (control bytes, including a literal tab and newline) pass through exactly
+               as printable ASCII does. Only NUL (0x00) and bytes >= 0x80 are octal-escaped; see the type
+               header. One UTF-16 char, one byte, by construction either way. */
             bytes[length++] = (byte)c;
         }
 

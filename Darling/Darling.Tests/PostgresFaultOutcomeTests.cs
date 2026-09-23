@@ -99,6 +99,12 @@ public class PostgresFaultOutcomeTests
 
         /* And it must not repeat the sentence this fixes. */
         Assert.DoesNotContain("covers every collector", explanation, StringComparison.Ordinal);
+
+        /* #4046: whoever is granting pg_read_file for the first time is told to grant the binary twin in
+           the same breath, so a fresh setup never has to discover the 22021 byte the hard way. */
+        Assert.Contains(
+            "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -174,6 +180,48 @@ public class PostgresFaultOutcomeTests
 
         Assert.Equal("ERROR", status);
         Assert.Contains("could not open file", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4046 part 1c: the byte a failed login plants blinds pg_read_file() for the WHOLE tail, not just the
+    /// line it landed in. The arm is keyed on Unclassified — the classifier leaves 22021 there, same as the
+    /// 58P01 arm above — and only for the three log-tail collectors; it names the SQLSTATE, the mechanism
+    /// (pg_read_file validates text against the client encoding before this process sees a row), and the
+    /// exact grant that switches the collector to the binary route on its own.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    [InlineData("pg_log_events")]
+    public void ALogReader22021NamesThePlantedByteAndTheBinaryGrant(string collectorName)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, "appdb");
+
+        Assert.Equal("PERMISSIONS", status);
+        Assert.Contains("22021", explanation, StringComparison.Ordinal);
+        Assert.Contains("not valid UTF-8", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
+        Assert.Contains(
+            "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The arm must not widen: a 22021 on any collector that is not one of the three log-tail readers has no
+    /// listing-then-reading shape to explain it, and stays on the loud default exactly as the classifier's
+    /// Unclassified answer intends — the same discipline <see cref="AMissingFileOnAnyOtherCollectorStaysLoud"/>
+    /// pins for 58P01.
+    /// </summary>
+    [Fact]
+    public void A22021OnAnyOtherCollectorStaysLoud()
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector);
+
+        Assert.Equal("ERROR", status);
+        Assert.Contains("invalid byte sequence", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_binary_file", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>

@@ -302,6 +302,65 @@ public sealed class RdsDeadlockIngestorTests
     }
 
     /// <summary>
+    /// #4046 part 1b, the trade #4049 already gives the self-hosted route: with <c>logTimezoneIsUtc: true</c>
+    /// a foreign-zone line is not refused, it is skipped and counted. A window whose only report is the
+    /// foreign-zone one never touches the store at all (<c>StoreAsync</c> returns before opening it when
+    /// nothing survived filtering), so this runs over the same dead store as every other test here.
+    /// </summary>
+    [Fact]
+    public async Task LogTimezoneIsUtcTrue_SkipsAndCountsAForeignZoneLine_RatherThanRefusing()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var (ingestor, _, _) = Build(store, new FakeRds { FirstBody = NonUtcDeadlockText });
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Equal(3, outcome.ForeignZoneLines); /* the report's three prefixed lines - ERROR, DETAIL, HINT - are each individually foreign-zone-stamped */
+        Assert.True(outcome.SourceReached);
+    }
+
+    /// <summary>
+    /// The other half of the same trade: a foreign-zone report is skipped, but a genuine one in the SAME
+    /// window is not thrown away with it. Proven the way
+    /// <see cref="AManagedPrefixWindowReachesTheWrite_RatherThanReportingAnEmptyLog"/> proves it — the dead
+    /// store makes reaching <c>WriteAsync</c> observable as a throw that is NOT
+    /// <see cref="RdsLogUnavailableException"/>, since a window reporting zero rows would return quietly
+    /// instead. <see cref="PgDeadlockLogParserTests"/> and this file's own
+    /// <see cref="TheFixtureReallyParsesToOneDeadlock"/> already establish that <see cref="DeadlockText"/>
+    /// alone parses to exactly one report, so a throw here can only mean that survivor reached the COPY.
+    /// </summary>
+    [Fact]
+    public async Task LogTimezoneIsUtcTrue_TheSurvivingReportStillReachesTheWrite()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var (ingestor, client, _) = Build(store, new FakeRds { FirstBody = NonUtcDeadlockText + DeadlockText });
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+        Assert.Single(client.Downloads);
+    }
+
+    /// <summary>
+    /// The parser call underneath both ingestor tests above, asserted directly: exactly the foreign-zone
+    /// report is dropped and counted, the UTC one survives untouched. This is the sharpest statement of
+    /// "other rows still written" available without a live store, since the ingestor delegates entirely to
+    /// this call with no further filtering of its own.
+    /// </summary>
+    [Fact]
+    public void PgDeadlockLogParserExtract_LogTimezoneIsUtcTrue_KeepsTheUtcReportAndCountsTheForeignOne()
+    {
+        var found = PgDeadlockLogParser.Extract(
+            NonUtcDeadlockText + DeadlockText, logTimezoneIsUtc: true, out var foreignZoneLines);
+
+        Assert.Equal(3, foreignZoneLines); /* three prefixed lines in the one skipped report */
+        var kept = Assert.Single(found);
+        Assert.Equal(1549, kept.VictimPid);
+    }
+
+    /// <summary>
     /// A non-RDS host is skipped without touching the store or the marker — that target reads its log
     /// through <c>pg_read_file</c>, and there is nothing here to report or to resume.
     ///

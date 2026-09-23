@@ -695,6 +695,31 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// <paramref name="result"/> with <see cref="PgReadBinaryFileAdvisory.Sentence"/> merged into its host
+    /// note when <paramref name="targetKey"/> is still on the text route AND has not been noted inside
+    /// <see cref="PgReadBinaryFileAdvisory.NoteInterval"/> (#4046); otherwise <paramref name="result"/>
+    /// unchanged. The caller (<c>DarlingWorker.RunOneAsync</c>) gates this to <c>pg_log_events</c> only, so a
+    /// target gets one note a day rather than whichever of the three log-tail collectors happens to run and
+    /// win the gate. Reads <see cref="PgReadBinaryFileCapability"/>'s cache rather than probing again — the
+    /// server-scoped path already resolved it for this exact target this cycle, for every collector that
+    /// reads <see cref="PgServerLogTail"/>. A managed target's <paramref name="targetKey"/> was never entered
+    /// into that cache at all (it reaches its log through the RDS API, never through
+    /// <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/>), so <c>TryGetCachedVerdict</c> answers false
+    /// for it and this never fires there.
+    /// </summary>
+    internal static CollectorRunResult WithReadBinaryFileAdvisoryNote(CollectorRunResult result, string targetKey)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(targetKey);
+
+        return PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted)
+            && !granted
+            && PgReadBinaryFileAdvisory.ShouldNote(targetKey)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgReadBinaryFileAdvisory.Sentence) }
+            : result;
+    }
+
+    /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
     ///
     /// <para>Reported as a normal <see cref="CollectorRunResult"/> so the cycle accounts for it exactly like
