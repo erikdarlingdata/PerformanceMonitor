@@ -349,6 +349,43 @@ export async function apiGet(path) {
   return classifyResponse(resp);
 }
 
+/* The /api/fleet request every caller in flight at the same moment shares — see apiGetFleet. */
+let fleetRequest = null;
+
+/**
+ * GET /api/fleet, classified exactly like apiGet, with ONE request shared by every caller that asks while it is
+ * in flight (#3895). The 60s poll re-renders the sidebar and the current page in one synchronous pass, and the
+ * sidebar, the fleet page, the server page and a saved view each read the fleet roll-up — the store's widest
+ * read — so every visible tab computed the whole overview twice a minute. The second caller of a tick now joins
+ * the first's request instead of sending its own.
+ *
+ * Nothing outlives the response: a caller that starts after it has landed sends a fresh request, exactly as
+ * before, so no page renders an older roll-up than it would have — only the duplicate is gone. And each caller
+ * classifies (so parses) the shared body for itself, so every page still owns the cards it was handed.
+ */
+export async function apiGetFleet() {
+  if (!fleetRequest) {
+    fleetRequest = fetchBody("/api/fleet").finally(() => {
+      fleetRequest = null;
+    });
+  }
+
+  const shared = await fleetRequest;
+  if (shared.transportError) return { kind: "error", message: shared.transportError };
+  return classifyResponse({ ok: shared.ok, status: shared.status, text: async () => shared.raw });
+}
+
+/** Fetch a path and read its whole body once, for a response several callers classify. A failure comes back as a
+    value rather than a rejection, so one lost request cannot surface as an unhandled rejection per caller. */
+async function fetchBody(path) {
+  try {
+    const resp = await fetch(path, { headers: { Accept: "application/json" } });
+    return { ok: resp.ok, status: resp.status, raw: await resp.text() };
+  } catch (e) {
+    return { transportError: "Network error: " + (e && e.message ? e.message : String(e)) };
+  }
+}
+
 /**
  * Send a MUTATING request (POST / PUT / DELETE) with an optional JSON body, classified exactly like apiGet
  * (#1563 custom-view CRUD). A 204/empty body yields { kind: "data", data: null }; an { "error": ... } body on a

@@ -82,15 +82,19 @@ ORDER BY collection_time DESC
 LIMIT 1";
 
     /// <summary>Blocking counts in the window from both sources — XE blocked-process reports and the always-on
-    /// DMV snapshot; the caller applies Lite's XE-preferred, DMV-fallback rule. $1 server_id, $2 window start.</summary>
+    /// DMV snapshot; the caller applies Lite's XE-preferred, DMV-fallback rule. $1 server_id, $2 window start,
+    /// $3 the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event window cannot supply
+    /// (#3895, the fleet card's <c>DarlingFleetReader.FleetBlockingSql</c> carries the same one), so the counts
+    /// open the window's chunks rather than every retained one.</summary>
     public const string ServerSummaryBlockingSql = @"
 SELECT
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots  WHERE server_id = $1 AND event_time >= $2)";
+    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
+    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots  WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3)";
 
-    /// <summary>Deadlock count in the window. $1 server_id, $2 window start.</summary>
+    /// <summary>Deadlock count in the window. $1 server_id, $2 window start, $3 the
+    /// <see cref="EventWindowFloor"/> for $2 (#3895).</summary>
     public const string ServerSummaryDeadlockSql = @"
-SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2";
+SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3";
 
     /// <summary>Newest collection time across all collectors for one server. $1 server_id.</summary>
     public const string ServerSummaryLastCollectionSql = @"
@@ -150,6 +154,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, windowStart);
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(windowStart));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -165,6 +170,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, windowStart);
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(windowStart));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {

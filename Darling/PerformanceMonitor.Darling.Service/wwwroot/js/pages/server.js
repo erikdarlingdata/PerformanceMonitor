@@ -45,7 +45,7 @@
  * subtitle rather than inheriting a label that would misdescribe them.
  */
 
-import { el, mount, apiGet, bandClass, loadingStrip } from "../util.js";
+import { el, mount, apiGetFleet, bandClass, loadingStrip } from "../util.js";
 import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
@@ -198,7 +198,7 @@ function rangeControl() {
  * registry, exactly as this page behaved before it could ask. */
 function loadServerCard(server, onCard) {
   (async () => {
-    const res = await apiGet("/api/fleet");
+    const res = await apiGetFleet();
     if (res.kind !== "data") return onCard(null, null);
 
     const matches = (c) => c.server_name === server || c.display_name === server;

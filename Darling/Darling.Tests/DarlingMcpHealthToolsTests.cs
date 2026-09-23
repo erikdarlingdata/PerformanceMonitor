@@ -113,6 +113,10 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_deadlocks", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time >= $2", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
 
+        /* #3895: every windowed count carries the partition-column floor the event window cannot supply. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(Reader.ServerSummaryBlockingSql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
+        Assert.Contains("deadlock_time >= $2 AND collection_time >= $3", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
+
         Assert.Contains("MAX(collection_time)", Reader.ServerSummaryLastCollectionSql, StringComparison.Ordinal);
     }
 

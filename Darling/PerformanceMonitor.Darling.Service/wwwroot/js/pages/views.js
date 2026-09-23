@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
 import { renderPanel, VIZ } from "../panels.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
@@ -244,7 +244,7 @@ async function createFromTemplate(template, server, status) {
    measure picker greys on, none of which a v1 read template uses, and importing it would couple this page to the
    editor module for a name and a label. Returns [] on any failure; every caller handles an empty fleet. */
 async function loadServerNames() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
   return [...(res.data.cards || [])]
     .map((c) => ({ value: c.server_name || c.display_name, label: c.display_name || c.server_name }))
@@ -403,7 +403,7 @@ export async function renderView(main, id) {
     api.getSession(),
     api.getCatalog(),
     api.getView(id),
-    apiGet("/api/fleet"),
+    apiGetFleet(),
   ]);
   if (res.kind === "error") {
     mount(main, [el("div", { class: "page-head" }, [backToViews(), el("h2", { text: "View" })]), errorStrip(res.message)]);

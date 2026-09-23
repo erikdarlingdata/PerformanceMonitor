@@ -142,15 +142,27 @@ public sealed class ViewerServerChromeTests
         Assert.Equal("Azure — Managed Identity", new ViewerServerEntry { AuthenticationType = AuthenticationTypes.ManagedIdentity }.AuthenticationDisplay);
     }
 
+    /// <summary>
+    /// #3895: one newest-row probe per REGISTERED server, not a <c>GROUP BY</c> over every retained row of
+    /// <c>collection_log</c> — which is what the sidebar re-read on every refresh tick for a handful of
+    /// timestamps. Every registry row, disabled included (Manage Servers shows their last collection too),
+    /// and unbounded, because a weeks-old "last collected" is still the answer.
+    /// </summary>
     [Fact]
     public void ServerFreshnessSql_ReadsNewestCollectionPerServer()
     {
-        Assert.Contains("MAX(collection_time)", ViewerDataService.ServerFreshnessSql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_collection_log", ViewerDataService.ServerFreshnessSql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id", ViewerDataService.ServerFreshnessSql, StringComparison.Ordinal);
+        var sql = ViewerDataService.ServerFreshnessSql;
+        Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
+        Assert.Matches(@"ORDER BY collection_time DESC\s+LIMIT 1", sql);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("is_enabled", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$1", sql, StringComparison.Ordinal);
         /* Excludes the fleet retention run-record sentinel (server_id 0) so it never appears as a phantom
            server in the freshness dictionary. */
-        Assert.Contains("server_id <> 0", ViewerDataService.ServerFreshnessSql, StringComparison.Ordinal);
+        Assert.Contains("server_id <> 0", sql, StringComparison.Ordinal);
     }
 
     [Fact]
