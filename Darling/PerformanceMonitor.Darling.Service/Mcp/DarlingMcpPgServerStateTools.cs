@@ -751,7 +751,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change.")]
+    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change. PER-DATABASE AND PER-ROLE OVERRIDES (ALTER DATABASE/ROLE SET) are reported too, interleaved with the server-wide rows by changed_at: such a row carries database_name and/or role_name (only the ones it is scoped to) and change_kind - changed, set (old_value null: the override appeared) or reset (new_value null: it was removed) - while a server-wide row carries neither, and overrides already present when the collector first read them are not reported as set.")]
     public static async Task<string> GetPgServerConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -789,7 +789,17 @@ public sealed class DarlingMcpPgServerStateTools
             var truncated = fetched.Count > limit;
             var rows = truncated ? fetched.Take(limit).ToList() : fetched;
 
-            return JsonSerializer.Serialize(new
+            /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
+               anonymous shape it always was, and System.Text.Json serializes an object-typed element by its
+               runtime type, so its bytes do not move. An override row is built as a JsonObject because
+               McpHelpers.JsonOptions writes nulls: a shared shape with database_name / role_name / change_kind
+               would put `"database_name": null` on every server-wide row, and an override scoped to one role
+               would say `"database_name": null` where the truth is "every database". So a scoped row names only
+               the scope it has, plus change_kind, and omits unit / context / description, which the
+               pg_db_role_setting catalog does not hold (read them off the server-wide row for the same name, as
+               get_pg_server_config's database_overrides_note says). old_value and new_value stay on it even
+               when NULL, because there NULL is the answer: set had nothing before, reset has nothing after. */
+            var page = new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -799,23 +809,73 @@ public sealed class DarlingMcpPgServerStateTools
                 note = "changed_at is the time of the snapshot that FIRST reported the new value, so the "
                      + "change happened at some point in the hour before it - this collector runs hourly. "
                      + "A setting appearing for the first time is not reported here.",
-                changes = rows.Select(r => new
-                {
-                    changed_at = r.ChangedAtUtc,
-                    name = r.Name,
-                    old_value = r.OldValue,
-                    new_value = r.NewValue,
-                    unit = r.Unit,
-                    source = r.Source,
-                    context = r.Context,
-                    description = r.ShortDescription,
-                }),
-            }, McpHelpers.JsonOptions);
+                changes = rows.Select(r => r.DatabaseName is null && r.RoleName is null
+                    ? (object)new
+                    {
+                        changed_at = r.ChangedAtUtc,
+                        name = r.Name,
+                        old_value = r.OldValue,
+                        new_value = r.NewValue,
+                        unit = r.Unit,
+                        source = r.Source,
+                        context = r.Context,
+                        description = r.ShortDescription,
+                    }
+                    : ScopedChange(r)),
+            };
+
+            /* The override note is ATTACHED, like get_pg_server_config's database_overrides, so a page with no
+               override row - every page on a cluster with none, and every page before V138 - is byte-identical
+               to what this tool returned before #3937. */
+            if (rows.All(r => r.DatabaseName is null && r.RoleName is null))
+            {
+                return JsonSerializer.Serialize(page, McpHelpers.JsonOptions);
+            }
+
+            var node = JsonSerializer.SerializeToNode(page, McpHelpers.JsonOptions)?.AsObject()
+                ?? throw new InvalidOperationException("the config-changes page did not serialize to a JSON object");
+            node["scoped_changes_note"] = "Rows carrying database_name and/or role_name are per-database or per-role "
+                + "overrides (ALTER DATABASE/ROLE SET), interleaved with the server-wide rows by changed_at. "
+                + "change_kind says what happened between two consecutive snapshots of the server: changed (the "
+                + "override's value moved), set (it appeared - old_value is null) or reset (it was removed - "
+                + "new_value is null). An override already present on the first snapshot after the collector "
+                + "began reading overrides is not reported as set: nobody set it then, the collector started "
+                + "seeing it. An override row has no unit, context or description; read those off the "
+                + "server-wide setting of the same name.";
+            return node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_pg_server_config_changes", ex);
         }
+    }
+
+    /// <summary>
+    /// One override change as the payload renders it (#3937): the scope names it HAS and none it does not, then
+    /// change_kind, then the value pair. Property order follows the server-wide row's where the two share names.
+    /// </summary>
+    private static JsonObject ScopedChange(DarlingPgServerConfigReader.PgConfigChangeRow r)
+    {
+        var o = new JsonObject
+        {
+            ["changed_at"] = JsonSerializer.SerializeToNode(r.ChangedAtUtc, McpHelpers.JsonOptions),
+            ["name"] = r.Name,
+        };
+        if (r.DatabaseName is not null)
+        {
+            o["database_name"] = r.DatabaseName;
+        }
+
+        if (r.RoleName is not null)
+        {
+            o["role_name"] = r.RoleName;
+        }
+
+        o["change_kind"] = r.ChangeKind;
+        o["old_value"] = r.OldValue;
+        o["new_value"] = r.NewValue;
+        o["source"] = r.Source;
+        return o;
     }
 
 }
