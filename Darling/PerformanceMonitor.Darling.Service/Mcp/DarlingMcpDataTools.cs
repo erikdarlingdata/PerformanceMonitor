@@ -753,7 +753,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome; when it matches nothing but the same read without it has rows, the answer is empty (a measured zero), not a Query Store precondition." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -761,7 +761,8 @@ public sealed class DarlingMcpDataTools
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null)
+        [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
+        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -778,12 +779,13 @@ public sealed class DarlingMcpDataTools
         execution_type = string.IsNullOrWhiteSpace(execution_type)
             ? null
             : McpHelpers.QueryStoreExecutionTypes.First(t => string.Equals(t, execution_type.Trim(), StringComparison.OrdinalIgnoreCase));
+        module_name = string.IsNullOrWhiteSpace(module_name) ? null : module_name;
 
         try
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type);
+            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type, module_name);
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
                say nothing about how far back the read reached -- the most expensive query in a month may have
@@ -800,10 +802,21 @@ public sealed class DarlingMcpDataTools
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
                    so an Aborted or Exception filter is empty far more often than not, and falling through to the
                    chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
-                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path. */
-                if (execution_type != null
+                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path.
+                   module_name (#4057) is the same case and takes the same test: a module that did not run in the
+                   window is a measured zero whenever the read without the filters has rows. */
+                if ((execution_type != null || module_name != null)
                     && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name)).Count > 0)
-                    return McpHelpers.QueryStoreExecutionTypeEmpty(execution_type, hours_back, database_name);
+                    return module_name is null
+                        ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
+                        /* The module miss hands back the window it read: "did not run" is a claim about that window,
+                           and the raw tier may not reach the whole of the one asked for. */
+                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
+                        {
+                            effective_start = effectiveStart.ToString("o"),
+                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                            window_truncated = truncated
+                        });
 
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
@@ -832,6 +845,7 @@ public sealed class DarlingMcpDataTools
                 query_hash = r.QueryHash,
                 query_plan_hash = r.QueryPlanHash,
                 execution_type = r.ExecutionTypeDesc,
+                module_name = r.ModuleName,
                 execution_count = r.TotalExecutions,
                 avg_duration_ms = r.AvgDurationMs,
                 avg_cpu_ms = r.AvgCpuTimeMs,
