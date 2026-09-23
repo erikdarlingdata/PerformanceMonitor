@@ -1,3 +1,3 @@
 # DarlingMcpPgLoggingAuditTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_logging_audit 2086
+tool get_pg_logging_audit 546
 param get_pg_logging_audit.server_name 28

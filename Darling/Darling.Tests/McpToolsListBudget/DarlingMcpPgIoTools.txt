@@ -1,6 +1,6 @@
 # DarlingMcpPgIoTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_io_stats 2045
+tool get_pg_io_stats 610
 param get_pg_io_stats.as_of 167
 param get_pg_io_stats.hours_back 40
-param get_pg_io_stats.limit 235
+param get_pg_io_stats.limit 194
 param get_pg_io_stats.server_name 28

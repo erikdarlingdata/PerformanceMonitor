@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Text.Json;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -135,11 +136,18 @@ public sealed class PgWaitInstrumentDisclosureTests
     [Fact]
     public void BothToolDescriptions_NameTheThreeTiers()
     {
+        /* #3898 D3 re-pointed get_pg_wait_sampling's half deliberately: extension_sampled / service_sampled /
+           FLOOR are guardrail facts (misreading the instrument misreads every number in the answer), so they
+           are asserted against the SERVED head; the "Aurora native > ... > service sampler" ordering is
+           narrative and stays wherever the tail carries it. get_pg_wait_stats is a different lane's tool and
+           is not yet converted, so its half is unchanged and still reads the raw literal. */
         var sampling = ToolDescription(typeof(DarlingMcpPgWaitSamplingTools), "get_pg_wait_sampling");
-        Assert.Contains("extension_sampled", sampling, StringComparison.Ordinal);
-        Assert.Contains("service_sampled", sampling, StringComparison.Ordinal);
-        Assert.Contains("FLOOR", sampling, StringComparison.Ordinal);
-        Assert.Contains("Aurora native > pg_wait_sampling extension > service sampler", sampling, StringComparison.Ordinal);
+        var (samplingHead, samplingTail) = McpToolGuide.Split(sampling);
+        Assert.Contains("extension_sampled", samplingHead, StringComparison.Ordinal);
+        Assert.Contains("service_sampled", samplingHead, StringComparison.Ordinal);
+        Assert.Contains("FLOOR", samplingHead, StringComparison.Ordinal);
+        Assert.NotNull(samplingTail);
+        Assert.Contains("Aurora native > pg_wait_sampling extension > service sampler", samplingTail, StringComparison.Ordinal);
         /* The old opening claimed the extension as the ONLY source; it is one of two now. */
         Assert.DoesNotContain("from the pg_wait_sampling extension. This is", sampling, StringComparison.Ordinal);
 
