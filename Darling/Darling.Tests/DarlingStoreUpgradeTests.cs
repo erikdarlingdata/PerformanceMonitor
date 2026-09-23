@@ -1025,6 +1025,7 @@ public sealed class DarlingStoreUpgradeTests
     {
         foreach (var record in new[]
                  {
+                     new DarlingStoreUpgrade.TimescaleRecord(DarlingStoreUpgrade.TimescaleRecordState.Absent, "2.30.1"),
                      new DarlingStoreUpgrade.TimescaleRecord(DarlingStoreUpgrade.TimescaleRecordState.Current, "2.30.1"),
                      new DarlingStoreUpgrade.TimescaleRecord(DarlingStoreUpgrade.TimescaleRecordState.Pending, "2.28.1", "2.30.1"),
                  })
@@ -1033,9 +1034,8 @@ public sealed class DarlingStoreUpgradeTests
             Assert.Equal(record, DarlingStoreUpgrade.ParseTimescaleRecord(record.Format() + "\r\n"));
         }
 
-        /* "absent" included: an absent extension is never recorded, because the first start of a new store
-           reads it seconds before the worker creates it. */
-        foreach (var malformed in new[] { null, "", "absent", "pending 2.28.1", "pending 2.28.1 2.30.1 2.31.0", "current 2.30.1", "2.30.1-dev" })
+        /* A bare "absent" included: absence only means something under the runtime it was read under. */
+        foreach (var malformed in new[] { null, "", "absent", "absent 2.30", "pending 2.28.1", "pending 2.28.1 2.30.1 2.31.0", "current 2.30.1", "2.30.1-dev" })
         {
             Assert.Null(DarlingStoreUpgrade.ParseTimescaleRecord(malformed));
         }
@@ -1048,13 +1048,15 @@ public sealed class DarlingStoreUpgradeTests
         Assert.Equal(
             new[] { "2.30.1" },
             new DarlingStoreUpgrade.TimescaleRecord(DarlingStoreUpgrade.TimescaleRecordState.Current, "2.30.1").StoreVersions);
+        Assert.Empty(new DarlingStoreUpgrade.TimescaleRecord(DarlingStoreUpgrade.TimescaleRecordState.Absent, "2.30.1").StoreVersions);
     }
 
     [Theory]
     [InlineData(null, "2.30.1", true)]
     [InlineData("2.28.1", "2.30.1", true)]
     [InlineData("2.30.1", "2.30.1", false)]
-    [InlineData("absent", "2.30.1", true)]
+    [InlineData("absent 2.30.1", "2.30.1", false)]
+    [InlineData("absent 2.28.1", "2.30.1", true)]
     [InlineData("pending 2.28.1 2.30.1", "2.30.1", true)]
     [InlineData("not a record", "2.30.1", true)]
     [InlineData(null, null, false)]
@@ -1063,7 +1065,7 @@ public sealed class DarlingStoreUpgradeTests
         => Assert.Equal(expected, DarlingStoreUpgrade.NeedsQuiescedTimescaleUpdate(DarlingStoreUpgrade.ParseTimescaleRecord(record), bundled));
 
     [Fact]
-    public void PlanTimescaleBridge_SkipsWhatTheNewRuntimeCarries_AndOtherwiseTargetsTheNewestSharedVersion()
+    public void PlanTimescaleBridge_SkipsWhatTheNewRuntimeCarries_AndOtherwiseTargetsTheOldRuntimesOwnDefault()
     {
         string[] current = { "2.28.1", "2.30.1" };
 
@@ -1071,23 +1073,28 @@ public sealed class DarlingStoreUpgradeTests
            is, and nothing runs on the old cluster. */
         Assert.Equal(
             new DarlingStoreUpgrade.TimescaleBridgePlan(false, null),
-            DarlingStoreUpgrade.PlanTimescaleBridge("2.28.1", current, new[] { "2.28.1" }));
+            DarlingStoreUpgrade.PlanTimescaleBridge("2.28.1", current, "2.28.1"));
 
-        /* Not carried: the newest version above it that both runtimes carry. */
+        /* Not carried: the old runtime's own default, the one version it has update scripts for, when the new
+           runtime can restore it. */
         Assert.Equal(
             new DarlingStoreUpgrade.TimescaleBridgePlan(true, "2.28.1"),
-            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, new[] { "2.24.0", "2.28.1" }));
+            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, "2.28.1"));
         Assert.Equal(
             new DarlingStoreUpgrade.TimescaleBridgePlan(true, "2.30.1"),
-            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, new[] { "2.24.0", "2.28.1", "2.30.1" }));
+            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, "2.30.1"));
 
-        /* Nothing both carry above it: the upgrade stops before pg_upgrade instead of failing inside it. */
+        /* No reachable target: the upgrade stops before pg_upgrade instead of failing inside it. The old default
+           not above the store's version, a default the new runtime cannot restore, and no default at all. */
         Assert.Equal(
             new DarlingStoreUpgrade.TimescaleBridgePlan(true, null),
-            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, new[] { "2.24.0" }));
+            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, "2.24.0"));
         Assert.Equal(
             new DarlingStoreUpgrade.TimescaleBridgePlan(true, null),
-            DarlingStoreUpgrade.PlanTimescaleBridge("2.29.0", new[] { "2.28.1" }, new[] { "2.28.1", "2.29.0" }));
+            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, "2.29.0"));
+        Assert.Equal(
+            new DarlingStoreUpgrade.TimescaleBridgePlan(true, null),
+            DarlingStoreUpgrade.PlanTimescaleBridge("2.24.0", current, null));
     }
 
     [Fact]
@@ -1196,6 +1203,101 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// #3908's shared "can this package open the store" answer: the recorded versions the package has no complete
+    /// libraries for. Both a pending record's versions count, an absent extension needs nothing, and no record
+    /// abstains.
+    /// </summary>
+    [Fact]
+    public void MissingTimescaleLibraries_NamesOnlyWhatThePackageCannotLoad()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-tsmissing-");
+        try
+        {
+            var data = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(data);
+            var record = Path.Combine(data, DarlingStoreUpgrade.TimescaleRecordFileName);
+            var zip = PlantRuntimeZip(root.FullName, "carries-2.30.1", "2.30.1");
+
+            Assert.Empty(DarlingStoreUpgrade.MissingTimescaleLibraries(data, zip));
+
+            File.WriteAllText(record, "2.30.1");
+            Assert.Empty(DarlingStoreUpgrade.MissingTimescaleLibraries(data, zip));
+
+            File.WriteAllText(record, "2.31.0");
+            Assert.Equal(new[] { "2.31.0" }, DarlingStoreUpgrade.MissingTimescaleLibraries(data, zip));
+
+            File.WriteAllText(record, "pending 2.30.1 2.31.0");
+            Assert.Equal(new[] { "2.31.0" }, DarlingStoreUpgrade.MissingTimescaleLibraries(data, zip));
+
+            File.WriteAllText(record, "absent 2.31.0");
+            Assert.Empty(DarlingStoreUpgrade.MissingTimescaleLibraries(data, zip));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #3908, the clean-reinstall case. The runtime folder is gone and only the zip is beside the service, so the
+    /// start would extract it with nothing to swap. When the store's recorded TimescaleDB is one that zip cannot
+    /// load, the start refuses with the reason instead of extracting a runtime that cannot open the store, and
+    /// nothing is extracted. No PostgreSQL is needed: the refusal comes before anything runs.
+    /// </summary>
+    [Fact]
+    public async Task FirstExtraction_RefusesAPackageThatCannotOpenTheStore()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+
+        var root = Directory.CreateTempSubdirectory("darling-tsextract-");
+        try
+        {
+            var deployment = Path.Combine(root.FullName, "deploy");
+            var runtimeRoot = Path.Combine(deployment, "pg-runtime");
+            Directory.CreateDirectory(runtimeRoot);
+            var zip = PlantRuntimeZip(root.FullName, "carries-2.30.1", "2.30.1");
+            File.Copy(zip, Path.Combine(deployment, "pg-runtime.zip"));
+
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(dataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName), "2.31.0");
+
+            var managed = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = dataDirectory },
+                new CapturingLogger(),
+                runtimeRoot);
+
+            var refused = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => managed.EnsureRunningAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("carries no libraries for it", refused.Message, StringComparison.Ordinal);
+            Assert.Contains("2.31.0", refused.Message, StringComparison.Ordinal);
+            Assert.False(Directory.Exists(Path.Combine(runtimeRoot, "pgsql")), "nothing may be extracted");
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A runtime zip carrying a fake pg_ctl and both libraries of each given TimescaleDB version.</summary>
+    private static string PlantRuntimeZip(string root, string name, params string[] timescaleVersions)
+    {
+        var pgsql = Path.Combine(root, name, "pgsql");
+        Directory.CreateDirectory(Path.Combine(pgsql, "bin"));
+        Directory.CreateDirectory(Path.Combine(pgsql, "lib"));
+        File.WriteAllText(Path.Combine(pgsql, "bin", "pg_ctl.exe"), "fake");
+        foreach (var version in timescaleVersions)
+        {
+            File.WriteAllText(Path.Combine(pgsql, "lib", $"timescaledb-{version}.dll"), "x");
+            File.WriteAllText(Path.Combine(pgsql, "lib", $"timescaledb-tsl-{version}.dll"), "x");
+        }
+
+        var zip = Path.Combine(root, name + ".zip");
+        ZipFile.CreateFromDirectory(pgsql, zip, CompressionLevel.NoCompression, includeBaseDirectory: true);
+        return zip;
+    }
+
     [Fact]
     public void BuildStoreTimescaleReport_ReportsOnlyAnExtensionThatDidNotReachTheRuntime()
     {
@@ -1239,6 +1341,12 @@ public sealed class DarlingStoreUpgradeTests
         var start = At("StartServerAsync(binDirectory, networkPlan", ensureRunning);
         Assert.True(conf < update && update < plan && plan < start,
             "the quiesced TimescaleDB update must run after the conf append and before the network plan and the start");
+
+        /* A bootstrap retry keeps the outcome of the attempt that ran the update, and the update never starts new
+           binaries on a data directory of another major (a revert that could not run, #3927). */
+        var gate = managed[ensureRunning..update];
+        Assert.Contains("if (!(alreadyRunning && _startedByThisProcess))", gate, StringComparison.Ordinal);
+        Assert.Contains("DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) == _bundledMajor", gate, StringComparison.Ordinal);
 
         var ensureRuntime = At("private async Task<string> EnsureRuntimeAsync(", 0);
         Assert.True(At("StopQuiescedUpdateOrphanAsync(", ensureRuntime) < At("TryAdvanceRuntimeAsync(", ensureRuntime),
@@ -1554,19 +1662,22 @@ public sealed class DarlingStoreUpgradeTests
             var oldMajor = await BuildOldStoreAsync(runtimeRoot, dataDirectory, config.Port, timeout.Token);
             var oldTimescale = BundledTimescaleVersion(runtimeRoot);
 
+            var newStamp = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+            var legacyStamp = Path.Combine(runtimeRoot, DarlingStoreUpgrade.LegacyRuntimeStampFileName);
             if (stamped)
             {
-                var stampSource = Path.Combine(root.FullName, "old-runtime-stamp-source.zip");
-                ZipFile.CreateFromDirectory(
-                    Path.Combine(runtimeRoot, "pgsql"), stampSource, CompressionLevel.NoCompression, includeBaseDirectory: true);
-                File.WriteAllText(
-                    Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName),
-                    DarlingStoreUpgrade.ComputeFileHash(stampSource));
+                /* The state every 3.3-3.8 host is in: only the legacy stamp, holding that package's hash. Building
+                   the store through this release's bootstrap leaves exactly that (the pin), and no stamp of this
+                   release's own. */
+                Assert.False(File.Exists(newStamp), "a 3.3-3.8 host has no stamp of this release's own");
+                Assert.Equal(DarlingStoreUpgrade.LegacyRuntimePackageHash, File.ReadAllText(legacyStamp).Trim());
             }
             else
             {
-                Assert.False(File.Exists(Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName)),
-                    "the unstamped run needs a host with no stamp; building the store must not have written one");
+                /* A host whose runtime predates stamping, or was staged by hand: no stamp at all, so the start
+                   takes the no-stamp branch, which compares the runtimes themselves. */
+                File.Delete(newStamp);
+                File.Delete(legacyStamp);
             }
 
             var shippedZip = Path.Combine(deployment, "pg-runtime.zip");
@@ -1641,6 +1752,15 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.False(
                     Directory.Exists(DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, oldMajor)),
                     $"a same-major swap must not copy the data directory aside; that is pg_upgrade's rollback.\n\n--- orchestration log ---\n{log}");
+
+                /* Each arm took the path it claims: the unstamped host compared the runtimes themselves. */
+                if (!stamped)
+                {
+                    Assert.Contains("are both PostgreSQL", log.ToString(), StringComparison.Ordinal);
+                    Assert.Contains("not the same runtime", log.ToString(), StringComparison.Ordinal);
+                }
+
+                Assert.Equal(DarlingStoreUpgrade.LegacyRuntimePackageHash, File.ReadAllText(legacyStamp).Trim());
 
                 /* The previous runtime is rescued like any other swap, and the stamp now names the shipped zip,
                    so the next start adopts it instead of swapping again. */

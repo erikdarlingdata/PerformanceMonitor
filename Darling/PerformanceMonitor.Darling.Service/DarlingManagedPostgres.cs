@@ -2272,6 +2272,10 @@ public sealed class DarlingManagedPostgres
         if (!existingCluster)
         {
             await InitializeClusterAsync(binDirectory, cancellationToken);
+
+            /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
+               the second start has nothing to read (#3908). */
+            _bundledTimescaleVersion = ReadBundledTimescaleVersion(binDirectory);
         }
         else
         {
@@ -2301,9 +2305,20 @@ public sealed class DarlingManagedPostgres
            reverts the runtime: every store this service has shipped is on a TimescaleDB whose libraries the
            runtime carries, so a store whose update failed opens on its own version, and the alert says so. */
         var alreadyRunning = await IsRunningAsync(binDirectory, cancellationToken);
-        LastTimescaleOutcome = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
+
+        /* A re-entry (the worker's bootstrap retry) finds the server this process already started. The quiesced
+           step cannot run under it, and the attempt that did run it holds the outcome to report. */
+        if (!(alreadyRunning && _startedByThisProcess))
+        {
+            LastTimescaleOutcome = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
+        }
+
+        /* The data directory's major must be the runtime's: after an upgrade whose runtime revert could not run
+           (#3927), a start here would put the new binaries on the old cluster. */
         if (existingCluster
             && !alreadyRunning
+            && _bundledMajor > 0
+            && DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) == _bundledMajor
             && DarlingStoreUpgrade.NeedsQuiescedTimescaleUpdate(DarlingStoreUpgrade.ReadTimescaleRecord(_dataDirectory), _bundledTimescaleVersion))
         {
             LastTimescaleOutcome = await _storeUpgrade.UpdateTimescaleQuiescedAsync(
@@ -2475,6 +2490,17 @@ public sealed class DarlingManagedPostgres
 
         if (File.Exists(_runtimeZipPath))
         {
+            /* #3908: an existing store whose runtime folder is gone (a clean reinstall of this release over a
+               later one) must not get a runtime that cannot open its TimescaleDB. The swap path already refuses
+               that; this is the same check for the path that extracts with nothing to swap. */
+            if (DarlingStoreUpgrade.MissingTimescaleLibraries(_dataDirectory, _runtimeZipPath) is { Count: > 0 } missing)
+            {
+                throw new InvalidOperationException(
+                    $"The store at {_dataDirectory} is on TimescaleDB {string.Join(" or ", missing)} (recorded in {Path.Combine(_dataDirectory, DarlingStoreUpgrade.TimescaleRecordFileName)}), " +
+                    $"and {_runtimeZipPath} carries no libraries for it, so the runtime it would extract could not open the store. " +
+                    "Install a release whose runtime carries that TimescaleDB version, or restore the pg-runtime folder that last opened this store. Nothing has been extracted or changed.");
+            }
+
             _logger.LogInformation("Extracting the bundled Postgres runtime from {Zip} (first run)", _runtimeZipPath);
             await Task.Run(
                 () => ZipFile.ExtractToDirectory(_runtimeZipPath, _runtimeRoot, overwriteFiles: true),

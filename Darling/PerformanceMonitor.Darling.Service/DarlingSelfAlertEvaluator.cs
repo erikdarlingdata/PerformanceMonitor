@@ -4714,7 +4714,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
             var state = report.Failed
                 ? $"The store is running and collecting on {from}, whose library this runtime still carries, so nothing is down. The update is retried on the next service start."
-                : $"The store is running and collecting on {from}. Nothing moved it this start: the update runs only while this service starts the store itself, before anything can connect, and the next such start retries it.";
+                : $"The store is running and collecting on {from}. Nothing moved it this start. It moves the next time this service starts the store itself, before anything can connect; a server started by something else, or one this service adopted, keeps this version until then.";
 
             await FireAsync(
                 StoreKey(StoreTimescaleKey), _storeLabel, StoreUpgradeMetric,
