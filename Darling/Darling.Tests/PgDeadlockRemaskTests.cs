@@ -57,6 +57,9 @@ public sealed class PgDeadlockRemaskTests
 
     private static readonly string[] s_secrets = ["4721", "9034", "4111111111111111", "5500005555555559", "Leak4012"];
 
+    /* A store's log-hash key (#4004), fixed so the expected values are reproducible. */
+    private static readonly PgLogHashKey s_key = new(Enumerable.Range(1, PgLogHashKey.KeyLength).Select(i => (byte)i).ToArray());
+
     /* ───────────────────────── pure ───────────────────────── */
 
     /// <summary>
@@ -69,8 +72,36 @@ public sealed class PgDeadlockRemaskTests
     {
         Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("p.deadlock_hash", "p.graph_text"), PgDeadlockRemask.ReportPageSql, StringComparison.Ordinal);
         Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text"), PgDeadlockRemask.ReportUpdateSql, StringComparison.Ordinal);
-        Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text"), PgDeadlockRemask.AlertReportLookupSql, StringComparison.Ordinal);
-        Assert.Contains("AND   context_json = $4", PgDeadlockRemask.AlertUpdateSql, StringComparison.Ordinal);
+        Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text"), PgDeadlockRemask.ReportUpdateOwnBatchSql, StringComparison.Ordinal);
+        Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("a.deadlock_hash", "a.graph_text"), PgDeadlockRemask.ReportUpdateSql, StringComparison.Ordinal);
+        Assert.Contains(PgDeadlockLogParser.RawGraphHashSql("d.deadlock_hash", "d.graph_text"), PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4012's review: no write sends a row's raw text back to the store as a parameter, where
+    /// <c>log_min_duration_statement</c> would put it in the store's own log. The alert and finding writes check the
+    /// row by its version (<c>xmin</c>); the report write by the raw-hash test, which binds the graph it read. And the
+    /// findings page looks only into findings rooted where the deadlock section is attached, so it detoasts no other.
+    /// </summary>
+    [Fact]
+    public void NoWriteSendsRawTextBack_AndTheFindingsPageIsFilteredByRoot()
+    {
+        Assert.Contains("AND   xmin = $4::xid", PgDeadlockRemask.AlertUpdateSql, StringComparison.Ordinal);
+        Assert.Contains("AND   xmin = $4::xid", PgDeadlockRemask.FindingUpdateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$5", PgDeadlockRemask.AlertUpdateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$5", PgDeadlockRemask.FindingUpdateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$9", PgDeadlockRemask.ReportUpdateSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", PgDeadlockRemask.FindingAlertUpdateSql, StringComparison.Ordinal);
+        foreach (var sql in new[] { PgDeadlockRemask.AlertUpdateSql, PgDeadlockRemask.FindingUpdateSql, PgDeadlockRemask.FindingAlertUpdateSql, PgDeadlockRemask.ReportUpdateSql, PgDeadlockRemask.ReportUpdateOwnBatchSql })
+        {
+            Assert.DoesNotContain("context_json =", sql.Split("WHERE")[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("drill_down_json =", sql.Split("WHERE")[1], StringComparison.Ordinal);
+            Assert.DoesNotContain("victim_statement", sql.Split("WHERE")[1], StringComparison.Ordinal);
+        }
+
+        /* #4012's review, finding 4: by the chain, where the section is attached, not by the root alone. */
+        Assert.Contains($"string_to_array(f.story_path, ' → ') && ARRAY['{PgTargetFactKeys.DeadlockRate}', '{PgTargetFactKeys.AnomalyDeadlockRate}']", PgDeadlockRemask.FindingPageSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("root_fact_key", PgDeadlockRemask.FindingPageSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -124,17 +155,17 @@ public sealed class PgDeadlockRemaskTests
                 ? new(PgDeadlockRemask.ReportState.Raw, rewritten)
                 : new(PgDeadlockRemask.ReportState.Current, null);
 
-        var summary = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(legacy), null, Resolve);
+        var summary = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(legacy), null, Resolve, s_key);
         Assert.NotNull(summary);
-        Assert.Equal(AlertContextSerializer.Serialize(live), summary.Value.ContextJson);
+        Assert.Equal(Marked(AlertContextSerializer.Serialize(live), 0), summary.Value.ContextJson);
         Assert.Null(summary.Value.DetailText);
 
         var legacyPerEvent = Assert.Single(PerEventNotification.Split(legacy, 10)).Context;
         var livePerEvent = Assert.Single(PerEventNotification.Split(live, 10)).Context;
         var perEvent = PgDeadlockRemask.RemaskAlert(
-            AlertContextSerializer.Serialize(legacyPerEvent), AlertContextBuilders.ContextToDetailText(legacyPerEvent), Resolve);
+            AlertContextSerializer.Serialize(legacyPerEvent), AlertContextBuilders.ContextToDetailText(legacyPerEvent), Resolve, s_key);
         Assert.NotNull(perEvent);
-        Assert.Equal(AlertContextSerializer.Serialize(livePerEvent), perEvent.Value.ContextJson);
+        Assert.Equal(Marked(AlertContextSerializer.Serialize(livePerEvent), 0), perEvent.Value.ContextJson);
         Assert.Equal(AlertContextBuilders.ContextToDetailText(livePerEvent), perEvent.Value.DetailText);
 
         foreach (var text in new[] { summary.Value.ContextJson, perEvent.Value.ContextJson, perEvent.Value.DetailText })
@@ -143,14 +174,16 @@ public sealed class PgDeadlockRemaskTests
             Assert.DoesNotContain(rawHash, text, StringComparison.Ordinal);
         }
 
-        Assert.Null(PgDeadlockRemask.RemaskAlert(summary.Value.ContextJson, null, Resolve));
-        Assert.Null(PgDeadlockRemask.RemaskAlert(perEvent.Value.ContextJson, perEvent.Value.DetailText, Resolve));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(summary.Value.ContextJson, null, Resolve, s_key));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(perEvent.Value.ContextJson, perEvent.Value.DetailText, Resolve, s_key));
     }
 
     /// <summary>
-    /// An alert whose report retention already dropped keeps its key, which nothing left can test, and has its
-    /// statement normalized as it stands; its no-statement text carries no SQL and is kept. An alert built from
-    /// normalized text (its report current, or named by a report identity), a SQL Server alert and a context that
+    /// An alert whose report cannot be found (retention dropped it, or the report stage already rewrote it) has its
+    /// statement normalized as it stands, and its key, which may be a raw graph's hash, keyed under the store's secret
+    /// (#4012's review): the same key in, the same key out, so two alerts that shared one still do, and not a report
+    /// hash's shape, so a later walk leaves it alone. Its no-statement text carries no SQL and is kept. An alert built
+    /// from normalized text (its report current, or named by a report identity), a SQL Server alert and a context that
     /// does not parse are all left as they are.
     /// </summary>
     [Fact]
@@ -167,31 +200,58 @@ public sealed class PgDeadlockRemaskTests
         };
         static PgDeadlockRemask.ResolvedReport Gone(string key) => new(PgDeadlockRemask.ReportState.Missing, null);
 
-        var gone = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(raw), null, Gone);
+        var gone = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(raw), null, Gone, s_key);
         Assert.NotNull(gone);
         Assert.True(AlertContextSerializer.TryDeserialize(gone.Value.ContextJson, out var context));
-        Assert.Equal(goneHash, context.Incidents![0].DedupKey);
+        Assert.Equal(s_key.DeadlockAlertKey(goneHash), context.Incidents![0].DedupKey);
+        Assert.Equal(s_key.DeadlockAlertKey(goneHash[..31] + "0"), context.Incidents[1].DedupKey);
         Assert.Equal("UPDATE creds SET pw = '?' WHERE id = ?", Assert.Single(context.Incidents[0].InvolvedObjects));
         Assert.Equal("victim pid 3101, 2 participant(s)", Assert.Single(context.Incidents[1].InvolvedObjects));
         AssertNoSecret(gone.Value.ContextJson);
-        Assert.Null(PgDeadlockRemask.RemaskAlert(gone.Value.ContextJson, null, Gone));
+        Assert.DoesNotContain(goneHash, gone.Value.ContextJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(goneHash[..31] + "0", gone.Value.ContextJson, StringComparison.Ordinal);
+        Assert.Null(PgDeadlockRemask.RemaskAlert(gone.Value.ContextJson, null, Gone, s_key));
+
+        /* Before every report is rewritten (no key passed), an unresolvable key is left as it is: it may be a raw
+           report's new identity, which names nothing until that report is rewritten. Its statement is normalized. */
+        var early = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(raw), null, Gone, null);
+        Assert.NotNull(early);
+        Assert.True(AlertContextSerializer.TryDeserialize(early.Value.ContextJson, out var earlyContext));
+        Assert.Equal(goneHash, earlyContext.Incidents![0].DedupKey);
+        AssertNoSecret(early.Value.ContextJson);
+        Assert.Null(PgDeadlockRemask.RemaskAlert(early.Value.ContextJson, null, Gone, null));
+
+        /* A per-event row renders the key in its detail item and its detail_text: both take the keyed one. */
+        var perEvent = PerEventNotification.Split(raw, 10)[0].Context;
+        var perEventGone = PgDeadlockRemask.RemaskAlert(
+            AlertContextSerializer.Serialize(perEvent), AlertContextBuilders.ContextToDetailText(perEvent), Gone, s_key);
+        Assert.NotNull(perEventGone);
+        Assert.DoesNotContain(goneHash, perEventGone.Value.ContextJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(goneHash, perEventGone.Value.DetailText!, StringComparison.Ordinal);
+        Assert.Contains(s_key.DeadlockAlertKey(goneHash), perEventGone.Value.DetailText!, StringComparison.Ordinal);
+
+        /* The keyed value is the store's own: another key gives another value, and it is not the raw-line subkey's. */
+        var otherKey = new PgLogHashKey(Enumerable.Repeat((byte)7, PgLogHashKey.KeyLength).ToArray());
+        Assert.NotEqual(s_key.DeadlockAlertKey(goneHash), otherKey.DeadlockAlertKey(goneHash));
+        Assert.NotEqual(PgLogHashKey.DeadlockAlertKeyTag + s_key.RawLineHash(goneHash), s_key.DeadlockAlertKey(goneHash));
+        Assert.False(PgDeadlockRemask.IsReportHash(s_key.DeadlockAlertKey(goneHash)));
 
         static PgDeadlockRemask.ResolvedReport Current(string key) => new(PgDeadlockRemask.ReportState.Current, null);
-        Assert.Null(PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(raw), null, Current));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(raw), null, Current, s_key));
 
         var normalizedSince = new AlertContext
         {
             Incidents = [new AlertIncident(PgDeadlockLogParser.ReportIdentity(DateTime.UtcNow, 3101), ["UPDATE creds SET pw = 'Leak4012'"])],
         };
-        Assert.Null(PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(normalizedSince), null, Gone));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(normalizedSince), null, Gone, s_key));
 
         var sqlServer = new AlertContext
         {
             Incidents = [new AlertIncident(new string('a', 64), ["UPDATE creds SET pw = 'Leak4012'"])],
         };
-        Assert.Null(PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(sqlServer), null, Gone));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(sqlServer), null, Gone, s_key));
 
-        Assert.Null(PgDeadlockRemask.RemaskAlert("{ not json", null, Gone));
+        Assert.Null(PgDeadlockRemask.RemaskAlert("{ not json", null, Gone, s_key));
     }
 
     /// <summary>
@@ -320,8 +380,10 @@ public sealed class PgDeadlockRemaskTests
         var newFormatBefore = await DumpAsync(connection, $"SELECT victim_statement, graph_text, deadlock_hash FROM pg_deadlocks WHERE deadlock_hash = '{capturedC.DeadlockHash}'", ct);
         Assert.Equal(5, readsBefore.Summary.Count);
 
-        /* The pass, as the worker runs it: the alerts to their end, then the reports. */
+        /* The pass, as the worker runs it: the alerts to their end, then the reports, then the findings. */
         var (alertsRewritten, findingsRewritten, reportsRewritten, failed) = await RunPassAsync(connection, ct);
+        /* The summary and per-event rows rebuilt, and the gone report's alert normalized and keyed in the same write
+           (#4036's round-2 review, finding 3): the walk after the reports finds nothing left to key. */
         Assert.Equal(3, alertsRewritten);
         Assert.Equal(1, findingsRewritten);
         Assert.Equal(4, reportsRewritten);
@@ -382,11 +444,12 @@ public sealed class PgDeadlockRemaskTests
         var expectedB = PgDeadlockRemask.RemaskedIncident(atB, 4101, 2, null, graphB);
         var liveContext = new AlertContext { Incidents = [expectedA, expectedB], SeverityOverride = AlertSeverityLevel.Warning };
         var livePerEvent = PerEventNotification.Split(liveContext, 10)[0].Context;
-        Assert.Contains((AlertContextSerializer.Serialize(liveContext), (string?)null), alertsAfter);
-        Assert.Contains((AlertContextSerializer.Serialize(livePerEvent), AlertContextBuilders.ContextToDetailText(livePerEvent)), alertsAfter);
+        Assert.Contains((Marked(AlertContextSerializer.Serialize(liveContext), 0, 1), (string?)null), alertsAfter);
+        Assert.Contains((Marked(AlertContextSerializer.Serialize(livePerEvent), 0), AlertContextBuilders.ContextToDetailText(livePerEvent)), alertsAfter);
         Assert.Contains((AlertContextSerializer.Serialize(sinceC), (string?)null), alertsAfter);
         Assert.Contains((sqlServerJson, (string?)null), alertsAfter);
-        Assert.Contains(alertsAfter, a => a.Context.Contains(goneHash, StringComparison.Ordinal) && a.Context.Contains("WHERE id = ?", StringComparison.Ordinal));
+        Assert.Contains(alertsAfter, a => a.Context.Contains(s_key.DeadlockAlertKey(goneHash), StringComparison.Ordinal) && a.Context.Contains("WHERE id = ?", StringComparison.Ordinal));
+        Assert.DoesNotContain(goneHash, alertDump, StringComparison.Ordinal);
 
         /* The finding reads as every read showed it before; the one with no deadlock section is as planted. */
         var findingsAfter = await ReadFindingsAsync(connection, ct);
@@ -403,7 +466,1061 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal(tablesBefore, await DumpTablesAsync(connection, ct));
     }
 
+    /// <summary>
+    /// #4012's review, finding 5: what the stored text cannot say, the rewrite cannot match. The collector before
+    /// #4005 took every tab out of the DETAIL, so a query's own tab is gone (`LIMIT&lt;tab&gt;50` stored as `LIMIT50`,
+    /// one identifier that keeps its digits, as every read already shows it); and it kept no proof a report was whole,
+    /// so after a middle query that does not read to its end the rewrite withholds the rest (fail closed) where the
+    /// live read, which saw the HINT, keeps them. Both keep the old and new sightings apart rather than merge them;
+    /// neither leaks a literal the reads do not already show. A report with neither reads exactly as the live one.
+    /// </summary>
+    [Fact]
+    public void WhatTheStoredTextCannotSay_TheRewriteCannotMatch_AndStaysFailClosed()
+    {
+        var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
+
+        /* A tab inside the victim's query: the live collector keeps it, the old one stored the query without it. */
+        var tabbed = Report(at, 3101, 3102).Replace("WHERE card = 4111111111111111", "LIMIT\t50", StringComparison.Ordinal);
+        var live = Assert.Single(PgDeadlockLogParser.Extract(tabbed));
+        var storedTabless = LegacyGraph.Replace("WHERE card = 4111111111111111", "LIMIT50", StringComparison.Ordinal);
+        var (_, graph, hash) = PgDeadlockRemask.RemaskReport(at, null, storedTabless);
+        Assert.Contains("LIMIT50", graph, StringComparison.Ordinal);
+        Assert.Contains("LIMIT ?", live.GraphText, StringComparison.Ordinal);
+        Assert.NotEqual(live.DeadlockHash, hash);
+        Assert.Equal(PgDeadlockLogParser.NormalizeGraph(storedTabless), graph);
+
+        /* A middle query cut inside a literal (track_activity_query_size): the live read saw the HINT and keeps the
+           query after it; the stored graph carries no such proof, so the rewrite withholds it. */
+        var cut = "Process 3101 waits for ShareLock on transaction 5501; blocked by process 3102.\n"
+            + "Process 3102 waits for ShareLock on transaction 5500; blocked by process 3101.\n"
+            + "Process 3101: UPDATE accounts SET pin = '47\n"
+            + "Process 3102: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+        var (_, cutGraph, cutHash) = PgDeadlockRemask.RemaskReport(at, null, cut);
+        AssertNoSecret(cutGraph);
+        Assert.Equal(PgDeadlockLogParser.NormalizeGraph(cut, complete: false), cutGraph);
+        Assert.NotEqual(PgDeadlockLogParser.NormalizeGraph(cut, complete: true)!.TrimEnd('\n'), cutGraph);
+        Assert.NotEqual(PgDeadlockLogParser.IdentityOf(at, PgDeadlockLogParser.NormalizeGraph(cut, complete: true)!.TrimEnd('\n')), cutHash);
+
+        /* Neither: the rewrite is the live collector's report, identity included. */
+        var whole = Assert.Single(PgDeadlockLogParser.Extract(Report(at, 3101, 3102)));
+        Assert.Equal(whole.DeadlockHash, PgDeadlockRemask.RemaskReport(at, LegacyVictimStatement, LegacyGraph).DeadlockHash);
+    }
+
+    /// <summary>
+    /// #4012's review, the High: the stages run alerts, then reports, then findings, page after page, and each is
+    /// done only after a whole walk that rewrote nothing. An alert is rewritten while its report is still raw, so it
+    /// takes the report's new identity; an alert whose report is gone, on more than one page of alerts, takes a keyed
+    /// key; more than one page of reports is walked in one tick; a raw alert sitting behind the cursor of a walk that
+    /// rewrote rows (where a dismissal moves one) is caught by the next walk; and a restart, fresh state, walks every
+    /// table once more and changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_WalksEveryPage_InOrder_AndIsDoneOnlyAfterACleanWalk()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+
+        /* More than a page of raw reports, each its own report, with a literal in each query. */
+        var reportRows = PgDeadlockRemask.MaxReportRowsPerPass + 150;
+        await PlantRawReportsAsync(connection, reportRows, now.AddDays(-3), ct);
+
+        /* An alert naming the first raw report, and more than a page of alerts whose report is gone. */
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        var named = new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] };
+        await PlantAlertAsync(connection, now.AddDays(-3), null, AlertContextSerializer.Serialize(named), ct);
+        var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
+        var goneJson = AlertContextSerializer.Serialize(new AlertContext
+        {
+            Incidents = [new AlertIncident(goneHash, ["UPDATE creds SET pw = 'Leak4012' WHERE id = 7"])],
+        });
+        await PlantAlertsAsync(connection, PgDeadlockRemask.MaxAlertRowsPerPass + 20, goneJson, now.AddDays(-2), ct);
+
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), ct);
+
+        Assert.True(progress.Done);
+        Assert.False(progress.Alerts.GaveUp || progress.Reports.GaveUp || progress.Findings.GaveUp);
+        Assert.Equal(2, progress.Alerts.Walks);
+        Assert.Equal(2, progress.Reports.Walks);
+        /* The alert stage keyed the gone reports' alerts in its own writes (#4036's round-2 review, finding 3), so the
+           alert keys find nothing to key: one clean walk. */
+        Assert.Equal(1, progress.AlertKeys.Walks);
+        Assert.Equal(1, progress.Findings.Walks);
+        Assert.Equal(1, progress.FindingAlerts.Walks);
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+        Assert.Equal((long)reportRows, await ScalarAsync(connection, "SELECT count(*) FROM pg_deadlocks", ct));
+
+        /* Alerts first: the named alert took the report's new identity, not a keyed key. */
+        var expected = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph);
+        var alertDump = await DumpAsync(connection, "SELECT concat_ws('|', detail_text, context_json) FROM config_alert_log", ct);
+        var namedAfter = await ReadAlertsAsync(connection, ct);
+        var namedIncident = Assert.Single(
+            namedAfter.Select(a => AlertContextSerializer.TryDeserialize(a.Context, out var c) ? c.Incidents!.Single() : null),
+            i => i is not null && !i.DedupKey.StartsWith(PgLogHashKey.DeadlockAlertKeyTag, StringComparison.Ordinal));
+        Assert.Equal(expected.DedupKey, namedIncident!.DedupKey);
+        Assert.Equal(expected.InvolvedObjects, namedIncident.InvolvedObjects);
+        Assert.Equal((long)(PgDeadlockRemask.MaxAlertRowsPerPass + 20), await ScalarAsync(connection,
+            $"SELECT count(*) FROM config_alert_log WHERE strpos(context_json, '{s_key.DeadlockAlertKey(goneHash)}') > 0", ct));
+        AssertNoSecret(alertDump);
+        Assert.DoesNotContain(goneHash, alertDump, StringComparison.Ordinal);
+        Assert.DoesNotContain(first.Hash, alertDump, StringComparison.Ordinal);
+        AssertNoSecret(await DumpAsync(connection, "SELECT concat_ws('|', victim_statement, graph_text) FROM pg_deadlocks", ct));
+
+        /* A raw alert behind the cursor of a walk that has rewritten rows: planted, then the walk's state set to just
+           past it, as a dismissal that moved it there would leave it. The walk ends, and the next one catches it. */
+        await PlantAlertAsync(connection, now.AddDays(-1), null, goneJson, ct);
+        var behind = new PgDeadlockRemask.RemaskProgress();
+        behind.Alerts.WalkRewritten = 1;
+        behind.AlertCursor = DateTime.Parse(await ScalarTextAsync(connection, "SELECT to_char(max(alert_time), 'YYYY-MM-DD\"T\"HH24:MI:SS.US') FROM config_alert_log", ct), CultureInfo.InvariantCulture);
+        await PgDeadlockRemask.RunAsync(connection, behind, s_key, NullLoggerFor(), ct);
+        Assert.True(behind.Alerts.Done);
+        Assert.Equal(3, behind.Alerts.Walks);
+        Assert.DoesNotContain(goneHash, await DumpAsync(connection, "SELECT context_json FROM config_alert_log", ct), StringComparison.Ordinal);
+
+        /* A restart: fresh state walks every table once, rewrites nothing, and changes nothing. */
+        var tablesBefore = await DumpTablesAsync(connection, ct);
+        var restarted = new PgDeadlockRemask.RemaskProgress();
+        await PgDeadlockRemask.RunAsync(connection, restarted, s_key, NullLoggerFor(), ct);
+        Assert.True(restarted.Done);
+        Assert.Equal(1, restarted.Alerts.Walks);
+        Assert.Equal(1, restarted.Reports.Walks);
+        Assert.Equal(1, restarted.AlertKeys.Walks);
+        Assert.Equal(1, restarted.Findings.Walks);
+        Assert.Equal(1, restarted.FindingAlerts.Walks);
+        Assert.Equal(tablesBefore, await DumpTablesAsync(connection, ct));
+    }
+
+    /// <summary>
+    /// #4012's review: a stage that fails is logged, backs off (none, 1, then 3 ticks), and after
+    /// <see cref="PgDeadlockRemask.MaxConsecutiveStageFailures"/> failures in a row stops for the process; meanwhile
+    /// the stages after it run, so the reports are rewritten on the first tick although the alert stage fails on
+    /// every one.
+    /// </summary>
+    [Fact]
+    public async Task AFailingStage_BacksOff_IsCapped_AndDoesNotStarveTheOthers()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, 30, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        /* The alert stage's table is gone, so its page fails with 42P01 on every tick. */
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log RENAME TO config_alert_log_away", ct);
+
+        var logger = new CountingLogger();
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        Assert.Equal(1, progress.Alerts.ConsecutiveFailures);
+        Assert.False(progress.Alerts.Done);
+        Assert.True(progress.Findings.Done);
+
+        /* #4036's round-2 review, finding 2: the reports wait for the alerts to be done, not merely to be waiting out
+           a failure, so no report is rewritten before its alert is rebuilt. */
+        Assert.False(progress.Reports.Done);
+        Assert.Equal(30L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* Failures 2, 3 and 4 come after 0, 1 and 3 skipped ticks; the fourth stops the stage, and the reports run
+           on that tick. The alert keys start only then, and give up after their own four failures. */
+        var failuresByTick = new List<int>();
+        var reportsDoneByTick = new List<bool>();
+        for (var tick = 0; tick < 14; tick++)
+        {
+            await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+            failuresByTick.Add(progress.Alerts.ConsecutiveFailures);
+            reportsDoneByTick.Add(progress.Reports.Done);
+        }
+
+        Assert.Equal([2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4], failuresByTick);
+        Assert.Equal([false, false, false, false, false, false, true, true, true, true, true, true, true, true], reportsDoneByTick);
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+        Assert.True(progress.Alerts.Done);
+        Assert.True(progress.Alerts.GaveUp);
+        Assert.True(progress.AlertKeys.GaveUp);
+        Assert.True(progress.FindingAlerts.GaveUp);
+        Assert.Equal(3 * PgDeadlockRemask.MaxConsecutiveStageFailures, logger.Warnings);
+
+        /* #4012's review, finding 5: a stage that gave up is not given up for the life of the process. Within the day
+           it stays given up; a day after, it is tried again from its start, and with its table back it finishes.
+           #4036's round-2 review, finding 1: through the worker's own gate, which must still let the tick run once
+           every stage has finished or given up (Done is true then; Pending is what the worker reads). */
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log_away RENAME TO config_alert_log", ct);
+        Assert.True(progress.Done);
+        Assert.True(progress.Pending);
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        Assert.True(progress.Alerts.GaveUp);
+        foreach (var stage in progress.Stages.Where(s => s.GaveUp))
+        {
+            stage.GaveUpUtc = DateTime.UtcNow - PgDeadlockRemask.RetryGivenUpAfter - TimeSpan.FromMinutes(1);
+        }
+
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
+        Assert.True(progress.Done);
+        Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
+        Assert.False(progress.Pending);
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 2(b): an alert stage that fails once (no ticks skipped) must not let the
+    /// reports run in that tick. A report rewritten before its alert is rebuilt leaves the alert naming a hash no
+    /// report carries, and the alert-key stage then keys it: cut from its report for good. The alert must end naming
+    /// its report's new identity.
+    /// </summary>
+    [Fact]
+    public async Task AnAlertStageFailure_DoesNotLetTheReportsRunAheadOfIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+        await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(
+            new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] }), ct);
+
+        /* One failure of the alert stage: its table is away for one tick. */
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log RENAME TO config_alert_log_away", ct);
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.Equal(1, progress.Alerts.ConsecutiveFailures);
+        Assert.Equal(0, progress.Alerts.SkipTicks);
+        Assert.False(progress.Reports.Done);
+        Assert.Equal(5L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log_away RENAME TO config_alert_log", ct);
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+        Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
+
+        var reportHash = await ScalarTextAsync(connection, $"SELECT deadlock_hash FROM pg_deadlocks WHERE victim_pid = {first.VictimPid}", ct);
+        var alertKey = SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context);
+        Assert.Equal(PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph).DedupKey, reportHash);
+        Assert.Equal(reportHash, alertKey);
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 2(a): the alert-key stage waits for the reports to be rewritten by a clean
+    /// walk, not for a report stage that gave up. An alert already rebuilt to its raw report's new identity finds no
+    /// report by it while the report is raw, and keying it then would cut it from the report for good. Once the
+    /// reports' day-later retry rewrites the report, the alert names it.
+    /// </summary>
+    [Fact]
+    public async Task TheAlertKeys_WaitForAReportStageThatGaveUp()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+        await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(
+            new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] }), ct);
+        var newIdentity = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph).DedupKey;
+
+        /* The alerts are rebuilt (the alert names its report's new identity), then the report stage gives up with
+           its reports still raw, as four failures in a row leave it. */
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        while (!progress.Alerts.Done)
+        {
+            var (next, _, _, _) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, progress.AlertCursor, null, true, null, ct);
+            progress.AlertCursor = next;
+            progress.Alerts.Done = next is null;
+        }
+
+        Assert.Equal(newIdentity, SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context));
+        progress.Reports.Done = true;
+        progress.Reports.GaveUp = true;
+        progress.Reports.GaveUpUtc = DateTime.UtcNow;
+
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.Equal(0, progress.AlertKeys.Walks);
+        Assert.False(progress.AlertKeys.Done);
+        Assert.Equal(newIdentity, SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context));
+
+        /* A day later the reports are tried again and rewritten; the alert keys run then, and the alert still names
+           its report. */
+        progress.Reports.GaveUpUtc = DateTime.UtcNow - PgDeadlockRemask.RetryGivenUpAfter - TimeSpan.FromMinutes(1);
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+        Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
+        Assert.Equal(newIdentity, await ScalarTextAsync(connection, $"SELECT deadlock_hash FROM pg_deadlocks WHERE victim_pid = {first.VictimPid}", ct));
+        Assert.Equal(newIdentity, SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context));
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 2(c): an incident the pass rebuilt from its raw report carries a marker, so a
+    /// later walk never keys it, even with the key and while its report is still raw, when its new identity finds
+    /// nothing. The marker is its own property: the key is the live alert's, the cooldown seed's anchored match still
+    /// finds it, and every reader ignores the marker.
+    /// </summary>
+    [Fact]
+    public void ARebuiltIncident_IsMarked_AndNoWalkKeysIt()
+    {
+        var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
+        var rawHash = PgDeadlockLogParser.HashOf(LegacyGraph);
+        var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
+        var built = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyVictimStatement, LegacyGraph);
+        var legacy = new AlertContext
+        {
+            Incidents =
+            [
+                new AlertIncident(rawHash, [AlertContextBuilders.TruncateText(LegacyVictimStatement)]),
+                new AlertIncident(goneHash, ["UPDATE creds SET pw = 'Leak4012' WHERE id = 7"]),
+            ],
+        };
+
+        /* The report is raw: found by its raw hash, and not by its new identity. */
+        PgDeadlockRemask.ResolvedReport WhileRaw(string key) =>
+            key == rawHash ? new(PgDeadlockRemask.ReportState.Raw, built) : new(PgDeadlockRemask.ReportState.Missing, null);
+
+        var first = PgDeadlockRemask.RemaskAlert(AlertContextSerializer.Serialize(legacy), null, WhileRaw, s_key, reportsMayBeRaw: true);
+        Assert.NotNull(first);
+        var dto = Assert.IsType<AlertContextDto>(JsonSerializer.Deserialize<AlertContextDto>(first.Value.ContextJson));
+        Assert.Equal(built.DedupKey, dto.Incidents![0].DedupKey);
+        Assert.Equal(s_key.DeadlockAlertKey(goneHash), dto.Incidents[1].DedupKey);
+        Assert.Equal(Marked(AlertContextSerializer.Serialize(new AlertContext
+        {
+            Incidents = [built, new AlertIncident(s_key.DeadlockAlertKey(goneHash), ["UPDATE creds SET pw = '?' WHERE id = ?"])],
+        }), 0), first.Value.ContextJson);
+        Assert.DoesNotContain(rawHash, first.Value.ContextJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(goneHash, first.Value.ContextJson, StringComparison.Ordinal);
+
+        /* Dedupe is unchanged: the cooldown seed's anchored match finds the live alert's key. Readers ignore the
+           marker. */
+        Assert.True(AlertContextSerializer.ContextJsonContainsDedupKey(first.Value.ContextJson, built.DedupKey));
+        Assert.True(AlertContextSerializer.TryDeserialize(first.Value.ContextJson, out var read));
+        Assert.Equal(built.DedupKey, read.Incidents![0].DedupKey);
+
+        /* Walked again with the key while the report is still raw, by the alert stage or the alert-key stage: the
+           rebuilt incident finds nothing by its new identity, and is left as it is. */
+        Assert.Null(PgDeadlockRemask.RemaskAlert(first.Value.ContextJson, null, WhileRaw, s_key, reportsMayBeRaw: true));
+        Assert.Null(PgDeadlockRemask.RemaskAlert(first.Value.ContextJson, null, WhileRaw, s_key));
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, findings 2 and 3: #4022's pass (on dev before this one) rebuilt incidents without a
+    /// marker. While a report may be raw, the alert stage keys an unresolvable key only in a row no pass has
+    /// rewritten; a row #4022 rewrote may hold a still-raw report's new identity, has nothing else to rewrite, and is
+    /// not written at all. The alert-key stage, after every report is rewritten, keys what is left.
+    /// </summary>
+    [Fact]
+    public void AnUnmarkedRebuiltRow_WaitsForTheAlertKeys()
+    {
+        var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
+        var built = PgDeadlockRemask.RemaskedIncident(at, 3101, 2, LegacyVictimStatement, LegacyGraph);
+        var rebuiltBy4022 = AlertContextSerializer.Serialize(new AlertContext { Incidents = [built] });
+        static PgDeadlockRemask.ResolvedReport Missing(string key) => new(PgDeadlockRemask.ReportState.Missing, null);
+
+        Assert.Null(PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key, reportsMayBeRaw: true));
+
+        var keyed = PgDeadlockRemask.RemaskAlert(rebuiltBy4022, null, Missing, s_key);
+        Assert.NotNull(keyed);
+        Assert.Contains(s_key.DeadlockAlertKey(built.DedupKey), keyed.Value.ContextJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 3 (#4035): no re-mask write binds a raw report hash or a literal as a VALUE.
+    /// A trigger records what each UPDATE of the alert log and the reports writes, which is what the statement bound
+    /// (<c>SET context_json = $1, detail_text = $2</c>; the report's <c>$5</c>..<c>$7</c>): with the key, the alert
+    /// stage keys an incident whose report is gone in the same write that normalizes its row, rather than binding its
+    /// raw hash back and keying it on a later walk.
+    /// </summary>
+    [Fact]
+    public async Task NoRemaskWriteBindsARawReportHashAsAValue()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+        await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
+        var legacy = new AlertContext
+        {
+            Incidents =
+            [
+                new AlertIncident(first.Hash, [first.Victim!]),
+                new AlertIncident(goneHash, ["UPDATE creds SET pw = 'Leak4012' WHERE id = 7"]),
+            ],
+        };
+        await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(legacy), ct);
+        var perEvent = PerEventNotification.Split(legacy, 10)[1].Context;
+        await PlantAlertAsync(connection, now.AddDays(-2), AlertContextBuilders.ContextToDetailText(perEvent), AlertContextSerializer.Serialize(perEvent), ct);
+        var rawHashes = (await DumpAsync(connection, "SELECT deadlock_hash FROM pg_deadlocks", ct))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(5, rawHashes.Length);
+
+        await ExecuteAsync(connection, @"
+CREATE TABLE remask_bound (bound text);
+CREATE FUNCTION remask_bound_alert() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    INSERT INTO remask_bound VALUES (concat_ws('|', NEW.context_json, NEW.detail_text));
+    RETURN NEW;
+END $f$;
+CREATE FUNCTION remask_bound_report() RETURNS trigger LANGUAGE plpgsql AS $f$
+BEGIN
+    INSERT INTO remask_bound VALUES (concat_ws('|', NEW.deadlock_hash, NEW.victim_statement, NEW.graph_text));
+    RETURN NEW;
+END $f$;
+CREATE TRIGGER remask_bound_alert BEFORE UPDATE ON config_alert_log FOR EACH ROW EXECUTE FUNCTION remask_bound_alert();
+CREATE TRIGGER remask_bound_report BEFORE UPDATE ON pg_deadlocks FOR EACH ROW EXECUTE FUNCTION remask_bound_report();", ct);
+
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+        Assert.False(progress.Pending);
+
+        Assert.True(await ScalarAsync(connection, "SELECT count(*) FROM remask_bound", ct) >= 2 + 5);
+        var bound = await DumpAsync(connection, "SELECT bound FROM remask_bound", ct);
+        AssertNoSecret(bound);
+        Assert.DoesNotContain(goneHash, bound, StringComparison.Ordinal);
+        Assert.All(rawHashes, raw => Assert.DoesNotContain(raw, bound, StringComparison.Ordinal));
+        Assert.Contains(first.Hash, rawHashes);
+        Assert.Contains(s_key.DeadlockAlertKey(goneHash), bound, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 4: a row that moves physically during a walk is still reached. A Viewer
+    /// dismiss-all writes a new copy of every row, and VACUUM FULL, CLUSTER or pg_repack move every row; a copy that
+    /// lands behind a <c>ctid</c> cursor during an otherwise clean walk was never read, and the stage was marked done
+    /// over it. CLUSTER is the deterministic stand-in here: run after the walk's first row, it moves a raw alert that
+    /// sorts after a full page of current ones to the table's first block. Paged by <c>alert_time</c>, which no
+    /// UPDATE or relocation changes, the walk still reaches it.
+    /// </summary>
+    [Fact]
+    public async Task AnAlertMovedBehindTheWalk_IsStillReached()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+
+        /* A full page of alerts in #4005's form, then one raw alert, later than all of them, on a server whose id
+           sorts first, so CLUSTER on (server_id, metric_name, alert_time) puts it in the first block. */
+        var current = AlertContextSerializer.Serialize(new AlertContext
+        {
+            Incidents = [new AlertIncident(PgDeadlockLogParser.ReportIdentity(now.AddDays(-3), 7), ["UPDATE t SET a = $1"])],
+        });
+        await PlantAlertsAsync(connection, PgDeadlockRemask.MaxAlertRowsPerPass, current, now.AddDays(-2), ct);
+        var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
+        await ExecuteAsync(connection, $@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, muted, context_json)
+VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.DeadlockWatermarkMetric}', 1, 1, true, 'webhook', false,
+        '{AlertContextSerializer.Serialize(new AlertContext { Incidents = [new AlertIncident(goneHash, ["UPDATE creds SET pw = 'Leak4012' WHERE id = 7"])] }).Replace("'", "''", StringComparison.Ordinal)}')", ct);
+
+        var moved = false;
+        string? movedTo = null;
+        var progress = new PgDeadlockRemask.RemaskProgress
+        {
+            RowCounted = (stage, _) =>
+            {
+                if (moved || stage.Name != "alert")
+                {
+                    return;
+                }
+
+                moved = true;
+                using var mover = new NpgsqlConnection(scratch.ConnectionString);
+                mover.Open();
+                using var cluster = new NpgsqlCommand("CLUSTER config_alert_log USING idx_config_alert_log_time", mover);
+                cluster.ExecuteNonQuery();
+                using var where = new NpgsqlCommand("SELECT ctid::text FROM config_alert_log WHERE server_id = 1", mover);
+                movedTo = (string?)where.ExecuteScalar();
+            },
+        };
+
+        /* No key, so the alert-key stage waits and cannot rescue a row the alert stage missed: the alert stage alone
+           must reach it. */
+        await TickAsTheWorkerAsync(connection, progress, null, NullLoggerFor(), ct);
+        Assert.True(moved);
+
+        /* Behind every row the walk's first page read. */
+        Assert.Equal("(0,1)", movedTo);
+        Assert.True(progress.Alerts.Done);
+        Assert.False(progress.Alerts.GaveUp);
+
+        /* The walk that met it rewrote it, so a second, clean walk was needed; a walk that missed it is clean at once. */
+        Assert.Equal(2, progress.Alerts.Walks);
+        var dump = await DumpAsync(connection, "SELECT context_json FROM config_alert_log WHERE server_id = 1", ct);
+        AssertNoSecret(dump);
+        Assert.Contains("WHERE id = ?", dump, StringComparison.Ordinal);
+    }
+
+    /* The expected context of a rewritten alert: its incidents at the given positions carry the rebuilt marker,
+       after their other members. */
+    private static string Marked(string json, params int[] incidents)
+    {
+        var root = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        foreach (var index in incidents)
+        {
+            root["Incidents"]![index]!.AsObject()[PgDeadlockRemask.RebuiltIncidentMarker] = true;
+        }
+
+        return root.ToJsonString();
+    }
+
+    private static string SingleIncidentKey(string contextJson) =>
+        Assert.Single(Assert.IsType<AlertContextDto>(JsonSerializer.Deserialize<AlertContextDto>(contextJson)).Incidents!).DedupKey;
+
+    /* One hourly tick as DarlingWorker runs it: RunAsync behind the worker's own gate, which
+       TheWorkerRunsTheRemaskWithOrWithoutAKey pins the worker to. */
+    private static async Task TickAsTheWorkerAsync(
+        NpgsqlConnection connection, PgDeadlockRemask.RemaskProgress progress, PgLogHashKey? key,
+        Microsoft.Extensions.Logging.ILogger logger, CancellationToken ct)
+    {
+        if (progress.Pending)
+        {
+            await PgDeadlockRemask.RunAsync(connection, progress, key, logger, ct);
+        }
+    }
+
+    /// <summary>
+    /// #4012's review: a cancel mid-page (the tick's budget) keeps the cursor at the last row the page finished, so
+    /// the next tick resumes after it rather than reading the page again; and the driver ends quietly on its cancel,
+    /// leaving each cursor where it stood.
+    /// </summary>
+    [Fact]
+    public async Task ABudgetCancel_KeepsTheCursorAtTheLastFinishedRow()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        await PlantRawReportsAsync(connection, 40, DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2), ct);
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var finished = new List<PgDeadlockRemask.ReportCursor>();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PgDeadlockRemask.RemaskStoredReportsAsync(connection, null, (row, _) =>
+        {
+            /* Each planted report is its own batch, so every row closes one. */
+            finished.Add(Assert.NotNull(row));
+            if (finished.Count == 10)
+            {
+                budget.Cancel();
+            }
+        }, budget.Token));
+
+        Assert.Equal(10, finished.Count);
+        Assert.Equal(30L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* The driver, handed that cursor, resumes after the tenth row: the ten are not read again. */
+        var progress = new PgDeadlockRemask.RemaskProgress { ReportCursor = finished[^1] };
+        progress.Alerts.Done = true;
+        var (_, examined, rewritten, _) = await PgDeadlockRemask.RemaskStoredReportsAsync(connection, progress.ReportCursor, null, ct);
+        Assert.Equal(30, rewritten);
+
+        /* The cursor is the last finished batch, with no hash in it (#4035), so not one of the ten is read again. */
+        Assert.Equal(30, examined);
+
+        /* Canceled before it starts, the driver returns quietly and moves no cursor. */
+        using var spent = new CancellationTokenSource();
+        await spent.CancelAsync();
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), spent.Token);
+        Assert.Equal(finished[^1], progress.ReportCursor);
+        Assert.False(progress.Reports.Done);
+    }
+
+    /// <summary>
+    /// #4012's review, finding 6 (#4035): no statement sends a raw report's hash back to the store as a parameter,
+    /// where <c>log_min_duration_statement</c> would write it into the store's own log. The report walk's cursor is
+    /// its batch, the report write takes the hash from the row the page read, and the alert page resolves its
+    /// incidents' reports in SQL from its own <c>context_json</c>.
+    /// </summary>
+    [Fact]
+    public void NoStatementBindsARawReportHash()
+    {
+        Assert.DoesNotContain("deadlock_hash) >", PgDeadlockRemask.ReportPageSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", PgDeadlockRemask.ReportPageSql, StringComparison.Ordinal);
+        foreach (var sql in new[] { PgDeadlockRemask.ReportUpdateSql, PgDeadlockRemask.ReportUpdateOwnBatchSql })
+        {
+            Assert.DoesNotMatch(@"deadlock_hash\s*=\s*\$", sql[sql.IndexOf("WHERE", StringComparison.Ordinal)..]);
+            Assert.Contains("d.deadlock_hash = (", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("$8", sql, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("unnest(", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$3", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
+        Assert.Contains("regexp_matches(p.context_json", PgDeadlockRemask.AlertPageSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4012's review, finding 1: the worker runs the re-mask whether or not it has a log-hash key, and hands the key
+    /// over as it stands; <see cref="PgDeadlockRemask.RunAsync"/> decides what waits for one.
+    /// </summary>
+    [Fact]
+    public void TheWorkerRunsTheRemaskWithOrWithoutAKey()
+    {
+        var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
+        Assert.Contains("await PgDeadlockRemask.RunAsync(connection, _pgDeadlockRemask, _pgDeadlockRemaskKey, _logger, remaskBudget.Token);", worker, StringComparison.Ordinal);
+
+        /* #4036's round-2 review, finding 1: the gate the tests' TickAsTheWorkerAsync reproduces. Done counts a stage
+           that gave up, so gated on it the day-later retry never ran. */
+        Assert.Contains("if (_pgDeadlockRemask.Pending)", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("_pgDeadlockRemask.Done", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("_pgDeadlockRemaskKey is not", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("_pgDeadlockRemaskKey is null", worker, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4012's review, finding 1: without a log-hash key (an untrusted key directory or ACL, an unreadable key file,
+    /// DPAPI after the service moved machines) the reports, alerts, findings and finding alerts are re-masked all the
+    /// same; only the alert-key stage waits, says so once, and is never counted done. Given a key later, it runs.
+    /// </summary>
+    [Fact]
+    public async Task WithoutAKey_EveryStageButTheAlertKeysRuns()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+
+        await PlantRawReportsAsync(connection, 20, now.AddDays(-3), ct);
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        await PlantAlertAsync(connection, now.AddDays(-3), null, AlertContextSerializer.Serialize(
+            new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] }), ct);
+        var goneHash = PgDeadlockLogParser.HashOf("a report retention dropped");
+        await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(new AlertContext
+        {
+            Incidents = [new AlertIncident(goneHash, ["UPDATE creds SET pw = 'Leak4012' WHERE id = 7"])],
+        }), ct);
+        var (legacyDrillDown, legacyStory) = LegacyFinding();
+        var analysedAt = now.AddDays(-1);
+        await PlantFindingAsync(connection, 1, analysedAt, legacyDrillDown, legacyStory, ct, storyPathHash: "4012abcd00000000");
+        var (findingMetric, findingContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012abcd00000000");
+        await PlantAlertAsync(connection, analysedAt.AddMinutes(2), null, findingContext, ct, findingMetric);
+
+        var logger = new CountingLogger();
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await PgDeadlockRemask.RunAsync(connection, progress, null, logger, ct);
+        await PgDeadlockRemask.RunAsync(connection, progress, null, logger, ct);
+
+        Assert.True(progress.Alerts.Done && progress.Reports.Done && progress.Findings.Done && progress.FindingAlerts.Done);
+        Assert.False(progress.Alerts.GaveUp || progress.Reports.GaveUp || progress.Findings.GaveUp || progress.FindingAlerts.GaveUp);
+        Assert.False(progress.AlertKeys.Done);
+        Assert.False(progress.AlertKeys.GaveUp);
+        Assert.Equal(0, progress.AlertKeys.Walks);
+        Assert.False(progress.Done);
+        Assert.Equal(1, logger.Warnings);
+
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+        var tables = await DumpTablesAsync(connection, ct);
+        AssertNoSecret(tables);
+        Assert.DoesNotContain(first.Hash, tables, StringComparison.Ordinal);
+        Assert.DoesNotContain(PgDeadlockLogParser.HashOf(LegacyGraph), tables, StringComparison.Ordinal);
+
+        /* The alert whose report is gone has its statement normalized, and keeps its key until there is one to key
+           it with. */
+        Assert.Contains(goneHash, tables, StringComparison.Ordinal);
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, logger, ct);
+        Assert.True(progress.Done);
+        Assert.Equal(1, logger.Warnings);
+        Assert.DoesNotContain(goneHash, await DumpTablesAsync(connection, ct), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4012's review, finding 2: a page cut short loses no row's outcome. A tick canceled mid-page (as the row it was
+    /// writing committed) after rewriting three reports and leaving two, then a tick that completes the walk over
+    /// rows that are all current, must not take that walk for a clean one: the stage walks again, rewrites the report
+    /// it left, and is done only then.
+    /// </summary>
+    [Fact]
+    public async Task ACancelMidPage_ThenACompletedWalk_NeverLeavesTheStageDoneOverARawRow()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var from = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-2);
+
+        /* Five raw reports; the fourth's batch also holds a raw twin (the same time and victim, another graph), which
+           the rewrite cannot tell from it and so leaves, both; then three reports already current. */
+        await PlantRawReportsAsync(connection, 5, from, ct);
+        await ExecuteAsync(connection, @"
+INSERT INTO pg_deadlocks
+    (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
+SELECT collection_id + 100, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count,
+       upper(left(encode(sha256(convert_to(graph_text || ' twin', 'UTF8')), 'hex'), 32)), lock_modes, resources, victim_statement, graph_text || ' twin'
+FROM pg_deadlocks
+WHERE victim_pid = 10004", ct);
+        for (var i = 0; i < 3; i++)
+        {
+            var at = from.AddMinutes(10 + i);
+            var current = Assert.Single(PgDeadlockLogParser.Extract(Report(at, 7101 + i, 7201 + i)));
+            await PlantAsync(connection, at.AddMinutes(1), at, 7101 + i, "C" + i, current.DeadlockHash, current.VictimStatement, current.GraphText, ct);
+        }
+
+        /* The fifth report as the row being written when the cancel lands, its commit landing with it. */
+        var fifth = await DumpAsync(connection, "SELECT occurred_at FROM pg_deadlocks WHERE victim_pid = 10005", ct);
+        Assert.NotEmpty(fifth);
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        var counted = 0;
+        progress.RowCounted = (stage, _) =>
+        {
+            if (!ReferenceEquals(stage, progress.Reports) || ++counted != 5)
+            {
+                return;
+            }
+
+            using var other = new NpgsqlConnection(scratch.ConnectionString);
+            other.Open();
+            using var read = new NpgsqlCommand("SELECT occurred_at, victim_statement, graph_text FROM pg_deadlocks WHERE victim_pid = 10005", other);
+            DateTime occurredAt;
+            string? victimStatement;
+            string graphText;
+            using (var reader = read.ExecuteReader())
+            {
+                Assert.True(reader.Read());
+                occurredAt = reader.GetDateTime(0);
+                victimStatement = reader.IsDBNull(1) ? null : reader.GetString(1);
+                graphText = reader.GetString(2);
+            }
+
+            var (victim, graph, hash) = PgDeadlockRemask.RemaskReport(occurredAt, victimStatement, graphText);
+            using var write = new NpgsqlCommand("UPDATE pg_deadlocks SET victim_statement = $1, graph_text = $2, deadlock_hash = $3 WHERE victim_pid = 10005", other);
+            write.Parameters.Add(new NpgsqlParameter { Value = (object?)victim ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+            write.Parameters.AddWithValue(graph);
+            write.Parameters.AddWithValue(hash);
+            Assert.Equal(1, write.ExecuteNonQuery());
+            budget.Cancel();
+        };
+
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), budget.Token);
+        Assert.False(progress.Reports.Done);
+        Assert.Equal(5, counted);
+        Assert.Equal(2L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* The twin goes, so the report left can be rewritten; the next tick completes the walk over current rows. */
+        await ExecuteAsync(connection, "DELETE FROM pg_deadlocks WHERE graph_text LIKE '% twin'", ct);
+        progress.RowCounted = null;
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), ct);
+
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+        Assert.True(progress.Reports.Done);
+        Assert.False(progress.Reports.GaveUp);
+        Assert.True(progress.Reports.Walks >= 2);
+    }
+
+    /// <summary>
+    /// #4012's review, finding 3: a finding sent as an alert before #4005 flattened its deadlock exemplars into the
+    /// alert's context, a 300-character JSON prefix with the raw <c>deadlock_hash</c> and a note naming the raw victim
+    /// fingerprint, and the prose it was frozen with names it too. The finding-alert stage rewrites them from the
+    /// finding's normalized section while the finding is stored, and withholds them once it is gone; either way no
+    /// raw hash and no literal is left, and a second pass changes nothing.
+    /// </summary>
+    [Fact]
+    public async Task AFindingAlert_IsRewrittenFromItsFinding_OrWithheld()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+
+        var (legacyDrillDown, legacyStory) = LegacyFinding();
+        await PlantFindingAsync(connection, 1, now.AddDays(-1), legacyDrillDown, legacyStory, ct, storyPathHash: "4012abcd00000000");
+        var (kept, keptContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012abcd00000000");
+        await PlantAlertAsync(connection, now.AddDays(-1).AddMinutes(3), null, keptContext, ct, kept);
+        var (gone, goneContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012dead00000000");
+        /* Its finding is gone (no finding carries its story hash), recorded since #3721 as every such alert is. */
+        await PlantAlertAsync(connection, now.AddDays(-1).AddMinutes(4), null, goneContext, ct, gone);
+
+        /* #4036's round-2 review, finding 6: a row recorded before FindingAlertSectionSince cannot carry the section,
+           and its context is not read; planted with one all the same, it is left exactly as it is. */
+        var (early, earlyContext) = LegacyFindingAlert(legacyDrillDown, legacyStory, "4012e0e000000000");
+        await PlantAlertAsync(connection, PgDeadlockRemask.FindingAlertSectionSince.AddMinutes(-1), null, earlyContext, ct, early);
+        Assert.Contains(PgDeadlockLogParser.HashOf(LegacyGraph), keptContext, StringComparison.Ordinal);
+        Assert.Contains("4721", keptContext, StringComparison.Ordinal);
+
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+        Assert.Equal(2, progress.FindingAlerts.Walks);
+
+        var alerts = await ReadAlertsAsync(connection, ct);
+        Assert.Contains((earlyContext, (string?)null), alerts);
+        alerts.Remove((earlyContext, null));
+        foreach (var (context, _) in alerts)
+        {
+            AssertNoSecret(context);
+            Assert.DoesNotContain(PgDeadlockLogParser.HashOf(LegacyGraph), context, StringComparison.Ordinal);
+        }
+
+        /* The finding is stored: the section reads as the live alert flattens the finding's normalized one. */
+        var fingerprint = PgTargetDrillDownCollector.Fingerprint(PgDeadlockLogParser.NormalizeStatement(LegacyVictimStatement))!;
+        var rewritten = Assert.Single(alerts, a => a.Context.Contains("{\"Label\":\"Sql Normalized\",\"Value\":\"true\"}", StringComparison.Ordinal)).Context;
+        Assert.Contains(JsonSerializer.Serialize("with the victim `" + fingerprint + "`")[1..^1], rewritten, StringComparison.Ordinal);
+        Assert.DoesNotContain(PgDeadlockRemask.WithheldBefore4005, rewritten, StringComparison.Ordinal);
+
+        /* The finding is gone: withheld. */
+        var withheld = Assert.Single(alerts, a => a.Context.Contains(PgDeadlockRemask.WithheldBefore4005, StringComparison.Ordinal)).Context;
+        Assert.DoesNotContain("Sql Normalized", withheld, StringComparison.Ordinal);
+        Assert.DoesNotContain("with the victim `", withheld, StringComparison.Ordinal);
+
+        var tablesBefore = await DumpTablesAsync(connection, ct);
+        var again = new PgDeadlockRemask.RemaskProgress();
+        await PgDeadlockRemask.RunAsync(connection, again, s_key, NullLoggerFor(), ct);
+        Assert.Equal(1, again.FindingAlerts.Walks);
+        Assert.Equal(tablesBefore, await DumpTablesAsync(connection, ct));
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 5: another stored run of the same story, newer than the one the alert was sent
+    /// for but before the alert was recorded (an on-demand analysis, a rerun that queued no page), is the finding the
+    /// page finds. Its exemplar section's other fields are counts and fixed text, which match; its Diagnosis does not.
+    /// A different severity or a different window withholds the SQL rather than writing the other run's exemplars
+    /// over the alert's. The same finding, window and all, is still rewritten from it.
+    /// </summary>
+    [Fact]
+    public async Task AFindingAlert_WhoseStoryRanAgain_IsWithheld_NotRewrittenFromTheOtherRun()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var at = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-1).AddHours(12);
+        var (start, otherStart, end) = (at.AddHours(-2), at.AddHours(-3), at.AddHours(-1));
+        var (legacyDrillDown, legacyStory) = LegacyFinding();
+
+        /* abcd: the other run's severity differs. beef: its window differs. cafe: one run, the alert's own. */
+        await PlantFindingAsync(connection, 1, at, legacyDrillDown, legacyStory, ct, storyPathHash: "4012abcd00000000", windowStart: start, windowEnd: end);
+        await PlantFindingAsync(connection, 2, at.AddMinutes(1), legacyDrillDown, legacyStory, ct, storyPathHash: "4012abcd00000000", severity: 0.7, windowStart: start, windowEnd: end);
+        await PlantFindingAsync(connection, 3, at, legacyDrillDown, legacyStory, ct, storyPathHash: "4012beef00000000", windowStart: start, windowEnd: end);
+        await PlantFindingAsync(connection, 4, at.AddMinutes(1), legacyDrillDown, legacyStory, ct, storyPathHash: "4012beef00000000", windowStart: otherStart, windowEnd: end);
+        await PlantFindingAsync(connection, 5, at, legacyDrillDown, legacyStory, ct, storyPathHash: "4012cafe00000000", windowStart: start, windowEnd: end);
+        foreach (var hash in new[] { "4012abcd00000000", "4012beef00000000", "4012cafe00000000" })
+        {
+            var (metric, context) = LegacyFindingAlert(legacyDrillDown, legacyStory, hash, start, end);
+            await PlantAlertAsync(connection, at.AddMinutes(3), null, context, ct, metric);
+        }
+
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+
+        var byMetric = await DumpAsync(connection, "SELECT metric_name || '|' || context_json FROM config_alert_log ORDER BY metric_name", ct);
+        var rows = byMetric.Split('\n');
+        Assert.Equal(3, rows.Length);
+        foreach (var row in rows)
+        {
+            AssertNoSecret(row);
+            Assert.DoesNotContain(PgDeadlockLogParser.HashOf(LegacyGraph), row, StringComparison.Ordinal);
+        }
+
+        foreach (var withheld in rows.Where(r => r.Contains("[4012abcd]", StringComparison.Ordinal) || r.Contains("[4012beef]", StringComparison.Ordinal)))
+        {
+            Assert.Contains(PgDeadlockRemask.WithheldBefore4005, withheld, StringComparison.Ordinal);
+            Assert.DoesNotContain("Sql Normalized", withheld, StringComparison.Ordinal);
+        }
+
+        var same = Assert.Single(rows, r => r.Contains("[4012cafe]", StringComparison.Ordinal));
+        Assert.Contains("{\"Label\":\"Sql Normalized\",\"Value\":\"true\"}", same, StringComparison.Ordinal);
+        Assert.DoesNotContain(PgDeadlockRemask.WithheldBefore4005, same, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4012's review, finding 4: the exemplar section is attached when a deadlock fact is anywhere on the chain, not
+    /// only at its root, so a finding rooted elsewhere with the deadlock fact behind it is rewritten too.
+    /// </summary>
+    [Fact]
+    public async Task AFindingWhoseDeadlockFactIsOffTheRoot_IsRewrittenToo()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+
+        var (legacyDrillDown, legacyStory) = LegacyFinding();
+        await PlantFindingAsync(connection, 1, now.AddDays(-1), legacyDrillDown, legacyStory, ct,
+            storyPath: "PG_LOCK_WAIT_RATE → " + PgTargetFactKeys.AnomalyDeadlockRate);
+
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await PgDeadlockRemask.RunAsync(connection, progress, s_key, NullLoggerFor(), ct);
+
+        var (drillDown, story) = (await ReadFindingsAsync(connection, ct))[1];
+        AssertNoSecret(drillDown);
+        AssertNoSecret(story);
+        Assert.Contains("\"sql_normalized\":true", drillDown, StringComparison.Ordinal);
+    }
+
     /* ───────────────────────── helpers ───────────────────────── */
+
+    /* A finding alert as the analysis sent it before #4005 for the legacy finding: the live context builder over
+       that finding, so the flattened section, its note and the frozen prose carry what they carried then. */
+    private static (string Metric, string ContextJson) LegacyFindingAlert(
+        string drillDown, string story, string storyPathHash, DateTime? windowStart = null, DateTime? windowEnd = null)
+    {
+        var finding = new AnalysisFinding
+        {
+            ServerId = ServerId,
+            ServerName = ServerName,
+            Category = "deadlocks",
+            StoryPath = PgTargetFactKeys.DeadlockRate,
+            StoryPathHash = storyPathHash,
+            RootFactKey = PgTargetFactKeys.DeadlockRate,
+            TimeRangeStart = windowStart,
+            TimeRangeEnd = windowEnd,
+            Severity = 0.9,
+            Confidence = 1,
+            FactCount = 1,
+            StoryText = story,
+            DrillDown = DrillDownSerializer.Deserialize(drillDown),
+        };
+        return (FindingMessageFormatter.MetricName(finding), AlertContextSerializer.Serialize(FindingMessageFormatter.BuildContext(finding, 0.5)));
+    }
+
+    private static string ReadSource(string relativePath)
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relativePath)))
+        {
+            dir = System.IO.Directory.GetParent(dir)?.FullName;
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relativePath));
+    }
+
+    private static Microsoft.Extensions.Logging.ILogger NullLoggerFor() => Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+
+    /* Counts the warnings the driver logs, one per failure. */
+    private sealed class CountingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public int Warnings { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                Warnings++;
+            }
+        }
+    }
+
+    private static async Task<NpgsqlConnection> OpenMigratedAsync(string connectionString, CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        if (await LiveTimescaleProbe.TryEnableAsync(connectionString, ct))
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
+        }
+
+        return connection;
+    }
+
+    /* n raw reports as the collector before #4005 stored them: each its own report (its own timestamp and pids), a
+       PIN in each query, the hash over the raw graph, spread a minute apart. */
+    private static async Task PlantRawReportsAsync(NpgsqlConnection connection, int n, DateTime from, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+INSERT INTO pg_deadlocks
+    (collection_id, collection_time, server_id, server_name, occurred_at, victim_pid, participant_count, deadlock_hash, lock_modes, resources, victim_statement, graph_text)
+SELECT $1 + g, $2 + g * interval '1 minute', $3, $4, $2 + g * interval '1 minute' - interval '5 seconds', 10000 + g, 2,
+       upper(left(encode(sha256(convert_to(t.graph, 'UTF8')), 'hex'), 32)), 'ShareLock', 'transaction 5500, transaction 5501',
+       'UPDATE accounts SET pin = ''4721'' WHERE id = ' || g, t.graph
+FROM generate_series(1, $5) AS g
+CROSS JOIN LATERAL (SELECT
+    'Process ' || (10000 + g) || ' waits for ShareLock on transaction 5501; blocked by process ' || (20000 + g) || '.' || chr(10)
+    || 'Process ' || (20000 + g) || ' waits for ShareLock on transaction 5500; blocked by process ' || (10000 + g) || '.' || chr(10)
+    || 'Process ' || (10000 + g) || ': UPDATE accounts SET pin = ''4721'' WHERE id = ' || g || chr(10)
+    || 'Process ' || (20000 + g) || ': UPDATE accounts SET pin = ''9034'' WHERE id = ' || g AS graph) AS t", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(from, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(n);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<(string Hash, DateTime OccurredAt, int VictimPid, string? Victim, string Graph)> ReadFirstRawReportAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT deadlock_hash, occurred_at, victim_pid, victim_statement, graph_text FROM pg_deadlocks ORDER BY collection_time LIMIT 1", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.GetString(0), reader.GetDateTime(1), reader.GetInt32(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.GetString(4));
+    }
+
+    private static async Task PlantAlertsAsync(NpgsqlConnection connection, int n, string contextJson, DateTime at, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+INSERT INTO config_alert_log
+    (alert_time, server_id, server_name, metric_name, current_value, threshold_value, alert_sent, notification_type, send_error, muted, detail_text, context_json)
+SELECT $1 + g * interval '1 second', $2, $3, $4, 1, 1, true, 'webhook', NULL, false, NULL, $5
+FROM generate_series(1, $6) AS g", connection);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(at, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(AlertEngine.DeadlockWatermarkMetric);
+        command.Parameters.AddWithValue(contextJson);
+        command.Parameters.AddWithValue(n);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<long> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await command.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<string> ScalarTextAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return (string)(await command.ExecuteScalarAsync(ct))!;
+    }
 
     private sealed record Reads(
         List<DarlingPgDeadlockReader.PgDeadlockRow> Summary,
@@ -446,35 +1563,45 @@ public sealed class PgDeadlockRemaskTests
     private static async Task<(int Alerts, int Findings, int Reports, int Failed)> RunPassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         int alerts = 0, findings = 0, reports = 0, failed = 0;
-        string? alertCursor = null;
+        DateTime? alertCursor = null;
         do
         {
-            var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, alertCursor, ct);
+            var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, alertCursor, s_key, true, null, ct);
             Assert.Equal(0, raced);
             alerts += rewritten;
             alertCursor = next;
         }
         while (alertCursor is not null);
 
-        string? findingCursor = null;
-        do
-        {
-            var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, findingCursor, ct);
-            Assert.Equal(0, raced);
-            findings += rewritten;
-            findingCursor = next;
-        }
-        while (findingCursor is not null);
-
         PgDeadlockRemask.ReportCursor? reportCursor = null;
         do
         {
-            var (next, _, rewritten, failures) = await PgDeadlockRemask.RemaskStoredReportsAsync(connection, reportCursor, ct);
+            var (next, _, rewritten, failures) = await PgDeadlockRemask.RemaskStoredReportsAsync(connection, reportCursor, null, ct);
             reports += rewritten;
             failed += failures;
             reportCursor = next;
         }
         while (reportCursor is not null);
+
+        /* Every report rewritten: the alerts once more, keying the ones whose report cannot be found. */
+        do
+        {
+            var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, alertCursor, s_key, false, null, ct);
+            Assert.Equal(0, raced);
+            alerts += rewritten;
+            alertCursor = next;
+        }
+        while (alertCursor is not null);
+
+        long? findingCursor = null;
+        do
+        {
+            var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, findingCursor, null, ct);
+            Assert.Equal(0, raced);
+            findings += rewritten;
+            findingCursor = next;
+        }
+        while (findingCursor is not null);
 
         return (alerts, findings, reports, failed);
     }
@@ -547,18 +1674,27 @@ public sealed class PgDeadlockRemaskTests
     }
 
     private static async Task PlantFindingAsync(
-        NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct)
+        NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct,
+        string storyPath = PgTargetFactKeys.DeadlockRate, string storyPathHash = "h", double severity = 0.9,
+        DateTime? windowStart = null, DateTime? windowEnd = null)
     {
+        /* Severity, confidence and window as LegacyFindingAlert's alert for it reads them, unless a test says
+           otherwise (#4036's round-2 review, finding 5). */
         await using var command = new NpgsqlCommand(@"
 INSERT INTO analysis_findings
-    (finding_id, analysis_time, server_id, server_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, drill_down_json)
-VALUES ($1, $2, $3, $4, 0.6, 1, 'deadlocks', 'PG_DEADLOCK_RATE', 'h', $5, 'PG_DEADLOCK_RATE', 1, $6)", connection);
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, drill_down_json, time_range_start, time_range_end)
+VALUES ($1, $2, $3, $4, $9, 1, 'deadlocks', $7, $8, $5, split_part($7, ' → ', 1), 1, $6, $10, $11)", connection);
         command.Parameters.AddWithValue(findingId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(analysisTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
         command.Parameters.AddWithValue(story);
         command.Parameters.AddWithValue(drillDown);
+        command.Parameters.AddWithValue(storyPath);
+        command.Parameters.AddWithValue(storyPathHash);
+        command.Parameters.AddWithValue(severity);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)windowStart ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)windowEnd ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -626,7 +1762,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 2, $7, 'ShareLock', $10, $8, $9)", connection);
     }
 
     private static async Task PlantAlertAsync(
-        NpgsqlConnection connection, DateTime alertTime, string? detailText, string contextJson, CancellationToken ct)
+        NpgsqlConnection connection, DateTime alertTime, string? detailText, string contextJson, CancellationToken ct, string? metricName = null)
     {
         await using var command = new NpgsqlCommand(@"
 INSERT INTO config_alert_log
@@ -635,7 +1771,7 @@ VALUES ($1, $2, $3, $4, 1, 1, true, 'webhook', NULL, false, $5, $6)", connection
         command.Parameters.AddWithValue(DateTime.SpecifyKind(alertTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(ServerName);
-        command.Parameters.AddWithValue(AlertEngine.DeadlockWatermarkMetric);
+        command.Parameters.AddWithValue(metricName ?? AlertEngine.DeadlockWatermarkMetric);
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)detailText ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
         command.Parameters.AddWithValue(contextJson);
         await command.ExecuteNonQueryAsync(ct);

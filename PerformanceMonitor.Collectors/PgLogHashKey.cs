@@ -36,8 +36,9 @@ namespace PerformanceMonitor.Collectors;
 /// still inside the self-hosted tail's overlap window once more, and a statement shape's fingerprint changes once:
 /// the one-time discontinuity #4013 accepted.</para>
 ///
-/// <para>A class, not a record, holding only the two derived subkeys, and <see cref="ToString"/> names no byte of
-/// either, so no generated member can put key material in a log line.</para>
+/// <para>A class, not a record, holding only the derived subkeys (the two above, and the deadlock alert key
+/// #4012's review added), and <see cref="ToString"/> names no byte of any, so no generated member can put key
+/// material in a log line.</para>
 /// </summary>
 public sealed class PgLogHashKey
 {
@@ -63,6 +64,7 @@ public sealed class PgLogHashKey
 
     private readonly byte[] _rawLineKey;
     private readonly byte[] _fingerprintKey;
+    private readonly byte[] _deadlockAlertKey;
 
     /// <param name="key">Exactly <see cref="KeyLength"/> bytes of key material.</param>
     /// <exception cref="ArgumentException">The key is not <see cref="KeyLength"/> bytes.</exception>
@@ -79,6 +81,25 @@ public sealed class PgLogHashKey
            line and as a statement gives two unrelated values, so neither column can be matched against the other. */
         _rawLineKey = HMACSHA256.HashData(key, "darling-pg-log-raw-line-v1"u8);
         _fingerprintKey = HMACSHA256.HashData(key, "darling-pg-log-statement-fingerprint-v1"u8);
+        _deadlockAlertKey = HMACSHA256.HashData(key, "darling-pg-deadlock-alert-key-v1"u8);
+    }
+
+    /// <summary>What <see cref="DeadlockAlertKey"/>'s value starts with. Never the shape of a report hash (32 hex
+    /// characters) or a report identity (<c>at-</c>), so a key rewritten once is not taken for either again.</summary>
+    public const string DeadlockAlertKeyTag = "hk-";
+
+    /// <summary>
+    /// A stored deadlock alert's incident key whose report can no longer be found, keyed (#4012's review). Such a key
+    /// may be the SHA-256 of a report's raw graph from before #4005, a test for the literals #4004 removed, and with
+    /// the report gone nothing is left to rebuild the normalized identity from. Under its own subkey (domain
+    /// separation: never the <see cref="RawLineHash"/> one), so two alerts that shared a key still share one, and a
+    /// store reader has nothing to test a guess against.
+    /// </summary>
+    public string DeadlockAlertKey(string reportKey)
+    {
+        ArgumentNullException.ThrowIfNull(reportKey);
+        return DeadlockAlertKeyTag
+            + Convert.ToHexString(HMACSHA256.HashData(_deadlockAlertKey, Encoding.UTF8.GetBytes(reportKey)), 0, HashBytes);
     }
 
     /// <summary>
