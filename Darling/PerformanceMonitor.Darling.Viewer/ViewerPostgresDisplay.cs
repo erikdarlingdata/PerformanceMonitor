@@ -1090,8 +1090,13 @@ internal static class PgDisplay
             Metric("Checkpoints", "Timed", row.CheckpointsTimed,
                 "Checkpoints that began because checkpoint_timeout elapsed. This is the healthy kind."),
             Metric("Checkpoints", "Requested", row.CheckpointsRequested,
-                "Began because WAL volume demanded one. Climbing against Timed is the classic "
-                + "max_wal_size-too-small signal."),
+                row.PostmasterRestartedDuringWindow
+                    /* #3955: blank for a reason the reset note does not cover, so this row says it. */
+                    ? "Blank: PostgreSQL restarted inside this window, and a shutdown checkpoint is counted as "
+                      + "requested and survives the restart, so across one this count cannot be told from WAL "
+                      + "pressure. Choose a window that starts after the restart to see it."
+                    : "Began because WAL volume demanded one. Climbing against Timed is the classic "
+                      + "max_wal_size-too-small signal."),
             Metric("Checkpoints", "Completed", row.CheckpointsDone,
                 "PostgreSQL 18+. Blank on earlier majors, which do not expose it."),
             MetricMs("Checkpoints", "Write Time (ms)", row.CheckpointWriteTimeMs,
