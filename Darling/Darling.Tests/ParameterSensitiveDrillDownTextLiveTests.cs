@@ -237,11 +237,7 @@ LIMIT 5";
     }
 
     /// <summary>
-    /// The rows a plan resolves against <c>query_text_dim</c>: at every join with the dimension on one side,
-    /// the actual rows (across loops) arriving from the OTHER side. Counted at the join rather than at the
-    /// dimension's scan because the join METHOD is the planner's call — a hash join over a dimension this
-    /// small reads all of it for five probe rows, and a nested loop over a large one reads one row per
-    /// probe — while the probe side is the property the read shape decides.
+    /// The rows a plan resolves against <c>query_text_dim</c>, from the executed plan (<see cref="ExplainJoinProbe"/>).
     /// </summary>
     private static async Task<double> RowsResolvedAgainstTheDimensionAsync(
         NpgsqlConnection connection, string sql, DateTime windowStart, DateTime windowEnd, CancellationToken ct)
@@ -252,41 +248,7 @@ LIMIT 5";
         };
         AddWindowParameters(cmd, windowStart, windowEnd);
 
-        var json = (string)(await cmd.ExecuteScalarAsync(ct))!;
-        using var document = JsonDocument.Parse(json);
-
-        var resolved = 0.0;
-        Walk(document.RootElement[0].GetProperty("Plan"));
-        return resolved;
-
-        void Walk(JsonElement node)
-        {
-            if (!node.TryGetProperty("Plans", out var children))
-            {
-                return;
-            }
-
-            /* Join inputs only: an InitPlan or SubPlan child is not a side of the join. */
-            var inputs = children.EnumerateArray()
-                .Where(c => c.GetProperty("Parent Relationship").GetString() is "Outer" or "Inner")
-                .ToList();
-
-            if (inputs.Count == 2 && inputs.Count(ReadsTheDimension) == 1)
-            {
-                var probe = inputs.Single(c => !ReadsTheDimension(c));
-                resolved += probe.GetProperty("Actual Rows").GetDouble() * probe.GetProperty("Actual Loops").GetDouble();
-            }
-
-            foreach (var child in children.EnumerateArray())
-            {
-                Walk(child);
-            }
-        }
-
-        static bool ReadsTheDimension(JsonElement node) =>
-            (node.TryGetProperty("Relation Name", out var relation)
-             && relation.GetString() == PayloadDimensions.QueryTextDimTable)
-            || (node.TryGetProperty("Plans", out var children) && children.EnumerateArray().Any(ReadsTheDimension));
+        return ExplainJoinProbe.RowsResolvedAgainst((string)(await cmd.ExecuteScalarAsync(ct))!, PayloadDimensions.QueryTextDimTable);
     }
 
     private static async Task<List<JsonElement>> DrillDownRowsAsync(NpgsqlDataSource postgres, AnalysisContext context)
