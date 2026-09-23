@@ -685,10 +685,10 @@ GROUP BY server_id, collector_name";
     /// catalog is there).
     ///
     /// <para><b>"Nothing materialized" is not <c>-infinity</c> (#3973).</b> The extension reports the minimum
-    /// FINITE timestamp, 4714-11-24 BC, both before the first refresh and after a refresh over a window with no
-    /// rows (measured on TimescaleDB 2.28.1 and 2.30.1). <c>isfinite()</c> passes it, and Npgsql cannot hold it
-    /// as a <see cref="DateTime"/>, so the fleet overview failed with "Out of range of DateTime" on every fresh
-    /// store until rows had landed and a refresh had covered them. Anything before
+    /// FINITE timestamp, 4714-11-24 BC, before the first refresh (measured on TimescaleDB 2.28.1 and 2.30.1)
+    /// and still after a refresh over a window with no rows (measured on 2.28.1). <c>isfinite()</c> passes it,
+    /// and Npgsql cannot hold it as a <see cref="DateTime"/>, so the fleet overview failed with "Out of range of
+    /// DateTime" on every fresh store until rows had landed and a refresh had covered them. Anything before
     /// <see cref="MaterializedWatermarkFloor"/> now reads as nothing materialized, whichever sentinel produced
     /// it.</para></summary>
     internal const string CollectionHealthWatermarkSql = @"
