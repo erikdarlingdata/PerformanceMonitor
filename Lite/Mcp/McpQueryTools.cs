@@ -237,7 +237,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering.")]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering.")]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
