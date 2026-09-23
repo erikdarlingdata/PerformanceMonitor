@@ -167,6 +167,21 @@ public sealed class PgTargetDeadlockDrillDownTests
             foreach (var secret in new[] { "4721", "9034", "4111111111111111", "5500005555555559", rawHash })
                 Assert.DoesNotContain(secret, text, StringComparison.Ordinal);
         }
+
+        /* A finding this build wrote says so and is left as written: its statement, normalized and then cut to
+           the cap, can end inside a '?', which a second reading would withhold. */
+        var written = JsonSerializer.SerializeToElement(new
+        {
+            exemplars = new[] { new { deadlock_hash = "ABC", victim_statement = "UPDATE t SET a = '", victim_pid = 11 } },
+            sql_normalized = true,
+        });
+        var current = new AnalysisFinding
+        {
+            StoryText = "{}",
+            DrillDown = new Dictionary<string, object> { [PgTargetDrillDownCollector.DeadlockExemplarsSection] = written },
+        };
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(current);
+        Assert.Equal(written.GetRawText(), ((JsonElement)current.DrillDown![PgTargetDrillDownCollector.DeadlockExemplarsSection]).GetRawText());
     }
 
     /* ───────────────────────── bounds ───────────────────────── */
@@ -385,6 +400,7 @@ public sealed class PgTargetDeadlockDrillDownTests
                 Assert.Equal(3, exemplars.GetProperty("reports_captured").GetInt32());
                 Assert.Equal(2, exemplars.GetProperty("distinct_shapes").GetInt32());
                 Assert.Equal(2, exemplars.GetProperty("exemplars_shown").GetInt32());
+                Assert.True(exemplars.GetProperty("sql_normalized").GetBoolean());
 
                 var shapes = exemplars.GetProperty("exemplars").EnumerateArray().ToList();
                 Assert.Equal(2, shapes.Count);

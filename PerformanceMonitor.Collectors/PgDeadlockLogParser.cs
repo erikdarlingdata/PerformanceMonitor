@@ -496,6 +496,14 @@ public static class PgDeadlockLogParser
         PgLogTextRedactor.RedactDetail(graph, complete);
 
     /// <summary>
+    /// How much of a stored statement or graph a read needs to normalize it (#4005): one character past the
+    /// longest SQL-bearing field the lexer reads at all. A longer one is withheld whole, so reading more serves
+    /// nothing, and a read that cuts first and normalizes after withholds a statement whose cut landed inside a
+    /// literal.
+    /// </summary>
+    public const int NormalizeReadCap = PgLogTextRedactor.MaxSqlFieldLength + 1;
+
+    /// <summary>
     /// A stored victim statement normalized the way <see cref="NormalizeGraph"/> normalizes it inside the graph
     /// (#4005): withheld when it cannot be read to its end or is too long to read. Null in, null out;
     /// idempotent.
