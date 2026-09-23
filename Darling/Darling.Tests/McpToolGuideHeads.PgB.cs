@@ -186,3 +186,101 @@ public sealed class McpToolGuideHeadsPgBAuditIoWaitTests
         Assert.True(limit.Length <= 200, $"get_pg_io_stats.limit: {limit.Length} > 200");
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for the rest of the "pgB" family: <c>get_pg_blocking</c> (<c>DarlingMcpPgBlockingTools</c>),
+/// <c>get_pg_wait_stats</c> (<c>DarlingMcpPgWaitTools</c>) and <c>get_pg_index_usage</c>
+/// (<c>DarlingMcpPgIndexUsageTools</c>). Darling only - none of the three has a Lite twin (see
+/// <c>CrossAppMcpToolInventoryPinTests.KnownLiteMissingMcpTools</c>). A separate class from
+/// <see cref="McpToolGuideHeadsPgBTests"/> and <see cref="McpToolGuideHeadsPgBAuditIoWaitTests"/> so parallel
+/// lanes converting different files in the same family never conflict on one class body.
+/// </summary>
+public sealed class McpToolGuideHeadsPgBBlockingWaitIndexTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_blocking",
+        "get_pg_wait_stats",
+        "get_pg_index_usage",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_blocking", "a periodic SAMPLE, not an event log"),
+        ("get_pg_blocking", "empty means none was SAMPLED, not none happened"),
+        ("get_pg_blocking", "Cycles (deadlocks) are reported separately, never folded into a chain"),
+        ("get_pg_blocking", "root_backend_id is a STRING; compare as text, never as a number"),
+        ("get_pg_blocking", "idle in transaction: an application defect; active: a query to tune"),
+        ("get_pg_wait_stats", "Aurora only"),
+        ("get_pg_wait_stats", "stock targets are served by get_pg_wait_sampling instead"),
+        ("get_pg_wait_stats", "Values are milliseconds"),
+        ("get_pg_wait_stats", "THE PAGE IS BOUNDED BY limit"),
+        ("get_pg_wait_stats", "SHARES ARE OF THE WINDOW, NOT OF THE PAGE"),
+        ("get_pg_index_usage", "scans_in_window, not lifetime total_scans_since_stats_reset, is the disuse figure"),
+        ("get_pg_index_usage", "needs 2+ samples"),
+        ("get_pg_index_usage", "Droppability is GATED on primary key/unique/exclusion/replica-identity/partial/expression/invalid facts"),
+        ("get_pg_index_usage", "unscanned_without_a_structural_blocker is a candidate, never a conclusion"),
+        ("get_pg_index_usage", "WRITERS ONLY"),
+        ("get_pg_index_usage", "Floors at 64 kB"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: every original sentence rides in the tail, including the ones the terse head
+    /// left out (the pid/state/application/query field list, the SQL Server blocked-process report contrast,
+    /// the 64-bit backend-id composite explanation, and the full Aurora wait-taxonomy/units narrative).</summary>
+    [Fact]
+    public void D3HeadCompression_LandsEveryDroppedSentenceInTheTail()
+    {
+        var blocking = McpToolGuideTests.Served("get_pg_blocking");
+        Assert.Contains("the root blocker's pid, state, application, username and query text", blocking.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Unlike SQL Server's blocked-process report", blocking.Tail!, StringComparison.Ordinal);
+        Assert.Contains("a 64-bit composite of the backend's start time and its pid", blocking.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Works on any PostgreSQL target including standbys.", blocking.Tail!, StringComparison.Ordinal);
+
+        var wait = McpToolGuideTests.Served("get_pg_wait_stats");
+        Assert.Contains("IO events point at storage or cache misses, Lock events at blocking between sessions", wait.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Note this is a separate tool from get_wait_stats", wait.Tail!, StringComparison.Ordinal);
+        Assert.Contains("reports in microseconds, so the two cannot share one result shape", wait.Tail!, StringComparison.Ordinal);
+
+        var usage = McpToolGuideTests.Served("get_pg_index_usage");
+        Assert.Contains("an index with millions of lifetime scans and none in ninety days is dead weight today", usage.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Ranked by the bytes of an index nothing scanned, largest first, with invalid indexes on top", usage.Tail!, StringComparison.Ordinal);
+        Assert.Contains("1,517", usage.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D2 parameter overflow: <c>get_pg_wait_stats</c>' and <c>get_pg_index_usage</c>'s <c>limit</c>
+    /// descriptions were 214 and 257 chars; the trailing clause each cut to fit 200 lands verbatim in its
+    /// tool's tail rather than disappearing (#3898 lesson: never reword a cut parameter clause).</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_Verbatim()
+    {
+        var wait = McpToolGuideTests.Served("get_pg_wait_stats");
+        var waitLimit = Assert.Single(wait.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(waitLimit.Length <= 200, $"get_pg_wait_stats.limit: {waitLimit.Length} > 200");
+        Assert.Contains("whatever this is set to.", wait.Tail!, StringComparison.Ordinal);
+
+        var usage = McpToolGuideTests.Served("get_pg_index_usage");
+        var usageLimit = Assert.Single(usage.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(usageLimit.Length <= 200, $"get_pg_index_usage.limit: {usageLimit.Length} > 200");
+        Assert.Contains("This is what bounds the page", usage.Tail!, StringComparison.Ordinal);
+        Assert.Contains("it is observed by fetching one row past this cap, never inferred from a full page", usage.Tail!, StringComparison.Ordinal);
+    }
+}
