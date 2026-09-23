@@ -664,16 +664,18 @@ public class CollectorHealthRow
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so
-    /// a 0 default — an on-load collector's catalog entry, or a collector no longer in the catalog at all —
-    /// reads as the daily recapture interval instead of the floor thresholds a raw 0 used to fall to, which
-    /// is what lets <see cref="CollectorHealthClassifier.Classify"/> band an on-load collector on the SAME
-    /// ladder as any other. The banding uses the shipped default, not any per-install override: the viewer
-    /// has no cheap per-collector effective frequency at the row level, and using the same default across
-    /// all three surfaces keeps them in parity.</summary>
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so an
+    /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
+    /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
+    /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
+    /// shipped default, not any per-install override: the viewer has no cheap per-collector effective
+    /// frequency at the row level, and using the same default across all three surfaces keeps them in
+    /// parity.</summary>
     private int FrequencyMinutes =>
-        CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
-            CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0);
+        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
+            : 0;
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
