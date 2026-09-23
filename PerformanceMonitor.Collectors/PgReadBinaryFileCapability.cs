@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>Why this exists at all.</b> A failed login can plant one byte that is not valid UTF-8 (0xFF)
 /// in the FATAL message <c>%u</c>/<c>%d</c> echo into the log, under any <c>log_line_prefix</c>.
-/// <c>pg_read_file</c> returns <c>text</c>, which PostgreSQL validates against the client encoding before
+/// <c>pg_read_file</c> returns <c>text</c>, which PostgreSQL validates against the database encoding before
 /// it ever reaches this process, so that one byte throws 22021 for the whole 4 MB tail read and every
 /// reader sharing <see cref="PgServerLogTail.TailCteSql"/> goes blind for as long as it sits inside the
 /// window. <c>pg_read_binary_file</c> returns <c>bytea</c>, which carries no such check — but a target
@@ -34,6 +34,13 @@ namespace PerformanceMonitor.Collectors;
 /// <c>has_function_privilege</c> against the exact argument types <see cref="PgServerLogTail.TailCteSql"/>
 /// and <see cref="PgServerLogTail.TailCteBinarySql"/> call the function with, so the answer is exact for
 /// the overload actually used.</para>
+///
+/// <para><b>UTF8 databases only.</b> The binary route decodes the log as UTF-8, which is right when the database
+/// the collector connects to is UTF8 and wrong otherwise: a LATIN1 database's own non-ASCII text would come
+/// back as U+FFFD. LATIN1 also accepts every byte but NUL as valid text, so its text route never meets the
+/// 22021 this check exists for. <see cref="ProbeSql"/> therefore
+/// answers NULL for a database that is not UTF8. <see cref="IsGrantedAsync"/> reads that as "stay on the text
+/// route", and <see cref="TryGetCachedVerdict"/> as "nothing to advise".</para>
 ///
 /// <para><b>The cache, not the connect-time <see cref="CollectorTargetInfo"/> facts.</b> Facts like
 /// <c>HasPgWaitSamplingExtension</c> are probed once when a target's <see cref="ServerRuntime"/> attaches
@@ -49,15 +56,19 @@ public static class PgReadBinaryFileCapability
     /// <summary>
     /// The exact argument types <see cref="PgServerLogTail.TailCteBinarySql"/> calls
     /// <c>pg_read_binary_file</c> with, so the privilege check answers for the overload actually used
-    /// rather than for the function name alone (PostgreSQL grants are per-overload).
+    /// rather than for the function name alone (PostgreSQL grants are per-overload). NULL when the database is
+    /// not UTF8, which the binary route never serves (see the type's remarks). The CASE is safe here, unlike
+    /// around the read itself: <c>has_function_privilege</c> is callable by any role.
     /// </summary>
     public const string ProbeSql =
-        "SELECT pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_read_binary_file(text, bigint, bigint)', 'EXECUTE')";
+        "SELECT CASE WHEN pg_catalog.current_setting('server_encoding') = 'UTF8' "
+        + "THEN pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_read_binary_file(text, bigint, bigint)', 'EXECUTE') END";
 
     /// <summary>Cache TTL — a target's verdict is re-checked after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
-    private sealed record CacheEntry(bool Granted, DateTime CheckedAtUtc);
+    /* Granted is null when the database is not UTF8: the binary route does not apply there at all. */
+    private sealed record CacheEntry(bool? Granted, DateTime CheckedAtUtc);
 
     /* Process-wide and static, like PgBaselineProvider's cache: "reset on restart" is then simply what a
        fresh process starts with — an empty dictionary — and needs no explicit action. Reset() below exists
@@ -78,20 +89,31 @@ public static class PgReadBinaryFileCapability
 
         if (s_cache.TryGetValue(targetKey, out var cached) && DateTime.UtcNow - cached.CheckedAtUtc < CacheTtl)
         {
-            return cached.Granted;
+            return cached.Granted == true;
         }
 
         using var command = connection.CreateCommand();
         command.CommandText = ProbeSql;
         var result = await command.ExecuteScalarAsync(cancellationToken);
-        var granted = result is bool b && b;
+        bool? granted = result is bool b ? b : null;
 
         s_cache[targetKey] = new CacheEntry(granted, DateTime.UtcNow);
-        return granted;
+        return granted == true;
     }
 
     /// <summary>Drops every cached verdict. Tests only — a real restart already starts with an empty cache.</summary>
     public static void Reset() => s_cache.Clear();
+
+    /// <summary>
+    /// Drops <paramref name="targetKey"/>'s cached verdict, so the next <see cref="IsGrantedAsync"/> re-checks
+    /// instead of waiting out <see cref="CacheTtl"/>. For a caller that has just seen a fault saying the verdict
+    /// is stale: a grant made in answer to a 22021, or one revoked since the last check.
+    /// </summary>
+    public static void Invalidate(string targetKey)
+    {
+        ArgumentNullException.ThrowIfNull(targetKey);
+        s_cache.TryRemove(targetKey, out _);
+    }
 
     /// <summary>
     /// The cached verdict for <paramref name="targetKey"/> WITHOUT a round trip and without refreshing an
@@ -100,15 +122,16 @@ public static class PgReadBinaryFileCapability
     /// this for calls it before <c>BuildQuery</c>), so a second probe would be redundant. Returns false with
     /// <paramref name="granted"/> unset when nothing is cached — which is also the honest answer for a target
     /// this capability was never checked for, e.g. a managed target that reaches its log through the RDS API
-    /// and never calls <see cref="IsGrantedAsync"/> at all.
+    /// and never calls <see cref="IsGrantedAsync"/> at all. It also returns false for a database that is not
+    /// UTF8, where the grant would change nothing.
     /// </summary>
     public static bool TryGetCachedVerdict(string targetKey, out bool granted)
     {
         ArgumentNullException.ThrowIfNull(targetKey);
 
-        if (s_cache.TryGetValue(targetKey, out var cached))
+        if (s_cache.TryGetValue(targetKey, out var cached) && cached.Granted is { } verdict)
         {
-            granted = cached.Granted;
+            granted = verdict;
             return true;
         }
 

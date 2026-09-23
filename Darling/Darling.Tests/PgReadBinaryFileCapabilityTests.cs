@@ -236,4 +236,69 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
         Assert.Equal(expectedGranted, context.PgReadBinaryFileGranted);
         Assert.Equal(expectedProbes, connection.ExecuteCount);
     }
+
+    /// <summary>
+    /// #4051 review L4: the probe answers NULL for a database that is not UTF8, where the binary route would
+    /// decode the database's own non-ASCII text wrongly. That target stays on the text route, the advisory reads
+    /// it as nothing to advise, and the NULL is cached like any verdict, so it costs no extra round trip.
+    /// </summary>
+    [Fact]
+    public async Task ANonUtf8DatabaseStaysOnTheTextRouteAndIsNotAdvised()
+    {
+        var connection = new FakeScalarConnection { Scalar = DBNull.Value };
+
+        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "latin1-target", CancellationToken.None));
+        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "latin1-target", CancellationToken.None));
+        Assert.Equal(1, connection.ExecuteCount);
+        Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("latin1-target", out _));
+    }
+
+    /// <summary>The probe asks the database's encoding first, and only a UTF8 database gets a grant answer.</summary>
+    [Fact]
+    public void TheProbeGatesTheGrantAnswerOnAUtf8Database()
+    {
+        Assert.Contains(
+            "current_setting('server_encoding') = 'UTF8'", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
+        Assert.Contains(
+            "'pg_catalog.pg_read_binary_file(text, bigint, bigint)'", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InvalidateDropsOneTargetsVerdictOnly()
+    {
+        var connection = new FakeScalarConnection { Scalar = true };
+        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
+        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-b", CancellationToken.None);
+
+        PgReadBinaryFileCapability.Invalidate("target-a");
+
+        Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("target-a", out _));
+        Assert.True(PgReadBinaryFileCapability.TryGetCachedVerdict("target-b", out _));
+    }
+
+    /// <summary>
+    /// #4051 review L1: which faults drop a target's cached verdict. A 22021 on a log-tail collector always does,
+    /// so a grant made in answer takes effect on the next cycle. A 42501 does only while the verdict says granted,
+    /// which means the grant was revoked. A 42501 on the text route, any other SQLSTATE, and any other collector
+    /// leave it alone.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_log_events", "22021", false, true)]
+    [InlineData("pg_deadlocks", "22021", true, true)]
+    [InlineData("pg_plan_capture", "42501", true, true)]
+    [InlineData("pg_log_events", "42501", false, false)]
+    [InlineData("pg_log_events", "58P01", true, false)]
+    [InlineData("pg_log_events", null, true, false)]
+    [InlineData("pg_database_stats", "22021", true, false)]
+    public async Task AStaleVerdictIsForgottenOnlyOnTheFaultsThatMakeItStale(
+        string collectorName, string? sqlState, bool cachedGranted, bool expectForgotten)
+    {
+        var connection = new FakeScalarConnection { Scalar = cachedGranted };
+        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "stale-target", CancellationToken.None);
+
+        PerformanceMonitor.Darling.Service.DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(
+            collectorName, sqlState, "stale-target");
+
+        Assert.Equal(!expectForgotten, PgReadBinaryFileCapability.TryGetCachedVerdict("stale-target", out _));
+    }
 }

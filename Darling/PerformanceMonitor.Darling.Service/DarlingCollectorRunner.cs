@@ -705,7 +705,8 @@ public sealed class DarlingCollectorRunner
     /// reads <see cref="PgServerLogTail"/>. A managed target's <paramref name="targetKey"/> was never entered
     /// into that cache at all (it reaches its log through the RDS API, never through
     /// <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/>), so <c>TryGetCachedVerdict</c> answers false
-    /// for it and this never fires there.
+    /// for it and this never fires there. It answers false for a database that is not UTF8 too, where the
+    /// grant would change nothing (#4051 review L4).
     /// </summary>
     internal static CollectorRunResult WithReadBinaryFileAdvisoryNote(CollectorRunResult result, string targetKey)
     {
@@ -792,18 +793,39 @@ public sealed class DarlingCollectorRunner
             var provider = TargetProviders.For(server.Target);
             await using var connection = provider.CreateConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            using var command = connection.CreateCommand();
-            command.CommandTimeout = 10;
-            command.CommandText = PgServerLogTail.LogTimezoneSql;
-            var value = await command.ExecuteScalarAsync(cancellationToken);
-            return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+            return await ReadLogTimezoneIsUtcAsync(connection, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogDebug(ex, "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
+            /* Warning, not Debug: a read that fails every cycle turns part 1b off for this target, and at Debug
+               that went unseen while every call failed (#4051 review H1). */
+            _logger?.LogWarning(ex, "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
                 + "line this cycle is refused as before.", server.Config.DisplayName);
             return false;
         }
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's <c>log_timezone</c> read as a whole statement.
+    /// <see cref="PgServerLogTail.LogTimezoneSql"/> is an expression the self-hosted readers select beside the
+    /// tail, so on its own it needs the SELECT. Without it every call failed with 42601 and part 1b never took
+    /// effect on an RDS or Aurora target (#4051 review H1).
+    /// </summary>
+    internal const string LogTimezoneReadSql = "SELECT " + PgServerLogTail.LogTimezoneSql;
+
+    /// <summary>
+    /// Whether the target's <c>log_timezone</c> renders UTC, read on <paramref name="connection"/>, which must
+    /// already be open. Its own method so a live test can run the exact statement the managed route sends.
+    /// </summary>
+    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        using var command = connection.CreateCommand();
+        command.CommandTimeout = 10;
+        command.CommandText = LogTimezoneReadSql;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
     }
 
     /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
@@ -1050,6 +1072,33 @@ public sealed class DarlingCollectorRunner
         {
             context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
                 targetConnection, targetKey, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// #4046 part 1c (#4051 review L1): drops <paramref name="targetKey"/>'s cached
+    /// <see cref="PgReadBinaryFileCapability"/> verdict when a log-tail collector's fault says it is stale, so the
+    /// next cycle re-checks instead of waiting out the hour.
+    /// <list type="bullet">
+    /// <item>A 22021 is the text route meeting a planted byte, and its message tells the operator to grant
+    /// pg_read_binary_file. A grant made in answer should take effect on the next cycle.</item>
+    /// <item>A 42501 while the verdict says granted means the grant was revoked, or the login changed, since the
+    /// check. Every binary-route read would fail until the hour ran out.</item>
+    /// </list>
+    /// A 42501 on the text route leaves the verdict alone, so a target that never granted pg_read_file is not
+    /// re-probed every cycle.
+    /// </summary>
+    internal static void ForgetStaleReadBinaryFileVerdict(string collectorName, string? sqlState, string targetKey)
+    {
+        if (!ReadsPgServerLogTail(collectorName))
+        {
+            return;
+        }
+
+        if (sqlState == "22021"
+            || (sqlState == "42501" && PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted) && granted))
+        {
+            PgReadBinaryFileCapability.Invalidate(targetKey);
         }
     }
 

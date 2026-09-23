@@ -108,8 +108,11 @@ The third grant is not optional in practice ([#4046](https://github.com/erikdarl
 process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
 login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
 byte sits in the window, blinding all three collectors at once. `pg_read_binary_file()` returns `bytea`,
-which carries no such check, and the three collectors switch to it on their own the moment it is granted —
-no restart, no config change.
+which carries no such check, and the three collectors switch to it on their own once it is granted, with no
+restart and no config change: on the next cycle after a read that failed on such a byte, otherwise within an
+hour. That applies to a database whose encoding is UTF8. In any other encoding the collectors stay on
+`pg_read_file()`, which suits that encoding's own text; LATIN1, for one, accepts every byte but NUL, so the
+planted byte never fails its read.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
 identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from

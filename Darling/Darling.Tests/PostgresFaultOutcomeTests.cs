@@ -183,11 +183,25 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
-    /// #4046 part 1c: the byte a failed login plants blinds pg_read_file() for the WHOLE tail, not just the
-    /// line it landed in. The arm is keyed on Unclassified — the classifier leaves 22021 there, same as the
-    /// 58P01 arm above — and only for the three log-tail collectors; it names the SQLSTATE, the mechanism
-    /// (pg_read_file validates text against the client encoding before this process sees a row), and the
-    /// exact grant that switches the collector to the binary route on its own.
+    /// #4046 part 1c (#4051 review M1): a 22021 on a log-tail reader gets no PostgresFaultOutcome arm. It
+    /// declines with ERROR, so the general handler records it and the blinding counts as an error there.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    [InlineData("pg_log_events")]
+    public void ALogReader22021KeepsErrorForTheGeneralHandler(string collectorName)
+    {
+        var (status, _) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, "appdb");
+
+        Assert.Equal("ERROR", status);
+    }
+
+    /// <summary>
+    /// The sentence the general handler records for that 22021: the SQLSTATE, the mechanism (pg_read_file
+    /// validates text against the database encoding before this process sees a row), and the exact grant that
+    /// switches the collector to the binary route on its own.
     /// </summary>
     [Theory]
     [InlineData("pg_deadlocks")]
@@ -195,16 +209,45 @@ public class PostgresFaultOutcomeTests
     [InlineData("pg_log_events")]
     public void ALogReader22021NamesThePlantedByteAndTheBinaryGrant(string collectorName)
     {
-        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+        var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
             Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, "appdb");
 
-        Assert.Equal("PERMISSIONS", status);
+        Assert.NotNull(explanation);
         Assert.Contains("22021", explanation, StringComparison.Ordinal);
         Assert.Contains("not valid UTF-8", explanation, StringComparison.Ordinal);
         Assert.Contains("#4046", explanation, StringComparison.Ordinal);
         Assert.Contains(
             "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
         Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sentence must not widen: a 22021 on a collector that is not one of the three log-tail readers, any
+    /// other SQLSTATE on one that is, and a fault that is not a PostgresException all keep the general
+    /// handler's own message.
+    /// </summary>
+    [Fact]
+    public void TheUndecodableByteSentenceIsForALogReaders22021Only()
+    {
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector, "appdb"));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("58P01", "could not open file"), "pg_log_events", "appdb"));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            new InvalidOperationException("not a server fault"), "pg_log_events", "appdb"));
+    }
+
+    /// <summary>
+    /// #4051 review L3: a 22021 proven to come from a write to the STORE is not about the target's log, so it
+    /// keeps the general handler's own message (#3111's rule).
+    /// </summary>
+    [Fact]
+    public void AStoreWrites22021KeepsTheGeneralMessage()
+    {
+        var fault = Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0x00");
+        CollectorFaultCopyPhase.Stamp(fault, StoreCopyPhase.Data);
+
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(fault, "pg_log_events", "appdb"));
     }
 
     /// <summary>
