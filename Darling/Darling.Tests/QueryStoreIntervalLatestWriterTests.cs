@@ -351,6 +351,46 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending WHERE server_id = @server_id", ct));
     }
 
+    /// <summary>
+    /// Review finding 2, as a pin: every statement that runs INSIDE the raw batch's transaction reads raw only by the
+    /// batch's own <c>collection_time</c>, so it locks one chunk, never all of them, and can never queue behind raw's
+    /// <c>drop_chunks</c>. The two wider reads run before the transaction and bind their bounds bare (#2387).
+    /// </summary>
+    [Fact]
+    public void InsideTheBatchTransaction_RawIsReadOnlyByTheBatchsOwnCollectionTime()
+    {
+        var inTransaction = new[]
+        {
+            QueryStoreIntervalLatest.StampSql,
+            QueryStoreIntervalLatest.PendingForServerSql,
+            QueryStoreIntervalLatest.DeletePendingSql,
+            QueryStoreIntervalLatest.UpsertSql,
+            QueryStoreIntervalLatest.ResetCoverageSql,
+            QueryStoreIntervalLatest.RecordPendingSql,
+            QueryStoreIntervalLatest.AdvanceAppliedThroughSql,
+        };
+
+        foreach (var sql in inTransaction)
+        {
+            var rawReads = System.Text.RegularExpressions.Regex.Matches(sql, @"FROM collect\.query_store_stats AS s\s+WHERE s\.server_id = \$1\s+AND   s\.collection_time = \$2\b").Count;
+            var rawMentions = System.Text.RegularExpressions.Regex.Matches(sql, @"\bquery_store_stats\b").Count;
+            Assert.Equal(rawMentions, rawReads);
+        }
+
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(QueryStoreIntervalLatest.UpsertSql, @"\bquery_store_stats\b").Count);
+
+        /* The two wider reads: bounded by a bare parameter, never by an expression over one. */
+        Assert.Contains("AND   s.collection_time >= $3", QueryStoreIntervalLatest.EnsureCoverageSql, StringComparison.Ordinal);
+        Assert.Contains("AND   s.collection_time > $2", QueryStoreIntervalLatest.GapCheckSql, StringComparison.Ordinal);
+
+        /* The conflict target and the batch key render from the one identity constant. */
+        Assert.Contains("ON CONFLICT (" + QueryStoreIntervalLatest.IdentityColumns + ")", QueryStoreIntervalLatest.UpsertSql, StringComparison.Ordinal);
+        Assert.Contains("SELECT DISTINCT ON (" + QueryStoreIntervalLatest.BatchIdentityColumns + ")", QueryStoreIntervalLatest.UpsertSql, StringComparison.Ordinal);
+        Assert.Equal("server_id, " + QueryStoreIntervalLatest.BatchIdentityColumns, QueryStoreIntervalLatest.IdentityColumns);
+        Assert.Contains("(EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time, t.execution_count)", QueryStoreIntervalLatest.UpsertSql, StringComparison.Ordinal);
+        Assert.Contains("s.execution_type_desc = 'Regular'", QueryStoreIntervalLatest.UpsertSql, StringComparison.Ordinal);
+    }
+
     /* ---- helpers ----------------------------------------------------------------------------------------- */
 
     private static DateTime TruncateToSeconds(DateTime value) =>
