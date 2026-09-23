@@ -279,6 +279,11 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "describe_custom_view_catalog"), Description(
+        "Returns the COMPOSE CATALOG: the exact vocabulary (measures, dimensions, aggregates, units, timeBuckets, viz) " +
+        "a composed (v2) panel may use; the compiler emits ONLY these identifiers. CALL THIS FIRST before " +
+        "create/update/validate/run_custom_view_panel. On query_stats, ad-hoc SQL carries the literal '(ad hoc)' " +
+        "module; a neq filter on procedure name still INCLUDES those rows (the dimension value is never null). " +
+        "Static reference data: no server, time window, or collected-data read. <<GUIDE>> " +
         "Returns the COMPOSE CATALOG — the exact vocabulary a composed (v2) custom-view panel may draw from — so you " +
         "can build a VALID panel without guessing at names. CALL THIS FIRST before create_custom_view / " +
         "update_custom_view / validate_custom_view / run_custom_view_panel: the panel's 'source', 'measure'/'ratio', " +

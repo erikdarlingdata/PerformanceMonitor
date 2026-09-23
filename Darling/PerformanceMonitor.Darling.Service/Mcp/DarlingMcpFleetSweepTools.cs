@@ -50,6 +50,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFleetSweepTools
 {
     [McpServerTool(Name = "get_sweep_reports"), Description(
+        "Reads the scheduled Fleet Sweep Report: the timeline for the window, the newest sweep in full, and the " +
+        "watch worklist (default: open+carried only; pass watch_state for pending/closed); pass sweep_id (a " +
+        "STRING) for one sweep. MUTE SEMANTICS: alerts_enabled false means DELIVERY WAS OFF that window; such a " +
+        "sweep carries would_have_paged (present-and-empty means nothing would have paged; ABSENT on an " +
+        "alerts-on sweep). QUIET IS NOT CLEAN: instruments_alive false means the sweep could not prove its data " +
+        "sources; read instrument_liveness before trusting a quiet window. Stored read. <<GUIDE>> " +
         "Reads the scheduled Fleet Sweep Reports - the stateful whole-fleet summaries the service persists at " +
         "the configured cadence (get_alert_settings' fleet_sweep group holds the knobs; default hourly). One " +
         "call returns the sweep timeline for the window (each sweep's full document embedded), the newest " +
