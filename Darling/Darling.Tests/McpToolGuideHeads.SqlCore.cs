@@ -35,7 +35,7 @@ public sealed class McpToolGuideHeadsSqlCoreTests
 
     /// <summary>The four tools whose original prose carried no product-specific fact; their heads name neither
     /// SKU. <c>mute_analysis_finding</c> and <c>audit_config</c> are deliberately excluded (see
-    /// <see cref="MuteAndAuditHeads_NameBothProductsInOneClause_WhereTheFactDiffers"/>).</summary>
+    /// <see cref="MuteHeadStatesTheSharedErrorStatus_AuditHeadNamesDarlingInOneClause"/>).</summary>
     private static readonly string[] ToolsWithNoProductQualifier =
     [
         "analyze_server",

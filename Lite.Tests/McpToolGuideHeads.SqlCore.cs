@@ -19,7 +19,7 @@ namespace Lite.Tests;
 /// <c>Darling.Tests/McpToolGuideHeadsSqlCoreTests</c>, which also holds the cross-SKU lockstep pin. Both apps'
 /// tool bodies mirror each other field-for-field, so the original prose (and now the head and tail) is
 /// byte-identical on both SKUs, except <c>mute_analysis_finding</c>'s and <c>audit_config</c>'s tails, which are
-/// per-product because the underlying facts differ (see <c>MuteAndAuditHeads_NameBothProductsInOneClause_WhereTheFactDiffers</c>).
+/// per-product because the underlying facts differ (see <c>MuteHeadStatesTheSharedErrorStatus_AuditHeadNamesDarlingInOneClause</c>).
 /// </summary>
 public sealed class McpToolGuideHeadsSqlCoreTests
 {
@@ -35,7 +35,7 @@ public sealed class McpToolGuideHeadsSqlCoreTests
 
     /// <summary>The four tools whose original prose carried no product-specific fact; their heads name neither
     /// SKU. <c>mute_analysis_finding</c> and <c>audit_config</c> are deliberately excluded (see
-    /// <see cref="MuteAndAuditHeads_NameBothProductsInOneClause_WhereTheFactDiffers"/>).</summary>
+    /// <see cref="MuteHeadStatesTheSharedErrorStatus_AuditHeadNamesDarlingInOneClause"/>).</summary>
     private static readonly string[] ToolsWithNoProductQualifier =
     [
         "analyze_server",
