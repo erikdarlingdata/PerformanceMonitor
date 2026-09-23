@@ -14,6 +14,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -423,7 +424,19 @@ ORDER BY o.worker_ratio DESC";
             finding.DrillDown!["parameter_sensitive_queries"] = items;
     }
 
-    public const string RegressedQueriesSql = @"
+    public const string RegressedQueriesSql = RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
+
+    /// <summary>
+    /// The regressed-queries read over the latest-snapshot interval table (#3953): <see cref="RegressedQueriesSql"/>
+    /// with its <c>deduped</c> CTE, <c>ROW_NUMBER</c> and <c>rn = 1</c> gone and <c>plan_dedup</c> reading
+    /// <c>query_store_interval_latest</c>. The head (the de-skew and PSP signature) and the tail (<c>latest</c> down)
+    /// are shared constants, so the two cannot drift. It runs when the fact read the table this pass
+    /// (<see cref="AnalysisContext.PlanRegressionReadsIntervalTable"/>), so it reproduces what the fact reported.
+    /// </summary>
+    public const string RegressedQueriesTableSql = RegressedQueriesHead + RegressedQueriesTableMiddle + RegressedQueriesTail;
+
+    /// <summary>The de-skew and PSP-signature CTEs, shared by both regressed-queries reads (#3953 split).</summary>
+    private const string RegressedQueriesHead = @"
 WITH svr AS
 (
     -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
@@ -480,7 +493,10 @@ psp_signature AS
     AND   creation_time_utc <= $3
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
 ),
-deduped AS
+";
+
+    /// <summary>The raw read's dedup and <c>plan_dedup</c> over it, byte-identical to the pre-#3953 text.</summary>
+    private const string RegressedQueriesRawMiddle = @"deduped AS
 (
     -- LOAD-BEARING (correctness, not just perf): query_store_stats rows are CUMULATIVE per-Query-Store-
     -- interval snapshots. The QueryStoreCollector is incremental and re-fetches the OPEN interval every
@@ -560,7 +576,46 @@ plan_dedup AS
     GROUP BY database_name, query_id, replica_role, query_plan_hash
     HAVING SUM(execution_count) >= 25
 ),
-latest AS
+";
+
+    /// <summary>The table twin's <c>plan_dedup</c>.</summary>
+    private const string RegressedQueriesTableMiddle = @"plan_dedup AS
+(
+    -- #3953: the table twin. query_store_interval_latest already holds each interval's latest snapshot (the raw
+    -- twin's deduped CTE and its rn = 1), so this aggregates it directly, with the same predicates and #3902's
+    -- offender filter moved over unchanged. $7 is the raw twin's $2 - interval '1 day', bound bare (#2387), on
+    -- collection_time as there and on the table's partitioning column, which last_execution_time >= $2 implies
+    -- because one Query Store interval spans at most a day.
+    -- Aggregate the DISTINCT intervals (rn = 1) per (query_id, plan hash). Collapses the old
+    -- plan_agg(per plan_id) + plan_dedup(per hash) two-stage into one: a weighted-avg of weighted-avgs
+    -- equals the direct execution_count-weighted avg, and MAX(plan_id) is unchanged. MAX(plan_id) carries
+    -- the most recently observed plan_id in the hash forward (newer plans are less likely evicted by
+    -- Query Store retention; any plan_id sharing the hash forces the same execution shape).
+    SELECT
+        database_name,
+        query_id,
+        replica_role,
+        query_plan_hash,
+        MAX(plan_id) AS plan_id,
+        any_value(query_hash) AS query_hash,
+        any_value(query_text) AS query_text,
+        SUM(execution_count) AS execs,
+        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
+        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        MAX(last_execution_time) AS last_exec
+    FROM query_store_interval_latest
+    WHERE server_id = $1
+    AND   last_execution_time >= $2
+    AND   collection_time >= $7
+    AND   first_execution_time >= $7
+    AND   ($5::text[] IS NULL OR (database_name = ANY($5::text[]) AND query_id = ANY($6::bigint[])))
+    GROUP BY database_name, query_id, replica_role, query_plan_hash
+    HAVING SUM(execution_count) >= 25
+),
+";
+
+    /// <summary>Everything from <c>latest</c> down, shared by both regressed-queries reads.</summary>
+    private const string RegressedQueriesTail = @"latest AS
 (
     -- The most recently executed plan per query. DISTINCT ON instead of the old self-referential rank,
     -- so plan_dedup is materialized ONCE rather than the whole pipeline running twice (once per side).
@@ -668,10 +723,17 @@ LIMIT 5";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(RegressedQueriesSql, connection);
+        /* #3953: the source the fact read this pass, so the drill-down can reproduce it; when the fact did not
+           decide, the same decision the fact makes, over the same bound. */
+        var windowStart = AsNaive(context.TimeRangeStart.AddDays(-14));
+        var readsTable = context.PlanRegressionReadsIntervalTable
+            ?? await QueryStoreIntervalLatest.ReadsTableAsync(
+                connection, context.ServerId, windowStart.AddDays(-1), DrillDownCommandTimeoutSeconds, null, context.CancellationToken);
+
+        using var cmd = new NpgsqlCommand(readsTable ? RegressedQueriesTableSql : RegressedQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
         cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-14)));
+        cmd.Parameters.AddWithValue(windowStart);
         /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
            comparison window above, so the flag matches what the PARAMETER_SENSITIVITY detector itself
            would report for this run. */
@@ -693,6 +755,12 @@ LIMIT 5";
             NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint,
             Value = offenders is null ? DBNull.Value : offenders.Select(o => o.QueryId).ToArray()
         });
+        if (readsTable)
+        {
+            /* $7 (#3953): the raw twin's "$2 - interval '1 day'", bound bare so both the collection_time bound and
+               the table's partitioning column are compared against a parameter (#2387). */
+            cmd.Parameters.AddWithValue(windowStart.AddDays(-1));
+        }
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

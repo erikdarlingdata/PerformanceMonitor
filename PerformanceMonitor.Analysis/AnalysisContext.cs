@@ -222,6 +222,15 @@ public class AnalysisContext
     public IReadOnlyList<PlanRegressionOffender>? PlanRegressionOffenders { get; set; }
 
     /// <summary>
+    /// Which source the PLAN_REGRESSION fact read this pass on Darling (#3953): true for the latest-snapshot interval
+    /// table, false for the raw Query Store slice, null when the fact did not decide (it did not run, or this is
+    /// Lite, which has no such table). The regressed-queries drill-down reads the SAME source, so it can always
+    /// reproduce what the fact reported: a best plan the table still holds and raw has purged would otherwise vanish
+    /// from the drill-down.
+    /// </summary>
+    public bool? PlanRegressionReadsIntervalTable { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose

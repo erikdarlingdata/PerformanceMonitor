@@ -305,6 +305,167 @@ SELECT
     b.null_first_execution_rows
 FROM batch_rows AS b;";
 
+    /* ---- the read-source decision (6.2 of the design) ---------------------------------------------------- */
+
+    /// <summary>
+    /// The decision's store-shape inputs for one server: its coverage row's <c>filled_since</c> (NULL when none),
+    /// whether it has pending batches, and whether TimescaleDB's catalog views exist on this store.
+    /// </summary>
+    public const string ReadSourceInputsSql = @"
+SELECT
+    c.filled_since,
+    EXISTS
+    (
+        SELECT
+            1
+        FROM collect.query_store_interval_latest_pending AS p
+        WHERE p.server_id = $1
+    ) AS has_pending,
+    to_regclass('timescaledb_information.chunks') IS NOT NULL AS has_timescale
+FROM (SELECT 1) AS one
+LEFT JOIN collect.query_store_interval_latest_coverage AS c
+  ON c.server_id = $1;";
+
+    /// <summary>
+    /// The floors, from TimescaleDB's catalog (metadata, never a scan): raw's oldest chunk (NULL when raw is not a
+    /// hypertable, which the rule reads as "raw holds everything"), and the table's, when the table is one. A
+    /// chunk's <c>range_start</c> is at or below its oldest row, so both err toward raw. <c>AT TIME ZONE 'UTC'</c>
+    /// collapses the catalog's <c>timestamptz</c> to the store's naive-UTC discipline, as DarlingRetention does.
+    /// </summary>
+    public const string ChunkFloorsSql = @"
+SELECT
+    (
+        SELECT
+            MIN(ch.range_start) AT TIME ZONE 'UTC'
+        FROM timescaledb_information.chunks AS ch
+        WHERE ch.hypertable_schema = 'collect'
+        AND   ch.hypertable_name = 'query_store_stats'
+    ) AS raw_floor,
+    EXISTS
+    (
+        SELECT
+            1
+        FROM timescaledb_information.hypertables AS h
+        WHERE h.hypertable_schema = 'collect'
+        AND   h.hypertable_name = 'query_store_interval_latest'
+    ) AS table_is_hypertable,
+    (
+        SELECT
+            MIN(ch.range_start) AT TIME ZONE 'UTC'
+        FROM timescaledb_information.chunks AS ch
+        WHERE ch.hypertable_schema = 'collect'
+        AND   ch.hypertable_name = 'query_store_interval_latest'
+    ) AS table_floor;";
+
+    /// <summary>The table's floor for one server where the table is a plain heap: its oldest interval.</summary>
+    public const string PlainTableFloorSql = @"
+SELECT
+    MIN(t.first_execution_time)
+FROM collect.query_store_interval_latest AS t
+WHERE t.server_id = $1;";
+
+    /// <summary>
+    /// The rule: read the table if and only if all four hold, otherwise run the shipped raw SQL unchanged.
+    /// <list type="number">
+    /// <item><c>F</c> exists: this build has claimed coverage for the server.</item>
+    /// <item><c>F &lt;= max(R, B)</c>: the table holds every snapshot the raw read would read (it reads
+    /// <c>collection_time &gt;= max(R, B)</c>), and may hold more, which is the ruled window extension.</item>
+    /// <item><c>R &gt;= H</c> or <c>B &gt;= H</c>: raw holds no history the table has dropped, or every interval the
+    /// window needs starts inside the table (<c>B</c> is the window minus a day, and an interval spans at most a
+    /// day). A NULL <c>H</c> means the table holds nothing for the server, and then clause 2 already says raw holds
+    /// nothing in the window either.</item>
+    /// <item>No pending batch: a batch that stored raw but missed the table is not in the claim.</item>
+    /// </list>
+    /// A NULL <c>R</c> is raw with no chunk floor (a plain store, whose raw keeps 30 days): minus infinity, which can
+    /// only pick raw. Every input errs toward raw, never toward an under-read.
+    /// </summary>
+    public static bool UseTable(DateTime? filledSince, bool hasPending, DateTime? rawFloor, DateTime rawBound, DateTime? tableFloor)
+    {
+        if (filledSince is not DateTime f || hasPending)
+        {
+            return false;
+        }
+
+        var rawReadsFrom = rawFloor is DateTime r && r > rawBound ? r : rawBound;
+        if (f > rawReadsFrom)
+        {
+            return false;
+        }
+
+        if (tableFloor is not DateTime h)
+        {
+            return true;
+        }
+
+        return (rawFloor is DateTime floor && floor >= h) || rawBound >= h;
+    }
+
+    /// <summary>
+    /// Decides the PLAN_REGRESSION source for one server and pass. <paramref name="rawBound"/> is the raw read's own
+    /// <c>collection_time</c> bound (<c>$3</c>). Any fault picks raw: the raw SQL is the shipped read, so the worst a
+    /// broken decision can cost is today's behaviour.
+    /// </summary>
+    public static async Task<bool> ReadsTableAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        DateTime rawBound,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DateTime? filledSince;
+            bool hasPending;
+            bool hasTimescale;
+            await using (var inputs = new NpgsqlCommand(ReadSourceInputsSql, connection) { CommandTimeout = commandTimeoutSeconds })
+            {
+                inputs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                await using var reader = await inputs.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                filledSince = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                hasPending = reader.GetBoolean(1);
+                hasTimescale = reader.GetBoolean(2);
+            }
+
+            if (filledSince is null || hasPending)
+            {
+                return false;
+            }
+
+            DateTime? rawFloor = null;
+            DateTime? tableFloor = null;
+            var tableIsHypertable = false;
+            if (hasTimescale)
+            {
+                await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                tableIsHypertable = reader.GetBoolean(1);
+                tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+            }
+
+            if (!tableIsHypertable)
+            {
+                await using var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                plain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
+            }
+
+            var useTable = UseTable(filledSince, hasPending, rawFloor, rawBound, tableFloor);
+            logger?.LogDebug(
+                "PLAN_REGRESSION source for server {ServerId}: {Source} (coverage since {FilledSince:o}; raw floor {RawFloor:o}; raw bound {RawBound:o}; table floor {TableFloor:o})",
+                serverId, useTable ? "interval table" : "raw", filledSince, rawFloor, rawBound, tableFloor);
+            return useTable;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "PLAN_REGRESSION source decision failed for server {ServerId}; reading raw", serverId);
+            return false;
+        }
+    }
+
     private readonly ConcurrentDictionary<int, byte> _coverageEnsured = new();
     private readonly ConcurrentDictionary<int, DateTime> _gapCheckedAt = new();
     private readonly ILogger? _logger;
