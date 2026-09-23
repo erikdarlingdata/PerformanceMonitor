@@ -1,8 +1,8 @@
 # DarlingMcpPgLogEventTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_log_events 4199
+tool get_pg_log_events 619
 param get_pg_log_events.as_of 167
 param get_pg_log_events.family 109
 param get_pg_log_events.hours_back 40
 param get_pg_log_events.limit 123
-param get_pg_log_events.min_severity 233
+param get_pg_log_events.min_severity 147
 param get_pg_log_events.server_name 28
