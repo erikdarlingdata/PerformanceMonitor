@@ -189,7 +189,7 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         var description = typeof(McpMemoryTools).GetMethod(nameof(McpMemoryTools.GetMemoryTrend))!
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.Contains("granted memory joined per point", description, StringComparison.Ordinal);
+        Assert.Contains("granted memory from the memory-grant series joined per bucket", description, StringComparison.Ordinal);
         Assert.Contains("total_granted_mb is null", description, StringComparison.Ordinal);
         Assert.Contains("get_memory_grants", description, StringComparison.Ordinal);
     }

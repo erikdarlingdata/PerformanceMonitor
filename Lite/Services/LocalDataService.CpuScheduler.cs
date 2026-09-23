@@ -25,7 +25,10 @@ public partial class LocalDataService
 
     /// <summary>
     /// The CPU Scheduler pressure trend: the runnable / blocked / queued task counts per collection over
-    /// the window, plotted directly (point-in-time collector, no delta math).
+    /// the window, plotted directly (point-in-time collector, no delta math). #3936: <c>collection_id</c> is
+    /// a secondary sort, not a filter — a same-instant collision (rare, see
+    /// <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots, just
+    /// in a deterministic left-to-right order instead of whatever physical row order comes back.
     /// </summary>
     public async Task<List<CpuSchedulerTrendPoint>> GetCpuSchedulerTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -45,7 +48,7 @@ FROM v_cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time";
+ORDER BY collection_time, collection_id";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
@@ -71,6 +74,12 @@ ORDER BY collection_time";
     /// The CPU Scheduler latest-snapshot: the single most recent cpu_scheduler_stats row in the window
     /// (every scheduler / worker / NUMA / OS-memory pressure column + the collector's CASE-computed
     /// warning flags), feeding the metric grid. Returns null when the window holds no snapshot.
+    /// #3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A run-overlap
+    /// or clock-resolution collision can store two DIFFERENT snapshots under one <c>collection_time</c> —
+    /// <c>collection_id</c> is the per-process monotonic counter every row already carries, so it orders two
+    /// same-instant rows the same way on every read instead of a bare <c>LIMIT 1</c> returning either one
+    /// depending on physical row order. This is also Lite's <c>get_cpu_scheduler_pressure</c> MCP tool's
+    /// read (McpPlanCacheSchedulerTools), so the fix covers both surfaces.
     /// </summary>
     public async Task<CpuSchedulerSnapshot?> GetCpuSchedulerSnapshotAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -113,7 +122,7 @@ FROM v_cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

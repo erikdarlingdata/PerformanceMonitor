@@ -289,6 +289,60 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         }
     }
 
+    /// <summary>
+    /// #3936 regression: two cpu_scheduler_stats snapshots planted under ONE collection_time (a run-overlap or
+    /// clock-resolution collision, reproduced live in the field on DARLING01 — see the issue) must still read
+    /// deterministically as the NEWER of the two, not whichever the plan happens to return first. The lower
+    /// collection_id row (NORMAL) is inserted AFTER the higher one (CRITICAL) specifically so a physical/
+    /// insertion-order coincidence cannot make this pass without the collection_id DESC tiebreak actually
+    /// doing the work — reverting CpuSchedulerPressureSql's tiebreak turns this CRITICAL assertion into NORMAL.
+    /// </summary>
+    [Fact]
+    public async Task GetCpuSchedulerPressure_TwoSnapshotsShareOneCollectionTime_ReadsTheNewerByCollectionId()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-cache/scheduler-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var tiedCollectionTime = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            const string insertSql = @"INSERT INTO cpu_scheduler_stats (collection_id, collection_time, server_id, server_name, max_workers_count, scheduler_count, cpu_count, total_runnable_tasks_count, total_work_queue_count, total_current_workers_count, avg_runnable_tasks_count, total_active_request_count, total_queued_request_count, total_blocked_task_count, total_active_parallel_thread_count, runnable_percent, worker_thread_exhaustion_warning, runnable_tasks_warning, blocked_tasks_warning, queued_requests_warning, total_physical_memory_kb, available_physical_memory_kb, physical_memory_pressure_warning, total_node_count, nodes_online_count, offline_cpu_count, offline_cpu_warning)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)";
+
+            /* The NEWER snapshot (higher collection_id), inserted FIRST: runnable tasks 60 > 50 -> CRITICAL. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9002L, tiedCollectionTime, ServerId, ServerName, 512, 8, 8, 60, 5L, 100, 7.5m, 40, 12, 2, 20L, 12.5m, false, true, false, true, 65536000L, 32768000L, false, 1, 1, 0, false);
+
+            /* The OLDER snapshot (lower collection_id) under the SAME collection_time, inserted SECOND (i.e.
+               physically last) so a reader that trusted insertion/scan order instead of collection_id would
+               land on THIS one: runnable tasks 5, no warnings -> NORMAL. */
+            await DarlingMcpTestData.ExecAsync(connection, ct, insertSql,
+                9001L, tiedCollectionTime, ServerId, ServerName, 512, 8, 8, 5, 0L, 10, 0.5m, 0, 0, 0, 0L, 0m, false, false, false, false, 65536000L, 60000000L, false, 1, 1, 0, false);
+
+            var cpu = await DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(postgres, ServerName);
+            DarlingMcpTestData.AssertEnvelope(cpu, ServerName, "pressure_level");
+            Assert.Contains("CRITICAL - High runnable task queue", cpu, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"NORMAL\"", cpu, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct, bool keepServer = false)
     {
         var sql = string.Join(" ", new[] { "plan_cache_stats", "cpu_scheduler_stats" }

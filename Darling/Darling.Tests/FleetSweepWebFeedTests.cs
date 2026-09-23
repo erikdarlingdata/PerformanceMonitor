@@ -606,7 +606,7 @@ public sealed class FleetSweepWebFeedTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
         Assert.Contains(
-            "DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger);",
+            "DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger, _baselineCache);",
             host, StringComparison.Ordinal);
     }
 

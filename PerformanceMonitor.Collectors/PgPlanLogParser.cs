@@ -75,7 +75,8 @@ public static class PgPlanLogParser
     };
 
     /* INTERNAL rather than private, and that is the sharing mechanism (#3601): PgLogTextRedactor applies
-       these same two instances to every text column the log-event pipeline stores. The redaction MUST NOT
+       these same two instances to the statement the log-event pipeline fingerprints (#3944 left its prose
+       unmasked). The redaction MUST NOT
        be duplicated across the plan route and the log-event route any more than across the two plan
        transports — a second spelling of the literal pattern is the one that eventually disagrees, and the
        cost of that disagreement is a customer's data. */

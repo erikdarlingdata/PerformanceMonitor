@@ -114,11 +114,16 @@ public class AnalysisService
     /// collector runs at on that server, so a latest-value read looks back twice the interval of a collector
     /// an operator slowed past twice a day instead of losing its fact between runs. Optional — null bounds
     /// every read by the shipped default cadence.</param>
+    /// <param name="baselineCache">#3941: the store's shared baseline tier (<see cref="BaselineCache.For"/>). The
+    /// scheduler and the Recommendations tab build a fresh service per pass, so without it every pass recomputed every
+    /// 30-day baseline and the MCP host paid for them again; with it they share one compute per series per analysis
+    /// hour. Optional — null keeps the baselines private to this instance, as before.</param>
     public AnalysisService(
         DuckDbInitializer duckDb,
         IPlanFetcher? planFetcher = null,
         Func<string, int?>? retentionDaysForCollector = null,
-        Func<int, string, int?>? collectorFrequencyMinutes = null)
+        Func<int, string, int?>? collectorFrequencyMinutes = null,
+        BaselineCache? baselineCache = null)
     {
         _duckDb = duckDb;
         _findingStore = new FindingStore(duckDb);
@@ -127,7 +132,7 @@ public class AnalysisService
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
         _drillDown = new DrillDownCollector(duckDb, planFetcher, collectorFrequencyMinutes);
-        _baselineProvider = new BaselineProvider(duckDb, retentionDaysForCollector);
+        _baselineProvider = new BaselineProvider(duckDb, retentionDaysForCollector, baselineCache);
         _anomalyDetector = new AnomalyDetector(duckDb, _baselineProvider);
     }
 

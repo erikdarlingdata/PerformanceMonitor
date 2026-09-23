@@ -301,7 +301,14 @@ AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>Latest worker-thread pressure per server (newest cpu_scheduler_stats snapshot). $ none. The
     /// per-server probe <see cref="FleetCpuSql"/> describes (#3895): 37.6 ms plus 46.0 ms of planning on
-    /// DARLING01 as a <c>DISTINCT ON</c> over every retained row.</summary>
+    /// DARLING01 as a <c>DISTINCT ON</c> over every retained row.
+    ///
+    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
+    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
+    /// <c>collection_time</c> for one server — <c>collection_id</c> is the per-process monotonic counter
+    /// every row already carries (<see cref="PerformanceMonitor.Collectors.CollectionIdGenerator"/>), so it
+    /// is the one column guaranteed to order two same-instant rows the same way on every read, instead of a
+    /// bare <c>LIMIT 1</c> returning either one depending on physical row order.</para></summary>
     public const string FleetThreadsSql = $@"
 SELECT
     s.server_id,
@@ -319,7 +326,7 @@ CROSS JOIN LATERAL
         total_work_queue_count
     FROM v_cpu_scheduler_stats
     WHERE server_id = s.server_id
-    ORDER BY collection_time DESC
+    ORDER BY collection_time DESC, collection_id DESC
     LIMIT 1
 ) AS latest
 WHERE s.is_enabled

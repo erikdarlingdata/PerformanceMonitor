@@ -125,14 +125,15 @@ public sealed class McpWaitTools
         }
     }
 
-    [McpServerTool(Name = "get_wait_trend"), Description("Gets a time-series trend for a specific wait type, showing how wait time changes over time. Use get_wait_types first to discover available wait types." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_wait_trend"), Description("Gets one wait type's wait time per second over time, in time buckets. Use get_wait_types first to discover available wait types." + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetWaitTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("The exact wait type name, e.g. CXPACKET, PAGEIOLATCH_SH.")] string wait_type,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -142,7 +143,13 @@ public sealed class McpWaitTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetWaitStatsTrendAsync(resolved.ServerId, wait_type, hours_back, asOfUtc: windowEnd);
+            /* #3960: bucketed as on Darling (TrendPayloads.WaitTrend builds both SKUs' envelope); the desktop chart's
+               per-collection read (GetWaitStatsTrendAsync) is untouched. */
+            var budget = TrendBudget.Mcp(TrendBuckets.WaitMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var points = await dataService.GetWaitBucketsAsync(resolved.ServerId, wait_type, hours_back, windowEnd, bucketMinutes);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-values probe, not after it. Both are on
@@ -170,25 +177,14 @@ public sealed class McpWaitTools
                     new { collected_wait_types = collected });
             }
 
-            var result = points.Select(p => new
-            {
-                time = p.CollectionTime.ToString("o"),
-                wait_time_ms_per_second = p.WaitTimeMsPerSecond,
-                signal_wait_time_ms_per_second = p.SignalWaitTimeMsPerSecond
-            });
             /* #3653 A5: wait_stats is the first identity-epoch carrier, so this is the trend whose step a restart
                or failover most directly manufactures; the window's discontinuities ride the trailing key as on
                every trend tool of both SKUs — see BaselineDiscontinuities. */
             var discontinuities = await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                wait_type,
-                hours_back,
-                trend = result,
-                discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.WaitTrend(
+                resolved.ServerName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
         catch (Exception ex)
         {

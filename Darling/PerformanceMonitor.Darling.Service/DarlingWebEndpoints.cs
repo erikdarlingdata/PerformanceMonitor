@@ -239,8 +239,12 @@ public static class DarlingWebEndpoints
     /// writes through. Deliberately NOT <c>app.Logger</c>: the host clears the dashboard app's logging providers
     /// (both halves of that decision are stated at its ClearProviders site), so the app's own factory writes
     /// nowhere, and a degradation line logged through it would vanish.</para>
+    ///
+    /// <para><paramref name="baselineCache"/> is the process's shared baseline tier (#3941) — the one the worker's passes
+    /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
+    /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null)
     {
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -256,7 +260,7 @@ public static class DarlingWebEndpoints
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
            persisted-finding read — need only the store; the optional plan fetcher / logger are for the excluded
            analyze/drill path). Shared across requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres);
+        var analysis = new DarlingAnalysisService(postgres, baselineCache: baselineCache);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -1936,7 +1940,7 @@ public static class DarlingWebEndpoints
             ["get_collection_log"] = R(CatData, "Raw per-run collector log for a server, newest first — or slowest first when min_duration_ms is supplied.", PServer(), PHours(24), PLimit(200), PAsOf(), PText("collector_name"), PDouble("min_duration_ms")),
             ["get_current_waits_trend"] = R(CatData, "Waiting-task and blocked-session series over time.", PServer(), PHours(4), PText("database_name"), PAsOf()),
             ["get_blocking_stats"] = R(CatData, "Blocking duration and deadlock severity per minute.", PServer(), PHours(24), PAsOf()),
-            ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf()),
+            ["get_cpu_utilization"] = R(CatData, "CPU utilization over time.", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
             ["get_file_io_stats"] = R(CatData, "Per-file IO stall/throughput stats.", PServer()),
             ["get_memory_clerks"] = R(CatData, "Top memory clerks by allocation.", PServer()),
             ["get_memory_stats"] = R(CatData, "Server memory summary counters.", PServer()),
@@ -1947,7 +1951,7 @@ public static class DarlingWebEndpoints
             ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf()),
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
             ["get_server_properties"] = R(CatData, "Server properties/inventory for a server.", PServer()),
-            ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf()),
+            ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_top_procedures_by_cpu"] = R(CatData, "Top stored procedures by CPU.", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf()),
             ["get_top_queries_by_cpu"] = R(CatData, "Top queries by CPU, optionally parallel-only / min-DOP.", PServer(), PHours(24), PTop(20), PText("database_name"), PBool("parallel_only", false), PInt("min_dop", 0), PAsOf()),
             ["get_pg_top_queries"] = R(CatData, "Top PostgreSQL query shapes by total execution time (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
@@ -1974,9 +1978,9 @@ public static class DarlingWebEndpoints
             ["get_pg_server_config_changes"] = R(CatData, "PostgreSQL configuration parameters whose value CHANGED in the window, old beside new - per-database and per-role overrides included, as changed, set or reset. Nothing else can reconstruct this after the fact.", PServer(), PHours(168), PLimit(100), PAsOf()),
             ["get_pg_deadlocks"] = R(CatData, "PostgreSQL deadlocks reported in the window, with the victim, the lock modes and resources, and the victim's statement. Needs nothing configured on the target.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_deadlock_detail"] = R(CatData, "PostgreSQL deadlock graphs in full: the whole wait graph and every participant's statement, as the server wrote it. Newest first, or one by deadlock_hash.", PServer(), PText("deadlock_hash"), PLimit(5)),
-            ["get_pg_log_events"] = R(CatData, "PostgreSQL server-log events in the window, classified by family (error, connection, lock_wait, temp_file, autovacuum, checkpoint), newest first, redacted. The 'check the error log' read. Filter by family and min_severity; the page says what bounded it.", PServer(), PHours(24), PText("family"), PText("min_severity"), PLimit(50), PAsOf()),
+            ["get_pg_log_events"] = R(CatData, "PostgreSQL server-log events in the window, classified by family (error, connection, lock_wait, temp_file, autovacuum, checkpoint), newest first, SQL in them normalized. The 'check the error log' read. Filter by family and min_severity; the page says what bounded it.", PServer(), PHours(24), PText("family"), PText("min_severity"), PLimit(50), PAsOf()),
             ["get_pg_wait_trend"] = R(CatTrends, "One PostgreSQL wait event over time, per second. Omit wait_event to follow whichever dominates. Estimates from a sampling profiler, so the shape is the finding.", PServer(), PText("wait_event"), PHours(24), PAsOf()),
-            ["get_pg_query_duration_trend"] = R(CatTrends, "One PostgreSQL statement over time by queryid: what a single execution cost in each interval. Omit queryid for the busiest statement. The regression read.", PServer(), PText("queryid"), PHours(24), PAsOf()),
+            ["get_pg_query_duration_trend"] = R(CatTrends, "One PostgreSQL statement over time by queryid: what a single execution cost in each interval. Omit queryid for the busiest statement. The regression read.", PServer(), PText("queryid"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_io_trend"] = R(CatTrends, "One PostgreSQL (backend_type, context) pair over time: I/O rates per second, the hit ratio per point, and latency where the server measures it. Omit both to follow whichever pair moved the most I/O.", PServer(), PText("backend_type"), PText("context"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_database_trend"] = R(CatTrends, "One PostgreSQL database over time: temp-file spills, the cache hit ratio per point with its worst interval, deadlocks and the rollback share. Omit database for the biggest spiller. The cumulative ratio is a lifetime average that hides a cliff.", PServer(), PText("database"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_replication_stats"] = R(CatData, "Health of CONNECTED replicas from pg_stat_replication, with the worst lag in the window beside the latest. Counterpart of get_pg_replication_slots.", PServer(), PHours(24), PLimit(25), PAsOf()),
@@ -1986,14 +1990,14 @@ public static class DarlingWebEndpoints
             ["get_pg_table_bloat"] = R(CatData, "PostgreSQL per-table bloat ESTIMATE with its measured sizes and dead-tuple counts. The estimate is suppressed, not captioned, when its statistics cannot be trusted.", PServer(), PHours(168), PLimit(25), PAsOf()),
             ["get_pg_session_states"] = R(CatData, "PostgreSQL sessions holding a transaction open, and whether each one actually pins the xmin horizon - which is not the same question as how long it has been idle in transaction.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_wait_stats"] = R(CatData, "Top wait statistics in the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
-            ["get_wait_trend"] = R(CatData, "One wait type's totals over time (requires wait_type).", PReqText("wait_type"), PServer(), PHours(24), PAsOf()),
+            ["get_wait_trend"] = R(CatData, "One wait type's totals over time (requires wait_type).", PReqText("wait_type"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_wait_types"] = R(CatData, "The wait types observed in the window.", PServer(), PHours(24), PAsOf()),
             ["list_servers"] = R(CatData, "The monitored servers known to the store."),
 
             /* ── trends (DarlingMcpTrendTools) ── */
             ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("database_name")),
-            ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf()),
-            ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf()),
+            ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
+            ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
             ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
@@ -2641,7 +2645,11 @@ public static class DarlingWebEndpoints
                 : UnparseableParam("min_duration_ms"),
             ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
-            ["get_cpu_utilization"] = (c, pg, an) => DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), as_of: AsOf(c)),
+            /* #3960: the core trends a page charts take the CHART budget and bind bucket_minutes, as the trends
+               below do (#3897). */
+            ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c)),
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c)),
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
@@ -2652,7 +2660,9 @@ public static class DarlingWebEndpoints
             ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c)),
-            ["get_tempdb_trend"] = (c, pg, an) => DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c)),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
@@ -2684,7 +2694,9 @@ public static class DarlingWebEndpoints
             ["get_pg_deadlock_detail"] = (c, pg, an) => DarlingMcpPgDeadlockTools.GetPgDeadlockDetail(pg, Server(c), Str(c, "deadlock_hash"), Rows(c, "limit", 5)),
             ["get_pg_log_events"] = (c, pg, an) => DarlingMcpPgLogEventTools.GetPgLogEvents(pg, Server(c), Hours(c, 24), Str(c, "family"), Str(c, "min_severity"), Rows(c, "limit", 50), as_of: AsOf(c)),
             ["get_pg_wait_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgWaitTrend(pg, Server(c), Str(c, "wait_event"), Hours(c, 24), as_of: AsOf(c)),
-            ["get_pg_query_duration_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), as_of: AsOf(c)),
+            ["get_pg_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_pg_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
                 : UnparseableParam("bucket_minutes"),
@@ -2699,7 +2711,9 @@ public static class DarlingWebEndpoints
             ["get_pg_session_states"] = (c, pg, an) => DarlingMcpPgSessionStatesTools.GetPgSessionStates(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_wait_trend"] = (c, pg, an) => RequireText(c, "wait_type", out var waitType)
-                ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), as_of: AsOf(c))
+                ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                    : UnparseableParam("bucket_minutes"))
                 : MissingParam("wait_type"),
             ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg),
@@ -2711,9 +2725,13 @@ public static class DarlingWebEndpoints
             ["get_file_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart)
                 : UnparseableParam("bucket_minutes"),
-            ["get_memory_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_memory_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
-                ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), as_of: AsOf(c))
+                ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                    : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)

@@ -657,12 +657,16 @@ public class CollectionBackgroundService : BackgroundService
                    which would resolve, then re-fire, the findings and notifications built on them. */
                 var schedules = _scheduleManager;
                 var servers = _serverManager;
+                /* #3941: the store's shared baseline tier — this service is fresh per pass, and without the tier every
+                   pass recomputed every 30-day baseline; with it, a pass inside an analysis hour another pass (or the
+                   MCP host, or the Recommendations tab) already computed reads none. */
                 var analysisService = new AnalysisService(
                     _duckDb,
                     planFetcher,
                     collectorFrequencyMinutes: schedules is null
                         ? null
-                        : (id, collector) => schedules.GetFrequencyForStorageServer(servers, id, collector));
+                        : (id, collector) => schedules.GetFrequencyForStorageServer(servers, id, collector),
+                    baselineCache: BaselineCache.For(_duckDb));
 
                 /* #2412: the TOKEN is the timeout now; the Task.Delay below is only this loop's
                    patience. Two things had to change for the budget to mean anything.

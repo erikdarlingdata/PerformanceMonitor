@@ -1924,7 +1924,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
-        ctx.label + ", newest 50 across every family; message and detail are redacted at the collector, the statement is never stored; Sightings counts re-reads of the same line, not repeats",
+        ctx.label + ", newest 50 across every family; messages as PostgreSQL wrote them, SQL in them normalized, the statement never stored; Sightings counts re-reads of the same line, not repeats",
         "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.
@@ -3569,6 +3569,8 @@ const PG_WAIT_TREND_COLUMNS = [
 const PG_QUERY_DURATION_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "mean_exec_ms", label: "Mean ms/exec", format: "num2" },
+  /* #3960: a row is a bucket of intervals, so its costliest single interval rides beside the pooled mean. */
+  { key: "peak_mean_exec_ms", label: "Peak ms/exec", format: "num2", small: true },
   { key: "calls", label: "Calls", format: "int" },
   { key: "calls_per_second", label: "Calls/sec", format: "num2" },
   { key: "total_exec_ms", label: "Total ms", format: "num1", small: true },

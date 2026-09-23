@@ -29,8 +29,8 @@ namespace PerformanceMonitor.Collectors;
 public sealed class PgErrorEventParser : IPgLogFamilyParser
 {
     /* `for user "name"` / `role "name"` / `database "name" does not exist` — the identifiers PostgreSQL
-       double-quotes in authentication and startup failures. Identifiers, not values; kept by the redactor
-       and lifted here so a FATAL connection storm groups by who was refused. */
+       double-quotes in authentication and startup failures, lifted here so a FATAL connection storm groups by
+       who was refused. */
     private static readonly Regex s_forUser = new(
         @"\b(?:for user|role) ""(?<user>[^""]+)""", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -122,9 +122,9 @@ public sealed class PgConnectionEventParser : IPgLogFamilyParser
 /// The <c>DETAIL</c> names the holder and the queue (<c>Process holding the lock: 4321. Wait queue:
 /// 1234.</c>), the <c>STATEMENT</c> is the waiter's SQL, and the <c>CONTEXT</c> — where present — names the
 /// tuple and relation (<c>while updating tuple (0,7) in relation "orders"</c>). The message, detail and
-/// context are stored redacted, and survive it because they are pids, modes and identifiers after a noun;
-/// the statement is fingerprinted and never stored. (The first draft claimed the context survived while
-/// the row had no column for it — review caught the gap, and the column exists because of it.)</para>
+/// context are stored as PostgreSQL wrote them (#3944); the statement is fingerprinted and never stored. (The
+/// first draft claimed the context survived while the row had no column for it — review caught the gap, and
+/// the column exists because of it.)</para>
 ///
 /// <para><b>What this is beside <c>pg_blocking</c>.</b> That collector SAMPLES <c>pg_blocking_pids()</c> on
 /// a cadence and can miss a wait that starts and ends between samples; this is the server's own record of
@@ -162,7 +162,7 @@ public sealed class PgLockWaitEventParser : IPgLogFamilyParser
 /// size %lu"</c>, identical in 16, 17 and 18). The size is an unsigned long of bytes with no separators —
 /// PostgreSQL's own <c>snprintf</c> never applies a locale — so it parses invariantly. The path names a
 /// pgsql_tmp file, not a relation: it carries the pid and a sequence number and nothing about the data,
-/// which is why it stays in <c>message</c> (redacted like every message) and is NOT lifted into
+/// which is why it stays in <c>message</c> and is NOT lifted into
 /// <c>relation_name</c>. One statement can write several files (a parallel hash, a multi-batch sort), and
 /// each is its own event with its own bytes; summing per fingerprint per second is a reader's job.</para>
 ///
@@ -184,8 +184,8 @@ public sealed class PgTempFileEventParser : IPgLogFamilyParser
     private static readonly Regex s_shape = new(@"^temporary file: ", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* `size N` at the end of the line — the one number in the message. Anchored on the keyword rather
-       than on the path's closing quote, because a path is an operating-system string and the redactor
-       would not be the only thing surprised by a quote inside one. */
+       than on the path's closing quote, because a path is an operating-system string and can carry a quote
+       of its own. */
     private static readonly Regex s_size = new(@"\bsize (?<n>\d+)\s*$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     public string Family => PgLogFamilies.TempFile;

@@ -21,9 +21,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -433,6 +435,177 @@ public sealed class ComposeStoreRolesLiveTests
         }
         finally
         {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>Answers <see cref="IAlertDeliverer"/> without sending anything (#3580 requires both members
+    /// answered by hand): the tests below read fired state back from <see cref="CustomAlertStateStore"/> instead
+    /// of capturing a delivery.</summary>
+    private sealed class NoopDeliverer : IAlertDeliverer
+    {
+        public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        {
+            await DeliverAsync(outcome, cancellationToken);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// #3970: the custom-alert evaluator admits this start's compose verdict beside the managed DPAPI gate, and
+    /// the resulting VIEWER pool — carrying the statement_timeout backstop and denied the secret column, exactly
+    /// like the web dashboard's own login (<see cref="AssertLeastPrivilegeAsync"/>) — is enough to read a
+    /// composed metric and fire a rule, the one thing <see cref="CustomAlertEvaluator"/> ever asks of it (rules,
+    /// state and history all stay on the owner pool, as the real worker builds them).
+    /// </summary>
+    [Fact]
+    public async Task TheComposeStore_CustomAlertEvaluator_ConnectsAsViewer_AndEvaluatesARule_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-3970-evaluator-");
+        var credentials = Path.Combine(root.FullName, "credentials");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            await using var ownerSource = NpgsqlDataSource.Create(owner);
+
+            var provisioning = new CapturingTestLogger();
+            var verdict = await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, provisioning, ct, credentials);
+            Assert.True(verdict.Provisioned, provisioning.Joined);
+
+            var viewerLogin = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct);
+            Assert.Equal(verdict.ViewerConnectionString, viewerLogin);
+            await AssertLeastPrivilegeAsync(viewerLogin!, "viewer", ct);
+
+            const int serverId = 993970;
+            var storage = "car_3970_srv_" + Guid.NewGuid().ToString("N");
+            var ruleName = "car_3970_" + Guid.NewGuid().ToString("N");
+            // Gauge metric (avg over 15m), one seeded row, fire on the first breach -- the same deterministic
+            // shape CustomAlertSeverityEscalationLiveTests uses -- scoped to exactly this server.
+            var definition =
+                "{\"metric\":{\"source\":\"cpu_utilization_stats\",\"measure\":\"sqlserver_cpu_utilization\",\"aggregate\":\"avg\",\"hours\":0.25}," +
+                "\"predicate\":{\"op\":\"ge\",\"warnThreshold\":25}," +
+                "\"hysteresis\":{\"breachSamples\":1,\"clearSamples\":1}," +
+                "\"scope\":{\"mode\":\"servers\",\"servers\":[\"" + storage + "\"]}}";
+
+            await using (var register = ownerSource.CreateCommand(
+                "INSERT INTO servers (server_id, server_name, display_name) VALUES ($1, $2, $2)"))
+            {
+                register.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                register.Parameters.Add(new NpgsqlParameter<string> { TypedValue = storage });
+                await register.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var seed = ownerSource.CreateCommand(@"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization)
+VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 0)"))
+            {
+                seed.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DateTime.UtcNow.Ticks });
+                seed.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+                seed.Parameters.Add(new NpgsqlParameter<string> { TypedValue = storage });
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            var rules = new CustomAlertRuleStore(ownerSource);
+            var state = new CustomAlertStateStore(ownerSource);
+            var created = Assert.IsType<CustomAlertRuleResult.Ok>(
+                await rules.CreateAsync(ruleName, null, definition, true, "test", ct));
+            var ruleId = created.Rule!.Id;
+            var version = created.Rule!.Version;
+
+            /* The real construction (DarlingWorker): rules/state/history on the OWNER pool, only the metric READ
+               on the resolved compose viewer pool. */
+            await using var viewerSource = NpgsqlDataSource.Create(viewerLogin!);
+            var evaluator = new CustomAlertEvaluator(
+                rules, state, viewerSource, new NoopDeliverer(), isAlertMuted: null, alertsEnabled: static () => true,
+                new PgAlertHistoryStore(ownerSource), defaultIntervalSeconds: 0, cacheTtl: TimeSpan.Zero, NullLogger.Instance);
+
+            await evaluator.EvaluateServerAsync(serverId, storage, storage, ct);
+
+            var fired = await state.LoadAsync(ruleId, serverId, version, ct);
+            Assert.True(fired.Persistence.Firing, "the rule did not fire through the compose store's viewer pool");
+            Assert.Equal("Warning", fired.FiredSeverity);
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #3970: for a start that did NOT provision the compose store's roles, the evaluator tries a trusted
+    /// credential an earlier start left (F1) exactly as a host does, accepted before use -- but stops there. When
+    /// the store refuses it (re-keyed by hand) or none exists at all, a host falls back to the owner login
+    /// (<see cref="DarlingStoreLogins.ResolveUnmanagedAsync"/>); the evaluator must not, in either case, since a
+    /// rule's compose metric running with owner rights is exactly what the viewer-role pool exists to prevent.
+    /// </summary>
+    [Fact]
+    public async Task TheComposeStore_CustomAlertEvaluator_TrustsAnEarlierCredential_ButNeverFallsBackToTheOwner_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-3970-earlier-");
+        var credentials = Path.Combine(root.FullName, "credentials");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            await using var ownerSource = NpgsqlDataSource.Create(owner);
+
+            /* An earlier start provisioned the roles and wrote their credential files. */
+            var earlier = new CapturingTestLogger();
+            Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, earlier, ct, credentials)).Provisioned, earlier.Joined);
+
+            /* This start did not provision (a stand-down, say) -- the verdict a real one settles, pointed at this
+               test's directory. */
+            DarlingStoreLogins.PublishComposeStoreVerdict(DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(
+                "The collector stopped before it could provision the store's roles (Store: connection refused).", credentials));
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");
+
+            /* 1. The role still has the password an earlier start gave it: the evaluator uses it, exactly as a
+                  host would (F1). */
+            var trusted = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct);
+            Assert.NotNull(trusted);
+            await AssertLeastPrivilegeAsync(trusted!, "viewer", ct);
+
+            /* 2. The role re-keyed by hand since: the store refuses that credential, so the evaluator gets
+                  nothing -- never the owner in its place. */
+            await ExecAsync(owner, "ALTER ROLE viewer PASSWORD 'ChangedByHand3970';", ct);
+            var rekeyed = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, rekeyed, ct));
+            Assert.Contains(
+                "Custom alert evaluator not started this attempt: the store did not accept the viewer login an earlier start provisioned",
+                rekeyed.Joined, StringComparison.Ordinal);
+
+            /* 3. No trusted credential at all: a host falls back to the owner here (#3914's ruling); the
+                  evaluator must not, which is the divergence this test exists to pin. */
+            File.Delete(Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer")));
+            Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(owner, NullLogger.Instance, ct));
+
+            var hostFallback = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                DarlingStoreLogins.Surface.Web, new PostgresConfig { ConnectionString = owner }, NullLogger.Instance, ct);
+            Assert.Equal(owner, hostFallback);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
             DarlingStoreLogins.ResetComposeStoreVerdictForTests();
             await cluster.StopIfStartedByThisProcessAsync();
             DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);

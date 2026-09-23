@@ -4018,8 +4018,8 @@
                                     <DataGridTextColumn Header="User" Binding="{Binding UserName}" Width="100"/>
                                     <DataGridTextColumn Header="Application" Binding="{Binding ApplicationName}" Width="120"/>
                                     <DataGridTextColumn Header="PID" Binding="{Binding Pid}" Width="70"/>
-                                    <!-- Redacted at the collector: quoted literals and key values are gone before
-                                         the row exists. -->
+                                    <!-- As PostgreSQL wrote it (#3944); the SQL in Detail and Context is normalized
+                                         at the collector, literals replaced by ?. -->
                                     <DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="*"/>
                                     <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="220"/>
                                     <!-- The CONTEXT companion: for a lock wait, the tuple and relation. -->

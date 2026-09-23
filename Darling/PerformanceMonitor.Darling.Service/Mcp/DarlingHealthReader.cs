@@ -96,9 +96,21 @@ SELECT
     public const string ServerSummaryDeadlockSql = @"
 SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3";
 
-    /// <summary>Newest collection time across all collectors for one server. $1 server_id.</summary>
+    /// <summary>
+    /// Newest collection time across all collectors for one server. $1 server_id.
+    ///
+    /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
+    /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
+    /// returned none — but a bound cannot make the MAX form cheap: <c>collection_log</c> keeps 60 days, so any
+    /// bound wide enough to keep the answer identical is the retention horizon itself, and every retained
+    /// chunk falls inside it. The same per-server LATERAL/ordered-descent shape
+    /// <c>ViewerDataService.ServerFreshnessSql</c> already carries for the SAME table (#3895) and
+    /// <c>DarlingDataReader.ServerListSql</c> and <c>ViewerDataService.ServerSummaryLastCollectionSql</c> now
+    /// carry too (#3976) — an ordered per-chunk descent that stops at the newest chunk with a row, which a
+    /// plan built to prove a MAX over the whole retained history cannot do regardless of any WHERE clause.</para>
+    /// </summary>
     public const string ServerSummaryLastCollectionSql = @"
-SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
+SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 1";
 
     /// <summary>The span the blocking and deadlock counts cover, ending at the read's clock — Lite's window.
     /// Published by the tool so "recent" has a number.</summary>

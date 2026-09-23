@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,7 +31,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// The log-event pipeline (#3601): assembly, the three proving family parsers, the recognised-only
-/// families, redaction, the shared tailer, and both transports.
+/// families, SQL normalization, the shared tailer, and both transports.
 ///
 /// <para><b>Fixtures are real log lines.</b> Every prefix-and-message shape below is what PostgreSQL 16–18
 /// writes at <c>stderr</c> under the two <c>log_line_prefix</c> families the deadlock parser already meets
@@ -174,6 +175,30 @@ public sealed class PgLogEventsPipelineTests
         }
     }
 
+    /// <summary>
+    /// #3944's review: a companion line from ANOTHER backend is dropped, and so are the tab lines under it, the rest
+    /// of that backend's field. They used to run on into the field this entry had open, which prose masking hid;
+    /// with the columns stored as written they would put one session's statement into another's message.
+    /// </summary>
+    [Fact]
+    public void AnotherBackendsContinuationLines_NeverJoinTheOpenEntry()
+    {
+        var log = P + "[4102] ERROR:  canceling statement due to statement timeout\n"
+            + P + "[4200] STATEMENT:  UPDATE creds\n"
+            + "\tSET secret = 'Leak3944w'\n"
+            + P + "[4102] CONTEXT:  PL/pgSQL function f() line 3 at SQL statement\n"
+            + P + "[4102] STATEMENT:  SELECT f()\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(log));
+        Assert.Equal("canceling statement due to statement timeout", entry.Message);
+        Assert.Equal("PL/pgSQL function f() line 3 at SQL statement", entry.Context);
+        Assert.Equal("SELECT f()", entry.Statement);
+        Assert.Null(entry.Detail);
+
+        var stored = Assert.Single(Classify(log));
+        Assert.DoesNotContain("Leak3944w", stored.Message + stored.Detail + stored.Context, StringComparison.Ordinal);
+    }
+
     /* ---- classification ------------------------------------------------------------------------------ */
 
     [Fact]
@@ -236,8 +261,8 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(2, waits.Count);
         Assert.Equal("process 4102 still waiting for ShareLock on transaction 809 after 1000.123 ms", waits[0].Message);
         Assert.Equal("Process holding the lock: 4099. Wait queue: 4102.", waits[0].Detail);
-        /* The CONTEXT is STORED — review caught the first draft parsing it and dropping it while the parser's
-           doc claimed it survived. Identifiers after a noun stay; the tuple's numbers stay. */
+        /* The CONTEXT is STORED, as PostgreSQL wrote it — review caught the first draft parsing it and dropping
+           it while the parser's doc claimed it survived. */
         Assert.Equal("while updating tuple (0,7) in relation \"orders\"", waits[0].Context);
         Assert.Contains(PgLogEventsCollector.Instance.PayloadColumns, c => c.Name == "context");
         Assert.Equal("process 4102 acquired ShareLock on transaction 809 after 2345.678 ms", waits[1].Message);
@@ -338,44 +363,33 @@ public sealed class PgLogEventsPipelineTests
         }
     }
 
-    /* ---- redaction ----------------------------------------------------------------------------------- */
+    /* ---- what is stored: prose as written, SQL normalized ---------------------------------------------- */
 
-    /// <summary>The issue's scope note, as a pin: a literal fed in never reaches the row.</summary>
+    /// <summary>
+    /// #3944's ruling, as a pin: the message and the prose of the detail and context are stored as PostgreSQL
+    /// wrote them, value and all, and the statement is never stored at all, only fingerprinted, so no literal of
+    /// the user's SQL reaches the row. #3601 through #3920 masked the value shapes in the prose; that is gone.
+    /// </summary>
     [Fact]
-    public void Redaction_StripsEveryLiteral_BeforeAnythingIsStored()
+    public void TheProseIsStoredAsWritten_AndTheStatementNever()
     {
         var events = Classify(SelfHostedLog);
 
+        /* Two representative shapes, both masked before #3944: a unique violation's key tuple and a value-quoting
+           error. Both are PostgreSQL's own evidence, kept. */
+        var duplicate = events.Single(e => e.Message.StartsWith("duplicate key", StringComparison.Ordinal));
+        Assert.Equal("duplicate key value violates unique constraint \"customers_email_key\"", duplicate.Message);
+        Assert.Equal("Key (email)=(someone@example.com) already exists.", duplicate.Detail);
+        Assert.Contains(events, e => e.Message == "invalid input syntax for type integer: \"secret-order-ref-9931\"");
+
+        /* The STATEMENT companions' literals appear nowhere a row stores: they were only ever in the statement. */
         foreach (var e in events)
         {
             var stored = e.Message + e.Detail + e.Context + e.StatementFingerprint;
-            Assert.DoesNotContain("secret-order-ref", stored, StringComparison.Ordinal);
-            Assert.DoesNotContain("host all all", stored, StringComparison.Ordinal);
-            Assert.DoesNotContain("someone@example.com", stored, StringComparison.Ordinal);
-            Assert.DoesNotContain("O'Brien", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("Brien", stored, StringComparison.Ordinal);
             Assert.DoesNotContain("shipped", stored, StringComparison.Ordinal);
             Assert.DoesNotContain("gift", stored, StringComparison.Ordinal);
         }
-
-        /* The unique-violation DETAIL's value tuple is the one unquoted value shape in PostgreSQL's prose. */
-        var duplicate = events.Single(e => e.Message.StartsWith("duplicate key", StringComparison.Ordinal));
-        Assert.Equal("Key (email)=(?) already exists.", duplicate.Detail);
-
-        /* Review caught the leak this pins: PostgreSQL does not escape the value, so a value carrying `)`
-           defeated a first-paren pattern and ` Inc.)` reached the store. The tuple now runs to its TRUE
-           close; expression keys and the other violation sentences are read the same way. */
-        Assert.Equal("Key (name)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (name)=(Acme (USA) Inc.) already exists."));
-        Assert.Equal("Key (name, region)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (name, region)=(Acme (USA) Inc., EMEA (west)) already exists."));
-        Assert.Equal("Key (lower(email))=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (lower(email))=(x) already exists."));
-        Assert.Equal("Key (order_id)=(?) is still referenced from table \"order_lines\".", PgLogTextRedactor.RedactMessage("Key (order_id)=(42 (legacy)) is still referenced from table \"order_lines\"."));
-        Assert.Equal("Key (customer_id)=(?) is not present in table \"customers\".", PgLogTextRedactor.RedactMessage("Key (customer_id)=(1007) is not present in table \"customers\"."));
-        Assert.Equal("Key (during)=(?) conflicts with existing key (during)=(?).", PgLogTextRedactor.RedactMessage("Key (during)=([\"2026-01-01\",\"2026-01-02\")) conflicts with existing key (during)=([\"2026-01-01\",\"2026-01-03\"))."));
-        Assert.DoesNotContain("Acme", PgLogTextRedactor.RedactMessage("Key (name)=(Acme (USA) Inc.) already exists.")!, StringComparison.Ordinal);
-        /* A value carrying `)=(` — the shape that would fool a pattern anchored on the tuple separator. */
-        Assert.Equal("Key (code)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (code)=(a)=(b) already exists."));
-        Assert.Equal("Key (code)=(?) already exists.", PgLogTextRedactor.RedactMessage("Key (code)=(x) conflicts with) already exists."));
-        /* Identifiers stay: the constraint name is double-quoted and is not a value. */
-        Assert.Equal("duplicate key value violates unique constraint \"customers_email_key\"", duplicate.Message);
 
         /* The statement is never a column at all: the row type has no member carrying it. */
         Assert.DoesNotContain(typeof(PgLogEvent).GetProperties(), p => p.Name.Contains("Statement", StringComparison.Ordinal) && p.PropertyType == typeof(string) && p.Name != "StatementFingerprint");
@@ -383,59 +397,13 @@ public sealed class PgLogEventsPipelineTests
     }
 
     [Fact]
-    public void Redaction_IsThePlanParsersOwnPatterns_AppliedAtTwoStrengths()
+    public void TheStatementFingerprint_IsThePlanParsersOwnPatterns()
     {
         /* Statement: literals and bare numbers go, identifier-glued digits stay — exactly the plan parser's
-           condition-field rule over SQL text. */
+           condition-field rule over SQL text. Unchanged by #3944, so fingerprints stay continuous. */
         Assert.Equal(
             "UPDATE transactionitems1 SET note = '?' WHERE id = ? AND amount > ?",
             PgLogTextRedactor.RedactStatement("UPDATE transactionitems1 SET note = 'it''s' WHERE id = 42 AND amount > 10.5"));
-
-        /* Prose: literals go, numbers stay — a lock wait's numbers are its evidence. */
-        Assert.Equal(
-            "process 4102 still waiting for ShareLock on transaction 809 after 1000.123 ms",
-            PgLogTextRedactor.RedactMessage("process 4102 still waiting for ShareLock on transaction 809 after 1000.123 ms"));
-        /* PostgreSQL quotes the offending VALUE with DOUBLE quotes in this class of message — review caught
-           the first draft asserting a single-quoted variant the server never writes. The value shapes go
-           whole (greedy to the closing quote, so JSON with quotes of its own is not left standing), the
-           identifier shapes stay, an unknown lead is over-redacted rather than trusted. */
-        Assert.Equal("invalid input syntax for type integer: \"?\"", PgLogTextRedactor.RedactMessage("invalid input syntax for type integer: \"abc123\""));
-        Assert.Equal("invalid input syntax for type uuid: \"?\"", PgLogTextRedactor.RedactMessage("invalid input syntax for type uuid: \"not-a-uuid\""));
-        Assert.Equal("malformed array literal: \"?\"", PgLogTextRedactor.RedactMessage("malformed array literal: \"{\"a\"}\""));
-        Assert.Equal("date/time field value out of range: \"?\"", PgLogTextRedactor.RedactMessage("date/time field value out of range: \"2026-13-40\""));
-        Assert.Equal("invalid input value for enum mood: \"?\"", PgLogTextRedactor.RedactMessage("invalid input value for enum mood: \"happ\""));
-        Assert.Equal("syntax error at or near \"?\"", PgLogTextRedactor.RedactMessage("syntax error at or near \"DELTE\""));
-        Assert.Equal("unterminated quoted string at or near \"?\"", PgLogTextRedactor.RedactMessage("unterminated quoted string at or near \"'abc\""));
-        Assert.Equal("invalid value for parameter \"work_mem\": \"?\"", PgLogTextRedactor.RedactMessage("invalid value for parameter \"work_mem\": \"lots\""));
-        Assert.Equal("Failing row contains (?).", PgLogTextRedactor.RedactMessage("Failing row contains (1, someone@example.com, Acme (USA) Inc., null)."));
-        Assert.Equal("something odd \"?\" mid-sentence", PgLogTextRedactor.RedactMessage("something odd \"value\" mid-sentence"));
-        /* Review's second look: a quote after bare whitespace or at the head of a tab-continuation line has no
-           noun before it and must be evaluated (and redacted), not skipped. An inner SQL statement in a
-           CONTEXT goes whole for the same reason: `statement` is not an identifier noun. */
-        Assert.Equal("two spaces  \"?\" here", PgLogTextRedactor.RedactMessage("two spaces  \"value\" here"));
-        Assert.Equal("line one\n\"?\" on a continuation", PgLogTextRedactor.RedactMessage("line one\n\"value\" on a continuation"));
-        Assert.Equal("\"?\" at the start", PgLogTextRedactor.RedactMessage("\"value\" at the start"));
-        Assert.Equal("SQL statement \"?\"", PgLogTextRedactor.RedactMessage("SQL statement \"UPDATE orders SET v = 1 WHERE id = 42\""));
-        Assert.Equal("COPY t, line 3, column c: \"?\"", PgLogTextRedactor.RedactMessage("COPY t, line 3, column c: \"someone@example.com\""));
-        Assert.Equal("Connection matched file \"/etc/postgresql/pg_hba.conf\" line 117: \"?\"", PgLogTextRedactor.RedactMessage("Connection matched file \"/etc/postgresql/pg_hba.conf\" line 117: \"host all all 0.0.0.0/0 scram-sha-256\""));
-
-        /* Identifiers, by the noun before them: the diagnostic value of the message is the name. */
-        foreach (var kept in new[]
-        {
-            "duplicate key value violates unique constraint \"customers_email_key\"",
-            "password authentication failed for user \"intruder\"",
-            "role \"intruder\" does not exist",
-            "database \"app_db\" does not exist",
-            "null value in column \"email\" of relation \"customers\" violates not-null constraint",
-            "connection authenticated: identity=\"app_rw\" method=scram-sha-256 (/etc/postgresql/pg_hba.conf:117)",
-            "temporary file: path \"base/pgsql_tmp/pgsql_tmp4102.0\", size 4294967296",
-            "automatic vacuum of table \"app_db.public.orders\": index scans: 1",
-            "while updating tuple (0,7) in relation \"orders\"",
-            "unrecognized configuration parameter \"foo\"",
-        })
-        {
-            Assert.Equal(kept, PgLogTextRedactor.RedactMessage(kept));
-        }
 
         /* Same shape, different values, one fingerprint; and the fingerprint is over the REDACTED text, so
            the raw literal is not even hashed. */
@@ -605,61 +573,90 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #3920's review, the prose value shapes: a partition key's values, a JSON line, and a key tuple whose quoted
-    /// column name holds an apostrophe. The value shapes now run before the single-quote pass, and that pass
-    /// steps over double-quoted names, so an apostrophe inside <c>"o'k"</c> pairs with nothing.
+    /// #3944: the prose of a DETAIL and a CONTEXT is kept as PostgreSQL wrote it. A partition key's values and a
+    /// JSON input line were two of the value shapes #3920's reviews masked; now only a field's SQL is touched.
     /// </summary>
     [Fact]
-    public void Prose_MasksPartitionKeysJsonLinesAndQuotedNamesWithApostrophes()
+    public void DetailAndContextProse_IsKeptAsWritten()
     {
-        var cases = new (string Raw, string Masked)[]
-        {
-            ("Partition key of the failing row contains (tenant_email) = (bob@example.com).", "Partition key of the failing row contains (tenant_email) = (?)."),
-            ("Partition key of the failing row contains (lower(a), b) = (x (y), z).", "Partition key of the failing row contains (lower(a), b) = (?)."),
-            ("JSON data, line 1: {\"card\": 4111111111111111, \"cvv\": 123, \"x\": }", "JSON data, line 1: ?"),
-            ("Key (\"o'k\")=(it's Leak3920g) already exists.", "Key (\"?\")=(?) already exists."),
-            ("column \"o'k\" of relation \"t\" and the value 'Leak3920h'", "column \"o'k\" of relation \"t\" and the value '?'"),
-        };
+        const string partition = "Partition key of the failing row contains (tenant_email) = (bob@example.com).";
+        Assert.Equal(partition, PgLogTextRedactor.RedactDetail(partition));
 
-        foreach (var (raw, masked) in cases)
-        {
-            Assert.Equal(masked, PgLogTextRedactor.RedactMessage(raw));
-            Assert.Equal(masked, PgLogTextRedactor.RedactMessage(masked));
-        }
+        const string json = "JSON data, line 1: {\"card\": 4111111111111111, \"cvv\": 123, \"x\": }\n\tPL/pgSQL function g() line 2 at PERFORM";
+        Assert.Equal(json, PgLogTextRedactor.RedactContext(json));
     }
 
     /// <summary>
-    /// #3920's fourth review (M1, L3). A DETAIL is read as SQL only in the three shapes PostgreSQL writes SQL into:
-    /// a deadlock report (its wait-for lines first), a crash report, and a logged EXECUTE's <c>prepare:</c>. Inside
-    /// a deadlock report, a <c>Process N:</c> line starts a new query only when N is one of the deadlock's own
-    /// processes AND the query before it reads to its end. Round 3's splitter broke a query at any such line: a
-    /// literal holding numbered lines ("Process 1: call Jane") kept its middle as identifiers, and a key tuple or
-    /// failing row cut there lost the close its prose shape needed.
+    /// #3920's fourth review (M1, L3), #3944's review. A DETAIL is read as SQL only in the shapes PostgreSQL writes
+    /// SQL into: a deadlock report (its wait-for lines first), a crash report, a logged EXECUTE's <c>prepare:</c> and
+    /// a statement's parameter values. A deadlock report's query heads are its waiters' <c>Process N:</c> lines, in
+    /// the wait-for lines' order, each once, and each query is read on its own. Round 3's splitter broke a query at
+    /// any such line: a literal holding numbered lines ("Process 1: call Jane") kept its middle as identifiers. A
+    /// line shaped like a waiter's head inside a query leaves the boundaries unknowable, so every query is withheld.
+    /// Any other DETAIL is prose, kept as written (#3944), a line shaped like a query head included.
     /// </summary>
     [Fact]
     public void ADetailIsSqlOnlyInTheShapesPostgresWritesSqlInto()
     {
-        var deadlock = PgLogTextRedactor.RedactDetail(string.Join("\n",
+        const string waitFor = "Process 11 waits for ShareLock on transaction 5; blocked by process 12.\n"
+            + "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.";
+
+        /* Numbered lines inside a literal are the query's own text: no waiter's head among them. */
+        var numbered = PgLogTextRedactor.RedactDetail(waitFor + "\n" + string.Join("\n",
         [
-            "Process 11 waits for ShareLock on transaction 5; blocked by process 12.",
-            "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.",
             "\tProcess 11: UPDATE notes SET body = 'Steps:",
             "\tProcess 1: call Jane Roe at jane@example.com",
-            "\tProcess 12: done' WHERE id = 5",
+            "\tProcess 2: done' WHERE id = 5",
             "\tProcess 12: UPDATE notes SET body = 'x' WHERE id = 6",
         ]));
-        Assert.Equal(string.Join("\n",
-        [
-            "Process 11 waits for ShareLock on transaction 5; blocked by process 12.",
-            "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.",
-            "\tProcess 11: UPDATE notes SET body = '?' WHERE id = ?",
-            "\tProcess 12: UPDATE notes SET body = '?' WHERE id = ?",
-        ]), deadlock);
-        Assert.Equal(deadlock, PgLogTextRedactor.RedactDetail(deadlock));
+        Assert.Equal(
+            waitFor + "\n\tProcess 11: UPDATE notes SET body = '?' WHERE id = ?\n\tProcess 12: UPDATE notes SET body = '?' WHERE id = ?",
+            numbered);
+        Assert.Equal(numbered, PgLogTextRedactor.RedactDetail(numbered));
 
-        /* Any other DETAIL is prose, read whole, so the shape around such a line still closes. */
-        Assert.Equal("Failing row contains (?).", PgLogTextRedactor.RedactDetail("Failing row contains (42, 123-45-6789, Steps:\nProcess 1: mix, null)."));
-        Assert.Equal("Key (email, note)=(?) already exists.", PgLogTextRedactor.RedactDetail("Key (email, note)=(bob@example.com, a\n\tFailed process was running: b) already exists."));
+        /* A line inside a literal shaped like the next waiter's head: two heads for process 12, so where query 11
+           ends is unknowable, and both are withheld. */
+        var ambiguous = PgLogTextRedactor.RedactDetail(waitFor + "\n" + string.Join("\n",
+        [
+            "\tProcess 11: UPDATE notes SET body = 'Steps:",
+            "\tProcess 12: Leak3944w' WHERE id = 5",
+            "\tProcess 12: UPDATE notes SET body = 'Leak3944x' WHERE id = 6",
+        ]));
+        Assert.Equal(waitFor + "\n\tProcess 11: " + PgLogTextRedactor.WithheldStatement, ambiguous);
+        Assert.Equal(ambiguous, PgLogTextRedactor.RedactDetail(ambiguous));
+
+        /* A query cut at track_activity_query_size inside a literal is withheld on its own in a report proven whole
+           (a companion field followed it, and every waiter's head is here): the next query is read from its own
+           first character, so the cut literal cannot pair with its quotes (#3920's rule read it on, and the next
+           query's literal came back as a word). Without that proof, the next head may be a look-alike in a report
+           cut between its lines, and every query from there on is withheld (#3996's review), which is also what a
+           claim of whole with a head missing gets. A report cut before its last query keeps the rest when the ones
+           it has read to their end. */
+        const string three = "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "Process 200 waits for ShareLock on transaction 6; blocked by process 300.\n"
+            + "Process 300 waits for ShareLock on transaction 7; blocked by process 100.";
+        Assert.Equal(
+            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: UPDATE t SET pw = '?'\nProcess 300: SELECT ?",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = '\nProcess 200: UPDATE t SET pw = 'Leak3944y' /* it's */\nProcess 300: SELECT 1", complete: true));
+        Assert.Equal(
+            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: SELECT '?', '?'\nProcess 300: SELECT ?",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = $$\nProcess 200: SELECT $$Leak3944z$$, 'a\"'\nProcess 300: SELECT 1", complete: true));
+        foreach (var complete in new[] { false, true })
+        {
+            Assert.Equal(
+                three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: " + PgLogTextRedactor.WithheldStatement,
+                PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = '\nProcess 200: UPDATE t SET pw = 'Leak3944y' /* it's */", complete));
+        }
+
+        Assert.Equal(
+            three + "\nProcess 100: SELECT ?\nProcess 200: SELECT '?'",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: SELECT 1\nProcess 200: SELECT 'Leak3944x2'"));
+
+        /* Any other DETAIL is prose, kept as written, a line inside it shaped like a query head included. */
+        const string failingRow = "Failing row contains (42, 123-45-6789, Steps:\nProcess 1: mix, null).";
+        Assert.Equal(failingRow, PgLogTextRedactor.RedactDetail(failingRow));
+        const string keyTuple = "Key (email, note)=(bob@example.com, a\n\tFailed process was running: b) already exists.";
+        Assert.Equal(keyTuple, PgLogTextRedactor.RedactDetail(keyTuple));
 
         /* The single-query shapes: a crash report, and the PREPARE a logged EXECUTE names. */
         Assert.Equal("Failed process was running: UPDATE creds SET n = ?", PgLogTextRedactor.RedactDetail("Failed process was running: UPDATE creds SET n = 4111111111111111"));
@@ -669,21 +666,21 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #3920's fourth review (M1, CONTEXT side). A CONTEXT frame is read as SQL only where a frame can start: the
-    /// field's first line, a line after a complete one-line frame (<c>PL/pgSQL function ...</c>, <c>while ...
-    /// tuple ... in relation ...</c>, <c>JSON data, line N: ...</c>), or after a closed SQL frame, and never while
-    /// an earlier value's quote is still open. A COPY value that runs onto a line shaped like a frame is that
-    /// value's content, and is masked with it.
+    /// #3944: a CONTEXT's SQL frame is read as SQL on whatever line it opens, and the prose frames around it are
+    /// kept as written. #3920's fourth review read one only where a frame could start, which kept a COPY value's
+    /// prose mask whole; with prose unmasked that rule protected nothing and cost SQL: a function's own
+    /// <c>COPY ... FROM '...'</c> under the <c>COPY t, line N</c> frame its data raised was never read as SQL, and
+    /// would now have kept its literal. A false start inside a COPY value can only normalize that value's line.
     /// </summary>
     [Fact]
-    public void AContextFrameIsSqlOnlyWhereAFrameCanStart()
+    public void AContextSqlFrameIsReadOnWhicheverLineItOpens()
     {
+        var copyInFunction = PgLogTextRedactor.RedactContext(
+            "COPY t, line 1, column a: \"x\"\n\tSQL statement \"COPY t FROM '/srv/Leak3944a.csv'\"\n\tPL/pgSQL function f() line 3 at SQL statement");
         Assert.Equal(
-            "COPY t, line 1: \"?\"",
-            PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111111111111111,Jane Roe,x\nSQL statement \"SELECT 1\""));
-        Assert.Equal(
-            "COPY t, line 1: \"?\"",
-            PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111,Jane\n\tPL/pgSQL function f() line 1 at SQL statement\n\tSQL statement \"Jane Doe\"\n\tx\""));
+            "COPY t, line 1, column a: \"x\"\n\tSQL statement \"COPY t FROM '?'\"\n\tPL/pgSQL function f() line 3 at SQL statement",
+            copyInFunction);
+        Assert.Equal(copyInFunction, PgLogTextRedactor.RedactContext(copyInFunction));
 
         var nested = PgLogTextRedactor.RedactContext(
             "while updating tuple (0,1) in relation \"t\"\n\tSQL statement \"UPDATE t SET a = 1 WHERE b = 'x'\"\n\tPL/pgSQL function f() line 3 at SQL statement");
@@ -694,15 +691,51 @@ public sealed class PgLogEventsPipelineTests
 
         var json = PgLogTextRedactor.RedactContext(
             "JSON data, line 1: {\"card\": 4111111111111111\n\tSQL statement \"SELECT '{\"card\": 4111111111111111'::json\"\n\tPL/pgSQL function g() line 2 at PERFORM");
-        Assert.Equal("JSON data, line 1: ?\n\tSQL statement \"SELECT '?'::json\"\n\tPL/pgSQL function g() line 2 at PERFORM", json);
+        Assert.Equal("JSON data, line 1: {\"card\": 4111111111111111\n\tSQL statement \"SELECT '?'::json\"\n\tPL/pgSQL function g() line 2 at PERFORM", json);
         Assert.Equal(json, PgLogTextRedactor.RedactContext(json));
+
+        /* A COPY value that runs onto a line shaped like a frame: the value's own line stays as written, and the
+           look-alike is normalized or, when it cannot be closed, withheld with what follows it. */
+        Assert.Equal(
+            "COPY t, line 1: \"4111111111111111,Jane Roe,x\nSQL statement \"SELECT ?\"",
+            PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111111111111111,Jane Roe,x\nSQL statement \"SELECT 1\""));
+        Assert.Equal(
+            "COPY t, line 1: \"4111,Jane\n\tSQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
+            PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111,Jane\n\tSQL statement \"Jane Doe\"\n\tx\""));
+    }
+
+    /// <summary>
+    /// #3944's review: a look-alike SQL frame that has not closed by the line where the next real SQL frame opens is
+    /// withheld with it. Read on past that line, the look-alike's text set the lexical state the real statement was
+    /// read in: its open <c>$$</c> closed at the real statement's own, and the literal inside came back as a word. A
+    /// generated sweep of COPY values (look-alike heads of all five SQL frame kinds, ahead of real quoted, remote and
+    /// portal frames) found 23,770 leaks in 1.6 million fields before this rule and none in 2.2 million after it. A
+    /// look-alike that closes on its own line only normalizes that line, and the real frame is read on its own.
+    /// </summary>
+    [Fact]
+    public void ALookAlikeFrame_NeverDecidesHowARealStatementIsRead()
+    {
+        Assert.Equal(
+            "COPY t, line 1, column a: \"v\n\tSQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
+            PgLogTextRedactor.RedactContext(
+                "COPY t, line 1, column a: \"v\n\tSQL statement \"$$\"\n\tSQL statement \"SELECT $$Leak3944q$$, 'a\"'\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
+        Assert.Equal(
+            "COPY t, line 1, column a: \"v\n\tremote SQL command: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactContext(
+                "COPY t, line 1, column a: \"v\n\tremote SQL command: $$\"\n\tSQL statement \"SELECT $$Leak3944r$$\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
+
+        var closesOnItsOwnLine = PgLogTextRedactor.RedactContext(
+            "COPY t, line 1, column a: \"v\n\tSQL statement \"x 4111\"\n\tSQL statement \"SELECT 'Leak3944s'\"\n\tPL/pgSQL function f() line 3 at SQL statement");
+        Assert.Equal(
+            "COPY t, line 1, column a: \"v\n\tSQL statement \"x ?\"\n\tSQL statement \"SELECT '?'\"\n\tPL/pgSQL function f() line 3 at SQL statement",
+            closesOnItsOwnLine);
+        Assert.Equal(closesOnItsOwnLine, PgLogTextRedactor.RedactContext(closesOnItsOwnLine));
     }
 
     /// <summary>
     /// #3920's fourth review (M2). A non-ASCII character that is not a letter joins PostgreSQL's identifier, so
     /// <c>=&lt;NBSP&gt;4111...</c> is one token to the server, but it is how a value pasted from a web page or typed
-    /// through an IME reads, and keeping the token kept the value. It goes; a non-ASCII LETTER is still a name. The
-    /// prose allowlist likewise keeps a quoted run after a noun only when it reads as a name.
+    /// through an IME reads, and keeping the token kept the value. It goes; a non-ASCII LETTER is still a name.
     /// </summary>
     [Fact]
     public void ANonAsciiSpaceOrDigit_NeverKeepsAValue()
@@ -711,51 +744,115 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("SELECT * FROM cards WHERE pan = ?", PgLogTextRedactor.RedactStoredStatement("SELECT * FROM cards WHERE pan = ４１１１"));
         Assert.Equal("SELECT ??", PgLogTextRedactor.RedactStoredStatement("SELECT 4111​1111"));
         Assert.Equal("SELECT café, 名前 FROM t", PgLogTextRedactor.RedactStoredStatement("SELECT café, 名前 FROM t"));
-
-        Assert.Equal("column \"?\" does not exist", PgLogTextRedactor.RedactMessage("column \" 4111111111111111\" does not exist"));
-        Assert.Equal("column \"?\" does not exist", PgLogTextRedactor.RedactMessage("column \"4111111111111111\" does not exist"));
-        Assert.Equal("column \"email\" does not exist", PgLogTextRedactor.RedactMessage("column \"email\" does not exist"));
-        Assert.Equal("relation \"名前\" does not exist", PgLogTextRedactor.RedactMessage("relation \"名前\" does not exist"));
     }
 
     /// <summary>
-    /// #3920's fourth review (M4). The prose value shapes need their close, and a value cut before it (a read
-    /// boundary, a newline inside it, a sample cap) kept its opening half: <c>: "4111...</c> with no closing quote
-    /// matched nothing. Each shape now closes only where PostgreSQL's sentence closes it and otherwise masks to the
-    /// end; masking twice changes nothing.
+    /// #3944's review: two CONTEXT frames carry SQL without quoting it, and prose masking had covered both. postgres_fdw
+    /// writes the statement it sent the remote server, pushed-down constants as literals; a portal's bound parameters
+    /// (<c>log_parameter_max_length_on_error</c>) are values of a statement and read as SQL. Each is normalized to its
+    /// frame's end, and withheld with what follows when it cannot be read to it.
     /// </summary>
     [Fact]
-    public void AValueShapeWithoutItsClose_IsMaskedToTheEnd()
+    public void AContextsUnquotedSqlFrames_AreNormalizedToo()
     {
-        var cases = new (string Raw, string Masked)[]
-        {
-            ("invalid input syntax for type integer: \"4111111111111111", "invalid input syntax for type integer: \"?\""),
-            ("malformed array literal: \"{4111111111111111,", "malformed array literal: \"?\""),
-            ("invalid input syntax for type json: \"{\"card\": 4111111111111111", "invalid input syntax for type json: \"?\""),
-            ("syntax error at or near \"DELTE\" at character 15", "syntax error at or near \"?\" at character 15"),
-            ("Key (email)=(bob@exam", "Key (email)=(?)"),
-            ("Key (name)=(Acme (USA) Inc.", "Key (name)=(?)"),
-            ("Key (a)=(x) conflicts with existing key (a)=(yyy", "Key (a)=(?) conflicts with existing key (a)=(?)"),
-            ("Failing row contains (42, 4111111111111111", "Failing row contains (?)"),
-            ("Partition key of the failing row contains (tenant) = (bob@exam", "Partition key of the failing row contains (tenant) = (?)"),
-            ("column \"4111", "column \"?\""),
-        };
+        var fdw = PgLogTextRedactor.RedactContext(
+            "remote SQL command: SELECT id FROM public.t WHERE ((email = 'Leak3944r@example.com'::text)) AND ((n = 4111))\n"
+            + "\tSQL statement \"SELECT count(*) FROM ft\"\n\tPL/pgSQL function g() line 3 at PERFORM");
+        Assert.Equal(
+            "remote SQL command: SELECT id FROM public.t WHERE ((email = '?'::text)) AND ((n = ?))\n"
+            + "\tSQL statement \"SELECT count(*) FROM ft\"\n\tPL/pgSQL function g() line 3 at PERFORM",
+            fdw);
+        Assert.Equal(fdw, PgLogTextRedactor.RedactContext(fdw));
 
-        foreach (var (raw, masked) in cases)
-        {
-            Assert.Equal(masked, PgLogTextRedactor.RedactMessage(raw));
-            Assert.Equal(masked, PgLogTextRedactor.RedactMessage(masked));
-        }
+        Assert.Equal(
+            "unnamed portal with parameters: $1 = '?', $2 = NULL",
+            PgLogTextRedactor.RedactContext("unnamed portal with parameters: $1 = 'Leak3944s', $2 = NULL"));
+        Assert.Equal(
+            "portal \"C_1\" parameter $1 = '?'",
+            PgLogTextRedactor.RedactContext("portal \"C_1\" parameter $1 = 'Leak3944t'"));
+        Assert.Equal("unnamed portal parameter $1", PgLogTextRedactor.RedactContext("unnamed portal parameter $1"));
+
+        Assert.Equal(
+            "remote SQL command: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactContext("remote SQL command: SELECT 'Leak3944u\n\tPL/pgSQL function g() line 3 at PERFORM"));
     }
 
     /// <summary>
-    /// #3920's fourth review (M3). Masking stays linear on a hostile field: the CONTEXT frame's candidate closes and
-    /// the DETAIL's query splits are capped, and a field too long to read whole is withheld. Round 3 re-lexed the
-    /// frame body at every candidate close, so a 180 KB CONTEXT took 21 s, and the self-hosted tail re-reads its
-    /// overlap window every cycle.
+    /// #3944's review: auto_explain's report reaches an error log at <c>auto_explain.log_level = warning</c>, and its
+    /// plan carries the statement's text (<c>Query Text</c>) and its constants in a form the lexer cannot read, so the
+    /// plan is withheld under the duration line. Prose masking had masked its quoted literals.
     /// </summary>
     [Fact]
-    public void MaskingAHostileField_StaysLinear()
+    public void AnAutoExplainPlan_KeepsItsDurationLine_AndWithholdsThePlan()
+    {
+        var log = P + "[4300] WARNING:  duration: 1234.567 ms  plan:\n"
+            + "\tQuery Text: SELECT * FROM cards WHERE pan = '4111111111111111'\n"
+            + "\tSeq Scan on cards  (cost=0.00..1.01 rows=1 width=4)\n"
+            + "\t  Filter: (pan = 'Leak3944v'::text)\n";
+
+        var plan = Assert.Single(Classify(log));
+        Assert.Equal(PgLogFamilies.Error, plan.Family);
+        Assert.Equal("duration: 1234.567 ms  plan:\n" + PgLogTextRedactor.WithheldPlan, plan.Message);
+        Assert.Equal(plan.Message, PgLogTextRedactor.WithholdPlan(plan.Message));
+
+        /* Any other message, a one-line duration included, is kept as written. */
+        Assert.Equal("duration: 12.000 ms", PgLogTextRedactor.WithholdPlan("duration: 12.000 ms"));
+        Assert.Equal("value \"x\"\nsecond line", PgLogTextRedactor.WithholdPlan("value \"x\"\nsecond line"));
+    }
+
+    /// <summary>
+    /// #3944's review, on lines PostgreSQL 18.6 wrote: the values a statement ran with are one DETAIL list in SQL's
+    /// own quoting, and are normalized like SQL. PL/pgSQL writes <c>parameters:</c> under
+    /// <c>print_strict_params</c> on the ERROR a STRICT row count raises (its variables by name, or <c>$n</c> for
+    /// <c>EXECUTE ... USING</c>), and a logged statement carries <c>Parameters:</c> (errdetail_params). Prose masking
+    /// had covered their quoted values; kept as written, the ERROR's detail would have stored them. PL/pgSQL's
+    /// unquoted <c>query:</c> CONTEXT frame is SQL the same way.
+    /// </summary>
+    [Fact]
+    public void AStatementsParameterValues_AreNormalizedLikeItsSql()
+    {
+        var log = P + "[39980] ERROR:  query returned no rows\n"
+            + P + "[39980] DETAIL:  parameters: p_secret = 'Leak3944a', p_n = '4111'\n"
+            + P + "[39980] CONTEXT:  PL/pgSQL function probe_strict(text,integer) line 5 at SQL statement\n"
+            + P + "[39980] STATEMENT:  SELECT probe_strict('Leak3944a', 4111);\n"
+            + P + "[39980] ERROR:  query returned more than one row\n"
+            + P + "[39980] DETAIL:  parameters: $1 = 'Leak3944b', $2 = '4112'\n"
+            + P + "[39980] HINT:  Make sure the query returns a single row, or use LIMIT 1.\n"
+            + P + "[39980] CONTEXT:  PL/pgSQL function probe_dyn(text) line 5 at EXECUTE\n"
+            + P + "[39980] STATEMENT:  SELECT probe_dyn('Leak3944b');\n";
+
+        var events = Classify(log);
+        Assert.Equal(2, events.Count);
+        Assert.Contains(events, e => e.Message == "query returned no rows" && e.Detail == "parameters: p_secret = '?', p_n = '?'");
+        Assert.Contains(events, e => e.Message == "query returned more than one row" && e.Detail == "parameters: $1 = '?', $2 = '?'");
+        foreach (var e in events)
+        {
+            Assert.DoesNotContain("Leak3944", e.Message + e.Detail + e.Context, StringComparison.Ordinal);
+            Assert.Equal(e.Detail, PgLogTextRedactor.RedactDetail(e.Detail));
+        }
+
+        /* errdetail_params' own spelling, a value holding a quote and a newline, a NULL, and a list that cannot be
+           read to its end. */
+        Assert.Equal(
+            "Parameters: $1 = '?', $2 = NULL",
+            PgLogTextRedactor.RedactDetail("Parameters: $1 = 'it''s\n\tLeak3944c', $2 = NULL"));
+        Assert.Equal(
+            "parameters: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactDetail("parameters: p = 'Leak3944d"));
+
+        Assert.Equal(
+            "query: SELECT x FROM t WHERE k = '?'\n\tPL/pgSQL function f() line 3 at assignment",
+            PgLogTextRedactor.RedactContext("query: SELECT x FROM t WHERE k = 'Leak3944e'\n\tPL/pgSQL function f() line 3 at assignment"));
+    }
+
+    /// <summary>
+    /// #3920's fourth review (M3). Normalizing stays linear on a hostile field: the CONTEXT frame's candidate closes
+    /// and the DETAIL's query splits are capped, and SQL in a field too long to read whole is withheld. Round 3
+    /// re-lexed the frame body at every candidate close, so a 180 KB CONTEXT took 21 s, and the self-hosted tail
+    /// re-reads its overlap window every cycle.
+    /// </summary>
+    [Fact]
+    public void NormalizingAHostileField_StaysLinear()
     {
         foreach (var pairs in new[] { 10_000, 20_000, 7_000 })
         {
@@ -764,14 +861,9 @@ public sealed class PgLogEventsPipelineTests
             var masked = PgLogTextRedactor.RedactContext(context);
             clock.Stop();
             Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"{context.Length} chars took {clock.Elapsed}");
-            if (context.Length > 64 * 1024)
-            {
-                Assert.Equal(PgLogTextRedactor.WithheldStatement, masked);
-            }
-            else
-            {
-                Assert.StartsWith("SQL statement \"" + PgLogTextRedactor.WithheldStatement, masked, StringComparison.Ordinal);
-            }
+            /* Past 64 KB the frame is not read at all; below it, no close reads to its end. Either way the frame is
+               withheld with everything after it, which may be the rest of its statement. */
+            Assert.Equal("SQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"", masked);
         }
 
         foreach (var lines in new[] { 4_000, 20_000 })
@@ -786,20 +878,319 @@ public sealed class PgLogEventsPipelineTests
             Assert.DoesNotContain("Process 12: x", masked, StringComparison.Ordinal);
         }
 
-        foreach (var text in new[]
+        /* #3996's review (7): a DETAIL of W wait-for lines and H head lines made the head search O(W x H), a
+           list membership test per line. The length check now comes first, and the waiters are a set. */
+        foreach (var (waits, heads) in new[] { (10_000, 25_000), (40_000, 100_000) })
         {
-            string.Concat(Enumerable.Repeat("Key (", 20_000)),
-            string.Concat(Enumerable.Repeat("Key (a)=(", 10_000)),
-            string.Concat(Enumerable.Repeat("Partition key of the failing row contains (", 2_500)),
-            "invalid input syntax for type json: \"" + string.Concat(Enumerable.Repeat("\"a\": ", 20_000)),
-            string.Concat(Enumerable.Repeat("column \"", 20_000)),
+            var detail = new StringBuilder();
+            for (var k = 0; k < waits; k++)
+            {
+                detail.Append("Process ").Append(1_000_000 + k).Append(" waits for ; blocked by process 1.\n");
+            }
+
+            for (var k = 0; k < heads; k++)
+            {
+                detail.Append("Process 2000000: x\n");
+            }
+
+            var text = detail.ToString().TrimEnd('\n');
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var masked = PgLogTextRedactor.RedactDetail(text)!;
+            clock.Stop();
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"{text.Length} chars took {clock.Elapsed}");
+            Assert.EndsWith(PgLogTextRedactor.WithheldStatement, masked, StringComparison.Ordinal);
+        }
+    }
+
+    /* ---- #3996's review, round 1 -------------------------------------------------------------------- */
+
+    private const string TwoWaiters =
+        "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+        + "Process 200 waits for ShareLock on transaction 6; blocked by process 100.";
+
+    /// <summary>
+    /// #3996's review (1). A deadlock report cut between its lines, before a waiter's real head, leaves a line
+    /// inside the query above shaped like that head as the only one, in order; when that query did not read to its
+    /// end, the look-alike's text was read out of step and the literal after it came back as a word. RDS chunks are
+    /// consume-once, and the assembler stores an entry cut there. Now a head after such a query is trusted only
+    /// when the entry proves its DETAIL whole, by a companion after it (DeadLockReport always writes its HINT);
+    /// otherwise that query and every one after it are withheld.
+    /// </summary>
+    [Fact]
+    public void ACutDeadlockReport_TrustsNoHeadAfterAQueryThatDidNotReadToItsEnd()
+    {
+        string[] cuts =
+        [
+            TwoWaiters + "\nProcess 100: UPDATE users SET bio = 'x\nProcess 200: y', api_key = 'sk_live_Leak3996a', motto = '--' WHERE id = 5",
+            TwoWaiters + "\nProcess 100: UPDATE t SET a = 'x\nProcess 200: y', pw = 'Leak3996b', b = 'z",
+        ];
+        foreach (var cut in cuts)
+        {
+            var masked = PgLogTextRedactor.RedactDetail(cut);
+            Assert.Equal(
+                TwoWaiters + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: " + PgLogTextRedactor.WithheldStatement,
+                masked);
+            Assert.Equal(masked, PgLogTextRedactor.RedactDetail(masked));
+        }
+
+        const string threeWaiters = "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "Process 200 waits for ShareLock on transaction 6; blocked by process 300.\n"
+            + "Process 300 waits for ShareLock on transaction 7; blocked by process 100.";
+        Assert.Equal(
+            threeWaiters + "\nProcess 100: UPDATE t SET a = ? WHERE id = ?\nProcess 200: " + PgLogTextRedactor.WithheldStatement
+                + "\nProcess 300: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactDetail(threeWaiters + "\nProcess 100: UPDATE t SET a = 1 WHERE id = 1\nProcess 200: UPDATE users SET bio = 'x"
+                + "\nProcess 300: y', api_key = 'sk_live_Leak3996c', motto = '--' WHERE id = 5"));
+
+        /* Through the pipeline: the entry the chunk cut after its DETAIL keeps no value, and a whole report, its
+           HINT after the DETAIL, still reads the query after one cut at track_activity_query_size. */
+        var events = Classify(
+            P + "[4400] ERROR:  deadlock detected\n"
+            + P + "[4400] DETAIL:  Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "\tProcess 200 waits for ShareLock on transaction 6; blocked by process 100.\n"
+            + "\tProcess 100: UPDATE users SET bio = 'x\n"
+            + "\tProcess 200: y', api_key = 'sk_live_Leak3996d', motto = '--' WHERE id = 5\n"
+            + P + "[4401] ERROR:  deadlock detected\n"
+            + P + "[4401] DETAIL:  Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "\tProcess 200 waits for ShareLock on transaction 6; blocked by process 100.\n"
+            + "\tProcess 100: UPDATE t SET a = 'x\n"
+            + "\tProcess 200: UPDATE t SET pw = 'Leak3996e' WHERE id = 5\n"
+            + P + "[4401] HINT:  See server log for query details.\n"
+            + P + "[4401] STATEMENT:  UPDATE t SET pw = 'Leak3996e' WHERE id = 5\n");
+        Assert.Equal(2, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak3996", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
+        Assert.Equal(
+            TwoWaiters + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: " + PgLogTextRedactor.WithheldStatement,
+            events.Single(e => e.Pid == 4400).Detail);
+        Assert.Equal(
+            TwoWaiters + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: UPDATE t SET pw = '?' WHERE id = ?",
+            events.Single(e => e.Pid == 4401).Detail);
+    }
+
+    /// <summary>
+    /// #3996's review (2), the target's half. Under a translated lc_messages a line's label is one this reader does
+    /// not know, and the assembler's lazy run past it found <c>ERROR:  </c> inside the statement's literal and
+    /// started an event from the middle of the SQL, its message the literal's tail. The run now stops at a label of
+    /// any shipped catalogue, two spaces after its colon or none (Turkish, Korean), and a line it cannot read ends
+    /// the entry above, so a German <c>FEHLER:</c> line's untranslated <c>DETAIL:</c> joins nothing. The managed
+    /// family's run between zone and pid is held the same way: refused at the real pid, it slid to a <c>[1]</c>
+    /// inside the literal.
+    /// </summary>
+    [Fact]
+    public void ATranslatedLabel_NeverOpensAnEventFromInsideItsSql()
+    {
+        var events = Classify(
+            P + "[4500] ERROR:  llave duplicada viola restriccion de unicidad \"users_pkey\"\n"
+            + P + "[4500] DETALLE:  Ya existe la llave (id)=(5).\n"
+            + P + "[4500] SENTENCIA:  INSERT INTO users (id, api_key) VALUES (5, 'ERROR:  sk_live_Leak3996f')\n"
+            + P + "[4501] ERROR:  x\n"
+            + P + "[4501] ORTAM:SQL ifadesi \"SELECT 'ERROR:  Leak3996g'\"\n"
+            + P + "[4502] ERROR:  y\n"
+            + P + "[4502] 쿼리:SELECT 'FATAL:  Leak3996h'\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@app_db:[4503]:ANWEISUNG:  SELECT 'ERROR:  Leak3996i'\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@app_db:[4503]:ANWEISUNG:  SELECT 'x [1]:ERROR:  Leak3996i'\n");
+        Assert.Equal(3, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak3996", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
+        Assert.All(events, e => Assert.Null(e.Detail));
+
+        /* A German FEHLER line is not a primary this reader knows; its untranslated DETAIL is its own, not the
+           LOG entry's above it. */
+        var entries = PgLogEntryAssembler.Assemble(
+            P + "[4504] LOG:  Anweisung: SELECT 1\n"
+            + P + "[4504] FEHLER:  Verklemmung (Deadlock) entdeckt\n"
+            + P + "[4504] DETAIL:  Prozess 4504 wartet auf ShareLock\n"
+            + "\tProzess 4504: UPDATE t SET pw = 'Leak3996j'\n");
+        var only = Assert.Single(entries);
+        Assert.Equal("LOG", only.Severity);
+        Assert.Null(only.Detail);
+
+        /* The prefixes this reader already read still open their entries: a %Q query id, an IPv6 client and
+           pgAdmin's DB:name application under a pgBadger-style prefix, and the managed family. */
+        Assert.Equal(3, PgLogEntryAssembler.Assemble(
+            P + "[4505] 322048460535975151ERROR:  canceling statement due to user request\n"
+            + P + "[4506]: [1-1] user=u,db=d,app=pgAdmin 4 - DB:postgres,client=::1 ERROR:  canceling statement due to user request\n"
+            + "2026-09-18 03:07:12 UTC::@:[4507]:LOG:  checkpoint starting: time\n").Count);
+    }
+
+    /// <summary>
+    /// #3996's review (3), ruled under #3944's: the text a syntax error quotes after <c>at or near</c> is SQL. The
+    /// scanner writes the statement from the error token on, one token for most errors (a string literal among
+    /// them) and the rest of the input for an unterminated one, a whole function body for a dollar quote. It goes
+    /// through the lexer, and an <c>unterminated ...</c> form is withheld.
+    /// </summary>
+    [Fact]
+    public void ASyntaxErrorsQuotedText_IsReadAsSql()
+    {
+        var events = Classify(
+            P + "[4600] ERROR:  unterminated quoted string at or near \"'123-45-6789 WHERE id = 1\" at character 31\n"
+            + P + "[4600] STATEMENT:  UPDATE t SET ssn = '123-45-6789 WHERE id = 1\n"
+            + P + "[4601] ERROR:  syntax error at or near \"'Leak3996k'\" at character 28\n"
+            + P + "[4602] ERROR:  unterminated dollar-quoted string at or near \"$$ BEGIN\n"
+            + "\tRAISE NOTICE 'Leak3996l';\n"
+            + "\tEND\" at character 20\n"
+            + P + "[4603] ERROR:  syntax error at or near \"FROM\" at character 8\n");
+        Assert.Equal(4, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak3996", e.Message, StringComparison.Ordinal));
+        Assert.All(events, e => Assert.DoesNotContain("6789", e.Message, StringComparison.Ordinal));
+        Assert.Equal(
+            "unterminated quoted string at or near \"" + PgLogTextRedactor.WithheldStatement + "\" at character 31",
+            events.Single(e => e.Pid == 4600).Message);
+        Assert.Equal("syntax error at or near \"'?'\" at character 28", events.Single(e => e.Pid == 4601).Message);
+        Assert.Equal(
+            "unterminated dollar-quoted string at or near \"" + PgLogTextRedactor.WithheldStatement + "\" at character 20",
+            events.Single(e => e.Pid == 4602).Message);
+        Assert.Equal("syntax error at or near \"FROM\" at character 8", events.Single(e => e.Pid == 4603).Message);
+    }
+
+    /// <summary>
+    /// #3996's round-2 review, #4006, the target's half: es, id and ja keep the ERROR label in English, and so does
+    /// every catalogue that translates PL/pgSQL alone (zh_TW here), so a translated syntax error opens an event and
+    /// its token reached <c>message</c> verbatim: only the English <c> at or near "</c> was read. Every catalogue's
+    /// form is read now, a token-first one included, and an unterminated head in any language withholds its token;
+    /// so do a jsonpath token, a head holding a quote (<c>improper use of "*"</c>), and a token-first message cut
+    /// between its lines before its closing.
+    /// </summary>
+    [Fact]
+    public void ATranslatedSyntaxError_ReadsItsTokenAsSql_OrWithholdsIt()
+    {
+        var events = Classify(
+            P + "[4700] ERROR:  \"'4111-1111-1111-1111'\"またはその近辺で構文エラー(40文字目)\n"
+            + P + "[4701] ERROR:  error de sintaxis en o cerca de «'Leak4006a'» en carácter 28\n"
+            + P + "[4702] ERROR:  una cadena de caracteres entre comillas está inconclusa en o cerca de «'hunter2, 'sk_live_Leak4006b')» en carácter 45\n"
+            + P + "[4703] ERROR:  'kesalahan sintaks' pada atau didekat « 'Leak4006c' » pada karakter 12\n"
+            + P + "[4704] ERROR:  \"'Leak4006d'\" もしくはその近辺で 構文エラー(20文字目)\n"
+            + P + "[4705] ERROR:  \"'Leak4006e'\" 附近發生 語法錯誤 at character 9\n"
+            + P + "[4706] ERROR:  improper use of \"*\" at or near \"'Leak4006f'\" at character 17\n"
+            + P + "[4707] ERROR:  syntax error at or near \"\"4111-1111\"\" of jsonpath input\n"
+            + P + "[4708] ERROR:  42601: \"'Leak4006g'\"またはその近辺で構文エラー(8文字目)\n"
+            + P + "[4709] ERROR:  \"$$ BEGIN\n"
+            + "\tRAISE NOTICE 'Leak4006h';\n"
+            + "\tEND\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)\n"
+            + P + "[4710] ERROR:  \"$$ BEGIN\n"
+            + "\tRAISE NOTICE 'Leak4006i';\n"
+            + P + "[4711] ERROR:  syntax error at or near \"FROM\" at character 8\n");
+        Assert.Equal(12, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak4006", e.Message, StringComparison.Ordinal));
+        Assert.All(events, e => Assert.DoesNotContain("4111", e.Message, StringComparison.Ordinal));
+
+        string MessageOf(int pid) => events.Single(e => e.Pid == pid).Message;
+        const string W = PgLogTextRedactor.WithheldStatement;
+        Assert.Equal("\"'?'\"またはその近辺で構文エラー(40文字目)", MessageOf(4700));
+        Assert.Equal("error de sintaxis en o cerca de «'?'» en carácter 28", MessageOf(4701));
+        Assert.Equal("una cadena de caracteres entre comillas está inconclusa en o cerca de «" + W + "» en carácter 45", MessageOf(4702));
+        Assert.Equal("'kesalahan sintaks' pada atau didekat « '?' » pada karakter 12", MessageOf(4703));
+        Assert.Equal("\"'?'\" もしくはその近辺で 構文エラー(20文字目)", MessageOf(4704));
+        Assert.Equal("\"'?'\" 附近發生 語法錯誤 at character 9", MessageOf(4705));
+        Assert.Equal("improper use of \"*\" at or near \"" + W + "\"", MessageOf(4706));
+        Assert.Equal("syntax error at or near \"" + W + "\" of jsonpath input", MessageOf(4707));
+        Assert.Equal("42601: \"'?'\"またはその近辺で構文エラー(8文字目)", MessageOf(4708));
+        Assert.Equal("\"" + W + "\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)", MessageOf(4709));
+        Assert.Equal("\"" + W + "\"", MessageOf(4710));
+        Assert.Equal("syntax error at or near \"FROM\" at character 8", MessageOf(4711));
+    }
+
+    /// <summary>
+    /// #3996's round-2 review (1), the target's half. Turkish and Korean write four labels and one with no space
+    /// after the colon, and the run read one as a label only before a letter: PL/pgSQL's QUERY companion is the
+    /// function's body, which opens with a space after <c>AS $$ BEGIN</c> (or a digit), so the run crossed
+    /// <c>SORGU: </c> and <c>쿼리: </c> and opened an event at the first English label inside the body, with the
+    /// body's password on its lines. A named unpadded label ends the run whatever follows its colon, except the
+    /// managed prefix's pid in brackets after a database whose name ends in one.
+    /// </summary>
+    [Fact]
+    public void AnUnpaddedLabel_EndsTheRunWhateverFollowsItsColon()
+    {
+        var events = Classify(
+            P + "[4720] HATA:  \"x\"  yerinde sözdizimi hatası\n"
+            + P + "[4720] SORGU: BEGIN -- WARNING: legacy key below\n"
+            + "\tPERFORM dblink_connect('host=db user=app password=Leak4006j');\n"
+            + "\tEND x\n"
+            + P + "[4721] 오류:  구문 오류\n"
+            + P + "[4721] 쿼리: 1; SELECT 'x' AS a, 'ERROR: ' AS b, 'Leak4006k' AS c\n"
+            + P + "[4722] HATA:  \"x\"  yerinde sözdizimi hatası\n"
+            + P + "[4722] SORGU: BEGIN PERFORM dblink_connect('password=Leak4006l'); RAISE EXCEPTION 'ERROR:  bad %', x;\n"
+            + "\tEND x\n"
+            + P + "[4723] ERROR:  x\n"
+            + P + "[4723] ORTAM: PL/pgSQL function f() line 3 at RAISE 'ERROR:  Leak4006m'\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@검색쿼리:[4724]:ERROR:  y\n");
+        Assert.Equal([4723, 4724], events.Select(e => e.Pid));
+        Assert.Equal(["x", "y"], events.Select(e => e.Message));
+        Assert.All(events, e => Assert.DoesNotContain("Leak4006", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #3996's round-2 review (3): each deadlock query's buffer was sized to the whole DETAIL, so a 63 KB report of
+    /// 880 waiters allocated 107 MB a call, and a CONTEXT's frames were each sized to the 64 KB field cap, 125 MB a
+    /// call for 1,000 one-line frames. Each is sized to its own text now.
+    /// </summary>
+    [Fact]
+    public void EachQueryAndFrame_IsSizedToItself()
+    {
+        var report = new StringBuilder();
+        for (var k = 0; k < 880; k++)
+        {
+            report.Append("Process ").Append(1000 + k).Append(" waits for Lock on x; blocked by process 1.\n");
+        }
+
+        for (var k = 0; k < 880; k++)
+        {
+            report.Append("Process ").Append(1000 + k).Append(": x\n");
+        }
+
+        var context = new StringBuilder();
+        for (var k = 0; k < 1000; k++)
+        {
+            context.Append("SQL statement \"SELECT ").Append(k).Append("\"\n");
+        }
+
+        var (detail, frames) = (report.ToString().TrimEnd('\n'), context.ToString().TrimEnd('\n'));
+        /* Under the 64 KB past which a field's SQL is not read at all, so the report's every query is read. */
+        Assert.InRange(detail.Length, 60_000, 64 * 1024);
+        foreach (var redact in new Func<string>[] { () => PgLogTextRedactor.RedactDetail(detail, complete: true)!, () => PgLogTextRedactor.RedactContext(frames)! })
+        {
+            redact();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            Assert.DoesNotContain(PgLogTextRedactor.WithheldStatement, redact(), StringComparison.Ordinal);
+            Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 8L * 1024 * 1024);
+        }
+    }
+
+    /// <summary>
+    /// #3996's review (5, 6). PL/pgSQL writes a variable's name UNQUOTED in its <c>parameters:</c> list, so a name
+    /// that needed quoting (<c>o'k</c>, <c>a"b</c>) put the lexer out of step and a value came back as a word; the
+    /// lexed list must now read as <c>name = '?'</c> or <c>NULL</c> pairs, or it is withheld. A portal's name is
+    /// unescaped too, and one holding a double quote failed the frame's match, so its values were kept as prose.
+    /// </summary>
+    [Fact]
+    public void AValueListThatDoesNotLexToItsShape_IsWithheld()
+    {
+        foreach (var list in new[]
+        {
+            "parameters: o'k = 'x', p_secret = 'Leak3996m', it's = 'y'",
+            "parameters: a\"b = 'x', p_secret = 'Leak3996n', c\"d = 'y'",
+            "parameters: o'k = 'x', p_secret = 'Leak3996o', p_note = '--'",
         })
         {
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            PgLogTextRedactor.RedactMessage(text);
-            clock.Stop();
-            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"{text[..20]}... ({text.Length} chars) took {clock.Elapsed}");
+            Assert.Equal("parameters: " + PgLogTextRedactor.WithheldStatement, PgLogTextRedactor.RedactDetail(list));
         }
+
+        Assert.Equal(
+            "portal \"C\"1\" with parameters: $1 = '?', $2 = '?'",
+            PgLogTextRedactor.RedactContext("portal \"C\"1\" with parameters: $1 = 'Leak3996p', $2 = '42'"));
+        Assert.Equal(
+            "portal \"a\"b\" parameter $1 = '?'",
+            PgLogTextRedactor.RedactContext("portal \"a\"b\" parameter $1 = 'Leak3996q'"));
+
+        /* A portal's list is held to the same shape, so text after a name that ends a head early only withholds. */
+        Assert.Equal(
+            "unnamed portal with parameters: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactContext("unnamed portal with parameters: $1 = 'x', Leak3996r"));
+        Assert.Equal(
+            "unnamed portal with parameters: $1 = '?', $2 = NULL",
+            PgLogTextRedactor.RedactContext("unnamed portal with parameters: $1 = 'x', $2 = NULL"));
+        Assert.Equal(
+            "parameters: p_secret = '?', p_n = NULL, $3 = '?', café = '?'",
+            PgLogTextRedactor.RedactDetail("parameters: p_secret = 'x', p_n = NULL, $3 = '4111', café = 'y'"));
     }
 
     /* ---- the self-hosted collector and the shared tailer --------------------------------------------- */
@@ -945,7 +1336,9 @@ public sealed class PgLogEventsPipelineTests
         var description = method.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
         Assert.Contains("truncated", description, StringComparison.Ordinal);
         Assert.Contains("limit", description, StringComparison.Ordinal);
-        Assert.Contains("REDACTED", description, StringComparison.Ordinal);
+        /* #3944: the description says plainly what is stored, in the ruling's words. */
+        Assert.Contains("Messages are shown as PostgreSQL wrote them; SQL text is normalized with literals replaced by ?", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("REDACTED", description, StringComparison.Ordinal);
         Assert.Contains("log_lock_waits", description, StringComparison.Ordinal);
         Assert.Contains("truncated", method.GetParameters().Single(p => p.Name == "limit").GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description, StringComparison.Ordinal);
 
@@ -960,6 +1353,11 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains("page.Rows.Count > limit", body, StringComparison.Ordinal);
         Assert.Contains("total_events = page.WindowTotal", body, StringComparison.Ordinal);
         Assert.DoesNotContain(">= limit", body, StringComparison.Ordinal);
+
+        /* #3996's review (4): raw_line_hash is an unkeyed hash of the raw entry, literals included, so a reader who
+           can rebuild the rest of the line can test guesses at a value against it offline. No row returns it. */
+        Assert.DoesNotContain("r.RawLineHash", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw_line_hash =", body, StringComparison.Ordinal);
 
         /* The instructions' census moved with the tool. */
         var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
@@ -1272,9 +1670,19 @@ public sealed class PgLogEventsLivePostgresTests
             JsonAssert.Contains("\"total_events\": 15", everything);
             JsonAssert.Contains("\"truncated\": false", everything);
             JsonAssert.Contains("\"times_seen\": 2", everything);
-            Assert.DoesNotContain("someone@example.com", everything, StringComparison.Ordinal);
-            Assert.DoesNotContain("O'Brien", everything, StringComparison.Ordinal);
-            Assert.DoesNotContain("secret-order-ref", everything, StringComparison.Ordinal);
+            /* #3944, through the real table and the real tool: the prose comes back as PostgreSQL wrote it, and
+               the statement's literals, which only the STATEMENT companion carried, come back nowhere. */
+            using (var parsed = System.Text.Json.JsonDocument.Parse(everything))
+            {
+                var returned = parsed.RootElement.GetProperty("events").EnumerateArray().ToList();
+                var duplicate = returned.Single(e => e.GetProperty("message").GetString()!.StartsWith("duplicate key", StringComparison.Ordinal));
+                Assert.Equal("Key (email)=(someone@example.com) already exists.", duplicate.GetProperty("detail").GetString());
+                Assert.Contains(returned, e => e.GetProperty("message").GetString() == "invalid input syntax for type integer: \"secret-order-ref-9931\"");
+            }
+
+            Assert.DoesNotContain("Brien", everything, StringComparison.Ordinal);
+            Assert.DoesNotContain("shipped", everything, StringComparison.Ordinal);
+            Assert.DoesNotContain("gift", everything, StringComparison.Ordinal);
 
             /* The boundary pair: limit = N-1 truncated, limit = N not; total_events is the window either way. */
             var cut = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, null, null, 14);
@@ -1330,6 +1738,32 @@ public sealed class PgLogEventsLivePostgresTests
             Assert.False(McpHelpers.IsErrorEnvelope(badSeverity), badSeverity);
             JsonAssert.Contains("\"parameter\": \"min_severity\"", badSeverity);
             Assert.Contains("not a PostgreSQL severity label", McpHelpers.ErrorMessageOf(badSeverity), StringComparison.Ordinal);
+
+            /* #3920, #3944: a row an earlier build stored with its SQL masked as prose only, bare numbers kept (a
+               remote command's constant, an auto_explain plan's), comes back through the reader brought to this
+               build's rules; the prose around it comes back as written. */
+            var older = new PgLogEvent(
+                OccurredAtUtc: DateTime.UtcNow.AddMinutes(-2), Family: PgLogFamilies.Error, Severity: "WARNING",
+                SqlState: null, DatabaseName: "app_db", UserName: "app", ApplicationName: null, Pid: 4117,
+                Message: "duration: 12.500 ms  plan:\nQuery Text: SELECT * FROM cards WHERE pan_tail = 41173944",
+                Detail: "value 42 is out of range",
+                Context: "remote SQL command: SELECT id FROM public.t WHERE ((n = 41183944))\nPL/pgSQL function g() line 3 at PERFORM",
+                StatementFingerprint: null, RawLineHash: "older-build-row-3944", Metrics: default);
+            await WriteAsync(postgres, [older], ct);
+            var warnings = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 1, "error", "WARNING", 100);
+            Assert.DoesNotContain("41173944", warnings, StringComparison.Ordinal);
+            Assert.DoesNotContain("41183944", warnings, StringComparison.Ordinal);
+            using (var parsed = System.Text.Json.JsonDocument.Parse(warnings))
+            {
+                var row = parsed.RootElement.GetProperty("events").EnumerateArray()
+                    .Single(e => e.GetProperty("message").GetString()!.StartsWith("duration: ", StringComparison.Ordinal));
+                Assert.Equal("duration: 12.500 ms  plan:\n" + PgLogTextRedactor.WithheldPlan, row.GetProperty("message").GetString());
+                Assert.Equal("value 42 is out of range", row.GetProperty("detail").GetString());
+                Assert.Equal(
+                    "remote SQL command: SELECT id FROM public.t WHERE ((n = ?))\nPL/pgSQL function g() line 3 at PERFORM",
+                    row.GetProperty("context").GetString());
+            }
+
             bodySucceeded = true;
         }
         finally

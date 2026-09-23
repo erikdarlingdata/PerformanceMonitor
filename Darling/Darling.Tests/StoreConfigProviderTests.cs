@@ -157,6 +157,97 @@ public sealed class StoreConfigProviderTests
         Assert.True(eff.Enabled);
     }
 
+    /* ---------------- #3929/#3930: on-load collectors also get a daily recapture cadence ---------------- */
+
+    /// <summary>
+    /// Pin 1 of #3929/#3930: the on-load set (frequency 0 - server_config, database_config,
+    /// database_scoped_config, trace_flags, server_properties) now resolves to a daily
+    /// (<see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/>) recurring interval through
+    /// <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/> - the one substitution both
+    /// Darling's worker and Lite's ScheduleManager make instead of special-casing these five collectors by
+    /// name. Every OTHER (already-scheduled) default is untouched - the substitution only fires on 0.
+    /// </summary>
+    [Fact]
+    public void EffectiveRecurringIntervalMinutes_OnLoadSet_ResolvesToDailyRecapture_OthersUnchanged()
+    {
+        var onLoadCount = 0;
+        foreach (var (name, entry) in CollectorScheduleDefaults.All)
+        {
+            var effective = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(entry.FrequencyMinutes);
+            if (entry.FrequencyMinutes == 0)
+            {
+                onLoadCount++;
+                Assert.Equal(CollectorScheduleDefaults.OnLoadRecaptureMinutes, effective);
+            }
+            else
+            {
+                Assert.Equal(entry.FrequencyMinutes, effective);
+            }
+        }
+
+        /* The five named in #3929/#3930: server_config, database_config, database_scoped_config, trace_flags,
+           server_properties. A floor, not an exact count pinned by name, so a future sixth on-load collector
+           does not need this test edited - it would just also get the substitution. */
+        Assert.True(onLoadCount >= 5, $"expected at least 5 on-load (frequency 0) collectors, found {onLoadCount}");
+    }
+
+    /// <summary>
+    /// An operator's own override still wins (#3929/#3930's "ruling"): a non-zero override for one of the
+    /// on-load collectors resolves and schedules exactly like any other collector's override, untouched by the
+    /// on-load substitution, because that substitution only ever fires when the EFFECTIVE (post-override)
+    /// frequency is 0.
+    /// </summary>
+    [Fact]
+    public void ResolveSchedule_OperatorOverrideOnAnOnLoadCollector_StillWins_OverTheDailySubstitution()
+    {
+        var overrides = new[] { new ScheduleOverride(123, "trace_flags", 10, null, true) };
+        var eff = StoreConfigProvider.ResolveSchedule("trace_flags", 123, overrides);
+
+        Assert.Equal(10, eff.FrequencyMinutes);
+        Assert.Equal(10, CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(eff.FrequencyMinutes));
+    }
+
+    /// <summary>
+    /// Pin 3 of #3930: simulating <see cref="DarlingWorker.ComputeSeededNextDue"/> called repeatedly with the
+    /// on-load recapture interval - exactly what the worker's connect loop, reload recompute and due-collector
+    /// sweep now do for a frequency-0 collector - never lets the gap between two captures exceed
+    /// <see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/> (a day), which is far inside every
+    /// on-load collector's 30-day (or server_properties's 365-day) retention. A server connected for 45 days
+    /// straight (one connect, then 44 simulated daily due cycles with no reconnect) therefore never goes more
+    /// than a day without a fresh database_config/trace_flags/etc. capture, so its newest snapshot always
+    /// stays inside retention - the #3930 field defect (30+ days connected loses the on-load config entirely)
+    /// cannot recur.
+    /// </summary>
+    [Fact]
+    public void ComputeSeededNextDue_RepeatedOnLoadCycle_NeverGapsPastRetention_Over45SimulatedDays()
+    {
+        var interval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
+        var retentionDays = CollectorScheduleDefaults.All["trace_flags"].RetentionDays;
+
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        DateTime? lastRun = now; // the initial on-connect capture
+
+        var maxGap = TimeSpan.Zero;
+        for (var day = 0; day < 44; day++)
+        {
+            var jitter = DarlingWorker.SeedJitter(serverId: 42, interval * 60);
+            var due = DarlingWorker.ComputeSeededNextDue(lastRun, interval, now, jitter);
+
+            /* The worker only dispatches once "now" reaches "due" (RunDueCollectorsAsync's now < due gate);
+               simulate the sweep catching it right at that instant. */
+            now = due;
+            var gap = now - lastRun!.Value;
+            if (gap > maxGap) maxGap = gap;
+
+            lastRun = now; // this cycle's capture becomes the watermark for the next
+        }
+
+        Assert.True(maxGap <= TimeSpan.FromMinutes(interval) + TimeSpan.FromMinutes(2.5),
+            $"a gap of {maxGap} between on-load recaptures exceeds the daily interval (+ the small seed jitter cap)");
+        Assert.True(maxGap.TotalDays < retentionDays,
+            $"a {maxGap.TotalDays:F1}-day gap would still be well inside the {retentionDays}-day retention window, but the assertion above is the real guarantee");
+    }
+
     [Fact]
     public void ResolveFleetRetentionDays_FleetOverrideWins_PerServerIgnored_ElseDefault()
     {

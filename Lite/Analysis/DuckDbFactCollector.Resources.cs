@@ -81,6 +81,9 @@ LIMIT 1";
     /// absent and the amplifier no-ops). The read is window-bounded to [TimeRangeStart, TimeRangeEnd]
     /// (a lower bound, not just &lt;= end, matching CpuUtilizationSql) so a lapsed collection surfaces
     /// no stale snapshot from outside the window — the fact is then absent and the amplifier no-ops.
+    /// #3936: the query's tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c> — see
+    /// Darling's twin (PgFactCollector.Resources.RunnableTaskStatsSql) for why a same-instant collision
+    /// needs a deterministic tiebreak here too.
     /// </summary>
     private async Task CollectRunnableTaskFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -97,7 +100,7 @@ FROM v_cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });

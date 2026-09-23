@@ -843,10 +843,10 @@ public sealed class DarlingWorker : BackgroundService
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
     private bool _timescaleAvailable;
 
-    /* #3915: the re-mask pass over store-log rows captured before this build. The cursor is where the last
-       hourly slice stopped; done once a slice reaches the table's end, and then not again this process (new
-       captures are masked on write, and the masking is idempotent, so the next process's pass is a no-op
-       re-read). */
+    /* #3915, #3944: the re-mask pass over store-log rows captured before this build, which normalizes their
+       SQL and re-keys their message. The cursor is where the last hourly slice stopped; done once a slice
+       reaches the table's end, and then not again this process (new captures are written that way, and the
+       pass is idempotent, so the next process's pass is a no-op re-read). */
     private string? _storeLogRemaskCursor;
 
     private bool _storeLogRemaskDone;
@@ -1016,7 +1016,12 @@ public sealed class DarlingWorker : BackgroundService
        indistinguishable from a healthy service on every automated surface there is. */
     private readonly CollectorRuntimeState _collectorState;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState)
+    /* #3941: the process's shared baseline tier, handed to every per-pass DarlingAnalysisService so a pass inside an
+       analysis hour another pass (or an MCP/web read) already computed reads no 30-day baseline — the same singleton
+       the MCP and web hosts hand theirs. */
+    private readonly BaselineCache _baselineCache;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -1025,6 +1030,7 @@ public sealed class DarlingWorker : BackgroundService
         _registryState = registryState;
         _collectorState = collectorState;
         _webTlsCertState = webTlsCertState;
+        _baselineCache = baselineCache;
     }
 
     private sealed class ServerLoopState
@@ -2095,12 +2101,21 @@ public sealed class DarlingWorker : BackgroundService
 
         /* #3285: the user-authored custom-alert evaluator. A rule's compose metric runs on a dedicated
            VIEWER-role pool (which carries the statement_timeout cap and the least-privilege ACL) — never the
-           owner pool. Requires a managed Windows store with a provisioned viewer credential (written by
-           EnsureProvisionedAsync above); other deployments do not get custom alerts in this first slice. */
+           owner pool. #3970: two deployments can supply that pool — a managed Windows store's provisioned
+           viewer credential (written by EnsureProvisionedAsync above), or the Linux compose store's own viewer
+           role (DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync: this start's, provisioned above, or a
+           trusted credential an earlier start left, accepted before use — never the owner login, unlike a
+           host's own fallback). A bring-your-own store stays out either way: its viewer role comes from
+           tools/provision-roles.sql, which does not create config.record_custom_alert_resolution. */
         string? customAlertViewerConnString = null;
         if (OperatingSystem.IsWindows() && config.Postgres.Managed)
         {
             customAlertViewerConnString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config.Postgres);
+        }
+        else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
+        {
+            customAlertViewerConnString = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+                config.Postgres.ConnectionString, _logger, stoppingToken);
         }
 
         await using var customAlertViewerSource =
@@ -2127,7 +2142,7 @@ public sealed class DarlingWorker : BackgroundService
         else
         {
             _logger.LogInformation(
-                "Custom alert evaluator not started: this build evaluates custom alerts only on a managed Windows store with a provisioned viewer role (#3285 first slice).");
+                "Custom alert evaluator not started: this deployment has no viewer-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned viewer role are required; a bring-your-own store is not (#3285, #3970).");
         }
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.
@@ -4040,12 +4055,13 @@ public sealed class DarlingWorker : BackgroundService
 
     /// <summary>
     /// Recomputes each CONNECTED server's per-collector NextDue from the current schedule overrides after a
-    /// reload: a disabled or on-load-only (freq 0) collector is dropped from the schedule; a newly-enabled one is
-    /// seeded from its persisted watermark (the #1575 <see cref="ComputeSeededNextDue"/> policy, one lazily
-    /// batched read per server that gains a new entry); an existing entry is pulled in to at most now + the
-    /// (possibly shortened) effective interval so a frequency change takes effect promptly without over-firing. A
-    /// server still connecting has no NextDue yet — <see cref="TryConnectAsync"/> seeds it from the same watermark
-    /// policy when it connects.
+    /// reload: a disabled collector is dropped from the schedule; a newly-enabled one (an on-load collector
+    /// included — #3929/#3930 give it <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>
+    /// rather than dropping it) is seeded from its persisted watermark (the #1575
+    /// <see cref="ComputeSeededNextDue"/> policy, one lazily batched read per server that gains a new entry); an
+    /// existing entry is pulled in to at most now + the (possibly shortened) effective interval so a frequency
+    /// change takes effect promptly without over-firing. A server still connecting has no NextDue yet —
+    /// <see cref="TryConnectAsync"/> seeds it from the same watermark policy when it connects.
     /// </summary>
     private async Task RecomputeNextDueAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
     {
@@ -4066,19 +4082,24 @@ public sealed class DarlingWorker : BackgroundService
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
-                if (!effective.Enabled || effective.FrequencyMinutes == 0)
+                if (!effective.Enabled)
                 {
                     /* ConcurrentDictionary has no Remove(key) — TryRemove is the drop-in for the old Remove. */
                     server.NextDue.TryRemove(name, out _);
                     continue;
                 }
 
+                /* #3929/#3930: an on-load collector (frequency 0) is no longer dropped from the schedule here —
+                   it ALSO reruns on OnLoadRecaptureMinutes, exactly like the connect-time seed and the
+                   due-collector sweep below. */
+                var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
+
                 if (server.NextDue.TryGetValue(name, out var existing))
                 {
                     /* Existing entry KEEPS its already-applied phase, but is pulled in to at most now + the
                        (possibly shortened) interval so a frequency change takes effect promptly without
                        over-firing — unchanged from before. */
-                    var capped = now.AddMinutes(effective.FrequencyMinutes);
+                    var capped = now.AddMinutes(interval);
                     server.NextDue[name] = existing < capped ? existing : capped;
                 }
                 else
@@ -4089,8 +4110,8 @@ public sealed class DarlingWorker : BackgroundService
                        jitter still de-clusters an overdue / never-run fleet-wide enable. */
                     watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
                     var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
-                    var jitter = SeedJitter(runtime.ServerId, effective.FrequencyMinutes * 60);
-                    server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                    var jitter = SeedJitter(runtime.ServerId, interval * 60);
+                    server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, now, jitter);
                 }
             }
         }
@@ -6919,10 +6940,10 @@ LIMIT 1";
                 await connection.OpenAsync(budget.Token);
             }
 
-            /* #3915: rows stored before this build kept their entries unmasked (an ERROR's STATEMENT line, a
-               DETAIL's key values), for the capture's 400-day retention. Re-masked one bounded slice per tick
-               until the table's end, then not again this process; a new capture is masked on write. Its own
-               catch, like the capture's, and its own time cap (#3920's review): neither a failure nor a slow
+            /* #3915, #3944: rows stored before this build kept their entries whole (an ERROR's STATEMENT line with
+               its literals), for the capture's 400-day retention. Their SQL is normalized one bounded slice per
+               tick until the table's end, then not again this process; a new capture is normalized on write. Its
+               own catch, like the capture's, and its own time cap (#3920's review): neither a failure nor a slow
                slice may cost the collector-cost flush below. */
             if (!_storeLogRemaskDone)
             {
@@ -6937,7 +6958,7 @@ LIMIT 1";
                     if (rewritten > 0)
                     {
                         _logger.LogInformation(
-                            "Store log: re-masked {Rewritten} of {Examined} stored row(s) captured before this build, so their statement literals and quoted values no longer reach get_store_log{Remaining}.",
+                            "Store log: re-masked {Rewritten} of {Examined} stored row(s) captured before this build, so their SQL literals no longer reach get_store_log and their messages group by shape{Remaining}.",
                             rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
                     }
                 }
@@ -7229,7 +7250,7 @@ LIMIT 1";
 
         try
         {
-            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger);
+            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache);
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout
@@ -7923,6 +7944,18 @@ LIMIT 1";
                        never resets it, so folding it in would mix a previous body's bookkeeping
                        into these rows - the cross-body contamination the reset exists to prevent. */
                     await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+
+                    /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
+                       seeded from the SAME pre-dispatch watermark used below - the run just above updates it
+                       moments from now, but seeding from the watermark read at the top of this method means a
+                       collector that already ran recently (a quick reconnect) is not re-phased a full day
+                       forward. Without this, a long-lived connection never re-captures: its on-load config
+                       snapshot ages out of retention (#3930) and a cleared trace flag has nothing to overwrite
+                       its stale ON row (#3929) until the next reconnect. */
+                    var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
+                    var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
+                    var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
+                    server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
                 }
                 else
                 {
@@ -8057,18 +8090,23 @@ LIMIT 1";
                 }
 
                 /* Effective schedule = config_collector_schedules override layered on the code default.
-                   A disabled or on-load-only (freq 0) collector is skipped; the frequency the NextDue stamp
-                   advances by is the EFFECTIVE one, so an override takes effect immediately. */
+                   A disabled collector is skipped; the frequency the NextDue stamp advances by is the
+                   EFFECTIVE one, so an override takes effect immediately. An on-load collector (freq 0) is
+                   NOT skipped here (#3929/#3930): it also reruns on
+                   CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes, in addition to the immediate
+                   on-connect run TryConnectAsync's on-load loop still does — a long-lived connection would
+                   otherwise never refresh it again, aging its config snapshot out of retention (#3930) and
+                   leaving a cleared trace flag with no later row to overwrite its stale ON one (#3929). */
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
                 if (!effective.Enabled
-                    || effective.FrequencyMinutes == 0
                     || !server.NextDue.TryGetValue(name, out var due)
                     || now < due)
                 {
                     continue;
                 }
 
-                server.NextDue[name] = now.AddMinutes(effective.FrequencyMinutes);
+                var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
+                server.NextDue[name] = now.AddMinutes(interval);
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
                    run time is bimodal — a heavy batch runs 100-230+ seconds against a ~5-35s mean, on its

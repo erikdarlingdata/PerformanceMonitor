@@ -23,6 +23,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -116,12 +117,17 @@ public sealed class DarlingWebHostService : BackgroundService
     internal static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
     private const int SigningKeyBytes = 32;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState)
+    /* #3941: the process's shared baseline tier, for the analysis reads MapAll serves (compare_analysis' banding).
+       Optional so a host built outside the service's DI (a test) keeps a private one. */
+    private readonly BaselineCache _baselineCache;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null)
     {
         _logger = logger;
         _state = state;
         _collectorState = collectorState;
         _certState = certState;
+        _baselineCache = baselineCache ?? new BaselineCache();
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
@@ -935,7 +941,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 });
             }
 
-            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger);
+            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger, _baselineCache);
             _app.UseDefaultFiles();
             _app.UseStaticFiles();
 

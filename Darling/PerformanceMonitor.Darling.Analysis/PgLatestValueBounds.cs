@@ -113,6 +113,19 @@ AND   collection_time <= $2";
                   ?? context.TimeRangeEnd - AnalysisContext.LatestValueLookback;
         }
 
+        /* #3929: trace_flags is on-load by default (frequency 0) but can't take the newest-capture anchor the
+           OTHER on-load config facts use (server_config, database_config, server_properties, none of which are
+           in Collectors above either — they read their own newest capture ad hoc). A capture that finds every
+           flag off writes ZERO rows, so MAX(capture_time) would silently fall back to an older capture that
+           still had one on — exactly the case that matters. Bounding the read to the on-load-aware lookback
+           instead means a flag missing from the whole window (about two OnLoadRecaptureMinutes cycles once
+           #3930's daily recapture is in effect) has no row there at all, on-load or not, so this entry always
+           takes the interval branch (EffectiveRecurringIntervalMinutes is never 0) rather than the anchor one. */
+        var traceFlagsFrequency = CollectorScheduleDefaults.ResolveFrequencyMinutes(
+            "trace_flags", perServer.GetValueOrDefault("trace_flags"), fleet.GetValueOrDefault("trace_flags"));
+        starts["trace_flags"] = context.TimeRangeEnd - AnalysisContext.LatestValueLookbackFor(
+            CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(traceFlagsFrequency))!.Value;
+
         context.LatestValueStarts = starts;
     }
 
