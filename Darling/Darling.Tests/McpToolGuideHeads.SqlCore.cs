@@ -110,6 +110,14 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         Assert.Contains("parameter-sensitive plans or top spill queries behind the finding", McpToolGuideTests.Served("get_analysis_findings").Tail!, StringComparison.Ordinal);
     }
 
+    /// <summary>The facts payload's total_facts/shown/filters were never documented; the coordinator added
+    /// one tail sentence in #4083, so an agent reading shown: 0 can tell a filtered-out read from no facts.</summary>
+    [Fact]
+    public void FactsPayloadCounts_AreDocumentedInTheTail()
+    {
+        Assert.Contains("total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them", McpToolGuideTests.Served("get_analysis_facts").Tail!, StringComparison.Ordinal);
+    }
+
     /// <summary>D4: <c>get_analysis_findings</c>' two issue references ("(pre-#3538)" naming the confidence-basis
     /// migration, "(#3653)" naming the recurrence-label change) are off the wire on both head and tail; the
     /// guardrail each carried (a pre-migration row is path-shape, not corroboration; the three recurrence fields
