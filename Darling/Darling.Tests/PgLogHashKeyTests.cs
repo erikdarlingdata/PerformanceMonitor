@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -28,6 +29,52 @@ internal static class TestLogHashKeys
     internal static readonly byte[] FixedMaterial = Enumerable.Range(1, PgLogHashKey.KeyLength).Select(i => (byte)i).ToArray();
 
     public static PgLogHashKey Fixed { get; } = new(FixedMaterial);
+}
+
+/// <summary>
+/// Unix directory modes on a box that has none (#4004's review): what a test reports a credentials directory's mode as,
+/// and what the service's chmod leaves it at, as the kernel would. Stood in through
+/// <see cref="ComposeCredentialDirectoryStart.BeginForTest"/>; one instance outlives a start, the way a directory does.
+/// </summary>
+internal sealed class StandInUnixModes : IUnixDirectoryModes
+{
+    private readonly Dictionary<string, UnixFileMode> _modes = new(StringComparer.OrdinalIgnoreCase);
+
+    public void Report(string directory, string octal) => _modes[Key(directory)] = (UnixFileMode)Convert.ToInt32(octal, 8);
+
+    public string Octal(string directory) => Convert.ToString((int)_modes[Key(directory)], 8);
+
+    public void CreateOwnerOnly(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        _modes[Key(directory)] = DarlingManagedRoles.OwnerOnlyDirectory;
+    }
+
+    public UnixFileMode Get(string directory) => _modes[Key(directory)];
+
+    public void Set(string directory, UnixFileMode mode) => _modes[Key(directory)] = mode;
+
+    /// <summary>A file someone else wrote that the file check trusts, which is the point: owner-only on Unix (a 0600
+    /// file whose owner managed code cannot see), and the temp directory's inherited ACL on Windows.</summary>
+    public static void WriteOwnerOnly(string path, string text)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            File.WriteAllText(path, text);
+            return;
+        }
+
+        using var stream = new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            UnixCreateMode = DarlingManagedRoles.OwnerOnlyFile,
+        });
+        using var writer = new StreamWriter(stream);
+        writer.Write(text);
+    }
+
+    private static string Key(string directory) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
 }
 
 /// <summary>
@@ -214,7 +261,9 @@ public sealed class PgLogHashKeyTests
             Assert.Null(load.Key);
             Assert.False(load.Generated);
             Assert.Contains(path, load.Refusal, StringComparison.Ordinal);
-            Assert.Contains("never replaces an existing key", load.Refusal, StringComparison.Ordinal);
+            /* #4004's review: "does not replace THIS key", since the service now does replace a key whose directory was
+               open to other users until the start (below); a refused key is still never replaced. */
+            Assert.Contains("does not replace this key on its own", load.Refusal, StringComparison.Ordinal);
             Assert.Contains("delete it", load.Refusal, StringComparison.Ordinal);
             Assert.Equal(before, File.ReadAllBytes(path));
         }
@@ -270,6 +319,121 @@ public sealed class PgLogHashKeyTests
         finally
         {
             Remove(directory);
+        }
+    }
+
+    /// <summary>
+    /// #4004's review (F1): on compose, role provisioning looks at the credentials directory first and sets it 0700, so
+    /// a key load that judged the directory by what IT found saw owner-only and loaded a key planted while the directory
+    /// was 0777. The verdict is the start's now: the first look records the mode, and every later caller in that start
+    /// is judged by it. Driven through the Unix-mode seam, since the suite runs on Windows: provisioning's own call on a
+    /// directory reported as 0777 that holds a planted key, then the load. The planted key is discarded and a new one
+    /// generated, as #3983 replaces every role password there, and the NEXT start, which finds the directory 0700
+    /// because this one set it so, keeps the new key rather than rotating again.
+    /// </summary>
+    [Fact]
+    public void AKeyPlantedWhileItsDirectoryWasOpen_IsDiscarded_ThoughProvisioningClosedTheDirectoryFirst()
+    {
+        var directory = NewDirectory();
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, DarlingLogHashKeyFile.FileName);
+            var planted = Convert.ToBase64String(TestLogHashKeys.FixedMaterial);
+            StandInUnixModes.WriteOwnerOnly(path, OperatingSystem.IsWindows() ? DarlingSecrets.Protect(planted) : planted);
+            var modes = new StandInUnixModes();
+            modes.Report(directory, "777");
+
+            DarlingLogHashKeyLoad load;
+            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            {
+                /* Provisioning's call, first, as the worker makes it; spelled with a trailing separator, because the
+                   start's record is per full path, not per spelling. */
+                var provisioning = DarlingManagedRoles.PrepareComposeCredentialDirectory(
+                    directory + Path.DirectorySeparatorChar, create: true, NullLogger.Instance);
+                Assert.Equal(
+                    "its mode was 0777, which let other users put files in it until the service set it to owner-only this start",
+                    provisioning.Distrust);
+                Assert.True(provisioning.MayWrite);
+                Assert.Equal("700", modes.Octal(directory));
+
+                load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+            }
+
+            Assert.Null(load.Refusal);
+            Assert.True(load.Generated, "the planted key was loaded: the key load judged its directory by the mode provisioning had just set");
+            Assert.NotEqual(TestLogHashKeys.Fixed.RawLineHash(FailedUpdate), load.Key!.RawLineHash(FailedUpdate));
+            AssertOwnerOnly(path);
+
+            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            {
+                var next = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+                Assert.False(next.Generated);
+                Assert.Equal(load.Key.RawLineHash(FailedUpdate), next.Key!.RawLineHash(FailedUpdate));
+            }
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>
+    /// #4004's review: in a directory that was open until this start, a directory at the key's path is refused like
+    /// anywhere else (discarding never deletes a tree), and a directory still open to others after the chmod (a
+    /// filesystem that ignores modes) is refused without anything being written or removed.
+    /// </summary>
+    [Fact]
+    public void InADirectoryThatWasOpen_ADirectoryAtThePathOrAModeThatWillNotClose_IsRefused()
+    {
+        var directory = NewDirectory();
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, DarlingLogHashKeyFile.FileName);
+            Directory.CreateDirectory(path);
+            var modes = new StandInUnixModes();
+            modes.Report(directory, "777");
+
+            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            {
+                var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+                Assert.Null(load.Key);
+                Assert.Contains("it is a directory", load.Refusal, StringComparison.Ordinal);
+                Assert.True(Directory.Exists(path));
+            }
+
+            Directory.Delete(path);
+            StandInUnixModes.WriteOwnerOnly(path, "left-alone");
+            var ignoresModes = new IgnoresModes(modes);
+            modes.Report(directory, "777");
+
+            using (ComposeCredentialDirectoryStart.BeginForTest(ignoresModes))
+            {
+                var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+                Assert.Null(load.Key);
+                Assert.Contains("its mode is still 0777 after the service set it to owner-only", load.Refusal, StringComparison.Ordinal);
+                Assert.Equal("left-alone", File.ReadAllText(path));
+            }
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>A filesystem that ignores Unix modes: the chmod succeeds and changes nothing.</summary>
+    private sealed class IgnoresModes(StandInUnixModes inner) : IUnixDirectoryModes
+    {
+        public void CreateOwnerOnly(string directory) => inner.CreateOwnerOnly(directory);
+
+        public UnixFileMode Get(string directory) => inner.Get(directory);
+
+        public void Set(string directory, UnixFileMode mode)
+        {
         }
     }
 

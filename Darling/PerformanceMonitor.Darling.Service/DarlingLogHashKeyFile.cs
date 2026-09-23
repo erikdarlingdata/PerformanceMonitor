@@ -36,15 +36,23 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Trusted the way #3983 trusts the compose role passwords</b>: the directory is set owner-only again first
 /// (<see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/>), then the file must be a regular file no one
 /// else can reach (<see cref="DarlingManagedRoles.UntrustedComposeCredentialReason"/>): no group or other bits on
-/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users.</para>
+/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users. The directory is judged by the
+/// mode this START first found it with (<see cref="ComposeCredentialDirectoryStart"/>), because on compose role
+/// provisioning looks first and sets it owner-only before the key loads.</para>
 ///
-/// <para><b>Where it parts from #3983: an existing key is never replaced.</b> A role password costs only a re-assert
-/// to regenerate, so #3983 discards a file it cannot trust. A new key gives every stored log event a new identity: the
-/// reads dedupe on <c>raw_line_hash</c> and the lock-wait facts group on <c>statement_fingerprint</c>. So a key is
-/// generated only when there is no file at the path at all, and a file that cannot be trusted, read or parsed is
-/// REFUSED: the load returns no key with the reason, the service logs it, and the collectors that hash refuse to run
-/// (<see cref="PgLogHashKey.UnavailableMessage"/>) until an operator fixes the file or deletes it. Deleting is the one
-/// way to rotate, and it is a deliberate act.</para>
+/// <para><b>Where it parts from #3983: an existing key is not replaced, with one exception.</b> A role password costs
+/// only a re-assert to regenerate, so #3983 discards a file it cannot trust. A new key gives every stored log event a
+/// new identity: the reads dedupe on <c>raw_line_hash</c> and the lock-wait facts group on <c>statement_fingerprint</c>.
+/// So a key is generated when there is no file at the path at all, and a file that cannot be trusted, read or parsed
+/// is REFUSED: the load returns no key with the reason, the service logs it, and the collectors that hash refuse to run
+/// (<see cref="PgLogHashKey.UnavailableMessage"/>) until an operator fixes the file or deletes it. Deleting is how an
+/// operator rotates, and it is a deliberate act.</para>
+///
+/// <para>The exception is #3983's own case (#4004 review): a directory other users could write to until this start.
+/// Any file in it could have been planted, and the file check cannot tell (it cannot see a Unix owner), so the key
+/// there is discarded and a new one generated, as every role password there is. Refusing it instead would hold for
+/// one start only: the next finds the directory owner-only, because this start set it so, and would trust the
+/// planted file.</para>
 /// </summary>
 public static class DarlingLogHashKeyFile
 {
@@ -116,8 +124,9 @@ public static class DarlingLogHashKeyFile
     }
 
     /// <summary>
-    /// Loads the key from <paramref name="directory"/>, generating it only when no file exists at its path. Never throws
-    /// for anything the file system or the file can do; the result says what happened.
+    /// Loads the key from <paramref name="directory"/>, generating it when no file exists at its path, or when the
+    /// directory was open to other users until this start (the class's one exception). Never throws for anything the
+    /// file system or the file can do; the result says what happened.
     /// </summary>
     public static DarlingLogHashKeyLoad Load(string directory, ILogger logger)
     {
@@ -138,13 +147,17 @@ public static class DarlingLogHashKeyFile
                 }
 
                 /* The directory let other users put files in it until this start (#3983's arm), and a planted 0600 file
-                   passes the file check, which cannot see a Unix owner. #3983 regenerates in that case; a key is never
-                   replaced, so a key found there is refused instead. With no key there, generating is safe: only the
-                   service can reach the directory now. */
-                if (exists)
+                   passes the file check, which cannot see a Unix owner. The verdict is the start's (#4004 review): on
+                   compose, role provisioning runs first and sets the directory 0700, and judged by what this call found,
+                   the key load trusted a planted key. So a key found there is discarded and a new one generated, as
+                   #3983 replaces every role password there. Refusing it would last one start: the next finds the
+                   directory owner-only and trusts the same file. Only the service can reach the directory now. */
+                if (exists && Discard(path, directory, distrust, logger) is { } failure)
                 {
-                    return Refuse(path, $"its directory {directory} was open to other users until this start ({distrust}), so the key in it may not be the one this service generated");
+                    return Refuse(path, failure);
                 }
+
+                return Generate(path, logger);
             }
 
             if (exists)
@@ -172,6 +185,33 @@ public static class DarlingLogHashKeyFile
     {
         var info = new FileInfo(path);
         return info.LinkTarget is not null || info.Exists || Directory.Exists(path);
+    }
+
+    /// <summary>
+    /// Removes the key a directory that was open to other users held (#4004 review), or says why it could not. A
+    /// symbolic link is removed itself, never followed; a directory at the path is not removed, and refuses the load
+    /// as it would anywhere else.
+    /// </summary>
+    private static string? Discard(string path, string directory, string distrust, ILogger logger)
+    {
+        if (new FileInfo(path).LinkTarget is null && Directory.Exists(path))
+        {
+            return "it is a directory";
+        }
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"its directory {directory} was open to other users until this start ({distrust}) and it could not be removed ({ex.Message})";
+        }
+
+        logger.LogWarning(
+            "The store's log-hash key {Path} was in a directory other users could write to until this start ({Reason}), so it may not be the key this service generated. It is discarded and a new one generated (#4004); log events stored from now on are identified by hashes keyed with the new key.",
+            path, distrust);
+        return null;
     }
 
     private static DarlingLogHashKeyLoad Read(string path, ILogger logger)
@@ -223,7 +263,9 @@ public static class DarlingLogHashKeyFile
     /// <summary>
     /// Writes a new key owner-only from the moment it exists, the way #3983 writes a compose role password: 0600 at
     /// creation on Unix, the hardened ACL at creation on Windows (checked, then hardened once more if ordinary users can
-    /// still read it), then moved into place WITHOUT overwrite, so a file that appeared meanwhile is never replaced.
+    /// still read it), flushed to disk (<see cref="DarlingManagedRoles.FlushToDisk"/>, so a power loss cannot leave a
+    /// zero-length key that every later start refuses), then moved into place WITHOUT overwrite, so a file that
+    /// appeared meanwhile is never replaced.
     /// </summary>
     private static DarlingLogHashKeyLoad Generate(string path, ILogger logger)
     {
@@ -239,6 +281,7 @@ public static class DarlingLogHashKeyFile
                 using (var writer = new StreamWriter(stream))
                 {
                     writer.Write(DarlingSecrets.Protect(encoded));
+                    DarlingManagedRoles.FlushToDisk(writer, stream);
                 }
 
                 if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
@@ -262,6 +305,7 @@ public static class DarlingLogHashKeyFile
                 });
                 using var writer = new StreamWriter(stream);
                 writer.Write(encoded);
+                DarlingManagedRoles.FlushToDisk(writer, stream);
             }
 
             File.Move(temporary, path, overwrite: false);
@@ -298,8 +342,8 @@ public static class DarlingLogHashKeyFile
         Path: path,
         Generated: false,
         Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
-            + "The service never replaces an existing key on its own, because a new key gives every stored log event a new identity. "
-            + "If only this service could have written or read it, restrict it to the service account and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one.");
+            + "The service does not replace this key on its own, because a new key gives every stored log event a new identity. "
+            + "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one.");
 }
 
 /// <summary>What <see cref="DarlingLogHashKeyFile.Load"/> found (#4004): the key, or why there is none. Its

@@ -589,7 +589,9 @@ public sealed class PgLogEventMetricsRungTests
     public void TheRunbookAndTheReadme_NameBothFamilies()
     {
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
-        Assert.Contains("exact bytes beside the fingerprint of the statement that spilled once `log_temp_files` is on (#3602)", runbook, StringComparison.Ordinal);
+        /* #4004: no tool or viewer returns a statement fingerprint, so the runbook no longer promises one beside the bytes. */
+        Assert.Contains("A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602)", runbook, StringComparison.Ordinal);
+        Assert.DoesNotContain("fingerprint of the statement that spilled", runbook, StringComparison.Ordinal);
         Assert.Contains("`get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603)", runbook, StringComparison.Ordinal);
         Assert.Contains("| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs`", runbook, StringComparison.Ordinal);
 

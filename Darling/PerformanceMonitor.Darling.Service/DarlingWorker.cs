@@ -2041,8 +2041,10 @@ public sealed class DarlingWorker : BackgroundService
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
         /* #4004: the store's log-hash key, loaded ONCE here and shared by every run that hashes log text (pg_log_events
            on the pg_read_file and RDS routes), so raw_line_hash and statement_fingerprint are keyed with a secret the
-           store never holds. Generated only when none exists and never replaced: null means the file could not be used,
-           the reason is already logged, and those runs refuse rather than hash without it. */
+           store never holds. Generated when none exists, and replaced only when its directory was open to other users
+           until this start (a verdict role provisioning above shares, since it looked at the directory first): null
+           means the file could not be used, the reason is already logged, and those runs refuse rather than hash
+           without it. */
         var logHashKey = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),

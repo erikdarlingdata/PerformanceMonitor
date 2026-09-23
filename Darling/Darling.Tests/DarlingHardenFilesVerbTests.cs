@@ -101,7 +101,9 @@ public class DarlingHardenFilesVerbTests
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
-        var body = source[at..Math.Min(source.Length, at + 6000)];
+        /* The same window as the two pins below: #4004's review added the log-hash key's targets to the list, which
+           moved the verify pass past the old 6,000. */
+        var body = source[at..Math.Min(source.Length, at + 8000)];
 
         /* It re-reads rather than trusting the call. */
         Assert.Contains("DarlingFileSecurity.IsReadableByOrdinaryUsers(", body, StringComparison.Ordinal);

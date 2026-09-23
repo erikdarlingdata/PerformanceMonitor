@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -1511,12 +1512,14 @@ WHERE u.rolname = current_user";
     /// <summary>
     /// Sets the compose store's credentials directory owner-only again before any file in it is read, and says what
     /// the service may do with it this start (#3914). A symbolic link is never followed: nothing in it is read or
-    /// written. Unix: 0700 is re-applied every start and the result read back
-    /// (<see cref="JudgeComposeCredentialDirectory"/>). Windows (the live tests' runtime): a directory the service
-    /// creates is hardened as it is created, and each file's owner and readability carry the rest.
-    /// <paramref name="create"/> makes a missing directory; only the worker passes it. Never throws: a directory
-    /// that cannot be created or checked (a read-only mount, say) is one nothing is read from or written to, and
-    /// the roles are still provisioned with this start's passwords, as they were when only the write could fail.
+    /// written. Unix: 0700 is re-applied on every call and the result read back, and the directory is judged by the
+    /// mode THIS START first found it with (<see cref="ComposeCredentialDirectoryStart"/>,
+    /// <see cref="JudgeComposeCredentialDirectory"/>), so every caller in one start gets the same verdict. Windows
+    /// (the live tests' runtime): a directory the service creates is hardened as it is created, and each file's
+    /// owner and readability carry the rest. <paramref name="create"/> makes a missing directory; only the worker
+    /// passes it. Never throws: a directory that cannot be created or checked (a read-only mount, say) is one
+    /// nothing is read from or written to, and the roles are still provisioned with this start's passwords, as
+    /// they were when only the write could fail.
     /// </summary>
     internal static ComposeCredentialDirectoryTrust PrepareComposeCredentialDirectory(string directory, bool create, ILogger logger)
     {
@@ -1531,6 +1534,34 @@ WHERE u.rolname = current_user";
             if (!info.Exists && !create)
             {
                 return new ComposeCredentialDirectoryTrust(null, MayWrite: false);
+            }
+
+            var start = ComposeCredentialDirectoryStart.Current;
+            if (start.UnixModes is { } modes)
+            {
+                if (!info.Exists)
+                {
+                    modes.CreateOwnerOnly(directory);
+                }
+
+                /* #4004 review: the mode this START found the directory with, not the one this call finds. Role
+                   provisioning, a host's earlier-credential read and the log-hash key each come through here, and
+                   the first of them sets 0700 just below. Judged by what each call found, every later caller saw a
+                   directory that was open to other users until moments before as owner-only all along, and the key
+                   load, which runs after provisioning, trusted whatever had been planted in it. */
+                var before = start.ModeFoundAtStart(directory);
+                try
+                {
+                    modes.Set(directory, OwnerOnlyDirectory);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    /* Neither its owner nor root: a rootless container on someone else's bind mount. The mode read
+                       back below decides. */
+                    logger.LogDebug("Could not set {Directory} to owner-only: {Message}", directory, ex.Message);
+                }
+
+                return JudgeComposeCredentialDirectory(before, modes.Get(directory));
             }
 
             if (OperatingSystem.IsWindows())
@@ -1552,24 +1583,8 @@ WHERE u.rolname = current_user";
                 return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
             }
 
-            if (!info.Exists)
-            {
-                Directory.CreateDirectory(directory, OwnerOnlyDirectory);
-            }
-
-            var before = File.GetUnixFileMode(directory);
-            try
-            {
-                File.SetUnixFileMode(directory, OwnerOnlyDirectory);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                /* Neither its owner nor root: a rootless container on someone else's bind mount. The mode read back
-                   below decides. */
-                logger.LogDebug("Could not set {Directory} to owner-only: {Message}", directory, ex.Message);
-            }
-
-            return JudgeComposeCredentialDirectory(before, File.GetUnixFileMode(directory));
+            /* Unreachable: every platform but Windows has Unix modes. */
+            return new ComposeCredentialDirectoryTrust("this platform has no way to check it", MayWrite: false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1579,8 +1594,8 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// The Unix credentials-directory verdict, pure so each arm is pinned without a Linux box (#3914).
-    /// <paramref name="before"/> is the mode the directory was found with, <paramref name="after"/> its mode once the
-    /// service set it to 0700.
+    /// <paramref name="before"/> is the mode this start first found the directory with
+    /// (<see cref="ComposeCredentialDirectoryStart"/>), <paramref name="after"/> its mode once the service set it to 0700.
     /// <list type="bullet">
     /// <item><description>Still reachable by other users afterwards (a filesystem that ignores Unix modes): none of
     /// its files is read, and none is written there either, because a new one would be as reachable as the
@@ -1614,7 +1629,7 @@ WHERE u.rolname = current_user";
         UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
         | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
 
-    private const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+    internal const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
 
     internal const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
 
@@ -1644,6 +1659,7 @@ WHERE u.rolname = current_user";
                 using (var writer = new StreamWriter(stream))
                 {
                     writer.Write(credential.Password);
+                    FlushToDisk(writer, stream);
                 }
 
                 if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
@@ -1667,6 +1683,7 @@ WHERE u.rolname = current_user";
                 });
                 using var writer = new StreamWriter(stream);
                 writer.Write(credential.Password);
+                FlushToDisk(writer, stream);
             }
 
             File.Move(temporary, path, overwrite: true);
@@ -1687,6 +1704,17 @@ WHERE u.rolname = current_user";
                 logger.LogDebug("Could not remove {File}: {Message}", temporary, cleanup.Message);
             }
         }
+    }
+
+    /// <summary>
+    /// Puts what <paramref name="writer"/> wrote on the disk before its file is renamed into place (#4004 review). A
+    /// rename can reach the disk before the data it names does, so a power loss could otherwise leave a zero-length
+    /// file where a good one was: a key refused at every start, or a role credential a host can no longer use.
+    /// </summary>
+    internal static void FlushToDisk(StreamWriter writer, FileStream stream)
+    {
+        writer.Flush();
+        stream.Flush(flushToDisk: true);
     }
 
     /// <summary>One role's compose-store password and whether it was generated this start (#3914). A class, not
@@ -1859,3 +1887,96 @@ internal sealed class EarlierComposeCredential
 /// <param name="Distrust">Why none of its files is read this start; null when they are.</param>
 /// <param name="MayWrite">Whether a credential generated this start is written there.</param>
 internal sealed record ComposeCredentialDirectoryTrust(string? Distrust, bool MayWrite);
+
+/// <summary>
+/// One service start's look at its credentials directories (#4004 review). The FIRST look at a directory records the
+/// mode it had, before anything this start does sets it owner-only, and every caller of
+/// <see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/> is judged by that record: role provisioning, a
+/// host's <see cref="DarlingManagedRoles.ReadEarlierComposeCredential"/> and <see cref="DarlingLogHashKeyFile.Load"/>.
+/// Keyed by the directory's full path. A service start is a process, so the process holds one; a test begins its own
+/// (<see cref="BeginForTest"/>).
+/// </summary>
+internal sealed class ComposeCredentialDirectoryStart
+{
+    private static readonly ComposeCredentialDirectoryStart Process = new(PlatformModes());
+
+    private static readonly AsyncLocal<ComposeCredentialDirectoryStart?> TestStart = new();
+
+    private static PlatformUnixDirectoryModes? PlatformModes()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        return new PlatformUnixDirectoryModes();
+    }
+
+    private readonly ConcurrentDictionary<string, UnixFileMode> _modeFound = new(StringComparer.Ordinal);
+
+    private ComposeCredentialDirectoryStart(IUnixDirectoryModes? unixModes) => UnixModes = unixModes;
+
+    /// <summary>This start's: the process's, or the calling test's.</summary>
+    internal static ComposeCredentialDirectoryStart Current => TestStart.Value ?? Process;
+
+    /// <summary>The Unix mode calls this start makes; null on Windows, which judges by ACL instead.</summary>
+    internal IUnixDirectoryModes? UnixModes { get; }
+
+    /// <summary>
+    /// The mode <paramref name="directory"/> had when this start first looked at it, read now when this is that look.
+    /// The record is made before the first caller sets the directory owner-only, since that caller sets it only after
+    /// this returns. Two first looks racing each other can both read, but a read made after the chmod always loses:
+    /// the chmod follows an add that is already in place.
+    /// </summary>
+    internal UnixFileMode ModeFoundAtStart(string directory)
+    {
+        var modes = UnixModes ?? throw new InvalidOperationException("This start has no Unix modes to read.");
+        return _modeFound.GetOrAdd(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)),
+            static (_, state) => state.modes.Get(state.directory),
+            (modes, directory));
+    }
+
+    /// <summary>
+    /// Begins a start whose Unix mode calls are <paramref name="unixModes"/>, for the calling test's flow only, so the
+    /// Unix verdict and its once-per-start record are pinned on the Windows box the suite runs on. Disposing it ends
+    /// that start; beginning another with the same stand-in is the service's next start.
+    /// </summary>
+    internal static IDisposable BeginForTest(IUnixDirectoryModes unixModes)
+    {
+        ArgumentNullException.ThrowIfNull(unixModes);
+        var previous = TestStart.Value;
+        TestStart.Value = new ComposeCredentialDirectoryStart(unixModes);
+        return new EndTestStart(previous);
+    }
+
+    private sealed class EndTestStart(ComposeCredentialDirectoryStart? previous) : IDisposable
+    {
+        public void Dispose() => TestStart.Value = previous;
+    }
+}
+
+/// <summary>
+/// The Unix mode calls behind the credentials-directory verdict (#4004 review): create a directory owner-only, read its
+/// mode, set it. A seam, so a test can stand in a directory reported as 0777
+/// (<see cref="ComposeCredentialDirectoryStart.BeginForTest"/>).
+/// </summary>
+internal interface IUnixDirectoryModes
+{
+    void CreateOwnerOnly(string directory);
+
+    UnixFileMode Get(string directory);
+
+    void Set(string directory, UnixFileMode mode);
+}
+
+/// <summary>The platform's own <see cref="IUnixDirectoryModes"/>, on every platform but Windows.</summary>
+[UnsupportedOSPlatform("windows")]
+internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
+{
+    public void CreateOwnerOnly(string directory) => Directory.CreateDirectory(directory, DarlingManagedRoles.OwnerOnlyDirectory);
+
+    public UnixFileMode Get(string directory) => File.GetUnixFileMode(directory);
+
+    public void Set(string directory, UnixFileMode mode) => File.SetUnixFileMode(directory, mode);
+}

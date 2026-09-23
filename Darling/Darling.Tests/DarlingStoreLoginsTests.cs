@@ -456,6 +456,44 @@ public sealed class DarlingStoreLoginsTests
     }
 
     /// <summary>
+    /// #4004's review: a host's earlier-credential read gets the START's directory verdict. Whatever looked at the
+    /// directory first (the worker, as provisioning or as the log-hash key's load) set it 0700, so a read judged by what
+    /// IT found trusted a password planted while the directory was 0777. It is refused now with the start's reason, and
+    /// left where it is: replacing it is provisioning's job.
+    /// </summary>
+    [Fact]
+    public void AnEarlierCredential_InADirectoryOpenUntilThisStart_IsNotRead_AfterAnotherCallerClosedIt()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-4004-earlier-");
+        try
+        {
+            var directory = Path.Combine(root.FullName, "credentials");
+            Directory.CreateDirectory(directory);
+            var viewerFile = Path.Combine(directory, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer"));
+            StandInUnixModes.WriteOwnerOnly(viewerFile, "Planted4004");
+            var modes = new StandInUnixModes();
+            modes.Report(directory, "777");
+
+            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            {
+                var first = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, create: true, NullLogger.Instance);
+                Assert.Equal("700", modes.Octal(directory));
+
+                var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance);
+
+                Assert.Null(earlier.Password);
+                Assert.Equal($"the credentials directory {directory} is not trusted ({first.Distrust})", earlier.MissingReason);
+                Assert.StartsWith("its mode was 0777", first.Distrust, StringComparison.Ordinal);
+                Assert.Equal("Planted4004", File.ReadAllText(viewerFile));
+            }
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// The Unix credentials-directory verdict (#3914 review, F4), pure because the test host is Windows. The service
     /// sets the directory to 0700 every start and reads the mode back: still reachable by others afterwards means
     /// nothing in it is read or written; writable by others BEFORE means a 0600 file could have been planted by

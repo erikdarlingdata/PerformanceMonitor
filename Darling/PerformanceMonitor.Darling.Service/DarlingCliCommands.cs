@@ -265,7 +265,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json and the store credentials (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials and the log-hash key (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -3308,10 +3308,10 @@ public static class DarlingCliCommands
         };
 
     /// <summary>
-    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
-    /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
-    /// control flow — which file gets INTERACTIVE read is the only judgement in this verb, and it should be
-    /// visible at a glance.
+    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it
+    /// (for a directory: walks through it, never reads it), and what it is called in the report. Kept as data so
+    /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
+    /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
     private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
@@ -3363,8 +3363,8 @@ public static class DarlingCliCommands
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
         {
-            /* INTERACTIVE read, alone in this list: the Viewer (ViewerSettings.ResolveConfigPath) and the CLI
-               verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
+            /* INTERACTIVE read, the only file in this list that keeps it: the Viewer (ViewerSettings.ResolveConfigPath)
+               and the CLI verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
@@ -3375,10 +3375,20 @@ public static class DarlingCliCommands
 
         if (!string.IsNullOrEmpty(storeRoot))
         {
-            targets.Add(new(storeRoot, AllowInteractive: false, IsDirectory: true, "the store directory"));
+            /* INTERACTIVE traverse, never read: the operator walks through it to the config, never to the credential
+               blobs in it. Mirrors DarlingManagedPostgres' own call. */
+            targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
+            targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
         }
+
+        /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
+           service creates with no INTERACTIVE access at all, so it gets none here either. */
+        var keyDirectory = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory, DarlingLogHashKeyFile.BringYourOwnDirectoryName);
+        targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
+        targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
@@ -3419,9 +3429,9 @@ public static class DarlingCliCommands
             {
                 if (target.IsDirectory)
                 {
-                    /* Traverse, not read: the operator's Viewer needs to walk to the config, never to read the
-                       credential blobs sitting in here. Mirrors DarlingManagedPostgres' own call. */
-                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: true);
+                    /* A directory's AllowInteractive is traverse, never read (the store directory's, above); a
+                       directory the service keeps from the operator entirely (darling-keys) keeps even that. */
+                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: target.AllowInteractive);
                 }
                 else
                 {
