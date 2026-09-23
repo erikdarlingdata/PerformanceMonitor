@@ -166,7 +166,11 @@ internal sealed class DarlingStoreUpgrade
         /// <summary>The data directory was upgraded to the bundled major and verified.</summary>
         Succeeded,
 
-        /// <summary>A step failed; the store reverted to its previous runtime + data directory and keeps running.</summary>
+        /// <summary>
+        /// A step failed before the commit point. <see cref="StoreUpgradeOutcome.PreUpgradeData"/> and
+        /// <see cref="StoreUpgradeOutcome.RuntimeReverted"/> say how much was put back; only the clean shape keeps the
+        /// store running on its previous major (#3927).
+        /// </summary>
         Failed,
     }
 
