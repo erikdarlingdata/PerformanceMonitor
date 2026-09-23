@@ -123,8 +123,12 @@ public sealed class McpToolsListBudgetTests
             Assert.DoesNotContain(McpToolGuide.Marker, tool.Served, StringComparison.Ordinal);
             if (tool.Tail is null)
             {
+                /* Unconverted: served exactly as before the seam, the whole [Description]. */
+                Assert.Equal(tool.Description ?? string.Empty, tool.Served);
                 continue;
             }
+
+            Assert.Equal(McpToolGuide.Split(tool.Description!).Head + McpToolGuide.GuidePointer, tool.Served);
 
             if (tool.Served.Length > ConvertedHeadCap)
             {
