@@ -107,6 +107,19 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        the JSON tab-indented under its LOG line, so the block is recognisable as a unit. The tabs are
        stripped to make it valid JSON.
 
+       ANCHORED to '^' with the 'n' (newline-sensitive) flag, and the timestamp is REQUIRED (#4008). The
+       pre-fix pattern matched '[digits] digits LOG:  duration: ... plan:' ANYWHERE in the tail, with no
+       timestamp check at all, so a statement's own author could write that text into their own SQL and
+       have PostgreSQL echo it back verbatim in the STATEMENT: companion after a syntax error — tab-indented
+       continuation lines and all — forging a plan, with any query id and duration, onto any real query's
+       history. A '^\d{4}-\d\d-\d\d ...' timestamp required at a genuine line start closes that: forged
+       text is never the first character of a raw physical line, because a real line always opens with
+       log_line_prefix and a continuation always opens with a tab, and 'n' makes '^' match only right after
+       a newline or at the very start of the tail. Self-hosted's own log_line_prefix is whatever the
+       operator configured, but the space-separated family is PostgreSQL's own default and the only one this
+       route has ever recognised — PgPlanLogParser.s_planBlock carries the colon-separated (managed-prefix)
+       alternative too, because that family is the norm on the RDS log-API route this SQL never runs on.
+
        The marker row the gate emits instead of log rows when logging_collector is off (#3410) is spelled
        in this query's own three columns; ReadAsync turns it into PgLoggingCollectorOffException, and the
        runner records the named non-fatal skip — not-collected with the reason, never a silent zero that
@@ -119,8 +132,8 @@ SELECT
 FROM tail,
      regexp_matches(
          tail.body,
-         '\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
-         'g') AS m
+         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ \n]+ \[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         'gn') AS m
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
