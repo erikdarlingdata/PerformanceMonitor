@@ -71,6 +71,65 @@ public sealed class PgDeadlockCandidatePatternLiveTests
             "2026-09-23 10:00:02.000 UTC [7777] STATEMENT:  SELECT 1 -- ERROR:  deadlock detected\n" + RealReport));
     }
 
+    /// <summary>
+    /// #4041: the pattern offers a report under every prefix the assembler behind it reads. It carried only
+    /// <c>'%m [%p] '</c>, so fields between the zone and the pid (<c>'%m %u@%d [%p] '</c>), a stamp with no fraction
+    /// (pgBadger's <c>'%t [%p]: user=%u,db=%d,...'</c>) and the managed family offered nothing, and the self-hosted
+    /// route read those servers as having no deadlocks. Each candidate is handed on to <c>FromReport</c> as the
+    /// collector hands it, so this is the route end to end. The new gap stops at the first bracket and at a field
+    /// label, so a forged header behind a real bracket, or across a label, is still not a candidate.
+    /// </summary>
+    [Fact]
+    public async Task TheShippedPattern_OffersAReportUnderEveryPrefixTheAssemblerReads()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock-candidate test.");
+
+        var pattern = ShippedPattern();
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        async Task<string[]> CandidatesAsync(string body)
+        {
+            await using var command = new NpgsqlCommand("SELECT m[1] FROM regexp_matches($1, $2, 'gn') AS m", connection);
+            command.Parameters.AddWithValue(body);
+            command.Parameters.AddWithValue(pattern);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var found = new System.Collections.Generic.List<string>();
+            while (await reader.ReadAsync(ct))
+            {
+                found.Add(reader.GetString(0));
+            }
+
+            return [.. found];
+        }
+
+        foreach (var prefix in new[]
+                 {
+                     "2026-08-26 22:25:24.100 UTC app_user@app_db [1549] ",
+                     "2026-08-26 22:25:24 UTC [1549]: user=app_user,db=app_db,app=psql,client=[local] ",
+                     "2026-08-26 22:25:24 UTC:192.0.2.10(52345):app_user@app_db:[1549]:",
+                 })
+        {
+            var candidate = Assert.Single(await CandidatesAsync(RealReport.Replace("2026-08-26 22:25:24.100 UTC [1549] ", prefix, StringComparison.Ordinal)));
+            var deadlock = PgDeadlockLogParser.FromReport(candidate);
+            Assert.NotNull(deadlock);
+            Assert.Equal(1549, deadlock.Value.VictimPid);
+        }
+
+        /* A STATEMENT echo behind the real bracket, and a logged statement's echo on a line with no bracket before
+           its label: neither is a candidate. */
+        Assert.Empty(await CandidatesAsync(
+            "2026-09-23 10:00:02.000 UTC app_user@app_db [7777] STATEMENT:  SELECT 1 -- [1] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"
+            + "\tProcess 2 waits for ShareLock on transaction 6; blocked by process 1.\n"));
+        Assert.Empty(await CandidatesAsync(
+            "2026-09-23 10:00:02.000 UTC app_user@app_db LOG:  statement: SELECT 'x [1] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"));
+    }
+
     /// <summary>The regexp_matches pattern as the collector ships it, lifted out of its own SQL.</summary>
     private static string ShippedPattern()
     {
