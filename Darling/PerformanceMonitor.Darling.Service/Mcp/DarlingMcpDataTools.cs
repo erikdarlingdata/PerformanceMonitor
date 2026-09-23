@@ -753,7 +753,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache, or exact stored-procedure attribution via module_name. Database and exact module filters are applied after interval deduplication and before ranking. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -761,7 +761,7 @@ public sealed class DarlingMcpDataTools
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Filter to one exact Query Store module name before ranking, e.g. dbo.usp_ProcessOrder. Case-sensitive.")] string? module_name = null)
+        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -799,7 +799,11 @@ public sealed class DarlingMcpDataTools
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
-                    ?? (string.IsNullOrWhiteSpace(module_name)
+                    /* A module filter that matched nothing is a true negative ("empty") only when the window held
+                       Query Store rows for it to match. When the window held none, the filter is not the reason, and
+                       the answer is the same "unavailable" an unfiltered read gives. The floor probe above is what
+                       tells the two apart, and it carries the window actually read, which the miss hands back. */
+                    ?? (module_name is null || floor is null
                         ? McpHelpers.Status(
                             "unavailable",
                             $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
@@ -809,9 +813,21 @@ public sealed class DarlingMcpDataTools
                             "queries did not run.")
                         : McpHelpers.Status(
                             "empty",
-                            $"No Query Store rows matched exact module_name '{module_name}' in the {hours_back}-hour window searched. " +
-                            "The module filter was applied after interval deduplication and before ranking; verify the exact " +
-                            "schema-qualified, case-sensitive module name and read effective_start before concluding the module did not run."));
+                            $"No Query Store rows matched module_name '{module_name}'" +
+                            (string.IsNullOrEmpty(database_name) ? "" : $" in database '{database_name}'") +
+                            " in the window served, which does hold Query Store rows. The match is exact and case-sensitive on " +
+                            "the schema-qualified name the collector records (the full_name get_top_procedures_by_cpu returns), " +
+                            "applied after interval deduplication and before ranking." +
+                            (truncated
+                                ? " The raw tier did not reach the whole window (window_truncated), so the module may have run " +
+                                  "before effective_start."
+                                : ""),
+                            hints: new
+                            {
+                                effective_start = effectiveStart.ToString("o"),
+                                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                                window_truncated = truncated
+                            }));
 
             var result = rows.Select(r => new
             {

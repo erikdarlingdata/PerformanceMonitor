@@ -270,6 +270,23 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal("dbo.usp_Target", row.ModuleName);
     }
 
+    /// <summary>
+    /// The probe <c>get_query_store_top</c> asks when a <c>module_name</c> filter matched nothing (#4057): it must
+    /// answer for the same window the top read resolves, so a module miss over a window that holds rows reads as
+    /// a true negative, and the same miss over an empty window reads as the unfiltered "unavailable".
+    /// </summary>
+    [Fact]
+    public async Task WindowProbe_SeesTheTopReadsWindow_AndOnlyIt()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 105, 1005, FirstExecA, 3, 100, 200, 1,
+            "0xPROBE", intervalId: 9305, intervalStart: BucketStart, moduleName: "dbo.usp_Probe");
+
+        var service = new LocalDataService(_duckDb);
+        Assert.True(await service.HasQueryStoreRowsInWindowAsync(ServerId, 24));
+        Assert.Empty(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_Missing"));
+        Assert.False(await service.HasQueryStoreRowsInWindowAsync(ServerId, 1, asOfUtc: BucketStart.AddDays(-2)));
+    }
+
     [Fact]
     public async Task TopQueries_ModuleFilterRunsAfterIntervalDedup()
     {

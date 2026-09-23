@@ -1720,7 +1720,9 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        ("DarlingMcpDataTools.cs", "initializer", 1),
+        /* Two: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer holds. */
+        ("DarlingMcpDataTools.cs", "initializer", 2),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
