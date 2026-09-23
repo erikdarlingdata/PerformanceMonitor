@@ -37,15 +37,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Why a client-side deadline does not simply defer to that GUC.</b> Three reasons, and they land
 /// differently per deployment shape rather than being one argument repeated:</para>
 ///
-/// <para>1. <b>Bring-your-own PostgreSQL has no such GUC at all.</b> The roles are created out-of-band by
-/// <c>Darling/tools/provision-roles.sql</c>, which provisions <c>admin</c> and <c>viewer</c> and
-/// deliberately NO <c>mcp</c> role, and sets <c>statement_timeout</c> on <c>viewer</c> only. The MCP host in
-/// that mode connects with the operator's own <c>postgres.connectionString</c>
-/// (<see cref="DarlingMcpHostService"/>), which is typically the owner or <c>admin</c> identity and carries
-/// no <c>statement_timeout</c>. So on a BYO store this read surface has NO server-side bound, and Npgsql's
-/// undocumented default is currently the only thing bounding it. Remove that inheritance without replacing
-/// it and the reads become unbounded. A BYO operator also has no knob here — the store column reaches the
-/// roles only through managed provisioning — which is why these values are deliberately not aggressive.</para>
+/// <para>1. <b>Bring-your-own PostgreSQL may have no such GUC at all.</b> The roles are created out-of-band by
+/// <c>Darling/tools/provision-roles.sql</c>, which sets a fixed <c>statement_timeout</c> on <c>viewer</c> and
+/// <c>mcp</c>, and the MCP host in that mode connects as them only when <c>postgres.mcpConnectionString</c> says
+/// so (#3914). Unset, it connects with <c>postgres.connectionString</c> — the owner, which carries no
+/// <c>statement_timeout</c> (<see cref="DarlingMcpHostService"/>). So on such a store this read surface has NO
+/// server-side bound, and a client-side deadline is the only thing bounding it. Remove that inheritance without
+/// replacing it and the reads become unbounded. A BYO operator also has no knob here — the store column reaches
+/// the roles only through the service's own provisioning (managed, or the compose store) — which is why these
+/// values are deliberately not aggressive.</para>
 ///
 /// <para>2. <b>On a managed store the GUC is operator-tunable to 600 s, and it is per-ROLE.</b> An operator
 /// who raises <c>compose_statement_timeout_seconds</c> so one heavy custom view can finish raises it for

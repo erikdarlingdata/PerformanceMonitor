@@ -50,6 +50,11 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /app/publish .
 
+# #3914: where the service keeps the passwords of the least-privilege roles it provisions on the compose store.
+# Created owner-only here because Docker seeds a new named volume from the image's directory, mode included, so
+# the compose file's darling-credentials volume starts owner-only too. The service creates each file 0600.
+RUN mkdir -p /var/lib/darling/credentials && chmod 700 /var/lib/darling/credentials
+
 # The config mount point the compose file uses; override DARLING_CONFIG to relocate.
 ENV DARLING_CONFIG=/config/darling.json
 

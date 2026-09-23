@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -227,7 +228,7 @@ public sealed class DarlingManagedRolesTests
     }
 
     [Fact]
-    public void BuildProvisioningSql_McpRole_CreatedAndGrantedReadPlusTwoInserts_NoAdp()
+    public void BuildProvisioningSql_McpRole_CreatedAndGrantedReadPlusTwoInserts_NoWriteAdp()
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
@@ -259,9 +260,15 @@ public sealed class DarlingManagedRolesTests
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO mcp", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA collect TO mcp", sql, StringComparison.Ordinal);
 
-        /* NO ALTER DEFAULT PRIVILEGES names mcp — ADP has no per-table form, so an ADP INSERT would broaden
-           mcp to ALL of collect. The narrow grants are explicit single-table statements. */
-        Assert.DoesNotContain("ON TABLES TO mcp", sql, StringComparison.Ordinal);
+        /* No default WRITE names mcp — ADP has no per-table form, so an ADP INSERT would broaden mcp to ALL of
+           collect; the narrow grants are explicit single-table statements. The ONE default mcp does get (#3914)
+           is SELECT on collect: the continuous aggregates are created after this batch in the same start, and
+           without it every one was unreadable to the MCP tools until the next restart. Collect holds no secrets;
+           config gets no mcp default, because its secret columns are carved table by table. */
+        Assert.Single(Regex.Matches(sql, "ON TABLES TO mcp"));
+        Assert.Single(Regex.Matches(sql, @"ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect\s+GRANT SELECT ON TABLES TO mcp;"));
+        Assert.DoesNotMatch(@"IN SCHEMA config\s+GRANT [A-Z, ]+ ON TABLES TO mcp", sql);
+        Assert.DoesNotMatch(@"(?:INSERT|UPDATE|DELETE)[A-Z, ]* ON TABLES TO mcp", sql);
         Assert.DoesNotContain("ON SEQUENCES TO mcp", sql, StringComparison.Ordinal);
         foreach (var adpLine in sql.Split('\n').Where(l => l.Contains("ALTER DEFAULT PRIVILEGES", StringComparison.Ordinal)))
         {
@@ -536,6 +543,16 @@ public sealed class DarlingManagedRolesTests
             "provision-roles.sql sends a password before it turns utility tracking off");
         Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal),
             "provision-roles.sql sends a password before it turns utility tracking off");
+
+        /* #3914: the script creates mcp too, so its password statements and its slow-statement lines are held to
+           the same order and the same settings. */
+        var mcpCreate = byo.IndexOf("CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal);
+        var mcpAlter = byo.IndexOf("ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD", StringComparison.Ordinal);
+        Assert.True(mcpCreate > utilityOff && mcpAlter > utilityOff,
+            "provision-roles.sql sends the mcp password before it turns utility tracking off");
+        Assert.Contains("ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET statement_timeout = '15s';", byo, StringComparison.Ordinal);
 
         /* The BYO remedy for the preload names the multi-literal ALTER SYSTEM form, never the one-literal list
            that stores a single library name (#3904's review). */

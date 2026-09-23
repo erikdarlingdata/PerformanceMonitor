@@ -41,7 +41,13 @@
   //    automatically when present, plain PostgreSQL works too. The collect/config schema split
   //    still applies (it is a migration); provision the least-privilege roles yourself with
   //    Darling/tools/provision-roles.sql and point a read-only Viewer's connectionString at the
-  //    "viewer" role.
+  //    "viewer" role. Point the web dashboard and the MCP server at the roles too (#3914):
+  //      "webConnectionString": "Host=localhost;Port=5432;Username=viewer;Password=...;Database=darling",
+  //      "mcpConnectionString": "Host=localhost;Port=5432;Username=mcp;Password=...;Database=darling"
+  //    (or env:NAME / file:/path references, like connectionString). Left unset, each connects as
+  //    the owner above and loses the roles' secret-column carve, narrow write grants and
+  //    statement_timeout backstop; the service warns at startup. (The Linux compose distribution's
+  //    own store needs neither: the service provisions the roles there itself.)
   //
   //    SIZE THE BACKGROUND WORKERS YOURSELF. Managed mode writes these on every start; in this
   //    mode nothing does, and PostgreSQL's stock max_worker_processes = 8 cannot run TimescaleDB's

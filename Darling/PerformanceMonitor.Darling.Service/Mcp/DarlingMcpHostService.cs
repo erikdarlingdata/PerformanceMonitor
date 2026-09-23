@@ -61,7 +61,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// stays config-free.</para>
 ///
 /// <para>The MCP surface gets its OWN <see cref="NpgsqlDataSource"/> over the store, connecting as the
-/// dedicated least-privilege <c>mcp</c> role (D3-role) — NOT the superuser owner — so a token-holder (or a
+/// dedicated least-privilege <c>mcp</c> role (D3-role) on a managed store and on the compose distribution's own
+/// store; on any other store as <c>postgres.mcpConnectionString</c>, or as the owner with a startup warning when
+/// that is unset (<see cref="DarlingStoreLogins"/>, #3914). As mcp it is NOT the superuser owner, so a token-holder (or a
 /// future/buggy tool) reaches only the viewer read surface plus the <c>analysis_findings</c> /
 /// <c>analysis_muted</c> INSERTs the tools persist, never the <c>config_command</c> service-credential
 /// pivot or the carved secret columns. It also gets its own <see cref="DarlingAnalysisService"/>. Store
@@ -383,7 +385,14 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
             else
             {
-                storeConnectionString = config.Postgres.ConnectionString;
+                /* #3914: not the owner by default any more — postgres.mcpConnectionString, the mcp role the
+                   service provisioned on the compose store, or the owner with a warning, in that order. */
+                storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                    DarlingStoreLogins.Surface.Mcp, config.Postgres, _logger, stoppingToken);
+                if (storeConnectionString is null)
+                {
+                    return false;
+                }
             }
 
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's

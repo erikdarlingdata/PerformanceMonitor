@@ -1,0 +1,475 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
+using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #3914: the store login the web dashboard and the MCP server connect with outside managed mode. They used to
+/// connect as the owner there, so a web session or an MCP token-holder had none of the <c>viewer</c>/<c>mcp</c>
+/// roles' protections. The ruling: the compose distribution's own store gets the roles the service provisions,
+/// any other store gets <c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>, and a surface
+/// left on the owner says at startup what that gives up.
+///
+/// <para>Pins the pure decision (<see cref="DarlingStoreLogins.Resolve"/>), the warning text, the derived role
+/// login, the compose-store refusals, the batch the compose store gets, the reload gate, the two settings, and —
+/// by source, because a behavioural test of a pure function cannot see it — the wiring: that each host's
+/// unmanaged pool is built from the resolver and its managed pool exactly as before, and that the worker
+/// provisions the compose store and seeds the reload baseline from what it wrote. The live half is
+/// <see cref="ComposeStoreRolesLiveTests"/>.</para>
+///
+/// <para>In the <c>darling-config-env</c> collection because one test resets and publishes the process-wide
+/// compose-store verdict, which the live tests in that collection also publish.</para>
+/// </summary>
+[Collection("darling-config-env")]
+public sealed class DarlingStoreLoginsTests
+{
+    private const string Owner = "Host=store;Port=5432;Username=darling;Password=OwnerSecret1;Database=darling";
+    private const string ViewerLogin = "Host=store;Port=5432;Username=viewer;Password=ViewerSecret2;Database=darling";
+    private const string McpLogin = "Host=store;Port=5432;Username=mcp;Password=McpSecret3;Database=darling";
+
+    /* ─────────────────────────── the decision ─────────────────────────── */
+
+    [Fact]
+    public void AConfiguredLogin_Wins_InOrOutOfAContainer()
+    {
+        var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, verdict: null);
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, outside.Source);
+        Assert.Equal(ViewerLogin, outside.ConnectionString);
+        Assert.Null(outside.Warning);
+
+        /* Even over a provisioned compose store: the operator's explicit login is the operator's call. */
+        var inside = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Mcp, Owner, McpLogin, inContainer: true, Provisioned());
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, inside.Source);
+        Assert.Equal(McpLogin, inside.ConnectionString);
+    }
+
+    [Fact]
+    public void InAContainer_TheComposeStoresProvisionedRole_IsEachSurfacesLogin()
+    {
+        var verdict = Provisioned();
+
+        var web = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict);
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, web.Source);
+        Assert.Equal(ViewerLogin, web.ConnectionString);
+        Assert.Null(web.Warning);
+
+        var mcp = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, verdict);
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, mcp.Source);
+        Assert.Equal(McpLogin, mcp.ConnectionString);
+    }
+
+    [Fact]
+    public void OutsideAContainer_ASurfaceWithNoLoginOfItsOwn_IsTheOwner_AndSaysSo()
+    {
+        /* A verdict outside a container can only be stale process state; the container is what makes the store
+           the compose one, so it is not consulted. */
+        var login = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: false, Provisioned());
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, login.Source);
+        Assert.Equal(Owner, login.ConnectionString);
+        Assert.Equal(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Web, null), login.Warning);
+    }
+
+    [Fact]
+    public void ARefusedOrFailedComposeStore_FallsBackToTheOwner_WithItsReason()
+    {
+        const string reason = "The service logs in to this store as 'someone', which is not the store's bootstrap superuser.";
+        var login = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Mcp, Owner, null, inContainer: true, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(reason));
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, login.Source);
+        Assert.Equal(Owner, login.ConnectionString);
+        Assert.NotNull(login.Warning);
+        Assert.StartsWith(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Mcp, null), login.Warning, StringComparison.Ordinal);
+        Assert.EndsWith(reason, login.Warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>The ruling's warning: the surface, why, and the three things the owner login gives up.</summary>
+    [Theory]
+    [InlineData("Web", "The web dashboard", "postgres.webConnectionString", "viewer")]
+    [InlineData("Mcp", "The MCP server", "postgres.mcpConnectionString", "mcp")]
+    public void TheOwnerFallbackWarning_NamesWhatTheOwnerLoginGivesUp(
+        string surface, string what, string setting, string role)
+    {
+        var warning = DarlingStoreLogins.OwnerFallbackWarning(Enum.Parse<DarlingStoreLogins.Surface>(surface), null);
+
+        Assert.StartsWith(what, warning, StringComparison.Ordinal);
+        Assert.Contains($"because {setting} is not set", warning, StringComparison.Ordinal);
+        Assert.Contains("the secret-column carve", warning, StringComparison.Ordinal);
+        Assert.Contains("the narrow write grants", warning, StringComparison.Ordinal);
+        Assert.Contains("the statement_timeout backstop", warning, StringComparison.Ordinal);
+        Assert.Contains($"Set {setting} to the {role} role tools/provision-roles.sql creates.", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AConfiguredLogin_ThatIsTheOwnerAfterAll_IsWarnedAbout()
+    {
+        const string sameOwner = "Host=store;Port=5432;Username=darling;Password=OwnerSecret1;Database=darling;Application Name=web";
+        var login = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, sameOwner, inContainer: false, verdict: null);
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, login.Source);
+        Assert.NotNull(login.Warning);
+        Assert.Contains("postgres.webConnectionString logs in as 'darling', the owner login", login.Warning, StringComparison.Ordinal);
+        Assert.Contains("so the web dashboard still gives up", login.Warning, StringComparison.Ordinal);
+        Assert.Contains("the secret-column carve, the narrow write grants and the statement_timeout backstop", login.Warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AConfiguredLogin_NamingARoleTheComposeStoreProvisions_IsWarnedAbout_OnlyThere()
+    {
+        var onCompose = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, Provisioned());
+        Assert.NotNull(onCompose.Warning);
+        Assert.Contains("names the 'viewer' role, which the service provisions on this compose store and re-keys", onCompose.Warning, StringComparison.Ordinal);
+        Assert.Contains("and the web dashboard connects as the viewer role the service provisions.", onCompose.Warning, StringComparison.Ordinal);
+
+        /* On any other store the same login is exactly what the operator should configure. */
+        Assert.Null(DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: false, Provisioned()).Warning);
+        Assert.Null(DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no")).Warning);
+    }
+
+    [Fact]
+    public void AMalformedConfiguredLogin_GetsNoGuess()
+    {
+        /* Npgsql's own error at the first connect names the problem; the resolver does not throw over it. */
+        Assert.Null(DarlingStoreLogins.ConfiguredLoginWarning(
+            DarlingStoreLogins.Surface.Web, "this is not = a; connection string =", Owner, verdict: null));
+    }
+
+    /* ─────────────────────────── the derived role login ─────────────────────────── */
+
+    [Fact]
+    public void TheComposeStoreRoleLogin_InheritsWhereTheStoreIs_AndNothingThatIsTheOwners()
+    {
+        const string owner =
+            "Host=store;Port=6543;Username=darling;Password=OwnerSecret1;Database=darling2;SSL Mode=VerifyFull;" +
+            "Root Certificate=/run/secrets/ca.pem;Timeout=33;Options=-c statement_timeout=0;Passfile=/root/.pgpass;" +
+            "SSL Certificate=/run/secrets/client.pem;SSL Key=/run/secrets/client.key;Maximum Pool Size=100;Search Path=public";
+
+        var derived = DarlingStoreLogins.BuildComposeStoreRoleConnectionString(owner, "viewer", "ViewerSecret2");
+        var builder = new NpgsqlConnectionStringBuilder(derived);
+
+        Assert.Equal("store", builder.Host);
+        Assert.Equal(6543, builder.Port);
+        Assert.Equal("darling2", builder.Database);
+        Assert.Equal(SslMode.VerifyFull, builder.SslMode);
+        Assert.Equal("/run/secrets/ca.pem", builder.RootCertificate);
+        Assert.Equal(33, builder.Timeout);
+
+        Assert.Equal("viewer", builder.Username);
+        Assert.Equal("ViewerSecret2", builder.Password);
+        Assert.Equal(DarlingManagedPostgres.SearchPath, builder.SearchPath);
+        Assert.Equal(DarlingStoreLogins.RoleLoginMaxPoolSize, builder.MaxPoolSize);
+
+        /* Options is the dangerous one: a -c statement_timeout=0 there switches off the role's backstop. */
+        Assert.True(string.IsNullOrEmpty(builder.Options), builder.Options);
+        Assert.True(string.IsNullOrEmpty(builder.Passfile), builder.Passfile);
+        Assert.True(string.IsNullOrEmpty(builder.SslCertificate), builder.SslCertificate);
+        Assert.True(string.IsNullOrEmpty(builder.SslKey), builder.SslKey);
+        Assert.DoesNotContain("OwnerSecret1", derived, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── the verdict seam ─────────────────────────── */
+
+    [Fact]
+    public void TheVerdict_IsSettledByAStandDown_AndNeverOverwrittenByOne()
+    {
+        try
+        {
+            /* A collector that stops before provisioning must not leave a container host waiting forever. */
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            new CollectorRuntimeState().PublishStopped(CollectorRuntimeState.StartupStep.Store, "the store is gone\nPOSITION: 3");
+            var settled = DarlingStoreLogins.ReadComposeStoreVerdict();
+            Assert.NotNull(settled);
+            Assert.False(settled.Provisioned);
+            Assert.Contains("The collector stopped before it could provision the store's roles (Store: the store is gone)", settled.NotProvisionedReason, StringComparison.Ordinal);
+
+            /* And a published verdict wins over a later stand-down's settle. */
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            DarlingStoreLogins.PublishComposeStoreVerdict(Provisioned());
+            DarlingStoreLogins.SettleComposeStoreVerdict("too late");
+            Assert.True(DarlingStoreLogins.ReadComposeStoreVerdict()!.Provisioned);
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        }
+    }
+
+    [Fact]
+    public void AVerdict_CannotPrintItsLogins()
+    {
+        /* Classes, not records: a generated ToString would put the password into any log line that formats one. */
+        Assert.DoesNotContain("ViewerSecret2", Provisioned().ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "ViewerSecret2",
+            DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, Provisioned()).ToString(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(typeof(DarlingStoreLogins.ComposeStoreVerdict).GetMethods(), m => m.Name == "<Clone>$");
+        Assert.DoesNotContain(typeof(ComposeStoreProvisioning).GetMethods(), m => m.Name == "<Clone>$");
+        Assert.DoesNotContain(typeof(DarlingStoreLogins.StoreLogin).GetMethods(), m => m.Name == "<Clone>$");
+    }
+
+    /* ─────────────────────────── which store is the service's own ─────────────────────────── */
+
+    [Fact]
+    public void TheComposeStore_IsOnlyOneWhoseLoginIsItsBootstrapSuperuser()
+    {
+        var refusal = DarlingManagedRoles.RefuseComposeStore(Facts(bootstrapSuperuser: false));
+
+        Assert.NotNull(refusal);
+        Assert.Contains("not the store's bootstrap superuser", refusal, StringComparison.Ordinal);
+        Assert.Contains("POSTGRES_USER", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASameNamedRoleTheServiceDidNotCreate_IsLeftAlone()
+    {
+        var refusal = DarlingManagedRoles.RefuseComposeStore(Facts(
+            bootstrapSuperuser: true,
+            ("viewer", DarlingManagedRoles.RoleMarker),
+            ("admin", null),
+            ("mcp", DarlingManagedRoles.ComposeStoreRoleMarker)));
+
+        Assert.NotNull(refusal);
+        Assert.Contains("'admin' (not created by Darling) and 'viewer' (created by tools/provision-roles.sql)", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("'mcp'", refusal, StringComparison.Ordinal);
+        Assert.Contains("rather than re-key their passwords", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheServicesOwnRoles_AndNoRolesAtAll_AreProvisioned()
+    {
+        Assert.Null(DarlingManagedRoles.RefuseComposeStore(Facts(bootstrapSuperuser: true)));
+        Assert.Null(DarlingManagedRoles.RefuseComposeStore(Facts(
+            bootstrapSuperuser: true,
+            ("admin", DarlingManagedRoles.ComposeStoreRoleMarker),
+            ("viewer", DarlingManagedRoles.ComposeStoreRoleMarker),
+            ("mcp", DarlingManagedRoles.ComposeStoreRoleMarker))));
+    }
+
+    [Fact]
+    public void ANameWithAControlCharacter_IsRefused()
+    {
+        var refusal = DarlingManagedRoles.RefuseComposeStore(
+            new ComposeStoreFacts("dar\nling", "darling", true, new Dictionary<string, string?>()));
+
+        Assert.NotNull(refusal);
+        Assert.Contains("control character", refusal, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── the batch each store gets ─────────────────────────── */
+
+    /// <summary>The managed batch keeps its bare owner and database names, its marker and its PUBLIC revoke, and
+    /// omitting the target is the same as naming <see cref="ProvisioningTarget.Managed"/>.</summary>
+    [Fact]
+    public void TheManagedBatch_KeepsItsNamesMarkerAndPublicRevoke_AndIsTheDefaultTarget()
+    {
+        var byDefault = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+        var explicitManaged = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            15, PasswordReassert.All, ProvisioningTarget.Managed);
+
+        Assert.Equal(byDefault, explicitManaged);
+        Assert.Contains("REVOKE ALL ON DATABASE darling FROM PUBLIC;", byDefault, StringComparison.Ordinal);
+        Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE darling IN SCHEMA collect", byDefault, StringComparison.Ordinal);
+        Assert.Contains("COMMENT ON ROLE viewer IS 'darling-managed';", byDefault, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedRoles.ComposeStoreRoleMarker, byDefault, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheComposeStoreBatch_NamesItsOwnOwnerAndDatabase_StampsItsOwnMarker_AndLeavesPublicConnectAlone()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            15, PasswordReassert.All, ProvisioningTarget.ComposeStore("darling", "darling"));
+
+        Assert.Contains("ALTER DEFAULT PRIVILEGES FOR ROLE \"darling\" IN SCHEMA collect", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("FOR ROLE darling ", sql, StringComparison.Ordinal);
+        Assert.Contains("GRANT CONNECT ON DATABASE \"darling\" TO admin, viewer;", sql, StringComparison.Ordinal);
+        Assert.Contains("COMMENT ON ROLE viewer IS 'darling-compose';", sql, StringComparison.Ordinal);
+        Assert.Contains("IS DISTINCT FROM 'darling-compose'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'darling-managed'", sql, StringComparison.Ordinal);
+
+        /* The database-level PUBLIC revoke would take CONNECT from the operator's own roles on this store; the
+           schema-level one stays, so no role can create objects in public. */
+        Assert.DoesNotContain("REVOKE ALL ON DATABASE", sql, StringComparison.Ordinal);
+        Assert.Contains("REVOKE CREATE ON SCHEMA public FROM PUBLIC;", sql, StringComparison.Ordinal);
+
+        /* A renamed POSTGRES_USER / POSTGRES_DB is named as it is, quoted, with an embedded quote doubled. */
+        var renamed = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            15, PasswordReassert.All, ProvisioningTarget.ComposeStore("Store \"Owner\"", "my db"));
+        Assert.Contains("FOR ROLE \"Store \"\"Owner\"\"\" IN SCHEMA collect", renamed, StringComparison.Ordinal);
+        Assert.Contains("GRANT CONNECT ON DATABASE \"my db\" TO mcp;", renamed, StringComparison.Ordinal);
+    }
+
+    /* ─────────────────────────── the reload gate ─────────────────────────── */
+
+    [Theory]
+    // store, applied, managed, windows, composeStoreProvisioned, expected
+    [InlineData(120, 15, false, false, true, true)]    // the compose store this process provisioned: kept current
+    [InlineData(15, 15, false, false, true, false)]    // unchanged: no catalog write
+    [InlineData(120, 15, false, false, false, false)]  // any other BYO store: its roles are the operator's
+    [InlineData(120, 15, false, true, false, false)]
+    [InlineData(120, 15, true, true, false, true)]     // managed: exactly as before
+    [InlineData(120, 15, true, false, false, false)]
+    public void TheReloadGate_KeepsTheComposeStoresRolesCurrent_AndNoOneElses(
+        int store, int applied, bool managed, bool windows, bool composeStoreProvisioned, bool expected)
+    {
+        Assert.Equal(
+            expected,
+            DarlingManagedRoles.ShouldReassertComposeStatementTimeout(store, applied, managed, windows, composeStoreProvisioned));
+    }
+
+    /* ─────────────────────────── the two settings ─────────────────────────── */
+
+    [Fact]
+    public void TheTwoSettings_ParseAsWritten_AndAReferenceIsNotResolvedAtParse()
+    {
+        /* Resolved when the host starts: an unreadable reference must stop that surface, not collection, which
+           is what resolving it here (as connectionString is) would do. */
+        var config = DarlingConfig.Parse("""
+            {
+              "postgres": {
+                "connectionString": "Host=db;Username=darling;Database=darling",
+                "webConnectionString": "env:DARLING_TEST_3914_NO_SUCH_VARIABLE",
+                "mcpConnectionString": "file:/no/such/file/3914"
+              },
+              "servers": [ { "host": "sql1", "auth": "integrated" } ]
+            }
+            """);
+
+        Assert.Equal("env:DARLING_TEST_3914_NO_SUCH_VARIABLE", config.Postgres.WebConnectionString);
+        Assert.Equal("file:/no/such/file/3914", config.Postgres.McpConnectionString);
+        Assert.Empty(config.Validate());
+    }
+
+    [Fact]
+    public void ManagedMode_RejectsEitherSetting()
+    {
+        var config = new DarlingConfig
+        {
+            Postgres = new PostgresConfig { Managed = true, WebConnectionString = "Host=x", McpConnectionString = "Host=y" },
+            Servers = { new MonitoredServer { Host = "sql1", Auth = "integrated" } },
+        };
+
+        var problems = config.Validate();
+
+        Assert.Contains(problems, p => p.Contains("postgres.webConnectionString is set", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.Contains("postgres.mcpConnectionString is set", StringComparison.Ordinal));
+    }
+
+    /* ─────────────────────────── the wiring, by source ─────────────────────────── */
+
+    /// <summary>
+    /// Each host's store pool is created from the resolver on an unmanaged store and from its DPAPI credential
+    /// on a managed one, and from nothing else. The pure tests above cannot see this: a host that went on
+    /// passing <c>config.Postgres.ConnectionString</c> to <c>NpgsqlDataSource.Create</c> would leave all of them
+    /// green. Containment, not order — the resolver call has to be INSIDE the else of the managed branch.
+    /// </summary>
+    [Theory]
+    [InlineData("DarlingWebHostService.cs", "Web", "TryBuildViewerConnectionStringFromStoredCredential")]
+    [InlineData("DarlingMcpHostService.cs", "Mcp", "TryBuildMcpConnectionStringFromStoredCredential")]
+    public void EachHost_BuildsItsUnmanagedPoolFromTheResolver_AndItsManagedPoolAsBefore(
+        string file, string surface, string managedBuilder)
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file));
+        var start = Body(code, "private async Task<bool> TryStartServerAsync(");
+
+        Assert.DoesNotContain("config.Postgres.ConnectionString", start, StringComparison.Ordinal);
+        Assert.Contains("NpgsqlDataSource.Create(storeConnectionString)", start, StringComparison.Ordinal);
+
+        var assignments = Regex.Matches(start, @"storeConnectionString\s*=(?!=)").Count;
+        Assert.Equal(2, assignments);
+
+        var managedIf = Regex.Match(start, @"if \(config\.Postgres\.Managed\)\s*\{");
+        Assert.True(managedIf.Success, "the managed branch could not be located, so this check proves nothing");
+        var open = managedIf.Index + managedIf.Length - 1;
+        var managedBlock = CSharpSourceWalker.BraceBalanced(start, open);
+        Assert.Contains("storeConnectionString = await WaitForManagedConnectionStringAsync(config.Postgres, stoppingToken);", managedBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("DarlingStoreLogins", managedBlock, StringComparison.Ordinal);
+
+        var afterManaged = start[(open + managedBlock.Length)..].TrimStart();
+        Assert.StartsWith("else", afterManaged, StringComparison.Ordinal);
+        var elseBlock = CSharpSourceWalker.BraceBalanced(afterManaged, afterManaged.IndexOf('{'));
+        Assert.Matches(
+            $@"storeConnectionString = await DarlingStoreLogins\.ResolveUnmanagedAsync\(\s*DarlingStoreLogins\.Surface\.{surface}, config\.Postgres, _logger, stoppingToken\);",
+            elseBlock);
+
+        /* The managed half is unchanged: its wait still derives the role login from the DPAPI credential. */
+        var wait = Body(code, "private async Task<string?> WaitForManagedConnectionStringAsync(");
+        Assert.Contains($"DarlingManagedPostgres.{managedBuilder}(config)", wait, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The worker provisions the compose store as the else of the managed provisioning branch, gated on an
+    /// unmanaged store in a container, and seeds the #2918 reload baseline — and the flag that lets the reload
+    /// write to these roles at all — only from a verdict that says it provisioned them.
+    /// </summary>
+    [Fact]
+    public void TheWorker_ProvisionsTheComposeStore_AndTrustsOnlyAProvisionedVerdict()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var loop = Body(code, "private async Task RunCollectionLoopAsync(");
+
+        const string managedIf = "if (config.Postgres.Managed && OperatingSystem.IsWindows())";
+        var managedBlock = Regex.Matches(loop, Regex.Escape(managedIf) + @"\s*\{")
+            .Select(m => (Start: m.Index + m.Length - 1, Block: CSharpSourceWalker.BraceBalanced(loop, m.Index + m.Length - 1)))
+            .Single(b => b.Block.Contains("DarlingManagedRoles.EnsureProvisionedAsync(", StringComparison.Ordinal));
+
+        var afterManaged = loop[(managedBlock.Start + managedBlock.Block.Length)..].TrimStart();
+        const string composeIf = "else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)";
+        Assert.StartsWith(composeIf, afterManaged, StringComparison.Ordinal);
+
+        var composeBlock = CSharpSourceWalker.BraceBalanced(afterManaged, afterManaged.IndexOf('{'));
+        Assert.Matches(
+            @"var verdict = await DarlingStoreLogins\.ProvisionComposeStoreAsync\(\s*postgres, config\.Postgres\.ConnectionString, _logger, stoppingToken\);",
+            composeBlock);
+
+        var provisioned = Regex.Match(composeBlock, @"if \(verdict\.Provisioned\)\s*\{");
+        Assert.True(provisioned.Success, "the provisioned branch could not be located");
+        var trusted = CSharpSourceWalker.BraceBalanced(composeBlock, provisioned.Index + provisioned.Length - 1);
+        Assert.Contains("_composeStoreRolesProvisioned = true;", trusted, StringComparison.Ordinal);
+        Assert.Contains("_appliedComposeStatementTimeoutSeconds = verdict.AppliedComposeStatementTimeoutSeconds;", trusted, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(composeBlock, "_composeStoreRolesProvisioned"));
+        Assert.Single(Regex.Matches(composeBlock, "_appliedComposeStatementTimeoutSeconds"));
+
+        /* And the reload gate hears about it. */
+        var reload = Body(code, "private async Task<long?> ReloadFromStoreAsync(");
+        Assert.Contains(
+            "config.Postgres.Managed, OperatingSystem.IsWindows(), _composeStoreRolesProvisioned)",
+            reload, StringComparison.Ordinal);
+    }
+
+    private static string Body(string code, string signature)
+    {
+        var at = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"'{signature}' could not be located, so this check proves nothing");
+        return CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', at)));
+    }
+
+    private static DarlingStoreLogins.ComposeStoreVerdict Provisioned() =>
+        DarlingStoreLogins.ComposeStoreVerdict.ProvisionedWith(ViewerLogin, McpLogin, 15);
+
+    private static ComposeStoreFacts Facts(bool bootstrapSuperuser, params (string Role, string? Marker)[] roles) =>
+        new("darling", "darling", bootstrapSuperuser, roles.ToDictionary(r => r.Role, r => r.Marker, StringComparer.Ordinal));
+}

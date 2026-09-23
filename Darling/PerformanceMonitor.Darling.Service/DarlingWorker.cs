@@ -686,6 +686,10 @@ public sealed class DarlingWorker : BackgroundService
        config_service or schedule write, and ALTER ROLE is a catalog write we should not pay for a knob
        nobody touched. -1 means "not yet known", which cannot equal any clamped value. */
     private int _appliedComposeStatementTimeoutSeconds = -1;
+
+    /* #3914: this process provisioned the least-privilege roles on the compose distribution's own store, so the
+       reload keeps their statement_timeout current as it does on a managed store. Set only on success. */
+    private bool _composeStoreRolesProvisioned;
     private IReadOnlyList<ScheduleOverride> _scheduleOverrides = Array.Empty<ScheduleOverride>();
 
     /* The service-pause flag (Stage 2): read from config_service.paused on every reload and honored by
@@ -1693,7 +1697,8 @@ public sealed class DarlingWorker : BackgroundService
            collect/config privileges — idempotent and self-healing, the conf-append discipline applied
            to roles. Windows-only (DPAPI credential files); a failure degrades (the Viewer cannot
            connect as admin/viewer until a later start succeeds) but never kills collection, which
-           connects as the owner. BYO stores provision roles out-of-band via tools/provision-roles.sql. */
+           connects as the owner. The compose store is the branch below; any other BYO store provisions roles
+           out-of-band via tools/provision-roles.sql. */
         if (config.Postgres.Managed && OperatingSystem.IsWindows())
         {
             try
@@ -1714,6 +1719,20 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogError(
                     "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale " +
                     "until the next successful start: {Message}", ex.Message);
+            }
+        }
+        else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
+        {
+            /* #3914: the Linux compose distribution's store is the service's own, so it provisions the same roles
+               there and the web and MCP hosts connect as viewer and mcp. It decides from the store whether this
+               IS that store, publishes the verdict the hosts wait on, and never throws: a refusal or failure
+               leaves the hosts on the owner with the reason. Same reload baseline as managed. */
+            var verdict = await DarlingStoreLogins.ProvisionComposeStoreAsync(
+                postgres, config.Postgres.ConnectionString, _logger, stoppingToken);
+            if (verdict.Provisioned)
+            {
+                _composeStoreRolesProvisioned = true;
+                _appliedComposeStatementTimeoutSeconds = verdict.AppliedComposeStatementTimeoutSeconds;
             }
         }
 
@@ -3794,15 +3813,16 @@ public sealed class DarlingWorker : BackgroundService
            knob above it does not go live just by landing in the held config — a reload used to observe the
            new value and leave the roles on whatever the last service start wrote. Re-assert it here, but
            ONLY on a real change: a config_version bump fires on any config_service or schedule write, and
-           this is a catalog write. Gated exactly as startup provisioning is (managed + Windows), because
-           that is where these roles are known to exist — a BYO store provisions them out-of-band through
-           tools/provision-roles.sql and names them itself, so ALTER ROLE viewer here would be guessing.
+           this is a catalog write. Gated exactly as startup provisioning is (managed + Windows, or the compose
+           store this process provisioned, #3914), because that is where these roles are known to exist — any
+           other store provisions them out-of-band through tools/provision-roles.sql and names them itself, so
+           ALTER ROLE viewer here would be guessing.
            The baseline advances only on SUCCESS, so a failed attempt retries on the next reload rather
            than being recorded as applied. */
         if (_postgres is not null
             && DarlingManagedRoles.ShouldReassertComposeStatementTimeout(
                 view.ComposeStatementTimeoutSeconds, _appliedComposeStatementTimeoutSeconds,
-                config.Postgres.Managed, OperatingSystem.IsWindows()))
+                config.Postgres.Managed, OperatingSystem.IsWindows(), _composeStoreRolesProvisioned))
         {
             if (await DarlingManagedRoles.ReassertComposeStatementTimeoutAsync(
                     _postgres, view.ComposeStatementTimeoutSeconds, _logger, cancellationToken))

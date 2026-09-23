@@ -22,11 +22,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The store's OWN per-statement timings (#3899): <c>pg_stat_statements</c> in the store's database, and the
 /// reader functions the least-privilege roles call to rank them. Field reports that "the web viewer / MCP
 /// tools are slow" could not be answered from anything the product recorded; with this they are a ranked list
-/// split by the role that ran each statement. On a MANAGED store those roles are the surfaces: <c>viewer</c> is
-/// the web viewer, remote read-only Darling Viewer seats and the service's custom-alert rule evaluation,
-/// <c>mcp</c> is MCP tools, <c>admin</c> is the local Darling Viewer and its Settings window, and the owner is
-/// the service's collection, maintenance and alerting. A compose or bring-your-own store runs its web and MCP
-/// hosts as the owner login, so there everything they ran is counted under the owner.
+/// split by the role that ran each statement. On a managed or compose store those roles are the surfaces:
+/// <c>viewer</c> is the web viewer, remote read-only Darling Viewer seats and the service's custom-alert rule
+/// evaluation, <c>mcp</c> is MCP tools, <c>admin</c> is the local Darling Viewer and its Settings window, and the
+/// owner is the service's collection, maintenance and alerting. A bring-your-own store runs a web or MCP host
+/// without a login of its own (#3914) as the owner, so there everything it ran is counted under the owner.
 ///
 /// <para><b>Runtime setup, not a migration.</b> The same posture as <see cref="TimescaleSupport"/>: the store
 /// must work with or without the module, so nothing here bumps the schema version or gates a viewer. The

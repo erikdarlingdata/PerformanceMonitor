@@ -196,9 +196,14 @@ public sealed class NotificationRoutesRungTests
         Assert.Contains($"REVOKE SELECT ON config.{Table} FROM viewer;", sql, StringComparison.Ordinal);
         Assert.Contains($"REVOKE SELECT ON config.{Table} FROM mcp;", sql, StringComparison.Ordinal);
 
+        /* #3914: the bring-your-own script creates the mcp role too, so the MCP server can connect as it there —
+           with exactly this table's managed shape: the carve, the toggle-or-delete write, and no authoring. */
         var byo = RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
         Assert.Contains($"REVOKE SELECT ON config.{Table} FROM viewer;", byo, StringComparison.Ordinal);
-        Assert.DoesNotContain("TO mcp", byo, StringComparison.Ordinal);
+        Assert.Contains($"REVOKE SELECT ON config.{Table} FROM mcp;", byo, StringComparison.Ordinal);
+        Assert.Contains($"GRANT UPDATE (enabled, modified_at), DELETE ON config.{Table} TO mcp;", byo, StringComparison.Ordinal);
+        Assert.DoesNotContain($"GRANT INSERT, UPDATE, DELETE ON config.{Table}", byo, StringComparison.Ordinal);
+        Assert.DoesNotContain($"GRANT INSERT ON config.{Table}", byo, StringComparison.Ordinal);
     }
 
     /// <summary>The MCP store never selects a destination column and writes only what the grant allows —
