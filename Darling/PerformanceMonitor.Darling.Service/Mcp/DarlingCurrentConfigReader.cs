@@ -161,12 +161,29 @@ internal static class DarlingCurrentConfigReader
 
     /// <summary>Latest trace-flags snapshot for one server — the viewer's <c>TraceFlagsSql</c> plus the trailing
     /// <c>capture_time</c> (#3541 A10). $1 server_id. A row exists only while a flag is enabled, so an empty
-    /// result means no active flags at the last capture — and, having no row, no stamp either.</summary>
+    /// result means no active flags at the last capture — and, having no row, no stamp either.
+    ///
+    /// <para><b>#3999: anchored on the collector's newest SUCCESSFUL run, not the newest row.</b> A capture
+    /// that finds every flag off writes ZERO rows (<c>DBCC TRACESTATUS(-1)</c> only ever lists flags that are
+    /// ON), so plain <c>capture_time = MAX(capture_time)</c> cannot see that capture at all and silently falls
+    /// back to an older capture that still had a flag on — reporting a flag enabled days or weeks after it (and
+    /// every other flag) was turned off. The second <c>AND</c> below closes that: it compares the newest row's
+    /// own timestamp against the newest SUCCESS this collector logged in <c>v_collection_log</c>, and if that
+    /// successful run is NEWER than the newest row, the run that ran most recently found nothing on, so the
+    /// whole predicate goes false and the read reports no flags — exact, rather than a stale fallback. The
+    /// <c>COALESCE</c> floor only matters when collection_log's retention has aged past this collector's
+    /// oldest trace_flags row (or nothing has run yet), and defaults to the pre-fix reading rather than
+    /// wrongly suppressing a real row it cannot corroborate.</para>
+    /// </summary>
     public const string TraceFlagsSql = """
         SELECT trace_flag, status, is_global, is_session, capture_time
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
+        AND   (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1) >= COALESCE(
+                  (SELECT MAX(collection_time) FROM v_collection_log
+                   WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'),
+                  TIMESTAMP '1900-01-01')
         ORDER BY trace_flag
         """;
 

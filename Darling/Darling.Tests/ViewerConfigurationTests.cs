@@ -404,6 +404,70 @@ public sealed class ViewerConfigurationLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #3999: the all-off case. A capture that finds every flag off writes ZERO rows to <c>trace_flags</c>
+    /// (<c>DBCC TRACESTATUS(-1)</c> only ever lists flags that are ON), so the newest ROW can be older than
+    /// the newest SUCCESSFUL run. Before this fix, <c>capture_time = MAX(capture_time)</c> could not see that
+    /// the collector had run again and fell back to the stale ON row - reporting a flag enabled days after it
+    /// (and every other flag) was turned off. Seeded here at the exact shape: one old ON row, then a newer
+    /// SUCCESS in collection_log with no corresponding trace_flags row at all.
+    /// </summary>
+    [Fact]
+    public async Task TraceFlags_AllOffSinceNewerSuccessfulRun_ReadsNoFlags_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live trace-flags all-off test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "trace_flags", TraceFlagsServerId, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "collection_log", TraceFlagsServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var flagWasOnAt = TruncateToSeconds(DateTime.UtcNow.AddDays(-2));
+            var laterSuccessfulRunFoundNothingAt = flagWasOnAt.AddDays(1);
+
+            await InsertTraceFlagAsync(connection, flagWasOnAt, 1117, status: true, isGlobal: true, isSession: false);
+            await InsertCollectionLogSuccessAsync(connection, laterSuccessfulRunFoundNothingAt);
+
+            /* The control: without the newer collection_log SUCCESS, the same row still reads (proven by
+               TraceFlags_LatestCaptureWins_OrderedByFlag_AgainstDevPostgres above with no collection_log row
+               at all — the COALESCE floor covers that case). This test is the case that row's coverage
+               cannot reach: a genuinely newer successful capture that stored nothing. */
+            var rows = await viewer.GetLatestTraceFlagsAsync(TraceFlagsServerId);
+
+            Assert.Empty(rows);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, "trace_flags", TraceFlagsServerId, cleanupCt);
+                await DeleteRowsAsync(cleanup, "collection_log", TraceFlagsServerId, cleanupCt);
+            });
+        }
+    }
+
+    private static async Task InsertCollectionLogSuccessAsync(NpgsqlConnection connection, DateTime collectionTimeUtc)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status) " +
+            "VALUES ($1, $2, $3, 'trace_flags', $4, 'SUCCESS')", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(TraceFlagsServerId);
+        command.Parameters.AddWithValue("viewer-trace-flags-e2e");
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
     private static async Task InsertServerConfigAsync(
         NpgsqlConnection connection, DateTime captureTimeUtc,
         string configurationName, long valueConfigured, long valueInUse, bool isDynamic, bool isAdvanced)
