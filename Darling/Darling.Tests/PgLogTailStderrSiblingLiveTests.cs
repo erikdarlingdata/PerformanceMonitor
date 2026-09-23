@@ -59,6 +59,9 @@ public sealed class PgLogTailStderrSiblingLiveTests
             ServerName = "live-rig-as-target",
             CollectionTime = DateTime.UtcNow,
             Deltas = new CollectorDeltaCalculator(),
+            /* #4004, merged from dev after this branch started: PgLogEventsCollector.BuildQuery refuses
+               without a key, since raw_line_hash and statement_fingerprint are keyed hashes now. */
+            LogHashKey = TestLogHashKeys.Fixed,
             Target = new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql,
