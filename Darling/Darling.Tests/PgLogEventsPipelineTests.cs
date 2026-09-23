@@ -1209,14 +1209,21 @@ public sealed class PgLogEventsPipelineTests
     [Fact]
     public void TheTailerExtraction_LeftBothSiblingsSqlByteIdentical()
     {
-        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
+        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n      AND name !~* '\\.(csv|json)$'\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
 
-        const string plansBefore = tail + "\nSELECT\n    (m[1])::bigint                                   AS query_id,\n    (m[2])::double precision                         AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ [\\n]+ [^[\\n]*\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 2000";
+        /* Both siblings, #3997: logging_collector = off (the original marker) and logging_collector = on
+           with no stderr-format file left after the newest CTE's own exclusion (the new one). The two
+           WHERE clauses cannot both be true — one needs the setting off, the other needs it on — which is
+           the mutual-exclusion PgServerLogTail's own remarks argue for. The regexp itself is #4016's fixed
+           pattern (merged from dev after this branch started), not #3997's own change — the extra
+           [^ [\n]+ [^[\n]*  before the pid bracket tolerates a prefix token #4016 found real logs carry
+           there; this pin follows dev's text rather than restating the old one. */
+        const string plansBefore = tail + "\nSELECT\n    (m[1])::bigint                                   AS query_id,\n    (m[2])::double precision                         AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ [\\n]+ [^[\\n]*\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 2000";
 
         /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
            candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
            read. The tailer it opens with is still the shared one, byte for byte. */
-        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ [^ \\n]+ \\[\\d+\\][^\\n]*ERROR:  deadlock detected\\s*\\n[^\\n]*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 500";
+        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ [^ \\n]+ \\[\\d+\\][^\\n]*ERROR:  deadlock detected\\s*\\n[^\\n]*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 500";
 
         /* Line endings normalised on both sides: the repo's `text=auto eol=crlf` checks the sources out as
            CRLF on Windows and this pin's literals are LF, and a verbatim string carries whatever its file
@@ -1232,6 +1239,7 @@ public sealed class PgLogEventsPipelineTests
         Assert.StartsWith(tail, events, StringComparison.Ordinal);
         Assert.Contains("SELECT tail.body AS log_body", events, StringComparison.Ordinal);
         Assert.Contains("'" + PgLoggingCollectorOffException.Marker + "'", events, StringComparison.Ordinal);
+        Assert.Contains("'" + PgNoStderrLogFileException.Marker + "'", events, StringComparison.Ordinal);
         Assert.Equal(tail, Lf(PgServerLogTail.TailCteSql));
     }
 
@@ -1265,6 +1273,12 @@ public sealed class PgLogEventsPipelineTests
 
         using var marker = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker } });
         await Assert.ThrowsAsync<PgLoggingCollectorOffException>(async () => await definition.ReadAsync(marker, context, CancellationToken.None));
+
+        /* #3997: the second marker, logging_collector on but no stderr-format file left after the tail's
+           own csvlog/jsonlog exclusion. Fails on the pre-fix shape: an unrecognised marker would fall
+           through to PgLogEventClassifier.Default.Classify, which is not what a csvlog/jsonlog gap is. */
+        using var noStderr = new FakeReader(new object?[][] { new object?[] { PgNoStderrLogFileException.Marker } });
+        await Assert.ThrowsAsync<PgNoStderrLogFileException>(async () => await definition.ReadAsync(noStderr, context, CancellationToken.None));
 
         var writer = new RecordingWriter();
         definition.WritePayload(rows[0], writer, context);

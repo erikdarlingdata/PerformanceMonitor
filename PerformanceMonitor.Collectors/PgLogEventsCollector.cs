@@ -63,14 +63,18 @@ public sealed class PgLogEventsCollector : PostgresCollectorDefinitionBase<PgLog
     }
 
     /* The tailer, shared byte-for-byte with PgPlanCaptureCollector and PgDeadlocksCollector — see
-       PgServerLogTail for the full argument. This query's own part is one column: the body, whole. The
-       marker row rides the same UNION ALL arm as its siblings, spelled in this query's one column. */
+       PgServerLogTail for the full argument. This query's own part is one column: the body, whole. Both
+       marker rows ride their own UNION ALL arm, spelled in this query's one column (#3997: the second arm
+       is the csvlog/jsonlog-only gap, mutually exclusive with the first by construction). */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT tail.body AS log_body
 FROM tail
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"'
-WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoStderrLogFileException.Marker + @"'
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override string Name => "pg_log_events";
 
@@ -166,6 +170,13 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
             if (string.Equals(body, PgLoggingCollectorOffException.Marker, StringComparison.Ordinal))
             {
                 throw new PgLoggingCollectorOffException();
+            }
+
+            /* The second marker row (#3997): logging_collector is on but the tail excluded every file as a
+               csvlog/jsonlog sibling, so there is no stderr-format file this cycle. Same reasoning as above. */
+            if (string.Equals(body, PgNoStderrLogFileException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgNoStderrLogFileException();
             }
 
             /* The whole pipeline, shared with the RDS transport. A non-UTC zone throws out of here and

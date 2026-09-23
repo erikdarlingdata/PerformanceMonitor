@@ -87,6 +87,15 @@ public class RdsLogSourceTests
                         new() { LogFileName = LogName, LastWritten = 1000 },
                         new() { LastWritten = 9999 },
                     },
+                    /* #3997: the csvlog sibling RDS writes beside the stderr file — same base name, .csv
+                       appended (measured against AWS's own documented naming) — written LATER, the exact
+                       shape that made OrderByDescending(LastWritten) alone pick it before the name filter
+                       existed. */
+                    "csv-sibling" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = LogName, LastWritten = 9999 },
+                        new() { LogFileName = LogName + ".csv", LastWritten = 10000 },
+                    },
                     _ => new List<DescribeDBLogFilesDetails>
                     {
                         new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
@@ -169,6 +178,22 @@ public class RdsLogSourceTests
     public async Task TheNewestLogIsChosenByTimeNotByName()
     {
         var (source, client) = Build();
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+
+        Assert.Equal("error/postgresql.log.2026-08-25-18", client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// The self-hosted route's own bug, on the RDS route (#3997): a csvlog sibling written LATER than the
+    /// stderr file it belongs beside must not win on LastWritten alone. Fails on the pre-fix shape — before
+    /// the name filter, this picked the newer .csv file and handed <c>PgPlanLogParser</c>/<c>PgDeadlockLogParser</c>
+    /// text neither parser's stderr-anchored pattern recognises.
+    /// </summary>
+    [Fact]
+    public async Task ACsvlogSiblingWrittenLater_DoesNotWinOverTheStderrFile()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-sibling" });
 
         await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
 

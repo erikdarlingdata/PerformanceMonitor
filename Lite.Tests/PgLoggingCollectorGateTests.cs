@@ -60,6 +60,13 @@ public sealed class PgLoggingCollectorGateTests
     private const string EmitsTheMarker =
         "WHERE pg_catalog.current_setting('logging_collector') <> 'on'";
 
+    /// <summary>The second marker's predicate (#3997): true only when the gate above is OPEN
+    /// (<c>logging_collector = 'on'</c>) and <c>newest</c> still came back empty — the csvlog/jsonlog-only
+    /// gap, which <see cref="EmitsTheMarker"/>'s complement cannot express because that one requires the
+    /// setting to be OFF. The two predicates cannot both be satisfied on the same server.</summary>
+    private const string EmitsTheNoStderrMarker =
+        "WHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)";
+
     /// <summary>
     /// The shipped SQL of both log readers — what <c>BuildQuery</c> hands the driver — gates the listing
     /// and emits the marker, per site with the collector named, so reverting one of the twin queries fails
@@ -89,6 +96,16 @@ public sealed class PgLoggingCollectorGateTests
                     && site.Sql.Contains($"'{PgLoggingCollectorOffException.Marker}'", StringComparison.Ordinal),
                 $"{site.Collector} gates the listing but returns no marker row when the gate closes, so "
                 + "logging_collector = off reads as a quiet server instead of as a named state.");
+
+            /* #3997: the second marker, for the gate being OPEN but newest still empty (every file was a
+               csvlog/jsonlog sibling). Both arms exist in the same query, and they are mutually exclusive by
+               construction — see EmitsTheNoStderrMarker's own remarks. */
+            Assert.True(
+                site.Sql.Contains(EmitsTheNoStderrMarker, StringComparison.Ordinal)
+                    && site.Sql.Contains($"'{PgNoStderrLogFileException.Marker}'", StringComparison.Ordinal),
+                $"{site.Collector} no longer returns a marker row when logging_collector is on but no "
+                + "stderr-format file survived the csvlog/jsonlog exclusion, so that gap reads as a quiet "
+                + "server instead of as a named state.");
         }
     }
 
@@ -117,6 +134,30 @@ public sealed class PgLoggingCollectorGateTests
             new object[] { DBNull.Value, DBNull.Value, PgLoggingCollectorOffException.Marker });
 
         await Assert.ThrowsAsync<PgLoggingCollectorOffException>(
+            () => PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None).AsTask());
+    }
+
+    /// <summary>The deadlock read's twin refusal for the csvlog/jsonlog-only gap (#3997). Fails on the
+    /// pre-fix shape: an unrecognised marker string would fall through to <c>PgDeadlockLogParser.FromReport</c>,
+    /// which would not parse it and silently skip it as an unrecognised block rather than naming the gap.</summary>
+    [Fact]
+    public async Task TheDeadlockReadRefusesTheNoStderrMarkerRow()
+    {
+        var reader = new FakeCollectorDataReader(
+            new object[] { PgNoStderrLogFileException.Marker, DBNull.Value, DBNull.Value, DBNull.Value });
+
+        await Assert.ThrowsAsync<PgNoStderrLogFileException>(
+            () => PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None).AsTask());
+    }
+
+    /// <summary>The plan read's twin refusal for the csvlog/jsonlog-only gap (#3997).</summary>
+    [Fact]
+    public async Task ThePlanReadRefusesTheNoStderrMarkerRow()
+    {
+        var reader = new FakeCollectorDataReader(
+            new object[] { DBNull.Value, DBNull.Value, PgNoStderrLogFileException.Marker });
+
+        await Assert.ThrowsAsync<PgNoStderrLogFileException>(
             () => PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None).AsTask());
     }
 
@@ -184,5 +225,28 @@ public sealed class PgLoggingCollectorGateTests
         /* And it must not send anyone after the grant pair — the dead end this state exists to rule out. */
         Assert.DoesNotContain("pg_read_server_files", message, StringComparison.Ordinal);
         Assert.DoesNotContain("GRANT", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The csvlog/jsonlog-only refusal's message (#3997) carries its own, DIFFERENT answer: the setting is
+    /// <c>log_destination</c> rather than <c>logging_collector</c>, and the fix is a RELOAD rather than a
+    /// restart, because <c>log_destination</c> is measured <c>sighup</c>-context on a live 18.6 target. A
+    /// message that borrowed the other exception's wording would tell an operator to restart a server that
+    /// only needed a reload.
+    /// </summary>
+    [Fact]
+    public void TheNoStderrRefusalNamesLogDestinationAndAReloadNotARestart()
+    {
+        var message = new PgNoStderrLogFileException().Message;
+
+        Assert.Contains(PgNoStderrLogFileException.SettingName, message, StringComparison.Ordinal);
+        Assert.Contains("reload", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("does NOT need a server restart", message, StringComparison.Ordinal);
+        Assert.Contains("NOT 'the log held nothing'", message, StringComparison.Ordinal);
+
+        /* Distinct from its sibling's marker and setting name, so the two named skips cannot be confused
+           with one another downstream — CollectorRuntimePrecondition quotes whichever message was stored. */
+        Assert.NotEqual(PgLoggingCollectorOffException.Marker, PgNoStderrLogFileException.Marker);
+        Assert.NotEqual(PgLoggingCollectorOffException.SettingName, PgNoStderrLogFileException.SettingName);
     }
 }
