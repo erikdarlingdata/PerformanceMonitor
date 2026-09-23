@@ -1948,7 +1948,7 @@ export const POSTGRES_TABS = [
         { server, limit: 5 },
         "deadlocks",
         PG_DEADLOCK_GRAPH_COLUMNS,
-        "the whole wait graph as the server wrote it, including every participant's statement",
+        "the whole wait graph as the server wrote it, including every participant's statement, SQL normalized",
         "No deadlock graph stored for this server."
       ),
     ],

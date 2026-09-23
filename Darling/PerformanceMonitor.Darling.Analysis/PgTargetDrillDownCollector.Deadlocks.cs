@@ -10,10 +10,14 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -39,9 +43,10 @@ public sealed partial class PgTargetDrillDownCollector
     internal const int GraphTextLineCap = 24;
 
     /// <summary>
-    /// The character bound applied IN THE READ (<c>LEFT(graph_text, $n)</c>) before the line bound is applied
-    /// in memory, so a graph whose statements are each a kilobyte long is not shipped whole to be cut here.
-    /// Twice lane 7's <see cref="StatementTextCap"/>: a two-participant graph carries two statements.
+    /// The character bound on a carried graph, applied before the line bound. Twice lane 7's
+    /// <see cref="StatementTextCap"/>: a two-participant graph carries two statements. Applied in memory since
+    /// #4005, after the graph is normalized, because a cut before it can land inside a literal and withhold the
+    /// query it cut; the read's own bound is <c>PgDeadlockLogParser.NormalizeReadCap</c>.
     /// </summary>
     internal const int GraphTextCharCap = 2 * StatementTextCap;
 
@@ -62,12 +67,14 @@ public sealed partial class PgTargetDrillDownCollector
 
     /// <summary>
     /// The captured deadlock reports in the window, grouped into SHAPES and ranked by recurrence.
-    /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the shape cap, <c>$5</c> the
-    /// statement text cap, <c>$6</c> the graph text cap.
+    /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the shape cap, <c>$5</c> and
+    /// <c>$6</c> how much of the statement and the graph are read, which since #4005 is what normalizing them
+    /// needs (<c>PgDeadlockLogParser.NormalizeReadCap</c>) rather than the caps the drill-down shows.
     ///
     /// <para><b>A shape is <c>(participant_count, lock_modes, resources)</c>, not <c>deadlock_hash</c>.</b>
-    /// The hash is <c>PgDeadlockLogParser.HashOf(graph)</c> — SHA-256 over the DETAIL block, pids included —
-    /// and exists so the same REPORT re-read from an overlapping log tail is stored once. Two deadlocks of
+    /// The hash is <c>PgDeadlockLogParser.IdentityOf</c> — SHA-256 over the timestamp and the DETAIL block, pids
+    /// included (over the raw block alone before #4005) — and exists so the same REPORT re-read from an
+    /// overlapping log tail is stored once. Two deadlocks of
     /// the same two statements on the same two tables carry different pids and therefore different hashes:
     /// counting distinct hashes counts reports, and would call a shape that fired forty times "forty
     /// one-offs". <c>lock_modes</c> and <c>resources</c> are the parser's sorted, de-duplicated edge labels
@@ -81,9 +88,11 @@ public sealed partial class PgTargetDrillDownCollector
     /// <c>occurred_at</c> for a browsing panel; the drill-down's job is to explain THIS pass's count.</para>
     ///
     /// <para>The exemplar of each shape is its LATEST report (<c>array_agg(… ORDER BY occurred_at DESC NULLS
-    /// LAST)</c> — the first element), with its hash so <c>get_pg_deadlock_detail</c> can be pointed at it.
-    /// The statement and graph are cut in the read to their caps and the untruncated lengths ride beside them
-    /// for the flags. <c>count(*) OVER ()</c> and the two <c>SUM(…) OVER ()</c> put the window totals on every
+    /// LAST)</c> — the first element), with its identity so <c>get_pg_deadlock_detail</c> can be pointed at it:
+    /// the hash, or the <c>PgDeadlockLogParser.ReportIdentity</c> of a report whose hash is over its raw graph
+    /// (#4005), which the read tells apart by <c>latest_hash_is_raw</c>.
+    /// The statement and graph are normalized in memory and then cut to their caps, which the flags report; the
+    /// stored lengths ride beside them. <c>count(*) OVER ()</c> and the two <c>SUM(…) OVER ()</c> put the window totals on every
     /// row of the capped result, so the shape count is known even though only <c>$4</c> shapes return.</para>
     /// </summary>
     public const string PgTargetDeadlockExemplarsSql = @"
@@ -99,7 +108,8 @@ WITH shapes AS (
         (array_agg(deadlock_hash     ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_hash,
         (array_agg(victim_pid        ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_victim_pid,
         (array_agg(victim_statement  ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_victim_statement,
-        (array_agg(graph_text        ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_graph_text
+        (array_agg(graph_text        ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_graph_text,
+        (array_agg(occurred_at       ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_occurred_at
     FROM pg_deadlocks
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -122,7 +132,12 @@ SELECT
     length(latest_graph_text)                            AS graph_text_length,
     CAST(count(*) OVER () AS integer)                    AS distinct_shapes,
     CAST(SUM(reports) OVER () AS integer)                AS total_reports,
-    CAST(SUM(rows_captured) OVER () AS integer)          AS total_rows
+    CAST(SUM(rows_captured) OVER () AS integer)          AS total_rows,
+    latest_occurred_at,
+    /* Whether the latest report's hash is over its raw graph (#4005), tested on the whole graph before the
+       cut: PgDeadlockLogParser.RawGraphHashSql, spelled out because this is a constant; a test holds the two
+       equal. */
+    (upper(left(encode(sha256(convert_to(latest_graph_text, 'UTF8')), 'hex'), 32)) = latest_hash) AS latest_hash_is_raw
 FROM shapes
 ORDER BY reports DESC, last_seen DESC NULLS LAST, participant_count DESC
 LIMIT $4";
@@ -175,8 +190,9 @@ LIMIT $4";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(DeadlockExemplarCap);
-        cmd.Parameters.AddWithValue(StatementTextCap);
-        cmd.Parameters.AddWithValue(GraphTextCharCap);
+        /* #4005: the read cuts at what normalizing needs, and the caps are applied after it — see below. */
+        cmd.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
+        cmd.Parameters.AddWithValue(PgDeadlockLogParser.NormalizeReadCap);
 
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {
@@ -186,11 +202,20 @@ LIMIT $4";
                 totalReports = reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14));
                 totalRows = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15));
 
-                var victimStatement = reader.IsDBNull(9) ? null : reader.GetString(9);
-                var victimLength = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
-                var graphText = reader.IsDBNull(11) ? null : reader.GetString(11);
-                var graphLength = reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetValue(12));
-                var (boundedGraph, graphLines, graphTruncated) = BoundGraphText(graphText, graphLength);
+                /* Normalized, then cut to the caps (#4005), as DarlingPgDeadlockReader normalizes every read: a row
+                   stored before #4005 holds its SQL raw. In that order because a cut first can land inside a
+                   literal, and the lexer then withholds the whole statement rather than keep what the cut left of
+                   it. The read's own bound is past anything the lexer reads, so what it cuts is withheld whole
+                   whichever way round. The flags say whether the caps cut what the reader is shown. */
+                var victimRead = reader.IsDBNull(9) ? null : reader.GetString(9);
+                var victimNormalized = PgDeadlockLogParser.NormalizeStatement(victimRead);
+                var victimStatement = victimNormalized is { Length: > StatementTextCap } ? victimNormalized[..StatementTextCap] : victimNormalized;
+                var graphNormalized = PgDeadlockLogParser.NormalizeGraph(reader.IsDBNull(11) ? null : reader.GetString(11));
+                var graphCharCut = graphNormalized is { Length: > GraphTextCharCap };
+                var (boundedGraph, graphLines, graphTruncated) = BoundGraphText(
+                    graphCharCut ? graphNormalized![..GraphTextCharCap] : graphNormalized, readCut: graphCharCut);
+                var latestPid = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
+                var latestHash = reader.IsDBNull(7) ? null : reader.GetString(7);
 
                 exemplars.Add(new PgTargetDeadlockExemplar(
                     Rank: exemplars.Count + 1,
@@ -201,10 +226,17 @@ LIMIT $4";
                     RowsCaptured: reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3)),
                     FirstSeen: reader.IsDBNull(5) ? null : reader.GetDateTime(5),
                     LastSeen: reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                    DeadlockHash: reader.IsDBNull(7) ? null : reader.GetString(7),
-                    VictimPid: reader.IsDBNull(8) ? null : Convert.ToInt32(reader.GetValue(8)),
+                    /* Never a hash over a raw graph (#4005, #4004): the identity get_pg_deadlock_detail takes. */
+                    DeadlockHash: latestHash is null
+                        ? null
+                        : DarlingPgDeadlockReader.IdentityOf(
+                            latestHash,
+                            !reader.IsDBNull(17) && reader.GetBoolean(17),
+                            reader.IsDBNull(16) ? default : reader.GetDateTime(16),
+                            latestPid ?? 0),
+                    VictimPid: latestPid,
                     VictimStatement: victimStatement,
-                    VictimStatementMayBeTruncated: victimStatement is not null && victimLength > victimStatement.Length,
+                    VictimStatementMayBeTruncated: victimNormalized is not null && victimNormalized.Length > victimStatement!.Length,
                     VictimStatementFingerprint: Fingerprint(victimStatement),
                     GraphText: boundedGraph,
                     GraphTextLinesTotal: graphLines,
@@ -264,6 +296,10 @@ LIMIT $4";
                 graph_text_truncated = e.GraphTextTruncated,
             }).ToList(),
             shape_note = "A shape is (participant_count, lock_modes, resources); deadlock_hash identifies one REPORT (pids included), so recurrence is reports per shape, not distinct hashes.",
+            /* #4005: what tells a stored finding from one written before its SQL was normalized, which
+               NormalizeStoredDeadlockExemplars rewrites on the way out. A statement this build cut to its cap
+               can end inside a `'?'`, and read again it would be withheld, so this one is left as written. */
+            sql_normalized = true,
             note = PgTargetAdvice.DeadlockExemplarSentence(summary),
         };
 
@@ -275,20 +311,90 @@ LIMIT $4";
 
     /// <summary>
     /// The graph, cut at <see cref="GraphTextLineCap"/> lines; the total line count and whether either bound
-    /// (the read's characters, this method's lines) cut it. Tabs were stripped at capture; line ends are
-    /// normalised here because the two log transports differ.
+    /// (the read's characters, which <paramref name="readCut"/> says, this method's lines) cut it. Tab
+    /// indenting was stripped at capture; line ends are normalised here because the two log transports differ.
     /// </summary>
-    internal static (string? Text, int Lines, bool Truncated) BoundGraphText(string? graphText, int untruncatedLength)
+    internal static (string? Text, int Lines, bool Truncated) BoundGraphText(string? graphText, bool readCut)
     {
         if (string.IsNullOrEmpty(graphText))
             return (graphText, 0, false);
 
-        var charTruncated = untruncatedLength > graphText.Length;
+        var charTruncated = readCut;
         var lines = graphText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         if (lines.Length <= GraphTextLineCap)
             return (string.Join('\n', lines), lines.Length, charTruncated);
 
         return (string.Join('\n', lines.Take(GraphTextLineCap)), lines.Length, true);
+    }
+
+    /// <summary>
+    /// A stored finding's deadlock exemplars brought to #4005's rules on the way out, as
+    /// <see cref="DarlingPgDeadlockReader"/> brings a stored report: a finding persists its drill-down and its
+    /// prose (#2060), so one written before #4005 kept each exemplar's victim statement, its fingerprint in the
+    /// advice sentence, and its graph with their literals, for the 30 days findings are kept. Each is normalized
+    /// again, and the fingerprint replaced in the prose where the stored one stands. The stored
+    /// <c>deadlock_hash</c> may be a hash over a raw graph, which a finding cannot tell from one that is not, so
+    /// every one is replaced by the <see cref="PgDeadlockLogParser.ReportIdentity"/> of the exemplar's latest
+    /// report, which <c>get_pg_deadlock_detail</c> takes. Idempotent, and a no-op on a finding with no exemplars
+    /// and on one this build wrote, whose section says <c>sql_normalized</c>.
+    /// </summary>
+    internal static void NormalizeStoredDeadlockExemplars(AnalysisFinding finding)
+    {
+        if (finding.DrillDown is null
+            || !finding.DrillDown.TryGetValue(DeadlockExemplarsSection, out var section)
+            || section is not JsonElement { ValueKind: JsonValueKind.Object } element
+            || JsonNode.Parse(element.GetRawText()) is not JsonObject node
+            || node["exemplars"] is not JsonArray exemplars
+            || (node["sql_normalized"] is JsonValue marker && marker.TryGetValue<bool>(out var normalized) && normalized))
+            return;
+
+        var fingerprints = new List<(string Stored, string Normalized)>();
+        foreach (var exemplar in exemplars.OfType<JsonObject>())
+        {
+            var statement = PgDeadlockLogParser.NormalizeStatement(StringOf(exemplar["victim_statement"]));
+            var storedFingerprint = StringOf(exemplar["victim_statement_fingerprint"]);
+            var fingerprint = Fingerprint(statement);
+            exemplar["victim_statement"] = statement;
+            exemplar["victim_statement_fingerprint"] = fingerprint;
+            exemplar["graph_text"] = PgDeadlockLogParser.NormalizeGraph(StringOf(exemplar["graph_text"]));
+            if (storedFingerprint is not null && storedFingerprint != fingerprint)
+                fingerprints.Add(($"`{storedFingerprint}`", $"`{fingerprint}`"));
+
+            var identity = StringOf(exemplar["deadlock_hash"]);
+            if (identity is not null && !PgDeadlockLogParser.TryParseReportIdentity(identity, out _, out _))
+            {
+                exemplar["deadlock_hash"] =
+                    DateTime.TryParse(StringOf(exemplar["last_seen"]), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var lastSeen)
+                    && exemplar["victim_pid"] is JsonValue pid && pid.TryGetValue<int>(out var victimPid)
+                        ? PgDeadlockLogParser.ReportIdentity(lastSeen, victimPid)
+                        : null;
+            }
+        }
+
+        if (StringOf(node["note"]) is { } note)
+            node["note"] = Replace(note, fingerprints);
+
+        finding.DrillDown[DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(node);
+
+        if (fingerprints.Count > 0 && FactAdvice.TryReadStoryText(finding.StoryText) is { } advice)
+        {
+            finding.StoryText = FactAdvice.SerializeForStoryText(advice with
+            {
+                Headline = Replace(advice.Headline, fingerprints),
+                Investigation = Replace(advice.Investigation, fingerprints),
+                Remediation = Replace(advice.Remediation, fingerprints),
+            });
+        }
+
+        static string? StringOf(JsonNode? value) =>
+            value is JsonValue text && text.TryGetValue<string>(out var s) ? s : null;
+
+        static string Replace(string text, List<(string Stored, string Normalized)> pairs)
+        {
+            foreach (var (stored, normalized) in pairs)
+                text = text.Replace(stored, normalized, StringComparison.Ordinal);
+            return text;
+        }
     }
 
     private static readonly Regex s_whitespaceRun = new(@"\s+", RegexOptions.Compiled);

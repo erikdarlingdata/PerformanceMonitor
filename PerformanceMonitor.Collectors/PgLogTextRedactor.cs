@@ -253,8 +253,8 @@ public static class PgLogTextRedactor
     }
 
     /// <summary>One query a DETAIL carries, masked, or withheld when it cannot be read to its end or is too long
-    /// to read at all.</summary>
-    private static string MaskQuery(string query) =>
+    /// to read at all. Also a stored deadlock's victim statement, the same query outside its DETAIL (#4005).</summary>
+    internal static string MaskQuery(string query) =>
         query.Length > MaxSqlFieldLength ? WithheldStatement : RedactStoredStatement(query) ?? WithheldStatement;
 
     /// <summary>The length of <paramref name="lines"/> from <paramref name="from"/> up to <paramref name="to"/>,
