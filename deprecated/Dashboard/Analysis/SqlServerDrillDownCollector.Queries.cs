@@ -121,19 +121,45 @@ ORDER BY DATEDIFF(MILLISECOND, 0, [CPU]) DESC;";
         cmd.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-SELECT TOP 5
-    database_name,
-    CONVERT(VARCHAR(18), query_hash, 1) AS query_hash,
-    CAST(SUM(total_worker_time_delta) AS BIGINT) AS total_cpu_us,
-    CAST(SUM(execution_count_delta) AS BIGINT) AS exec_count,
-    MAX(max_dop) AS max_dop,
-    CAST(SUM(total_spills) AS BIGINT) AS spills,
-    LEFT(CAST(DECOMPRESS(MAX(query_text)) AS NVARCHAR(MAX)), 500) AS query_text
-FROM collect.query_stats
-WHERE collection_time >= @startTime AND collection_time <= @endTime
-AND   total_worker_time_delta > 0
-GROUP BY database_name, query_hash
-ORDER BY CAST(SUM(total_worker_time_delta) AS BIGINT) DESC;";
+WITH top_queries AS
+(
+    -- #3959: ranked and cut WITHOUT the statement text. MAX(query_text) read every window row's compressed
+    -- varbinary(max) to print five; the text is now read for the five that print.
+    SELECT TOP (5)
+        database_name,
+        query_hash,
+        CAST(SUM(total_worker_time_delta) AS BIGINT) AS total_cpu_us,
+        CAST(SUM(execution_count_delta) AS BIGINT) AS exec_count,
+        MAX(max_dop) AS max_dop,
+        CAST(SUM(total_spills) AS BIGINT) AS spills
+    FROM collect.query_stats
+    WHERE collection_time >= @startTime AND collection_time <= @endTime
+    AND   total_worker_time_delta > 0
+    GROUP BY database_name, query_hash
+    ORDER BY CAST(SUM(total_worker_time_delta) AS BIGINT) DESC
+)
+SELECT
+    t.database_name,
+    CONVERT(VARCHAR(18), t.query_hash, 1) AS query_hash,
+    t.total_cpu_us,
+    t.exec_count,
+    t.max_dop,
+    t.spills,
+    LEFT(CAST(DECOMPRESS(x.query_text) AS NVARCHAR(MAX)), 500) AS query_text
+FROM top_queries AS t
+OUTER APPLY
+(
+    -- The same MAX over the same rows: this group's window rows under the window's own filter.
+    -- database_name is NOT NULL; query_hash is nullable and GROUP BY put its NULLs in one group, so the
+    -- hash match is NULL-safe (IS NOT DISTINCT FROM needs SQL Server 2022).
+    SELECT MAX(qs.query_text) AS query_text
+    FROM collect.query_stats AS qs
+    WHERE qs.collection_time >= @startTime AND qs.collection_time <= @endTime
+    AND   qs.total_worker_time_delta > 0
+    AND   qs.database_name = t.database_name
+    AND   (qs.query_hash = t.query_hash OR (qs.query_hash IS NULL AND t.query_hash IS NULL))
+) AS x
+ORDER BY t.total_cpu_us DESC;";
 
         cmd.Parameters.Add(new SqlParameter("@startTime", context.TimeRangeStart));
         cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
