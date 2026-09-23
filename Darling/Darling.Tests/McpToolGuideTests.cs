@@ -345,6 +345,12 @@ public sealed class McpToolGuideTests
                 var end = idx + 1 < anchors.Count ? anchors[idx + 1].Index : src.Length;
                 Assert.True(files.TryAdd(name, file), $"duplicate MCP tool name '{name}' under {string.Join("/", segments)}");
                 hasMarker[name] = src[anchors[idx].Index..end].Contains(McpToolGuide.Marker, StringComparison.Ordinal);
+                /* The marker is written INSIDE the Description literal (D3). A concatenated McpToolGuide.Marker
+                   compiles to the same string, but this scan (and `grep <<GUIDE>>`) would read the tool as
+                   unconverted, so the cross-SKU identity check above would silently skip it. */
+                Assert.False(
+                    Regex.IsMatch(src[anchors[idx].Index..end], @"\+\s*McpToolGuide\.Marker|McpToolGuide\.Marker\s*\+"),
+                    $"{name}: write {McpToolGuide.Marker} inside the Description literal; a concatenated McpToolGuide.Marker hides the tool from the source scans.");
             }
         }
 
