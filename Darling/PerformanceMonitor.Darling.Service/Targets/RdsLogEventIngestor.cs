@@ -63,6 +63,7 @@ public sealed class RdsLogEventIngestor
         int serverId,
         string storageName,
         string host,
+        bool logTimezoneIsUtc = false,
         CancellationToken cancellationToken = default)
     {
         RdsLogSource.LogChunk? chunk;
@@ -91,36 +92,39 @@ public sealed class RdsLogEventIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+        var (written, foreignZoneLines) = await StoreAsync(serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008). Everything the chunk held is in the store or was
            nothing to store; anything else threw out of StoreAsync and left the marker where it was. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return RdsIngestOutcome.Read(written);
+        return RdsIngestOutcome.Read(written, foreignZoneLines);
     }
 
-    private async Task<int> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines)> StoreAsync(
         int serverId,
         string storageName,
         string text,
+        bool logTimezoneIsUtc,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(text))
         {
-            return 0;
+            return (0, 0);
         }
 
         /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
-           about the target's configuration and has to reach the runner uncommitted (#3008). */
-        var events = _classifier.Classify(text);
+           about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
+           logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
+           self-hosted route already makes. */
+        var events = _classifier.Classify(text, logTimezoneIsUtc, out var foreignZoneLines);
 
         if (events.Count == 0)
         {
-            return 0;
+            return (0, foreignZoneLines);
         }
 
-        return await WriteAsync(serverId, storageName, events, cancellationToken);
+        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines);
     }
 
     /// <summary>

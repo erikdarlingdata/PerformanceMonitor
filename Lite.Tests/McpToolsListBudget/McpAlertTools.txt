@@ -5,9 +5,9 @@ param get_alert_history.hours_back 29
 param get_alert_history.include_dismissed 357
 param get_alert_history.limit 133
 
-tool get_alert_settings 3954
+tool get_alert_settings 607
 
 tool get_mute_rules 109
 param get_mute_rules.enabled_only 41
 
-tool get_notification_routes 600
+tool get_notification_routes 502

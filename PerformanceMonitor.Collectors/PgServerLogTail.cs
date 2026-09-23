@@ -130,6 +130,33 @@ tail AS (
 )";
 
     /// <summary>
+    /// The binary-route twin of <see cref="TailCteSql"/> (#4046 part 1c): the same file, the same offsets,
+    /// the same gates — <c>pg_read_binary_file</c> in place of <c>pg_read_file</c>, returning <c>bytea</c>
+    /// instead of <c>text</c>. A consumer sends this text INSTEAD OF <see cref="TailCteSql"/>, never both
+    /// in one statement — <see cref="PgReadBinaryFileCapability"/>'s doc comment says why a <c>CASE</c>
+    /// cannot pick between them at runtime — and only once <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/>
+    /// finds the grant. Kept as an independent literal rather than built from a shared fragment with
+    /// <see cref="TailCteSql"/>, so a change here can never alter the byte-for-byte pin on that constant.
+    /// </summary>
+    public const string TailCteBinarySql = @"
+WITH newest AS (
+    SELECT name, size
+    FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
+      AND name !~* '\.(csv|json)$'
+      AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+    ORDER BY modification DESC
+    LIMIT 1
+),
+tail AS (
+    SELECT pg_catalog.pg_read_binary_file(
+               pg_catalog.current_setting('log_directory') || '/' || n.name,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
+               " + TailBytesLiteral + @") AS body
+    FROM newest AS n
+)";
+
+    /// <summary>
     /// The predicate the marker arm carries: true exactly when the gate above has refused to list. Each
     /// consumer appends <c>UNION ALL SELECT &lt;marker in its own columns&gt; WHERE</c> + this, because the
     /// marker row has to match the consumer's column list and there is no column-agnostic way to say so.

@@ -20,6 +20,7 @@ public sealed class McpToolGuideHeadsDataTests
 {
     private static readonly string[] ConvertedTools =
     [
+        "get_collection_health",
         "get_file_io_stats",
         "get_perfmon_stats",
         "get_server_properties",
@@ -31,6 +32,11 @@ public sealed class McpToolGuideHeadsDataTests
 
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
+        ("get_collection_health", "STOPPED (gate off) does not count as failing"),
+        ("get_collection_health", "rows_stored=0 is NOT a fault by itself"),
+        ("get_collection_health", "last_error is a sticky slot, not necessarily current"),
+        ("get_collection_health", "regressed_from_productive floors WARNING on an axis SEPARATE from failed_collector_count"),
+        ("get_collection_health", "alert_read_health uses a DIFFERENT since-restart window"),
         ("get_file_io_stats", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_perfmon_stats", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_server_properties", "LATEST IS A TIME: the newest snapshot, not a window"),
