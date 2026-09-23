@@ -143,6 +143,12 @@ LIMIT 1";
         }
     }
 
+    /* #3896: the NEWEST capture only. database_config is an on-load snapshot — every database in one
+       capture shares its capture_time — so a database dropped since is simply absent from the newest one,
+       and a per-database latest-ever read kept counting it (and its auto_shrink, its recovery model) until
+       retention aged its old captures out. The drill-down that lists these databases
+       (PgDrillDownCollector.ConfigIssuesSql) was already anchored this way. No lookback bound: an on-load
+       capture can be weeks old on a healthy, long-connected server. */
     public const string DatabaseConfigSql = @"
 WITH latest AS (
     SELECT database_name, recovery_model, is_auto_shrink_on, is_auto_close_on,
@@ -152,6 +158,7 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name ORDER BY capture_time DESC) AS rn
     FROM database_config
     WHERE server_id = $1
+    AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
 )
 SELECT
     COUNT(*) AS database_count,

@@ -33,13 +33,17 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         size_on_disk_bytes,
         ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn
     FROM collect.file_io_stats
-    WHERE collection_time <= @endTime
+    WHERE collection_time >= @lookbackStart
+    AND   collection_time <= @endTime
     AND   size_on_disk_bytes > 0
 )
 SELECT SUM(size_on_disk_bytes / 1048576.0) AS total_size_mb
 FROM latest
 WHERE rn = 1";
 
+            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStart), the Darling/Lite twins' bound —
+               unbounded, a dropped database's files stayed in the sum for the whole file_io_stats retention. */
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
@@ -231,6 +235,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
     FROM collect.database_size_stats
     WHERE database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+    AND   collection_time >= @lookbackStart
+    AND   collection_time <= @endTime
 )
 SELECT
     file_count = COUNT(*),
@@ -241,6 +247,9 @@ AND   is_percent_growth = 1
 AND   total_size_mb >= @minSizeMb;";
 
             cmd.Parameters.Add(new SqlParameter("@minSizeMb", 10240.0)); /* 10 GB */
+            /* #3896: the latest-value lookback, and the same bounds as the drill-down that lists these files. */
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+            cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
             if (!await reader.ReadAsync()) return;
@@ -290,7 +299,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         volume_free_mb,
         ROW_NUMBER() OVER (PARTITION BY volume_mount_point ORDER BY collection_time DESC) AS rn
     FROM collect.database_size_stats
-    WHERE collection_time <= @endTime
+    WHERE collection_time >= @lookbackStart
+    AND   collection_time <= @endTime
     AND   volume_total_mb > 0
 )
 SELECT
@@ -301,6 +311,8 @@ SELECT
     SUM(volume_free_mb) AS total_free_mb
 FROM latest WHERE rn = 1";
 
+            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStart), the Darling/Lite twins' bound. */
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
