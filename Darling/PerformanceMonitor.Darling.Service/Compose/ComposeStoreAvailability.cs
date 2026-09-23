@@ -31,16 +31,19 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 internal static class ComposeStoreAvailability
 {
+    /// <summary>One probe's answer, and whether it is a measurement or the fallback a failed probe left
+    /// (#3905): the compose panels read both alike, the daily summary may not.</summary>
+    private readonly record struct ProbeAnswer(RollupAvailability Rollups, RollupCoverage Coverage, bool Failed);
+
     private sealed class Entry
     {
-        public RollupAvailability Rollups;
-        public RollupCoverage Coverage = RollupCoverage.Unknown;
+        public ProbeAnswer Answer = new(RollupAvailability.None, RollupCoverage.Unknown, Failed: false);
         public bool Probed;
         public DateTime ProbedAtUtc;
 
         /// <summary>The probe the current callers share (#3905): non-null and incomplete while one is running.
         /// A completed task here is history, and the next caller who finds the cache stale starts a new one.</summary>
-        public Task<(RollupAvailability Rollups, RollupCoverage Coverage)>? InFlight;
+        public Task<ProbeAnswer>? InFlight;
 
         /// <summary>Probes started for this data source over its whole life. Diagnostic; see
         /// <see cref="ProbesStartedFor"/>.</summary>
@@ -68,13 +71,15 @@ internal static class ComposeStoreAvailability
     ///
     /// <para><b>One probe in flight per data source (#3905).</b> This used to be "benignly racy": concurrent
     /// callers that found the cache stale each ran the probe, on the argument that it was two small lookups.
-    /// Neither half held. The daily-summary reader now reads coverage through here too, the web server page
-    /// fires its two daily reads together, and on the largest production store the coverage probe is
-    /// >= 1.7 s on a quiet minute, not a small lookup. So a stale cache is refreshed by exactly one probe and
-    /// every caller that arrives while it runs awaits that one: the single-flight shape of
-    /// <c>DarlingFleetReader.CollectionHealthMemo</c> (#3735), for its reasons. The shared probe runs on
-    /// <see cref="CancellationToken.None"/>, so a caller's token releases only that caller's wait, and the
-    /// probe cannot fault the shared task: a failure is the cached raw fallback below, as before.</para>
+    /// Neither half held. The daily-summary reader now reads coverage through here too, agents race their
+    /// daily reads, the compose panels, trend tools and custom alerts read the same gate, and on the largest
+    /// production store the coverage probe is >= 1.7 s on a quiet minute, not a small lookup. So a stale cache
+    /// is refreshed by exactly one probe and every caller that arrives while it runs awaits that one: the
+    /// single-flight shape of <c>DarlingFleetReader.CollectionHealthMemo</c> (#3735), for its reasons. The
+    /// shared probe runs on <see cref="CancellationToken.None"/>, so a caller's token releases only that
+    /// caller's wait, and the probe cannot fault the shared task: a failure is the cached raw fallback below,
+    /// as before. A reader that must not route on that fallback reads
+    /// <see cref="GetMeasuredRollupsAsync(NpgsqlDataSource, CancellationToken)"/> instead.</para>
     /// </summary>
     internal static ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetRollupsAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken)
@@ -90,25 +95,68 @@ internal static class ComposeStoreAvailability
         Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
         CancellationToken cancellationToken)
     {
+        var answer = await GetAnswerAsync(postgres, probe, cancellationToken);
+        return (answer.Rollups, answer.Coverage);
+    }
+
+    /// <summary>
+    /// The same cached gate, for a reader whose numbers the failure fallback would falsify (#3905: the daily
+    /// summary).
+    ///
+    /// <para>The fallback is <see cref="RollupAvailability.None"/>, and <see cref="RetentionTierRouter"/> sends
+    /// None to raw for any window. The compose panels accept that: raw is complete on a plain-PostgreSQL store,
+    /// and on a TimescaleDB one a panel without its rollup reads as a partial window. The daily summary cannot.
+    /// On a TimescaleDB store whose raw purges are armed, raw <c>query_stats</c> holds four days, so a month
+    /// routed to raw prints <c>unique_queries = 0</c> for every older day. That is not NULL and not in
+    /// <c>days_missing</c>: it is the #3653 A6 lie, told for as long as the failure stays cached. Before #3905
+    /// a failed probe failed this reader's call instead, because it probed per call and let the exception
+    /// through. So a cached failure is not an answer here. This reader probes again itself, on its own token,
+    /// exactly as it did per call before, and a probe that fails again surfaces as the caller's error. A
+    /// success is used and not written back: the failure fallback and its interval are the compose panels'
+    /// contract. Every measured answer, which is every answer on a healthy store, is the cached one.</para>
+    /// </summary>
+    internal static ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetMeasuredRollupsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+        => GetMeasuredRollupsAsync(postgres, ProbeAsync, cancellationToken);
+
+    /// <summary><see cref="GetMeasuredRollupsAsync(NpgsqlDataSource, CancellationToken)"/> with the probe
+    /// substitutable. The shared probe gets <see cref="CancellationToken.None"/>; the direct re-probe after a
+    /// cached failure gets <paramref name="cancellationToken"/>, since it is this caller's alone.</summary>
+    internal static async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetMeasuredRollupsAsync(
+        NpgsqlDataSource postgres,
+        Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
+        CancellationToken cancellationToken)
+    {
+        var answer = await GetAnswerAsync(postgres, probe, cancellationToken);
+        return answer.Failed
+            ? await probe(postgres, cancellationToken)
+            : (answer.Rollups, answer.Coverage);
+    }
+
+    private static async ValueTask<ProbeAnswer> GetAnswerAsync(
+        NpgsqlDataSource postgres,
+        Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(probe);
 
         var entry = s_entries.GetOrCreateValue(postgres);
 
-        Task<(RollupAvailability Rollups, RollupCoverage Coverage)> shared;
-        TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)>? lead = null;
+        Task<ProbeAnswer> shared;
+        TaskCompletionSource<ProbeAnswer>? lead = null;
         lock (entry)
         {
             if (entry.Probed && DateTime.UtcNow - entry.ProbedAtUtc < ReprobeInterval)
             {
-                return (entry.Rollups, entry.Coverage);
+                return entry.Answer;
             }
 
             if (entry.InFlight is not { IsCompleted: false })
             {
                 /* RunContinuationsAsynchronously: the waiters' continuations (the rest of each panel or daily
                    read) must not run inline on whichever thread completes the probe. */
-                lead = new TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)>(TaskCreationOptions.RunContinuationsAsynchronously);
+                lead = new TaskCompletionSource<ProbeAnswer>(TaskCreationOptions.RunContinuationsAsynchronously);
                 entry.InFlight = lead.Task;
                 entry.ProbesStarted++;
             }
@@ -149,36 +197,35 @@ internal static class ComposeStoreAvailability
 
     private static async Task RunProbeAsync(
         Entry entry,
-        TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)> lead,
+        TaskCompletionSource<ProbeAnswer> lead,
         NpgsqlDataSource postgres,
         Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe)
     {
-        RollupAvailability rollups;
-        RollupCoverage coverage;
+        ProbeAnswer answer;
         try
         {
-            (rollups, coverage) = await probe(postgres, CancellationToken.None);
+            var (rollups, coverage) = await probe(postgres, CancellationToken.None);
+            answer = new ProbeAnswer(rollups, coverage, Failed: false);
         }
         catch (Exception ex)
         {
             /* A store hiccup mid-probe must not fail the panel — raw is the safe answer for availability,
                and "no coverage evidence" leaves the age ladder in charge. The re-probe interval retries soon.
                Every exception, cancellation included: the probe runs on no caller's token, so nothing here
-               is a caller asking to stop, and the shared task must complete for every waiter. */
-            rollups = RollupAvailability.None;
-            coverage = RollupCoverage.Unknown;
+               is a caller asking to stop, and the shared task must complete for every waiter. Marked Failed
+               so GetMeasuredRollupsAsync can refuse to route on it. */
+            answer = new ProbeAnswer(RollupAvailability.None, RollupCoverage.Unknown, Failed: true);
             _ = ex;
         }
 
         lock (entry)
         {
-            entry.Rollups = rollups;
-            entry.Coverage = coverage;
+            entry.Answer = answer;
             entry.Probed = true;
             entry.ProbedAtUtc = DateTime.UtcNow;
         }
 
-        lead.SetResult((rollups, coverage));
+        lead.SetResult(answer);
     }
 
     /// <summary>

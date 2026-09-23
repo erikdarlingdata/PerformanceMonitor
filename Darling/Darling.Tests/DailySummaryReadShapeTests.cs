@@ -66,15 +66,17 @@ public sealed class DailySummaryReadShapeSqlTests
     }
 
     /// <summary>
-    /// The seam, as source: the MCP reader routes on the cached gate the compose panels read, and no longer runs
-    /// either probe itself. A per-call probe is what put a >= 1.7 s coverage read in front of every daily read,
-    /// twice per server-page load. The live half counts the probes.
+    /// The seam, as source: the MCP reader routes on the cached gate the compose panels read, through the
+    /// accessor that refuses a failed probe's raw fallback, and no longer runs either probe itself. A per-call
+    /// probe is what put a >= 1.7 s coverage read in front of every daily read, twice per server-page load. The
+    /// live half counts the probes.
     /// </summary>
     [Fact]
     public void TheDailyReader_RoutesOnTheCachedGate_NotAPerCallProbe()
     {
         var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingHealthReader.cs");
-        Assert.Contains("await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);", reader, StringComparison.Ordinal);
+        Assert.Contains("await ComposeStoreAvailability.GetMeasuredRollupsAsync(postgres, cancellationToken);", reader, StringComparison.Ordinal);
+        Assert.DoesNotContain("ComposeStoreAvailability.GetRollupsAsync(", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("TimescaleSupport.DetectRollupsAsync(", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("TimescaleSupport.DetectRollupCoverageAsync(", reader, StringComparison.Ordinal);
     }
@@ -102,18 +104,21 @@ public sealed class DailySummaryReadShapeSqlTests
         composite = composite[..composite.IndexOf("\n}", StringComparison.Ordinal)];
         Assert.Equal(1, composite.Split("readTool(").Length - 1);
         Assert.Contains("readTool(\"get_daily_summary_range\", { server, days_back: 30 })", composite, StringComparison.Ordinal);
-        Assert.Contains("days.find((day) => day.summary_date === res.data.to_date)", composite, StringComparison.Ordinal);
+        Assert.Contains("days.find((day) => day.summary_date === data.to_date)", composite, StringComparison.Ordinal);
+        /* Each panel renders through its own guard, so a fault in one cannot strand the other on its loading strip. */
+        Assert.Equal(2, composite.Split("renderInto(").Length - 1);
         Assert.Contains("VIZ.stat(today, { stats: DAILY_STATS })", composite, StringComparison.Ordinal);
         Assert.Contains("return [tile.panel, calendar.panel];", composite, StringComparison.Ordinal);
     }
 }
 
 /// <summary>
-/// #3905: <see cref="ComposeStoreAvailability"/> runs one coverage probe per data source at a time. The web
-/// server page fires its daily reads together, and on the largest production store the probe is >= 1.7 s, so a
-/// stale cache refreshed by every concurrent caller was that cost times the callers. Driven through the probe
-/// seam with a gated fake, the pattern <see cref="FleetCollectionHealthMemoTests"/> set for the fleet memo, so
-/// callers can be parked on the probe before it answers, which is the only way to prove they shared it.
+/// #3905: <see cref="ComposeStoreAvailability"/> runs one coverage probe per data source at a time. Agents race
+/// their daily reads, the compose panels and trend tools read the same gate, and on the largest production store
+/// the probe is >= 1.7 s, so a stale cache refreshed by every concurrent caller was that cost times the callers.
+/// Driven through the probe seam with a gated fake, the pattern <see cref="FleetCollectionHealthMemoTests"/> set
+/// for the fleet memo, so callers can be parked on the probe before it answers, which is the only way to prove
+/// they shared it.
 /// </summary>
 public sealed class ComposeStoreAvailabilitySingleFlightTests
 {
@@ -213,6 +218,70 @@ public sealed class ComposeStoreAvailabilitySingleFlightTests
         }
 
         Assert.Equal(RollupAvailability.None, (await ComposeStoreAvailability.GetRollupsAsync(dataSource, probe.Run, CancellationToken.None)).Rollups);
+        Assert.Equal(1, probe.Calls);
+    }
+
+    /// <summary>
+    /// The daily summary never routes on that fallback. On a TimescaleDB store whose raw purges are armed,
+    /// raw-for-everything prints unique_queries = 0 for every day raw has purged, a zero that is not NULL and
+    /// not in days_missing. So while the cache holds a failure, the measured accessor probes again itself on
+    /// its caller's token. A success is used (and not written back: the compose panels keep their cached
+    /// fallback), and a second failure surfaces to the caller, the way the per-call probe failed the read
+    /// before #3905. A measured answer is the cached one, with no extra probe.
+    /// </summary>
+    [Fact]
+    public async Task TheMeasuredAccessor_NeverRoutesOnAFailedProbesFallback()
+    {
+        await using var dataSource = UnopenedDataSource();
+        var calls = 0;
+        var outcomes = new Queue<Func<(RollupAvailability, RollupCoverage)>>(new Func<(RollupAvailability, RollupCoverage)>[]
+        {
+            () => throw new NpgsqlException("57014: canceling statement due to statement timeout"),
+            () => Answer,
+            () => throw new NpgsqlException("57014: again"),
+        });
+        var tokens = new List<CancellationToken>();
+        Task<(RollupAvailability Rollups, RollupCoverage Coverage)> Probe(NpgsqlDataSource _, CancellationToken token)
+        {
+            calls++;
+            tokens.Add(token);
+            return Task.FromResult<(RollupAvailability, RollupCoverage)>(outcomes.Dequeue()());
+        }
+
+        using var caller = new CancellationTokenSource();
+
+        /* The shared probe fails and is cached as the fallback; the measured accessor probes again, on its own
+           token, and routes on that answer. */
+        var measured = await ComposeStoreAvailability.GetMeasuredRollupsAsync(dataSource, Probe, caller.Token);
+        Assert.Equal(RollupAvailability.All, measured.Rollups);
+        Assert.Equal(2, calls);
+        Assert.Equal(new[] { CancellationToken.None, caller.Token }, tokens);
+        Assert.Equal(1, ComposeStoreAvailability.ProbesStartedFor(dataSource));
+
+        /* Not written back: the compose accessor still reads the cached fallback. */
+        Assert.Equal(RollupAvailability.None, (await ComposeStoreAvailability.GetRollupsAsync(dataSource, Probe, CancellationToken.None)).Rollups);
+        Assert.Equal(2, calls);
+
+        /* A second failure is the caller's error, not a quiet raw route. */
+        var ex = await Assert.ThrowsAsync<NpgsqlException>(() => ComposeStoreAvailability.GetMeasuredRollupsAsync(dataSource, Probe, caller.Token).AsTask());
+        Assert.Contains("again", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(3, calls);
+    }
+
+    /// <summary>And on a healthy store the measured accessor is the cache: one shared probe, then memory.</summary>
+    [Fact]
+    public async Task TheMeasuredAccessor_ReadsAMeasuredAnswerFromTheCache()
+    {
+        await using var dataSource = UnopenedDataSource();
+        var probe = new GatedProbe();
+
+        var first = ComposeStoreAvailability.GetMeasuredRollupsAsync(dataSource, probe.Run, CancellationToken.None).AsTask();
+        var alongside = ComposeStoreAvailability.GetRollupsAsync(dataSource, probe.Run, CancellationToken.None).AsTask();
+        probe.Gate.SetResult(Answer);
+
+        Assert.Equal(RollupAvailability.All, (await first).Rollups);
+        Assert.Equal(RollupAvailability.All, (await alongside).Rollups);
+        Assert.Equal(RollupAvailability.All, (await ComposeStoreAvailability.GetMeasuredRollupsAsync(dataSource, probe.Run, CancellationToken.None)).Rollups);
         Assert.Equal(1, probe.Calls);
     }
 }
@@ -342,6 +411,13 @@ public sealed class DailySummaryReadShapeLiveTests
         var daily = answers[RetentionTier.Daily + "/" + TimescaleSupport.QueryStatsHourlyView];
         Assert.DoesNotContain(daily, row => row.StartsWith(Day(2) + "|", StringComparison.Ordinal));
         Assert.Contains(daily, row => row.StartsWith(Day(8) + "|", StringComparison.Ordinal) && row.Split('|')[3] == "1");
+
+        /* A day whose only hash is NULL is still a day, counted 0, on every tier: the distinct pairs keep the
+           (day, NULL) pair and COUNT skips its NULL, where dropping the pair would have lost the day. */
+        foreach (var answer in answers.Values)
+        {
+            Assert.Contains(answer, row => row.StartsWith(Day(9) + "|", StringComparison.Ordinal) && row.Split('|')[3] == "0");
+        }
     }
 
     /// <summary>
@@ -449,12 +525,13 @@ public sealed class DailySummaryReadShapeLiveTests
     }
 
     /// <summary>
-    /// Nine whole UTC days, D0 thirteen days back, all past RawMaxAge and below every refresh policy's window,
+    /// Ten whole UTC days, D0 fourteen days back, all past RawMaxAge and below every refresh policy's window,
     /// so a background policy run cannot materialize what the seed leaves unmaterialized. D0: 3 hashes. D1:
     /// nothing. D2: 5 hashes, skipped by the hourly and the daily (the hole). D3: 4 hashes and a NULL-hash row.
-    /// D4: one restart row (interval 0). D5: 6. D6: 2. D7: 3. D8: 1. Refreshed: the legacy hourly over D0-D1 and
-    /// D3-D5 (ceiling D5); the successor over D0 and D3 (ceiling D3; it rejects D4's restart row); the daily over
-    /// D0 and D3 (ceiling D3).
+    /// D4: one restart row (interval 0). D5: 6. D6: 2. D7: 3. D8: 1. D9: a NULL-hash row and nothing else, past
+    /// every ceiling, so every tier counts it from raw: the day still appears, with 0. Refreshed: the legacy
+    /// hourly over D0-D1 and D3-D5 (ceiling D5); the successor over D0 and D3 (ceiling D3; it rejects D4's
+    /// restart row); the daily over D0 and D3 (ceiling D3).
     /// </summary>
     private static async Task<Seeded> SeedAsync(string what)
     {
@@ -476,8 +553,8 @@ public sealed class DailySummaryReadShapeLiveTests
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             await RegisterServerAsync(connection, ct);
 
-            var d0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-13), DateTimeKind.Unspecified);
-            var days = Enumerable.Range(0, 9).Select(n => d0.AddDays(n)).ToArray();
+            var d0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-14), DateTimeKind.Unspecified);
+            var days = Enumerable.Range(0, 10).Select(n => d0.AddDays(n)).ToArray();
             Assert.True(DateTime.UtcNow - days[^1].AddDays(1) > TimescaleSupport.DailyRefreshStartSpan, "the seed must sit below every refresh policy's window");
 
             foreach (var (day, hashes) in new[] { (0, 3), (2, 5), (3, 4), (5, 6), (6, 2), (7, 3), (8, 1) })
@@ -487,6 +564,7 @@ public sealed class DailySummaryReadShapeLiveTests
 
             await PlantRowAsync(connection, days[3].AddHours(12), queryHash: null, intervalSeconds: 1200, ct);
             await PlantRowAsync(connection, days[4].AddHours(6), queryHash: "0xRESTART", intervalSeconds: 0, ct);
+            await PlantRowAsync(connection, days[9].AddHours(3), queryHash: null, intervalSeconds: 1200, ct);
 
             await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, days[0], days[2], ct);
             await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, days[3], days[6], ct);

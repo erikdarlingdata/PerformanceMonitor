@@ -518,40 +518,55 @@ export function dailySummaryPanels(server) {
       return mount(calendar.body, readErrorStrip(res.message));
     }
     if (res.kind === "empty") {
-      mount(tile.body, emptyStrip(res.message));
+      /* The range's "empty" sentence is about the span and ends in MCP parameter advice (widen days_back, move
+         as_of); for today's tile the fact is simpler. "unavailable" (nothing ever collected) says the same thing
+         to both panels, so it is the server's sentence on both. */
+      mount(tile.body, emptyStrip(res.status === "empty" ? "Nothing has been collected for this server today (UTC)." : res.message));
       return mount(calendar.body, emptyStrip(res.message));
     }
 
-    const days = Array.isArray(res.data.days) ? res.data.days : [];
-    const today = days.find((day) => day.summary_date === res.data.to_date);
-    mount(
-      tile.body,
-      today
+    /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
+       panel instead of leaving both on their loading strips. */
+    const data = res.data || {};
+    const days = Array.isArray(data.days) ? data.days : [];
+    renderInto(tile.body, () => {
+      const today = days.find((day) => day.summary_date === data.to_date);
+      return today
         ? VIZ.stat(today, { stats: DAILY_STATS })
-        : emptyStrip("Nothing has been collected for this server yet on " + res.data.to_date + " (UTC).")
-    );
-
-    const body = calendar.body;
-    const grid = VIZ.table(res.data, {
-      rowsKey: "days",
-      columns: DAILY_RANGE_COLUMNS,
-      emptyText:
-        "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+        : emptyStrip("Nothing has been collected for this server yet " + (data.to_date ? "on " + data.to_date : "today") + " (UTC).");
     });
 
-    const missing = Array.isArray(res.data.days_missing) ? res.data.days_missing : [];
-    if (!missing.length) return mount(body, grid);
-    const plural = missing.length === 1 ? "" : "s";
-    mount(body, [
-      noticeStrip(
-        "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
-          "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
-          " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
-      ),
-      grid,
-    ]);
+    renderInto(calendar.body, () => {
+      const grid = VIZ.table(data, {
+        rowsKey: "days",
+        columns: DAILY_RANGE_COLUMNS,
+        emptyText:
+          "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+      });
+
+      const missing = Array.isArray(data.days_missing) ? data.days_missing : [];
+      if (!missing.length) return grid;
+      const plural = missing.length === 1 ? "" : "s";
+      return [
+        noticeStrip(
+          "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+            "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
+            " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
+        ),
+        grid,
+      ];
+    });
   })();
   return [tile.panel, calendar.panel];
+}
+
+/** Mount what `render` returns into `body`, or an error strip naming the fault if it throws. */
+function renderInto(body, render) {
+  try {
+    mount(body, render());
+  } catch (e) {
+    mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
+  }
 }
 
 /** Reshape flat rows into per-series points, keeping the top `maxSeries` series by peak value. */

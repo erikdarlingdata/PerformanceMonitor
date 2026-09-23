@@ -234,7 +234,7 @@ public sealed class DailySummaryNotCarriedTests
 
         var page = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
         Assert.Contains("export function dailySummaryPanels(server)", page, StringComparison.Ordinal);
-        Assert.Contains("res.data.days_missing", page, StringComparison.Ordinal);
+        Assert.Contains("Array.isArray(data.days_missing) ? data.days_missing : []", page, StringComparison.Ordinal);
         Assert.Contains("row.unique_queries == null", page, StringComparison.Ordinal);
         Assert.Contains("[\"not materialized\"]", page, StringComparison.Ordinal);
         Assert.Contains("...dailySummaryPanels(server),", page, StringComparison.Ordinal);
