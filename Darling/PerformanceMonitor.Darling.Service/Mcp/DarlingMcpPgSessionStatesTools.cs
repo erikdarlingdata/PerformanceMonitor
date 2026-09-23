@@ -212,29 +212,12 @@ public sealed class DarlingMcpPgSessionStatesTools
     }
 
     [McpServerTool(Name = "get_pg_session_states")]
-    [Description(
-        "PostgreSQL sessions holding a transaction open - who is idle in transaction, for how long, and "
-        + "WHETHER THAT SESSION IS ACTUALLY PINNING THE XMIN HORIZON. That last part is the whole point and "
-        + "it is not the same question as the first two: measured on a live instance, an idle-in-transaction "
-        + "session under READ COMMITTED that has only read, or whose UPDATE matched zero rows, holds neither "
-        + "a snapshot nor a transaction id and starves VACUUM of nothing at all. Only a transaction that has "
-        + "written (holding backend_xid) or one under REPEATABLE READ (holding backend_xmin) pins anything. "
-        + "So peak_horizon_age, not the duration, is what supports a causal claim, and a peak_horizon_age of "
-        + "-1 means the session pinned NOTHING rather than something small. Pairs with get_pg_xmin_horizon, "
-        + "which names the CLASS of holder; this names the session. Rolled up per backend across the window, "
-        + "horizon holders first, then longest transaction. THIS IS A SAMPLE at the collection interval, not "
-        + "an event log - PostgreSQL records nothing about session state unless something asks, so a "
-        + "transaction that opened and closed between samples is invisible; the capture counts are reported "
-        + "so 'nothing found' is distinguishable from 'nobody looked'. No raw query text is stored: "
-        + "pg_stat_activity.query carries literal parameter values, so the normalised query_id and a "
-        + "whitelisted command keyword are stored instead - join query_id to get_pg_top_queries for the "
-        + "statement text with placeholders. Requires pg_monitor on the target; without it PostgreSQL "
-        + "silently returns rows with every state column NULL, which the read reports rather than hides.")]
+    [Description("Gets PostgreSQL sessions holding a transaction open: how long, and WHETHER they are pinning the xmin horizon. peak_horizon_age carries that, not duration; -1 means pinned NOTHING, not a small age. THIS IS A SAMPLE at the collection interval - a transaction that opened and closed between samples is invisible; captures_in_window is the denominator, and captures_in_window = 0 means unavailable, not a clean bill. Requires pg_monitor; without it a row's state columns come back NULL (state_was_redacted) rather than refused. Window ends at as_of. <<GUIDE>> PostgreSQL sessions holding a transaction open - who is idle in transaction, for how long, and WHETHER THAT SESSION IS ACTUALLY PINNING THE XMIN HORIZON. That last part is the whole point and it is not the same question as the first two: measured on a live instance, an idle-in-transaction session under READ COMMITTED that has only read, or whose UPDATE matched zero rows, holds neither a snapshot nor a transaction id and starves VACUUM of nothing at all. Only a transaction that has written (holding backend_xid) or one under REPEATABLE READ (holding backend_xmin) pins anything. So peak_horizon_age, not the duration, is what supports a causal claim, and a peak_horizon_age of -1 means the session pinned NOTHING rather than something small. Pairs with get_pg_xmin_horizon, which names the CLASS of holder; this names the session. Rolled up per backend across the window, horizon holders first, then longest transaction. THIS IS A SAMPLE at the collection interval, not an event log - PostgreSQL records nothing about session state unless something asks, so a transaction that opened and closed between samples is invisible; the capture counts are reported so 'nothing found' is distinguishable from 'nobody looked'. No raw query text is stored: pg_stat_activity.query carries literal parameter values, so the normalised query_id and a whitelisted command keyword are stored instead - join query_id to get_pg_top_queries for the statement text with placeholders. Requires pg_monitor on the target; without it PostgreSQL silently returns rows with every state column NULL, which the read reports rather than hides. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")]
     public static async Task<string> GetPgSessionStates(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25. This is what bounds the page - read truncated to know whether the window held more sessions than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
+        [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
