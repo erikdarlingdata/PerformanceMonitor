@@ -15,6 +15,9 @@ C:\PerformanceMonitorDarling). What it does, in order:
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
      service installs cleanly and then dies at the bundled PostgreSQL's first step (#2185, #2187).
      Extract to a machine-scoped local path such as C:\PerformanceMonitorDarling instead.
+  1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
+     directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
+     folder and run this straight away; no lock can undo a file swapped before it.
   1c. REFUSES an install when the ASP.NET Core Runtime 10 is missing, and WARNS when the .NET Desktop
      Runtime 10 is (#2479). Both shipped binaries are framework-dependent; a stock Windows Server image
      has neither runtime, and the failure is the .NET host's own "You must install .NET" error with
@@ -31,6 +34,8 @@ C:\PerformanceMonitorDarling). What it does, in order:
   4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for
      INTERACTIVE (the Viewer). It holds encrypted SQL passwords and the MCP/web access tokens,
      and an install folder under C:\ otherwise inherits read access for BUILTIN\Users.
+  4b2. Grants the service account Modify on the locked install folder, which it needs to extract its
+     bundled PostgreSQL there, and re-verifies the lock.
   4c. Creates (or removes) the scoped Windows Firewall rules to match darling.json, via the exe's
      --configure-firewall verb. This requires elevation, which is why it lives here: the service's
      own unprivileged account cannot create them, and only verifies them at runtime.
@@ -267,6 +272,187 @@ function Format-FrameworkVersionList([string[]]$versions) {
     return (($versions | Sort-Object -Unique) -join ', ')
 }
 
+# The logon account the Darling service is registered to run as, exactly as Windows reports it (LocalSystem,
+# .\name and NT SERVICE\... spellings included), or $null when neither Win32_Service nor sc.exe qc can say.
+# sc.exe qc is the non-WMI second opinion, so a broken WMI repository alone cannot hide the account; its field
+# labels are localized, so a non-match there returns $null for the caller to refuse on, never a guess. Kept
+# byte-identical in install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallLocationTests compares.
+function Get-DarlingServiceLogonName([string]$name) {
+    try {
+        $startName = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$name'" -ErrorAction Stop).StartName
+        if ($startName) { return $startName }
+    }
+    catch {
+        Write-Host "Get-CimInstance could not read the service's logon account ($($_.Exception.Message)) - falling back to sc.exe qc." -ForegroundColor Yellow
+    }
+    $qc = & sc.exe qc $name 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $match = $qc | Select-String -Pattern '^\s*SERVICE_START_NAME\s*:\s*(\S.*?)\s*$'
+        if ($match) { return $match.Matches[0].Groups[1].Value }
+    }
+    return $null
+}
+
+# Lock the install tree against ordinary users (#4034). The tree holds the service exe, its DLLs and pg-runtime,
+# all of which run as the service account, and the scripts an administrator runs elevated. A folder created
+# directly under C:\ - the documented location - inherits "Authenticated Users: Modify" from the volume root,
+# so any local user could replace a binary and run code as the service. This stops the root inheriting, removes
+# every broad principal (Authenticated Users, Users, Everyone, INTERACTIVE), and grants back BUILTIN\Users read
+# and execute, plus, when $serviceAccount is given, the service account Modify: it held that before through
+# Authenticated Users and still needs it, because it extracts pg-runtime into the tree. With no account it only
+# locks. install-darling.ps1 calls it that way before anything runs from the tree, and again once the service
+# exists, to make the grant.
+#
+# Removing the broad groups is not enough on its own (#4038's review). Whoever OWNS an object can rewrite its
+# DACL, and a child that grants some specific account write keeps that grant through a folder lock: a local
+# user who created the folder in advance, or re-created a file while an older install was open, would still
+# control it. So the whole tree is given to Administrators as owner (darling.json and its backups go back to
+# the service account, which install-darling.ps1 step 4b makes their owner), every explicit write grant held
+# by an account outside the trusted set (SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER and the
+# service) is closed where it stands, and the walk reports any owner or writer outside that set that remains.
+#
+# The account is normalized the way install-darling.ps1 reads it from the service (LocalSystem is NT
+# AUTHORITY\SYSTEM, a leading .\ is this computer), since neither spelling translates to a SID as written.
+# Returns what is still open, one string per path: a writer or owner outside the trusted set, a junction or
+# link below the root (the walk does not descend it and a real install never holds one), or a root that is
+# itself a junction (the lock would change the link, not the folder it points to). Kept byte-identical in
+# install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallLocationTests compares.
+function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
+    # icacls reports a file it could not change on stderr (under /C it carries on), and Windows PowerShell 5.1
+    # turns redirected native stderr into a TERMINATING error when the preference is Stop, as both scripts set
+    # it. So this function judges icacls by its exit code and output, and reports an unreadable object rather
+    # than throwing out of the whole lock. The preference is local to this function.
+    $ErrorActionPreference = 'Continue'
+    if ((Get-Item -LiteralPath $root -Force -ErrorAction Stop).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        return @("$root (the install folder itself is a junction or link: run from the folder it points to)")
+    }
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $broad = @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::WorldSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)))
+    $usersSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+    $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+    $trusted = @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
+        $adminsSid,
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerSid, $null)),
+        (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType))
+    $grants = @('/grant', "*$($usersSid.Value):(OI)(CI)RX")
+    $serviceSid = $null
+    if ($serviceAccount) {
+        if ($serviceAccount -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
+        $serviceAccount = $serviceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
+        $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+        $trusted += $serviceSid
+        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)M")
+    }
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $open = @()
+
+    # icacls, not Set-Acl: Set-Acl on what Get-Acl read writes the SACL too, which needs SeSecurityPrivilege, and
+    # icacls is what the warnings tell an operator to run by hand, so the fix and the remediation are the same
+    # commands. /inheritance:d stops inheriting and keeps what the volume root gave as explicit ACEs, so SYSTEM
+    # and Administrators keep full control. SIDs, not names, so an account name with a space needs no quoting.
+    # /L acts on a link itself, never on what it points to.
+    $steps = @(
+        @('/inheritance:d'),
+        (@('/remove:g') + @($broad | ForEach-Object { "*$($_.Value)" })),
+        $grants)
+    foreach ($step in $steps) {
+        $output = & icacls.exe $root @step 2>&1
+        if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
+    }
+    $output = & icacls.exe $root /setowner "*$($adminsSid.Value)" /T /C /L /Q 2>&1
+    if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
+    if ($serviceSid) {
+        foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'darling.json' -or $_.Name -like 'darling.json.bak-*' })) {
+            $null = & icacls.exe $secret.FullName /setowner "*$($serviceSid.Value)" /L /Q 2>&1
+        }
+    }
+
+    # VERIFY rather than assume (#1957), and close what a folder lock cannot: every directory and file is read
+    # back, and one with an explicit write grant to an account outside the trusted set is fixed where it stands.
+    # darling.json and its backups keep their protected DACL and lose only that grant; anything else is reset to
+    # inherit the tree's ACEs, since no shipped file carries its own and emptying one would leave the service
+    # unable to run it. What remains is reported. A write right includes the generic bits (GENERIC_ALL
+    # 0x10000000, GENERIC_WRITE 0x40000000) an inherit-only ACE can carry.
+    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+    if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
+    $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
+    foreach ($target in $targets) {
+        $path = $target.FullName
+        if ($path.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            $open += "$path (a junction or link)"
+            continue
+        }
+        try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
+        catch { $open += "$path (its permissions could not be read)"; continue }
+        $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+        if ($explicit.Count -gt 0) {
+            if ($target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*') {
+                foreach ($rule in $explicit) { $null = & icacls.exe $path /remove:g "*$($rule.IdentityReference.Value)" /L /Q 2>&1 }
+            }
+            else {
+                $null = & icacls.exe $path /reset /L /Q 2>&1
+            }
+        }
+        try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
+        catch { $open += "$path (its permissions could not be read)"; continue }
+        $writers = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+        $owner = $acl.GetOwner($sidType)
+        if ($writers.Count -gt 0) { $open += $path }
+        elseif ($trusted -notcontains $owner) { $open += "$path (owned by $($owner.Value))" }
+    }
+    return $open
+}
+
+# Runs Lock-DarlingInstallTree for this script (steps 1b2 and 4b2) and says what it found, with the by-hand fix.
+# -StopOnOpen (1b2) then stops the install: everything after it runs the service exe, elevated, from this
+# folder, and stopping costs nothing yet, the same argument 1b makes. At 4b2 the service already exists, so a
+# failure warns loudly instead of leaving a half-made install. With no account yet the grant line names the
+# virtual account the service is about to get.
+function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
+    $open = @()
+    try {
+        $open = @(Lock-DarlingInstallTree $root $account)
+    }
+    catch {
+        $open = @("$root ($($_.Exception.Message))")
+    }
+    if ($open.Count -eq 0) {
+        if ($account) {
+            Write-Host "Locked the install folder: only SYSTEM, Administrators and $account can change what runs from $root." -ForegroundColor Green
+        }
+        else {
+            Write-Host "Locked the install folder against ordinary users before running anything from it: $root" -ForegroundColor Green
+        }
+        return
+    }
+    $grantTo = if ($account) { $account } else { "NT SERVICE\$serviceName" }
+    Write-Host ''
+    Write-Host 'SECURITY WARNING: ordinary users can still write to these paths in the install folder:' -ForegroundColor Red
+    foreach ($p in ($open | Select-Object -First 20)) { Write-Host "  $p" -ForegroundColor Red }
+    if ($open.Count -gt 20) { Write-Host "  ...and $($open.Count - 20) more." -ForegroundColor Red }
+    Write-Host '  The service and its PostgreSQL run from here as the service account, so anyone who can replace a' -ForegroundColor Red
+    Write-Host '  binary can run code as that account. Fix it from an elevated prompt, then re-run this script:' -ForegroundColor Red
+    Write-Host "    icacls `"$root`" /inheritance:d" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant `"$grantTo`:(OI)(CI)M`"" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /setowner *S-1-5-32-544 /T /C /L" -ForegroundColor Yellow
+    Write-Host '  A path listed as owned by an account, or BELOW the folder, needs its own fix: icacls "<path>" /setowner' -ForegroundColor Red
+    Write-Host '  *S-1-5-32-544 /L, then icacls "<path>" /reset /T /C. Remove any junction or link it names.' -ForegroundColor Red
+    Write-Host ''
+    if ($StopOnOpen) {
+        Fail 'Stopped before running anything from a folder ordinary users can still change. Fix the paths above, or extract the zip into a fresh folder, then re-run this script.'
+    }
+}
+
 # -- 1. Environment checks ------------------------------------------------------------------------
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -389,6 +575,26 @@ Nothing was installed or changed.
     $answer = Read-Host 'Point the service at this folder anyway? [y/N]'
     if ($answer -notmatch '^[Yy]') { exit 4 }
 }
+
+# -- 1b2. Lock the install tree before anything runs from it (#4034) ---------------------------------------
+# The rest of this script runs the service exe (the pre-flight, --configure-firewall) and registers it to run
+# as the service account, so the tree is closed to ordinary users first: see Lock-DarlingInstallTree. On a
+# fresh install there is no service account to grant yet; 4b2 adds it once sc.exe create has made one. What no
+# lock can undo is a file swapped between extracting the zip and running this script, which is why the README
+# says to extract into a fresh folder and run this straight away.
+# An upgrade through this script already has a service, and the lock removes any write grant outside the
+# trusted set, so the service's own account goes in now or its access would be stripped until 4b2 (and for
+# good if the script stopped before it). Unreadable, it stops here, as step 4 does, rather than guess.
+$lockAccount = ''
+if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+    $lockAccount = Get-DarlingServiceLogonName $serviceName
+    if (-not $lockAccount) {
+        Fail "Could not read which account the existing '$serviceName' service logs on as, so the install folder cannot be locked without taking that account's access away. Nothing was changed. Check it with: sc.exe qc `"$serviceName`", then re-run this script."
+    }
+    if ($lockAccount -eq 'LocalSystem') { $lockAccount = 'NT AUTHORITY\SYSTEM' }
+    else { $lockAccount = $lockAccount -replace '^\.\\', "$env:COMPUTERNAME\" }
+}
+Invoke-InstallTreeLock $lockAccount -StopOnOpen
 
 # -- 1c. Refuse an install the .NET runtimes on this box cannot run (#2479) ------------------------
 # The first thing a new operator hits and the least self-explanatory. Both shipped binaries are
@@ -532,18 +738,7 @@ else {
 # sc.exe qc is tried first as a non-WMI second opinion, so a broken WMI repository alone cannot brick an
 # upgrade; its field labels are localized, so a non-match there just falls through to the loud failure.
 $serviceAccount = "NT SERVICE\$serviceName"
-$startName = $null
-try {
-    $startName = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop).StartName
-}
-catch {
-    Write-Host "Get-CimInstance could not read the service's logon account ($($_.Exception.Message)) - falling back to sc.exe qc." -ForegroundColor Yellow
-    $qc = & sc.exe qc $serviceName 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        $match = $qc | Select-String -Pattern '^\s*SERVICE_START_NAME\s*:\s*(\S.*?)\s*$'
-        if ($match) { $startName = $match.Matches[0].Groups[1].Value }
-    }
-}
+$startName = Get-DarlingServiceLogonName $serviceName
 
 if ($startName) {
     if ($startName -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
@@ -554,8 +749,9 @@ elseif ($existing) {
 Could not determine which account service '$serviceName' logs on as, and it already existed before this run.
 Assuming the default virtual account would re-ACL darling.json around 'NT SERVICE\$serviceName' and strip the
 grant of whatever domain account or gMSA the service was re-homed to (#1802, #1823), locking it out of its own
-config on the next start - so this install stops here instead. Nothing was ACLed; the service is stopped with
-its binPath already updated.
+config on the next start - so this install stops here instead. darling.json was not re-ACLed (step 1b2 locked the
+install folder around the account the service already had); the service is stopped with its binPath already
+updated.
 
 Check the account, then re-run this script:
   sc.exe qc $serviceName
@@ -676,6 +872,15 @@ if ($failed.Count -gt 0) {
     Write-Host '  ...or move the install out of a world-readable folder such as one created directly under C:\.' -ForegroundColor Red
     Write-Host ''
 }
+
+# -- 4b2. Grant the service its access to the locked tree (#4034) ----------------------------------------
+# 1b2 locked the tree before anything ran from it, with no service to grant yet; sc.exe create has made the
+# account now, so this runs the same lock again with it, which adds the service's Modify grant (it extracts
+# pg-runtime into the tree) and re-verifies. After 4b on purpose: its files carry their own protected DACLs,
+# which the tree's ACEs do not touch. Before the first start on purpose: the extraction needs the grant.
+# upgrade-darling.ps1 runs the same function, so an install made before these steps is locked at its next
+# upgrade.
+Invoke-InstallTreeLock $serviceAccount
 
 # -- 4c. Firewall rules (#1771) --------------------------------------------------------------------
 # The service runs as an unprivileged virtual account that CANNOT create firewall rules. It used to try on
