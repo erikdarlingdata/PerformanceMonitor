@@ -147,3 +147,120 @@ public sealed class McpToolGuideHeadsSqlTailDurationTrendTests
         Assert.DoesNotContain("Lite has one tier", served.Tail!, StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for the "SqlTail" lane's third drop: <c>get_query_store_health</c>, a twin on both
+/// products (D6) whose original description was already byte-identical on Darling and Lite, so its tail is
+/// too. Follows the pattern in <see cref="McpToolGuideHeadsHealthParserTests"/>.
+/// </summary>
+public sealed class McpToolGuideHeadsSqlTailQueryStoreHealthTests
+{
+    /// <summary>The per-tool guardrail phrase the head must state.</summary>
+    private static readonly string[] HeadFacts =
+    [
+        "READ_WRITE->READ_ONLY after the storage cap = the classic failure",
+        "ALL (2016/17 default) churns most",
+        "AUTO (2019+ default) skips minor ones",
+        "CUSTOM tunes AUTO",
+        "NONE stops new capture",
+        "wait_stats_capture_mode: ON default, OFF empties per-query waits",
+        "null on either: predates the rung, or pre-2017 engine for wait_stats - never OFF",
+        "No verdict rendered",
+        "No server rows = unavailable",
+        "an unmatched database_name answers database_count 0",
+        "LATEST IS A TIME: captured_at is the newest hourly capture",
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        var served = McpToolGuideTests.Served("get_query_store_health");
+        Assert.NotNull(served.Tail);
+        Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+        Assert.True(served.Served.Length <= 620, $"served head {served.Served.Length} is over the 620 target");
+        Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"get_query_store_health.{p.Parameter}: {p.Length} > 200"));
+
+        foreach (var fact in HeadFacts)
+        {
+            Assert.Contains(fact, served.Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>D4: the two issue-number references (#3796 on the V137/v64 clause, #3797 on the
+    /// get_query_store_clutter cross-reference) and the one anecdote (a specific production store's plan count,
+    /// the story of why the V137 rung was added) come off the wire; the rule the anecdote sat beside — ALL
+    /// churns plans on an ad hoc workload, and was the 2016/2017 default — survives in the tail untouched.</summary>
+    [Fact]
+    public void QueryStoreHealth_D4Removals_DropTheIssueRefsAndAnecdote_KeepTheRules()
+    {
+        var served = McpToolGuideTests.Served("get_query_store_health");
+        var wire = served.Served + served.Tail;
+        Assert.DoesNotContain("#3796", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("#3797", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("755", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("42 servers", wire, StringComparison.Ordinal);
+        Assert.DoesNotContain("production store class", wire, StringComparison.Ordinal);
+        Assert.Contains("ALL was the engine default on SQL Server 2016 and 2017.", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("by get_query_store_clutter as its churn", served.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D6: the original description was already byte-identical on Darling and Lite, so the tail (the
+    /// full original prose, D4 removals aside) opens and carries its central claim unchanged; the generic
+    /// cross-SKU pin
+    /// (<see cref="McpToolGuideTests.EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads"/>)
+    /// covers the head, and Lite's own copy of this class pins Lite's served tail directly.</summary>
+    [Fact]
+    public void QueryStoreHealth_TailKeepsOriginalOpeningSentence_AndCentralClaim()
+    {
+        var darlingTail = McpToolGuideTests.Served("get_query_store_health").Tail!;
+        Assert.Contains("Gets per-database Query Store health", darlingTail, StringComparison.Ordinal);
+        Assert.Contains("CAPTURE MODE IS THE PLAN-CHURN KNOB", darlingTail, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #3898 D3 head pins for the "SqlTail" lane's fourth drop: <c>get_default_trace_events</c>, a twin on both
+/// products (D6) whose Darling description (866 served chars) crossed the 800-char conversion line; Lite's own
+/// description (702) converts alongside it per D6. Follows the pattern in
+/// <see cref="McpToolGuideHeadsHealthParserTests"/>. No D4 removals: the original text on either product carried
+/// no issue references or anecdotes.
+/// </summary>
+public sealed class McpToolGuideHeadsSqlTailDefaultTraceTests
+{
+    /// <summary>The per-tool guardrail phrase the head must state.</summary>
+    private static readonly string[] HeadFacts =
+    [
+        "file auto-grow/shrink stalls over 1 second",
+        "ErrorLog writes at severity 16+ (a null severity also counts)",
+        "over an event_time window ending at as_of, newest first",
+        "Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes",
+        "Empty means none passed the gate in this window",
+        "not_collected means this engine has no default trace (Azure SQL Database)",
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        var served = McpToolGuideTests.Served("get_default_trace_events");
+        Assert.NotNull(served.Tail);
+        Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+        Assert.True(served.Served.Length <= 620, $"served head {served.Served.Length} is over the 620 target");
+        Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"get_default_trace_events.{p.Parameter}: {p.Length} > 200"));
+
+        foreach (var fact in HeadFacts)
+        {
+            Assert.Contains(fact, served.Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Darling's tail keeps its own original sentence tying event_time to get_collection_log and
+    /// list_servers, which Lite's twin never carried (Lite has no fleet-wide collection_time/last_collection
+    /// concept on this surface); Lite's own tail is pinned in <c>Lite.Tests</c>.</summary>
+    [Fact]
+    public void DefaultTraceEvents_DarlingTailKeepsItsOwnCrossToolSentence()
+    {
+        var served = McpToolGuideTests.Served("get_default_trace_events");
+        Assert.Contains("so it lines up directly against get_collection_log's collection_time and list_servers' last_collection", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("intentionally excluded here to avoid double-counting", served.Tail!, StringComparison.Ordinal);
+    }
+}

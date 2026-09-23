@@ -1,5 +1,5 @@
 # McpDefaultTraceTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_default_trace_events 702
+tool get_default_trace_events 593
 param get_default_trace_events.as_of 167
 param get_default_trace_events.hours_back 41
 param get_default_trace_events.limit 48
