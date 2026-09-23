@@ -267,6 +267,61 @@ function Format-FrameworkVersionList([string[]]$versions) {
     return (($versions | Sort-Object -Unique) -join ', ')
 }
 
+# Lock the install tree against ordinary users (#4034). The tree holds the service exe, its DLLs and pg-runtime,
+# all of which run as the service account, and the scripts an administrator runs elevated. A folder created
+# directly under C:\ - the documented location - inherits "Authenticated Users: Modify" from the volume root,
+# so any local user could replace a binary and run code as the service. This stops the root inheriting, removes
+# every broad principal (Authenticated Users, Users, Everyone, INTERACTIVE), and grants back exactly two things:
+# BUILTIN\Users read and execute, and the service account Modify, which it held before through Authenticated
+# Users and still needs because it extracts pg-runtime into the tree. SYSTEM and Administrators keep the full
+# control the volume root gave them. Children take the new ACEs by inheritance; a file with its own protected
+# DACL (darling.json, the credential blobs) keeps it. Returns what is still open as strings, one per path; an
+# empty result means no directory and no file under the root lets a broad principal write. Kept byte-identical
+# in install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallTreeLockTests compares.
+function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $broad = @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::WorldSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)))
+    $usersSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+    $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+
+    # icacls, not Set-Acl: Set-Acl on what Get-Acl read writes the SACL too, which needs SeSecurityPrivilege, and
+    # icacls is what the warnings tell an operator to run by hand, so the fix and the remediation are the same
+    # commands. /inheritance:d stops inheriting and keeps what the volume root gave as explicit ACEs, so SYSTEM
+    # and Administrators keep full control. SIDs, not names, so an account name with a space needs no quoting.
+    $steps = @(
+        @('/inheritance:d'),
+        (@('/remove:g') + @($broad | ForEach-Object { "*$($_.Value)" })),
+        @('/grant', "*$($usersSid.Value):(OI)(CI)RX", '/grant', "*$($serviceSid.Value):(OI)(CI)M"))
+    foreach ($step in $steps) {
+        $output = & icacls.exe $root @step 2>&1
+        if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
+    }
+
+    # VERIFY rather than assume (#1957): read every directory and file back. A write right includes the generic
+    # bits (GENERIC_ALL 0x10000000, GENERIC_WRITE 0x40000000) an inherit-only ACE can carry.
+    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+    $open = @()
+    if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
+    $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
+    foreach ($target in $targets) {
+        $rules = (Get-Acl -LiteralPath $target.FullName).GetAccessRules($true, $true, $sidType)
+        foreach ($rule in $rules) {
+            if ($rule.AccessControlType -eq $allow -and (([int64]$rule.FileSystemRights) -band $write) -ne 0 -and $broad -contains $rule.IdentityReference) {
+                $open += $target.FullName
+                break
+            }
+        }
+    }
+    return $open
+}
+
 # -- 1. Environment checks ------------------------------------------------------------------------
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -674,6 +729,39 @@ if ($failed.Count -gt 0) {
     Write-Host "    icacls `"<file>`" /remove:g `"BUILTIN\Users`"" -ForegroundColor Yellow
     Write-Host "    icacls `"<file>`" /grant `"$serviceAccount`:(F)`"" -ForegroundColor Yellow
     Write-Host '  ...or move the install out of a world-readable folder such as one created directly under C:\.' -ForegroundColor Red
+    Write-Host ''
+}
+
+# -- 4b2. Lock the install tree (#4034) -------------------------------------------------------------
+# 4b closes READ access to the secrets; this closes WRITE access to everything that runs. See
+# Lock-DarlingInstallTree above. After 4b on purpose: its files carry their own protected DACLs, which the
+# tree's new ACEs do not touch. Before the first start on purpose: the service extracts pg-runtime into the
+# tree, under the Modify grant made here. upgrade-darling.ps1 runs the same function, so an install made
+# before this step is locked at its next upgrade. Best-effort like 4b: a failure warns loudly rather than
+# aborting an otherwise good install.
+$stillOpen = @()
+try {
+    $stillOpen = @(Lock-DarlingInstallTree $root $serviceAccount)
+}
+catch {
+    $stillOpen = @("$root ($($_.Exception.Message))")
+}
+if ($stillOpen.Count -eq 0) {
+    Write-Host "Locked the install folder: only SYSTEM, Administrators and the service account can change what runs from $root." -ForegroundColor Green
+}
+else {
+    Write-Host ''
+    Write-Host 'SECURITY WARNING: ordinary users can still write to these paths in the install folder:' -ForegroundColor Red
+    foreach ($p in ($stillOpen | Select-Object -First 20)) { Write-Host "  $p" -ForegroundColor Red }
+    if ($stillOpen.Count -gt 20) { Write-Host "  ...and $($stillOpen.Count - 20) more." -ForegroundColor Red }
+    Write-Host '  The service and its PostgreSQL run from here as the service account, so anyone who can replace a' -ForegroundColor Red
+    Write-Host '  binary can run code as that account. Fix it from an elevated prompt, then re-run this script:' -ForegroundColor Red
+    Write-Host "    icacls `"$root`" /inheritance:d" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant `"$serviceAccount`:(OI)(CI)M`"" -ForegroundColor Yellow
+    Write-Host '  A path BELOW the folder that grants access itself keeps that through the lock; reset it to the' -ForegroundColor Red
+    Write-Host '  folder''s permissions with:' -ForegroundColor Red
+    Write-Host '    icacls "<path>" /reset /T /C' -ForegroundColor Yellow
     Write-Host ''
 }
 

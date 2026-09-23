@@ -521,6 +521,104 @@ function Get-CimInstance {
         Assert.Equal(installer, service, ignoreCase: true);
     }
 
+    /// <summary>
+    /// #4034: <c>Lock-DarlingInstallTree</c> ships twice, in install-darling.ps1 (a fresh install) and
+    /// upgrade-darling.ps1 (every install made before it existed, closed at its next upgrade). Neither script can
+    /// import the other, since each runs from wherever its zip was extracted, so the copies are compared byte for
+    /// byte: a fix made to one and not the other would leave half the installs open.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ShipsIdenticallyInTheInstallAndUpgradeScripts()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+
+        Assert.Equal(InstallTreeLockBlock(InstallScript), InstallTreeLockBlock(upgrade));
+    }
+
+    /// <summary>
+    /// #4034, executed as shipped against a real tree. A folder created directly under the system drive root
+    /// inherits "Authenticated Users: Modify" from it (the documented install location's hole). After the lock the
+    /// root must be protected and grant ordinary users read and execute only, the service account Modify (it
+    /// extracts pg-runtime into the tree), and every child that inherits must follow. A file with its own
+    /// protected DACL (darling.json, as step 4b leaves it) keeps it. A child that grants a broad principal write
+    /// EXPLICITLY, behind its own protection, is not something a folder lock can override, so it must come back
+    /// in the result for the warning to name, not be silently passed over.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ClosesTheInheritedGrant_KeepsProtectedFiles_AndReportsWhatItCannotClose()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4034-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path "$root\pg-runtime\pgsql\bin", "$root\planted" -Force | Out-Null
+                Set-Content -LiteralPath "$root\pg-runtime\pgsql\bin\postgres.exe" -Value 'x'
+                Set-Content -LiteralPath "$root\darling.json" -Value '{}'
+                Set-Content -LiteralPath "$root\planted\evil.dll" -Value 'x'
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+                $interactive = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
+                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                $service = (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType)
+                $j = New-Object System.Security.AccessControl.FileSecurity
+                $j.SetAccessRuleProtection($true, $false)
+                $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+                $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactive, 'Read', 'Allow')))
+                Set-Acl -LiteralPath "$root\darling.json" -AclObject $j
+                $p = New-Object System.Security.AccessControl.DirectorySecurity
+                $p.SetAccessRuleProtection($true, $false)
+                $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+                $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+                Set-Acl -LiteralPath "$root\planted" -AclObject $p
+
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                'open=' + (($open | ForEach-Object { $_.Substring($root.Length) } | Sort-Object) -join ';')
+
+                function Rules($path) { (Get-Acl -LiteralPath $path).GetAccessRules($true, $true, $sidType) }
+                $rootAcl = Get-Acl -LiteralPath $root
+                'protected=' + $rootAcl.AreAccessRulesProtected
+                'authenticatedUsers=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $auth }).Count
+                'usersRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $users } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'serviceRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $service } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'postgresServiceInherited=' + @(Rules "$root\pg-runtime\pgsql\bin\postgres.exe" | Where-Object { $_.IdentityReference -eq $service -and $_.IsInherited }).Count
+                'jsonProtected=' + (Get-Acl -LiteralPath "$root\darling.json").AreAccessRulesProtected
+                'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
+            }
+            finally {
+                # The test user owns every object here and so keeps WRITE_DAC: reset to inherited, then delete.
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains(@"open=\planted;\planted\evil.dll", answers);
+        Assert.Contains("protected=True", answers);
+        Assert.Contains("authenticatedUsers=0", answers);
+        Assert.Contains("usersRights=ReadAndExecute, Synchronize", answers);
+        Assert.Contains("serviceRights=Modify, Synchronize", answers);
+        Assert.Contains("postgresServiceInherited=1", answers);
+        Assert.Contains("jsonProtected=True", answers);
+        Assert.Contains("jsonInteractive=Read, Synchronize", answers);
+    }
+
+    /// <summary>The #4034 block, its explaining comment included, exactly as a script ships it.</summary>
+    private static string InstallTreeLockBlock(string script)
+    {
+        var start = script.IndexOf("# Lock the install tree against ordinary users (#4034).", StringComparison.Ordinal);
+        Assert.True(start >= 0, "a Darling script no longer carries the #4034 install-tree lock");
+        var function = script.IndexOf("function Lock-DarlingInstallTree", start, StringComparison.Ordinal);
+        ExtractBracedBlockAt(script, script.IndexOf('{', function), out var end);
+        return script.Substring(start, end - start + 1);
+    }
+
     /// <summary>Returns the single line of <paramref name="script"/> containing <paramref name="marker"/>,
     /// verbatim — so a composition can be executed as shipped instead of retyped into a probe.</summary>
     private static string ExtractLine(string script, string marker)
