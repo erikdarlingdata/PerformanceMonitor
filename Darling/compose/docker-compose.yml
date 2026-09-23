@@ -20,9 +20,9 @@ services:
     image: timescale/timescaledb:latest-pg17
     restart: unless-stopped
     # #3899: pg_stat_statements, for the store's OWN statement statistics (get_store_query_stats: which of
-    # the store's queries cost the most). In compose the service, the web dashboard and MCP all connect as the
-    # darling login, so the ranking has no per-surface role split here; the statements themselves still name
-    # the query. On the command line so it takes effect on an existing volume too, with timescaledb kept in the
+    # the store's queries cost the most). The service collects as the darling login, and the web dashboard and
+    # MCP connect as the viewer and mcp roles it provisions here (#3914), so the ranking splits by surface as it
+    # does on a managed store. On the command line so it takes effect on an existing volume too, with timescaledb kept in the
     # list. The command line outranks the image's postgresql.conf AND any ALTER SYSTEM, so this line IS the
     # store's preload list: to preload another library, add it here (an ALTER SYSTEM or conf edit of
     # shared_preload_libraries is silently ignored while this line is present). track_utility=off keeps
@@ -30,6 +30,9 @@ services:
     # extension and its reader functions itself.
     command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off"]
     environment:
+      # darling is this store's bootstrap superuser, which is how the service knows the store is its own and
+      # provisions the least-privilege admin/viewer/mcp roles on it (#3914). The service's connection string in
+      # secrets/store_connection must log in as this user.
       POSTGRES_USER: darling
       POSTGRES_DB: darling
       POSTGRES_PASSWORD_FILE: /run/secrets/store_password
@@ -56,6 +59,12 @@ services:
         condition: service_healthy
     volumes:
       - ./darling.json:/config/darling.json:ro
+      # #3914: the generated passwords of the admin/viewer/mcp roles the service provisions on the store above,
+      # one owner-only file each. The volume keeps them across a recreated container; without it they are
+      # regenerated and re-applied to the roles on every recreation, which works but re-keys them each time.
+      # `docker compose exec darling cat /var/lib/darling/credentials/pg-admin-credential` shows the admin
+      # password, for connecting a Darling Viewer or psql to the store as admin rather than as the owner.
+      - darling-credentials:/var/lib/darling/credentials
     secrets:
       # One file per secret; darling.json references them as file:/run/secrets/<name> (#1804) —
       # including the whole store connection string, since its password lives inside it.
@@ -74,6 +83,7 @@ services:
 
 volumes:
   darling-store:
+  darling-credentials:
 
 secrets:
   store_password:

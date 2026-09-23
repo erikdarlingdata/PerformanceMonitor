@@ -25,9 +25,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// The store's OWN per-statement timings as an MCP read (#3899): which statements the monitoring store spends
 /// its time on, attributed to the role that ran them. It exists for one question the product could not answer
 /// before, "the web viewer / MCP tools are slow — which query?", and its role split is what answers it on a
-/// MANAGED store, where each surface has its own login (<see cref="RoleIdentities"/> says which is which). A
-/// compose or bring-your-own store runs its web and MCP hosts as the owner login, so the answer says so rather
-/// than filing their statements under the service. Reads the two SECURITY DEFINER functions
+/// managed or compose store, where each surface has its own login (<see cref="RoleIdentities"/> says which is
+/// which). A bring-your-own store runs a web or MCP host with no login of its own (#3914:
+/// <c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>) as the owner, so the answer says so
+/// rather than filing its statements under the service. Reads the two SECURITY DEFINER functions
 /// <see cref="StoreStatementStats"/> creates; a store without them, or without the library loaded, answers
 /// <c>precondition</c> with the remedy, decided from the catalog before the read rather than from an error
 /// after it.
@@ -58,13 +59,13 @@ public sealed class DarlingMcpStoreQueryStatsTools
             ["shared_blks_read"] = "shared_blks_read",
         };
 
-    /// <summary>The <c>role</c> values, and who connects as each on a MANAGED store. The viewer login is not
+    /// <summary>The <c>role</c> values, and who connects as each on a managed or compose store. The viewer login is not
     /// only the web viewer: remote Darling Viewer seats default to it, and the service runs every custom-alert
     /// rule's metric on a viewer-role pool.</summary>
     internal static readonly IReadOnlyDictionary<string, string> RoleIdentities =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["owner"] = "the service: collection, maintenance and alerting (on a compose or bring-your-own store, also the web viewer and MCP tools)",
+            ["owner"] = "the service: collection, maintenance and alerting (and a bring-your-own store's web viewer or MCP tools when they have no login of their own)",
             [DarlingManagedPostgres.AdminRoleName] = "the Darling Viewer on the service's machine and its Settings window, and any remote seat given the admin role",
             [DarlingManagedPostgres.ViewerRoleName] = "the web viewer, remote read-only Darling Viewer seats, and the service's custom-alert rule evaluation",
             [DarlingManagedPostgres.McpRoleName] = "MCP tools",
@@ -79,8 +80,8 @@ public sealed class DarlingMcpStoreQueryStatsTools
     /// What the tool needs to know before it reads, from the catalog alone, so every state a store can be in is
     /// named rather than raised: whether the reader exists and this role may run it, the installed extension
     /// version (none when it is not installed, or was dropped after the reader was built), whether the library
-    /// is loaded, whether utility statements are tracked, and whether this connection IS the store owner (a
-    /// compose or bring-your-own store's web and MCP hosts). Loaded is read from <c>pg_settings</c>, where the
+    /// is loaded, whether utility statements are tracked, and whether this connection IS the store owner (a web
+    /// or MCP host on the owner login, #3914). Loaded is read from <c>pg_settings</c>, where the
     /// module's own settings appear only once it is loaded, readable by any role (see
     /// <see cref="StoreStatementStats.ProbeSql"/>). <c>has_function_privilege</c> over a missing function is
     /// null, not an error, because <c>to_regprocedure</c> answers null and the function is strict.
@@ -161,7 +162,7 @@ ORDER BY ranked.{orderColumn} DESC NULLS LAST, ranked.queryid
 LIMIT $2";
 
     [McpServerTool(Name = "get_store_query_stats"), Description(
-        "Ranks the monitoring STORE's own SQL statements by server-side cost, from pg_stat_statements in the store, not a monitored server's queries. Answers 'the web viewer / MCP tools are slow: which query?'. Each statement is attributed to the role that ran it; on a managed store viewer = the web viewer, remote read-only Viewer seats and custom-alert rule evaluation, mcp = MCP tools, admin = the local Darling Viewer, owner = the service (a compose or bring-your-own store runs its web viewer and MCP tools as owner too). by_role gives each role's share of the recorded time; statements lists the top statements with calls, total/mean/max ms, rows and block I/O, the text normalized ($1, $2) and cut to a preview unless full_text. Figures are cumulative since stats_since and server-side only; the note says what they leave out. Answers status precondition, with the remedy, when pg_stat_statements is missing, not loaded, too old or not granted. No server_name: the store is the subject.")]
+        "Ranks the monitoring STORE's own SQL statements by server-side cost, from pg_stat_statements, not a monitored server's queries. Answers 'the web viewer / MCP tools are slow: which query?'. Each statement is attributed to the role that ran it; on a managed or compose store viewer = the web viewer, remote read-only Viewer seats and custom-alert rule evaluation, mcp = MCP tools, admin = the local Darling Viewer, owner = the service (and a bring-your-own store's web viewer and MCP tools without logins of their own). by_role gives each role's share of the recorded time; statements lists the top statements with calls, total/mean/max ms, rows and block I/O, the text normalized ($1, $2) and cut to a preview unless full_text. Figures are cumulative since stats_since and server-side only; the note says what they leave out. Answers status precondition, with the remedy, when pg_stat_statements is missing, not loaded, too old or not granted. No server_name: the store is the subject.")]
     public static async Task<string> GetStoreQueryStats(
         NpgsqlDataSource postgres,
         [Description("Only statements run by this role: owner, admin, viewer or mcp. Omit for every role.")] string? role = null,
@@ -385,12 +386,12 @@ LIMIT $2";
 
         if (state.ConnectedAsOwner)
         {
-            parts.Add("This read connected as the store owner, which is how a compose or bring-your-own store runs its web viewer and MCP tools: their statements are counted under owner, together with the service's own. Only a managed store gives them their own viewer and mcp roles.");
+            parts.Add("This read connected as the store owner, as a bring-your-own store's web viewer and MCP tools do until postgres.webConnectionString and postgres.mcpConnectionString give them logins of their own: their statements are counted under owner, together with the service's own.");
         }
 
         if (hiddenText > 0)
         {
-            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster; on a compose or bring-your-own store the web viewer and MCP tools run as that login (#3914), so on a cluster shared with other applications leave it hidden.");
+            parts.Add($"{hiddenText.ToString(CultureInfo.InvariantCulture)} statement(s) read as {InsufficientPrivilegeText}, with no query_id: the store owner, whose rights the reader runs with, is neither a superuser nor a member of pg_read_all_stats. Granting pg_read_all_stats to the owner role shows their text, and also lets that login read every session's query text and every database's statements on the cluster, and a bring-your-own store's web viewer and MCP tools run as that login unless they have logins of their own (#3914), so on a cluster shared with other applications leave it hidden.");
         }
 
         if (state.ExtensionVersion is { } version

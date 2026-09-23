@@ -101,8 +101,9 @@ public sealed class DarlingConfig
     /// (<see cref="!:DarlingManagedRoles.ReassertComposeStatementTimeoutAsync"/>). Three consequences a
     /// reader of this property should not have to rediscover:</para>
     ///
-    /// <para>1. <b>Re-assertion is managed-mode + Windows only</b>, mirroring the gate on provisioning,
-    /// which is where these roles get CREATED. A BYO store provisions them out-of-band through
+    /// <para>1. <b>Re-assertion happens only where the service provisioned the roles</b> — managed mode on
+    /// Windows, and the compose distribution's own store (#3914) — mirroring the gate on provisioning, which is
+    /// where these roles get CREATED. Any other BYO store provisions them out-of-band through
     /// <c>tools/provision-roles.sql</c> and names them itself, so there the old restart-scoped caveat still
     /// holds — and an operator has to re-run that script by hand.</para>
     ///
@@ -355,6 +356,22 @@ public sealed class DarlingConfig
             {
                 problems.Add($"postgres.port must be between 1 and 65535 (got {Postgres.Port}).");
             }
+
+            /* #3914: same reasoning as connectionString above — managed mode connects the web dashboard and the
+               MCP server as its own viewer and mcp roles, so a hand-set login would silently lose. */
+            foreach (var (setting, value) in new[]
+            {
+                ("postgres.webConnectionString", Postgres.WebConnectionString),
+                ("postgres.mcpConnectionString", Postgres.McpConnectionString),
+            })
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    problems.Add($"postgres.managed is true AND {setting} is set — managed mode connects the web " +
+                        "dashboard and the MCP server as its own viewer and mcp roles; remove it, or remove \"managed\" " +
+                        "to use your own PostgreSQL.");
+                }
+            }
         }
         else if (string.IsNullOrWhiteSpace(Postgres.ConnectionString))
         {
@@ -446,6 +463,25 @@ public sealed class PostgresConfig
 {
     [JsonPropertyName("connectionString")]
     public string ConnectionString { get; set; } = "";
+
+    /// <summary>
+    /// The web dashboard's store login on a store the service does not manage (#3914), normally the <c>viewer</c>
+    /// role <c>tools/provision-roles.sql</c> creates. Same forms as <see cref="ConnectionString"/>: a literal, or an
+    /// <c>env:NAME</c> / <c>file:/path</c> reference (#1804). Resolved when the web host starts, not at parse, so an
+    /// unreadable reference keeps the dashboard down with the reason logged instead of stopping collection. Unset:
+    /// the compose distribution's own store uses the <c>viewer</c> role the service provisions there, and any other
+    /// store the owner <see cref="ConnectionString"/>, with a startup warning naming what that gives up. Managed mode
+    /// derives its own; setting this there is a validation error.
+    /// </summary>
+    [JsonPropertyName("webConnectionString")]
+    public string? WebConnectionString { get; set; }
+
+    /// <summary>
+    /// The MCP server's store login on a store the service does not manage (#3914), normally the <c>mcp</c> role
+    /// <c>tools/provision-roles.sql</c> creates. Everything <see cref="WebConnectionString"/> says, for the MCP host.
+    /// </summary>
+    [JsonPropertyName("mcpConnectionString")]
+    public string? McpConnectionString { get; set; }
 
     /// <summary>Run the bundled, service-managed PostgreSQL instead of pointing at an existing one.</summary>
     [JsonPropertyName("managed")]

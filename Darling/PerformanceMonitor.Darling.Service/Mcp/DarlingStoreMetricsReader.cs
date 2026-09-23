@@ -215,8 +215,8 @@ WHERE name = $1";
     /// <c>pg_has_role</c> tests for it: membership in the database owner (which sees everything) and, per
     /// job, membership in that job's owner. From those the caller knows whether the count that follows is a
     /// census, a partial census, or a zero the view produced by construction — and the note says which, in
-    /// so many words, naming the role. On a bring-your-own store whose connection string is the owner role
-    /// the count IS the census and the flag becomes self-proving; on a managed store the block says it
+    /// so many words, naming the role. On a bring-your-own store whose MCP host connects as the owner (no
+    /// postgres.mcpConnectionString, #3914) the count IS the census and the flag becomes self-proving; on a managed store the block says it
     /// cannot see, and says who can, which is the sentence that would have ended the postmortem in a minute.</para>
     ///
     /// <para><b>The population half rides in the same statement, from the UNFILTERED view.</b> A zero is

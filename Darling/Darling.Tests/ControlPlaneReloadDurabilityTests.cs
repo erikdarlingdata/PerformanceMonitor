@@ -159,8 +159,10 @@ public sealed class ControlPlaneReloadDurabilityTests
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(SourceText("DarlingManagedRoles.cs"));
 
-        var member = code.IndexOf("public static async Task<int> EnsureProvisionedAsync(", StringComparison.Ordinal);
-        Assert.True(member > 0, "EnsureProvisionedAsync could not be located, so this check proves nothing");
+        /* #3914: the read and the return moved from EnsureProvisionedAsync into the core it shares with the
+           compose store's provisioning, so both callers report the sentinel from the one place. */
+        var member = code.IndexOf("private static async Task<int> ProvisionRolesAsync(", StringComparison.Ordinal);
+        Assert.True(member > 0, "ProvisionRolesAsync could not be located, so this check proves nothing");
 
         var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', member)));
 
@@ -172,6 +174,21 @@ public sealed class ControlPlaneReloadDurabilityTests
             "private static async Task<int?> ReadComposeStatementTimeoutAsync(",
             code,
             StringComparison.Ordinal);
+
+        /* Both entry points hand back what the core returned, not a value of their own: the managed one
+           returns it directly, and the compose one carries it into the verdict the worker seeds its reload
+           baseline from. */
+        string Body(string signature)
+        {
+            var at = code.IndexOf(signature, StringComparison.Ordinal);
+            Assert.True(at > 0, $"'{signature}' could not be located");
+            return CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf(')', at)));
+        }
+
+        Assert.Contains("return await ProvisionRolesAsync(", Body("public static async Task<int> EnsureProvisionedAsync("), StringComparison.Ordinal);
+        var compose = Body("public static async Task<ComposeStoreProvisioning> EnsureComposeStoreProvisionedAsync(");
+        Assert.Contains("var applied = await ProvisionRolesAsync(", compose, StringComparison.Ordinal);
+        Assert.Contains("ComposeStoreProvisioning.Succeeded(applied,", compose, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -182,10 +199,14 @@ public sealed class ControlPlaneReloadDurabilityTests
     /// Swept over the file rather than pinned at the one line, because the failure mode to guard is the
     /// next one being added.
     /// </summary>
-    [Fact]
-    public void RoleProvisioning_HasNoUnfilteredCatch()
+    [Theory]
+    [InlineData("DarlingManagedRoles.cs")]
+    /* #3914: the compose store's provisioning entry and the hosts' login resolution live beside it, and
+       swallowing a cancellation there would publish a verdict for a start that is shutting down. */
+    [InlineData("DarlingStoreLogins.cs")]
+    public void RoleProvisioning_HasNoUnfilteredCatch(string file)
     {
-        var source = SourceText("DarlingManagedRoles.cs");
+        var source = SourceText(file);
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
 
         /* The lookahead has to sit immediately after the ')' and swallow the whitespace ITSELF. Written as
@@ -207,7 +228,7 @@ public sealed class ControlPlaneReloadDurabilityTests
 
         Assert.True(
             offenders.Length == 0,
-            $"DarlingManagedRoles has {offenders.Length} unfiltered catch(Exception) at line(s) "
+            $"{file} has {offenders.Length} unfiltered catch(Exception) at line(s) "
             + $"{string.Join(", ", offenders)} — an unfiltered catch here swallows cancellation and then "
             + "writes a guessed statement_timeout onto the login roles");
     }

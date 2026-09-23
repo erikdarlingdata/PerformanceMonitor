@@ -27,9 +27,9 @@ namespace Darling.Tests;
 /// which share seven of their call sites with that path and cannot share its number.
 ///
 /// <para><b>Three constants, because the failure modes differ rather than the magnitudes.</b>
-/// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the twenty-six un-retried bootstrap
-/// sites; <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/> the two inside the
-/// bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
+/// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the un-retried bootstrap sites
+/// (<see cref="ExpectedBootstrapSites"/> of them); <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/>
+/// the two inside the bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
 /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the ten on the collection loop's serial
 /// thread, where ten sequential commands have to fit inside one watchdog window.</para>
 ///
@@ -125,7 +125,12 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingStoreUpgrade.cs", "ReadExtversionAsync", 1, 0, 0, 0),
         ("DarlingStoreUpgrade.cs", "ListConnectableDatabasesAsync", 1, 0, 0, 0),
         ("DarlingStoreUpgrade.cs", "VerifySentinelReadAsync", 2, 0, 0, 0),
-        ("DarlingManagedRoles.cs", "EnsureProvisionedAsync", 1, 0, 0, 0),
+        /* #3914: the provisioning batch moved out of EnsureProvisionedAsync into the core it now shares with
+           the compose store's provisioning; same single command, same deadline. */
+        ("DarlingManagedRoles.cs", "ProvisionRolesAsync", 1, 0, 0, 0),
+        /* #3914: the compose store's one pre-read (the login's bootstrap-superuser status and the three role
+           names' markers), run once at startup before anything is written. */
+        ("DarlingManagedRoles.cs", "ReadComposeStoreFactsAsync", 1, 0, 0, 0),
         /* #3910: the stored-verifier read that decides which role passwords are re-asserted. */
         ("DarlingManagedRoles.cs", "ReadStoredRoleSecretsAsync", 1, 0, 0, 0),
         ("DarlingManagedRoles.cs", "ReadComposeStatementTimeoutAsync", 1, 0, 0, 0),
@@ -174,7 +179,7 @@ public sealed class StartupCommandTimeoutTests
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedBootstrapSites = 32;
+    private const int ExpectedBootstrapSites = 33;
 
     private const int ExpectedConnectProbeSites = 2;
 
@@ -650,13 +655,13 @@ public sealed class StartupCommandTimeoutTests
     /// <c>.Storage</c> and <c>.Viewer</c> are Npgsql-store-only projects; <c>.Service</c> is not, and it
     /// builds commands against monitored PostgreSQL targets in the same files.
     ///
-    /// <para>All thirty sites in the members above are STORE commands, classified individually: twenty-six
-    /// against the <c>darling</c> store (six on a data-source connection, twenty on a non-pooled
-    /// <c>NpgsqlConnection</c> built from a connection-string builder), two against the MAINTENANCE
-    /// database <c>postgres</c> on the same cluster (the connect probe), and two against each
-    /// TimescaleDB-carrying database on the store cluster (the extension bridge). None is a monitored
-    /// target: no <c>SqlConnection</c>, no <c>TargetProviders.For</c>, and no use of a
-    /// <c>runtime.Target</c> connection anywhere in the thirty.</para>
+    /// <para>Every site in the members above is a STORE command, classified individually: against the
+    /// <c>darling</c> store (on a data-source connection, or on a non-pooled <c>NpgsqlConnection</c> built from
+    /// a connection-string builder), against the MAINTENANCE database <c>postgres</c> on the same cluster (the
+    /// connect probe), or against each TimescaleDB-carrying database on the store cluster (the extension
+    /// bridge). None is a monitored target: no <c>SqlConnection</c>, no <c>TargetProviders.For</c>, and no use
+    /// of a <c>runtime.Target</c> connection anywhere among them. No count here: the census above owns the
+    /// numbers, and a numeral in this sentence went stale the first time a site was added.</para>
     ///
     /// <para>The classification is encoded as a NEGATIVE against the two real target shapes, so a future
     /// target command placed in one of these members fails asking for a decision rather than inheriting a
