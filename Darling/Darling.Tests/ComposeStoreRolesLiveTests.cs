@@ -12,6 +12,8 @@ using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,14 +32,19 @@ namespace Darling.Tests;
 /// #3914 on a real store: a cluster from the bundled runtime, initialized with <c>darling</c> as its bootstrap
 /// superuser — exactly the compose file's store, whose image runs <c>initdb --username $POSTGRES_USER</c>.
 /// <list type="bullet">
-/// <item><description>The compose store: a same-named role the service did not create is left alone (its
-/// password still works) and a superuser that is not the bootstrap one does not make the store the service's
+/// <item><description>The compose store: a cluster that also holds a database the service does not own is not the
+/// service's own, a same-named role the service did not create is left alone (its password still works) and a
+/// superuser that is not the bootstrap one does not make the store the service's
 /// own; then the service provisions the three roles, stamps its own marker, writes the credential files, and the
 /// REAL web and MCP hosts — started as in a container, with their config read from <c>DARLING_CONFIG</c> — build
 /// their store pools as <c>viewer</c> and <c>mcp</c>, with the statement_timeout backstop and the secret carve
 /// in force. The mcp role reads a collect relation created after provisioning (the continuous-aggregate case), an
-/// operator's own role keeps CONNECT, a second start re-keys nothing, and a lost credential file re-keys that
-/// role alone.</description></item>
+/// operator's own role keeps CONNECT, a second start re-keys nothing and takes back every attribute and membership
+/// someone gave the roles since, and a lost credential file re-keys that role alone.</description></item>
+/// <item><description>A start that does not provision: each host stays on its role with the credential an earlier
+/// start wrote, a credential the store no longer accepts keeps that surface down, only a surface with no trusted
+/// credential falls back to the owner, and a credential file ordinary users can read is regenerated, never
+/// read.</description></item>
 /// <item><description>Bring-your-own: the shipped <c>provision-roles.sql</c> runs clean, the two settings resolve
 /// through the host's own entry (a literal and a <c>file:</c> reference) to <c>viewer</c> and <c>mcp</c>, an
 /// unreadable reference keeps the surface down rather than handing it the owner, and running managed
@@ -76,6 +83,23 @@ public sealed class ComposeStoreRolesLiveTests
             var ct = timeout.Token;
             var owner = await BootMigratedAsync(cluster, ct);
             await using var ownerSource = NpgsqlDataSource.Create(owner);
+
+            /* 0. A cluster that also holds a database the service does not own is not the compose store, though the
+                  service logs in as its bootstrap superuser: that is an operator's own cluster (#3914 review, F2),
+                  and roles are cluster-wide. Nothing is created on it and nothing is written. */
+            await ExecAsync(owner, "CREATE DATABASE operator_app_3914;", ct);
+            var shared = await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, NullLogger.Instance, ct, credentials);
+            Assert.False(shared.Provisioned);
+            Assert.Equal(
+                "This cluster also holds the database 'operator_app_3914' that the service does not own, so it is not treated as the service's own and no roles were created on it.",
+                shared.NotProvisionedReason);
+            foreach (var role in Roles)
+            {
+                Assert.False(await RoleExistsAsync(owner, role, ct), $"{role} was created on a cluster that is not the service's own");
+            }
+
+            Assert.False(Directory.Exists(credentials));
+            await ExecAsync(owner, "DROP DATABASE operator_app_3914;", ct);
 
             /* 1. A same-named role the service did not create — here one tools/provision-roles.sql made — is left
                   alone: nothing is created, nothing is written, and its password still logs in. */
@@ -177,10 +201,33 @@ public sealed class ComposeStoreRolesLiveTests
             Assert.Equal("mcp", await HostPoolUserAsync(mcpHost, mcpPort, mcpLog, ct));
             Assert.DoesNotContain("connects to the store as the owner login", webLog.Joined + mcpLog.Joined, StringComparison.Ordinal);
 
-            /* 5. A second start re-keys nothing. */
+            /* 5. A second start re-keys nothing, and takes back what someone gave the roles it adopts since (#3914
+                  review, F5): attributes that outrank every grant, a membership that undoes the secret carve, one
+                  granted by a role other than the bootstrap superuser (a plain REVOKE leaves that in place), and one
+                  the member used to grant onward (a RESTRICT revoke would fail the whole batch on it). */
+            await ExecAsync(owner,
+                "ALTER ROLE viewer CREATEROLE CREATEDB;"
+                + " GRANT pg_read_all_data TO mcp;"
+                + " CREATE ROLE granter_3914 NOLOGIN; GRANT pg_monitor TO granter_3914 WITH ADMIN OPTION;"
+                + " SET ROLE granter_3914; GRANT pg_monitor TO admin; RESET ROLE;"
+                + " GRANT pg_signal_backend TO mcp WITH ADMIN OPTION;"
+                + " SET ROLE mcp; GRANT pg_signal_backend TO reporting; RESET ROLE;", ct);
+            await using (var poisoned = await OpenAsync(new NpgsqlConnectionStringBuilder(mcp.ConnectionString) { Pooling = false }.ConnectionString, ct))
+            {
+                /* The control: with pg_read_all_data the carve is gone, so this would have stayed that way. */
+                await ScalarAsync<long>(poisoned, "SELECT count(smtp_encrypted_password) FROM config.config_notification", ct);
+            }
+
             var second = new CapturingTestLogger();
             Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, second, ct, credentials)).Provisioned, second.Joined);
             Assert.Contains("Role passwords: unchanged", second.Joined, StringComparison.Ordinal);
+            Assert.False(await OwnerScalarAsync<bool>(
+                owner, "SELECT bool_or(rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls OR rolsuper) FROM pg_catalog.pg_roles WHERE rolname IN ('admin', 'viewer', 'mcp')", ct));
+            Assert.Equal(0L, await OwnerScalarAsync<long>(
+                owner, "SELECT count(*) FROM pg_catalog.pg_auth_members AS a JOIN pg_catalog.pg_roles AS m ON m.oid = a.member WHERE m.rolname IN ('admin', 'viewer', 'mcp')", ct));
+            Assert.False(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('reporting', 'pg_signal_backend', 'MEMBER')", ct));
+            await AssertLeastPrivilegeAsync(mcp.ConnectionString, "mcp", ct);
+            await AssertLeastPrivilegeAsync(web.ConnectionString, "viewer", ct);
 
             /* 6. A lost credential file (a container recreated without the volume) re-keys that role alone. */
             var viewerFile = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer"));
@@ -203,6 +250,116 @@ public sealed class ComposeStoreRolesLiveTests
             }
 
             Environment.SetEnvironmentVariable("DARLING_CONFIG", previousConfig);
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #3914 review, F1 and F6, on a real store. A start that does not provision the roles — refused here because the
+    /// service reaches the store as a superuser that is not its bootstrap one, or a collector that stood down first —
+    /// keeps each host on its role with the credential an earlier start wrote, through the hosts' own entry. A
+    /// credential the store no longer accepts keeps that surface down with the store's error; only a surface with no
+    /// trusted credential falls back to the owner, and says why; and a credential file ordinary users can read is
+    /// regenerated by the next provisioning, never read.
+    /// </summary>
+    [Fact]
+    public async Task AStartThatDoesNotProvision_KeepsEachSurfaceOnItsRole_WithAnEarlierStartsCredential_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-3914-earlier-");
+        var credentials = Path.Combine(root.FullName, "credentials");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            await using var ownerSource = NpgsqlDataSource.Create(owner);
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");
+            var postgres = new PostgresConfig { ConnectionString = owner };
+
+            /* An earlier start provisioned the roles and wrote their credential files. */
+            var earlier = new CapturingTestLogger();
+            Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, earlier, ct, credentials)).Provisioned, earlier.Joined);
+
+            /* 1. This start is refused. Each surface connects as its role with that credential, not as the owner. */
+            await ExecAsync(owner, "CREATE ROLE intruder LOGIN SUPERUSER PASSWORD 'Intruder3914';", ct);
+            await using (var intruder = NpgsqlDataSource.Create(Login(owner, "intruder", "Intruder3914")))
+            {
+                var refused = await DarlingStoreLogins.ProvisionComposeStoreAsync(intruder, owner, NullLogger.Instance, ct, credentials);
+                Assert.False(refused.Provisioned);
+                Assert.Equal(credentials, refused.CredentialDirectory);
+            }
+
+            var refusedLog = new CapturingTestLogger();
+            var web = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, refusedLog, ct);
+            var mcp = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, refusedLog, ct);
+            Assert.True(web is not null && mcp is not null, refusedLog.Joined);
+            await AssertLeastPrivilegeAsync(web!, "viewer", ct);
+            await AssertLeastPrivilegeAsync(mcp!, "mcp", ct);
+            Assert.Contains("The web dashboard connects to the store as the viewer role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
+            Assert.Contains("The MCP server connects to the store as the mcp role with the credential an earlier start provisioned", refusedLog.Joined, StringComparison.Ordinal);
+            Assert.DoesNotContain("connects to the store as the owner login", refusedLog.Joined, StringComparison.Ordinal);
+
+            /* 2. A collector that stood down before provisioning: the same. The verdict is the one a stand-down settles,
+                  pointed at this test's directory (DarlingStoreLoginsTests pins that a real one names the shipped
+                  directory). */
+            DarlingStoreLogins.PublishComposeStoreVerdict(DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(
+                "The collector stopped before it could provision the store's roles (Store: connection refused).", credentials));
+            var stoodDown = new CapturingTestLogger();
+            var afterStandDown = await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, stoodDown, ct);
+            Assert.True(afterStandDown is not null, stoodDown.Joined);
+            Assert.Equal("viewer", await CurrentUserAsync(afterStandDown!, ct));
+
+            /* 3. The role re-keyed by hand since: the store refuses that credential, and the surface stays down with the
+                  store's error. It never becomes the owner. mcp, untouched, still connects. */
+            await ExecAsync(owner, "ALTER ROLE viewer PASSWORD 'ChangedByHand3914';", ct);
+            var rekeyed = new CapturingTestLogger();
+            Assert.Null(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Web, postgres, rekeyed, ct));
+            Assert.Contains("did not accept the viewer login an earlier start provisioned", rekeyed.Joined, StringComparison.Ordinal);
+            Assert.Contains(PostgresErrorCodes.InvalidPassword, rekeyed.Joined, StringComparison.Ordinal);
+            Assert.NotNull(await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, NullLogger.Instance, ct));
+
+            /* 4. No trusted credential for a surface: that one falls back to the owner, with both reasons. */
+            var mcpFile = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("mcp"));
+            File.Delete(mcpFile);
+            var fallback = new CapturingTestLogger();
+            Assert.Equal(owner, await DarlingStoreLogins.ResolveUnmanagedAsync(DarlingStoreLogins.Surface.Mcp, postgres, fallback, ct));
+            Assert.Contains("The MCP server connects to the store as the owner login", fallback.Joined, StringComparison.Ordinal);
+            Assert.Contains("The collector stopped before it could provision the store's roles", fallback.Joined, StringComparison.Ordinal);
+            Assert.Contains($"No mcp credential from an earlier start can stand in: {mcpFile} does not exist.", fallback.Joined, StringComparison.Ordinal);
+
+            /* 5. F6: a credential file ordinary local users can read is never read. The next provisioning regenerates it
+                  and re-asserts the role, and the new file is owner-only from the moment it exists. */
+            var viewerFile = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer"));
+            var exposed = new FileInfo(viewerFile).GetAccessControl();
+            exposed.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(viewerFile).SetAccessControl(exposed);
+            var exposedPassword = File.ReadAllText(viewerFile).Trim();
+
+            var next = new CapturingTestLogger();
+            Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, next, ct, credentials)).Provisioned, next.Joined);
+            Assert.Contains("'viewer' credential", next.Joined, StringComparison.Ordinal);
+            Assert.Contains("is not trusted (ordinary local users can read it)", next.Joined, StringComparison.Ordinal);
+            Assert.Contains("Role passwords: re-asserted for", next.Joined, StringComparison.Ordinal);
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(viewerFile), $"{viewerFile} is readable by ordinary users");
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(mcpFile), $"{mcpFile} is readable by ordinary users");
+            var regenerated = File.ReadAllText(viewerFile).Trim();
+            Assert.NotEqual(exposedPassword, regenerated);
+            Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", regenerated), ct));
+            Assert.Equal("mcp", await CurrentUserAsync(Login(owner, "mcp", File.ReadAllText(mcpFile).Trim()), ct));
+            await Assert.ThrowsAsync<PostgresException>(() => CurrentUserAsync(Login(owner, "viewer", exposedPassword), ct));
+        }
+        finally
+        {
             Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
             DarlingStoreLogins.ResetComposeStoreVerdictForTests();
             await cluster.StopIfStartedByThisProcessAsync();
@@ -401,6 +558,12 @@ WHERE r.rolname IN ('admin', 'viewer', 'mcp')";
     {
         await using var connection = await OpenAsync(login, ct);
         return await ScalarAsync<string>(connection, "SELECT current_user::text", ct);
+    }
+
+    private static async Task<T> OwnerScalarAsync<T>(string owner, string sql, CancellationToken ct)
+    {
+        await using var connection = await OpenAsync(owner, ct);
+        return await ScalarAsync<T>(connection, sql, ct);
     }
 
     private static async Task<bool> RoleExistsAsync(string owner, string role, CancellationToken ct)
