@@ -71,7 +71,11 @@ census, one of them introduced by that night's own wave).
   PR. Don't write report files: the harness can block a subagent's file writes outside its worktree, or all of
   them, and a PR body outlives any scratch file.
 - Before you call a failure pre-existing, re-run it alone on a freshly created database, after merging `origin/dev`.
-  If it passes there, the cause was your database or your stale base, not the code; don't file it.
+  If it passes there, the cause was your database or your stale base, not the code; don't file it. If it still
+  fails, check that dev's own latest CI run passes it. If dev passes, the failure is yours, even in a file you
+  never opened: pin and census tests read the source files you changed. (#4025's lane called
+  `CollectionLogDrainForensicsStoreTests` pre-existing, but it counts `DarlingWorker`'s fault arms, and the lane
+  had added one.)
 - Finish, or stop at a committed and pushed checkpoint with a handoff, by `<DEADLINE>`.
 - **Never stop to ask.** If an item needs a decision nobody has made, park it with the question in your report and
   move on.
