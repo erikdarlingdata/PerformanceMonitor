@@ -80,6 +80,18 @@ internal static class ServerResolver
             : (resolved.Value, null);
     }
 
+    /// <summary>
+    /// When the enabled server whose storage identity is <paramref name="serverId"/> was added
+    /// (<see cref="Models.ServerConnection.RegisteredAtUtc"/>), or null when none matches (#3967). The resolver
+    /// hands back an id and a name, and the summary read needs the registration too, so its band agrees with
+    /// the Overview card's for the same server.
+    /// </summary>
+    internal static DateTime? RegisteredAtUtc(ServerManager serverManager, int serverId) =>
+        serverManager.GetEnabledServers()
+            .Where(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId)
+            .Select(s => (DateTime?)s.RegisteredAtUtc)
+            .FirstOrDefault();
+
     private static string ListAvailableServers(ServerManager serverManager)
     {
         var servers = serverManager.GetEnabledServers();

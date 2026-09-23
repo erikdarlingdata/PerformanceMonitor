@@ -20,7 +20,11 @@ public partial class LocalDataService
     /// <summary>
     /// Gets a summary of server health for the overview dashboard.
     /// </summary>
-    public async Task<ServerSummaryItem?> GetServerSummaryAsync(int serverId, string displayName)
+    /// <param name="registeredAtUtc">When the server was added (<see cref="Models.ServerConnection.RegisteredAtUtc"/>),
+    /// or null when the caller has none. Required rather than defaulted (#3967): it is what tells a server whose
+    /// history has aged out of the archive from one that has never collected, and a caller that kept the old
+    /// call would compile and band the first as the second.</param>
+    public async Task<ServerSummaryItem?> GetServerSummaryAsync(int serverId, string displayName, DateTime? registeredAtUtc)
     {
         using var connection = await OpenConnectionAsync();
 
@@ -167,8 +171,9 @@ WHERE server_id = $1";
            place a ServerSummaryItem is built: the two MCP reads call this method too, and a band only the
            Overview applied would be a fact that depended on which caller asked. The clock is handed in
            rather than read inside the band, so the classification stays a pure function of
-           (last collection, now) — the shape the viewer's ApplyFreshness already has. */
-        summary.ApplyCollectionFreshness(DateTime.UtcNow);
+           (last collection, now) — the shape the viewer's ApplyFreshness already has. The registration rides
+           in with the caller for #3967, so every caller's card bands a dark-past-retention server alike. */
+        summary.ApplyCollectionFreshness(DateTime.UtcNow, registeredAtUtc);
         return summary;
     }
 
@@ -396,13 +401,19 @@ public class ServerSummaryItem
 
     /// <summary>
     /// Stamp <see cref="CollectionFreshness"/> from this card's own <see cref="LastCollectionTime"/>. Pure
-    /// over (last collection, now): both instants are UTC (the DuckDB store is naive UTC and
+    /// over (last collection, registration, now): the instants are UTC (the DuckDB store is naive UTC and
     /// <paramref name="nowUtc"/> is <see cref="DateTime.UtcNow"/>), so the subtraction inside the classifier
     /// is a true elapsed time regardless of Kind. Stamped rather than computed on read so the band cannot
     /// change between the row's brush binding and the tooltip that explains it.
+    ///
+    /// <para>#3967: the newest-collection read has no window, but the archive's retention bounds what it can
+    /// see (<see cref="RetentionService.OldestRetainedInstant"/>), so a server whose whole history has aged out
+    /// comes back null. Added before that instant, it bands Offline; added after it, or with no registration,
+    /// it keeps the ladder's never-collected reading. The same rule the Darling viewer and fleet card apply.</para>
     /// </summary>
-    public void ApplyCollectionFreshness(DateTime nowUtc) =>
-        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(LastCollectionTime, nowUtc);
+    public void ApplyCollectionFreshness(DateTime nowUtc, DateTime? registeredAtUtc) =>
+        CollectionFreshness = ServerHealthClassifier.ClassifyFreshness(
+            LastCollectionTime, registeredAtUtc, RetentionService.OldestRetainedInstant(nowUtc), nowUtc);
 
     /// <summary>
     /// The Last Collect row. Names its band in words when the collection is not current, because a colour
@@ -414,7 +425,10 @@ public class ServerSummaryItem
     {
         get
         {
-            if (!LastCollectionTime.HasValue) return "Never";
+            /* #3967: with nothing to show, "Never" only for a server that has never collected. One banded
+               Offline with nothing to show collected once, and none of it is still archived. */
+            if (!LastCollectionTime.HasValue)
+                return CollectionFreshness == ServerFreshness.Offline ? "None retained (stopped)" : "Never";
 
             var stamp = ServerTimeHelper.FormatServerTime(LastCollectionTime, "HH:mm:ss");
             return CollectionFreshness switch

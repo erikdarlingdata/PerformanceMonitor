@@ -531,41 +531,29 @@ AND   s.server_id <> 0";
 
     /// <summary>
     /// A card's collection freshness from <see cref="FleetLastCollectionSql"/>'s row (#3935): the shared
-    /// <see cref="ServerHealthClassifier.ClassifyFreshness"/> ladder, except for the one reading a bounded
-    /// read cannot hand that ladder, because to the ladder a null means "never".
+    /// registration rule (<see cref="ServerHealthClassifier"/>'s <c>ClassifyFreshness</c> overload, #3967) with
+    /// this read's window as what it could see. A newest collection inside the window bands on the ladder; with
+    /// none, a server first connected BEFORE the window reads Offline and one first connected inside it reads
+    /// awaiting its first collection, which is exact because the worker collects only after connecting (on
+    /// DARLING01 every one of the 17 registry rows has its first retained collection after its
+    /// <c>created_date</c>).
     ///
-    /// <para><b>The rule.</b> A newest collection inside the window bands exactly as it always did. With none,
-    /// the registry decides: a server first connected BEFORE the window began is Offline, and one first
-    /// connected inside it is awaiting its first collection. The second half is exact rather than a guess,
-    /// because the registry row is written at the first successful connect and the worker collects only after
-    /// connecting: a server registered inside the window could only have collected inside it, and the window
-    /// holds nothing. (On DARLING01 every one of the 17 registry rows, enabled or not, has its first retained
-    /// collection after its <c>created_date</c>.) The first half is the ruling: a server that connected more
-    /// than two days ago and has sent nothing since is dark, which is what the WPF viewer calls it from its
-    /// unbounded read, and "the service has not reached it yet" would be false — the service reached it,
-    /// which is what wrote the row.</para>
-    ///
-    /// <para><b>Where the two surfaces can still differ, and why that is the right way round.</b> The viewer
-    /// reads "never" whenever it finds no row at all, so it says "Awaiting first collection" for a server whose
-    /// rows retention has all dropped (dark for longer than the 60-day <c>collection_log</c> horizon), and for
-    /// one that connected over two days ago and has written no <c>collection_log</c> row since. The second is
-    /// rare, because every collector run writes a row whatever its outcome, so it takes a connect no sweep
-    /// followed. This card reads both Offline: in each, the service reached the server and nothing has come
-    /// back for at least two days.</para>
+    /// <para><b>The window, not the retention, is what this read could see.</b> So a server that connected more
+    /// than two days ago and has never written a <c>collection_log</c> row reads Offline here, while the
+    /// viewer and <c>list_servers</c>, whose reads have no window, can still prove it never collected and say
+    /// so. That case is rare: every collector run writes a row whatever its outcome, so it takes a connect no
+    /// sweep followed. A server dark past the retention reads Offline on every surface.</para>
     ///
     /// <para><b>A null registration keeps the ladder's reading.</b> The service writes <c>created_date</c> on
-    /// every registry insert; a row without one was inserted by hand, and nothing here can say when it was
-    /// reached. The same holds for a server the read did not report at all, which the caller passes as two
-    /// nulls.</para>
+    /// every registry insert; a row without one was inserted by hand. The same holds for a server the read did
+    /// not report at all, which the caller passes as two nulls.</para>
     /// </summary>
     /// <param name="lastCollection">The newest collection inside the window, or null when the window holds
     /// none.</param>
     /// <param name="registeredAt">The registry's <c>created_date</c> from the same row, or null.</param>
     /// <param name="now">The roll-up's reference instant, the one the window was cut from.</param>
     internal static ServerFreshness ClassifyWindowedFreshness(DateTime? lastCollection, DateTime? registeredAt, DateTime now) =>
-        !lastCollection.HasValue && registeredAt.HasValue && registeredAt.Value < LastCollectionWindowStart(now)
-            ? ServerFreshness.Offline
-            : ServerHealthClassifier.ClassifyFreshness(lastCollection, now);
+        ServerHealthClassifier.ClassifyFreshness(lastCollection, registeredAt, LastCollectionWindowStart(now), now);
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
