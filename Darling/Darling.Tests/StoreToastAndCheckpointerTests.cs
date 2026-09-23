@@ -1274,9 +1274,43 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
            consecutive CI runs of one PR (#3846) at the same 64.1. pg_stat_force_next_flush() (PostgreSQL 15+,
            the store's floor) makes the DELETE's pending counters report at the next opportunity, ahead of the
            VACUUM; the second call after VACUUM flushes anything the vacuum itself queued. */
-        await Exec(connection, "SELECT pg_stat_force_next_flush()", ct);
-        await Exec(connection, $"VACUUM {dim}", ct);
-        await Exec(connection, "SELECT pg_stat_force_next_flush()", ct);
+        /* Retried, bounded (#3977): full-suite load once left this exact free-space map reading at 96.2 %
+           live right after one VACUUM. Direct repro ruled out the #3945 mechanism — a transaction held open
+           in a DIFFERENT database never blocks this database's own VACUUM (verified live: 10,000 dead tuples
+           still fully removed with one held open throughout) — and this test mints its OWN scratch database
+           (#1776 own-store), so no other test shares it to hold a snapshot on in the first place. What
+           full-suite load can still do to an own-store test is starve its CPU/IO, so poll the FSM directly
+           (the same live-bytes formula ToastLiveBytesUpdateSql uses, without writing a row) after each VACUUM
+           instead of trusting the first one. The real, once-only sweep below still runs exactly once, and
+           only after the poll sees the expected shape or the bound is spent — which then fails loud on the
+           real reading, unchanged from before. */
+        var vacuumAttempt = 0;
+        const int maxVacuumAttempts = 10;
+        while (true)
+        {
+            await Exec(connection, "SELECT pg_stat_force_next_flush()", ct);
+            await Exec(connection, $"VACUUM {dim}", ct);
+            await Exec(connection, "SELECT pg_stat_force_next_flush()", ct);
+
+            double? polledPct;
+            await using (var probe = new NpgsqlCommand(
+                "SELECT greatest(pg_relation_size(c.reltoastrelid) - coalesce((SELECT sum(fs.avail) FROM pg_freespace(c.reltoastrelid) AS fs), 0), 0)::float8" +
+                "  / nullif(pg_relation_size(c.reltoastrelid), 0) * 100 " +
+                "FROM pg_class AS c WHERE c.oid = $1::regclass", connection) { CommandTimeout = 30 })
+            {
+                probe.Parameters.AddWithValue(dim);
+                var scalar = await probe.ExecuteScalarAsync(ct);
+                polledPct = scalar is null or DBNull ? null : Convert.ToDouble(scalar, System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            vacuumAttempt++;
+            if (polledPct is > 35 and < 65 || vacuumAttempt >= maxVacuumAttempts)
+            {
+                break;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+        }
 
         var t1 = t0.AddHours(1);
         await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, t1, null, ct);
