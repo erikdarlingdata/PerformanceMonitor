@@ -211,8 +211,8 @@ Everything it can name provably came out of one of our own zips, because the man
 **Backups pile up, and nothing used to remove them.** A dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, with the service naming every one on every start ([#2525](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525)). Retention above fixes new deploys; boxes that already have a backlog clear it with the installed copy, which needs no staging folder and does not stop the service:
 
 ```powershell
-C:\PerformanceMonitorDarling\upgrade-darling.ps1 -ListRollbacks   # show what would go
-C:\PerformanceMonitorDarling\upgrade-darling.ps1 -PruneOnly       # remove all but the newest 3
+& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -ListRollbacks   # show what would go
+& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly       # remove all but the newest 3
 ```
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
@@ -253,7 +253,7 @@ overlay-upgraded tree.
 
 #### The install location has to be machine-scoped
 
-Extract to a local, machine-scoped path. **Prefer `C:\Program Files\PerformanceMonitorDarling`** over a folder made directly under `C:\` (the older documented example, `C:\PerformanceMonitorDarling`): `C:\Program Files` denies write to ordinary local users by default, while a fresh folder directly under `C:\` inherits `Authenticated Users: Modify` from the volume root the instant it is extracted, before `install-darling.ps1` has run a single line ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)). Either way, **not** anywhere under a user profile (`C:\Users\...`, including your Desktop or Downloads), and not a UNC path or a mapped drive.
+Extract to a local, machine-scoped path. **Use `C:\Program Files\PerformanceMonitorDarling`**, not a folder made directly under `C:\` (the older documented example, `C:\PerformanceMonitorDarling`, which `install-darling.ps1` now refuses unless you pass `-AcceptWritableExtraction`): `C:\Program Files` denies write to ordinary local users by default, while a fresh folder directly under `C:\` inherits `Authenticated Users: Modify` from the volume root the instant it is extracted, before `install-darling.ps1` has run a single line ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)). Either way, **not** anywhere under a user profile (`C:\Users\...`, including your Desktop or Downloads), and not a UNC path or a mapped drive.
 
 The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMonitor Darling`, never LocalSystem, because the bundled PostgreSQL refuses to run with administrative privileges. That account is not you, not SYSTEM, and not Administrators — and a user profile grants access to about those three and nobody else, so the service cannot read its own program files there. It installs cleanly and then fails: `initdb.exe` dies at `0xC0000135` (STATUS_DLL_NOT_FOUND) before it can report anything (#2185). A folder created under `C:\` inherits read + execute for `BUILTIN\Users` instead, which the virtual account is a member of, which is why that documented location still works for the *service* — the residual is the *write* grant the same inheritance carries for every other local user, which is what `C:\Program Files` avoids and what the next paragraph checks for. Network paths fail for a related reason: a virtual account [reaches the network as the computer account](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions#virtual-accounts) rather than as you, and a mapped drive letter belongs to your logon session, which a service does not share.
 
@@ -264,11 +264,11 @@ The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMoni
 **Manual:** publish (or copy the build output) to a stable path, put `darling.json` next to the exe (or set `DARLING_CONFIG` as a machine environment variable), then register it:
 
 ```
-dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o C:\PerformanceMonitorDarling
+dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o "C:\Program Files\PerformanceMonitorDarling"
 ```
 
 ```
-sc create "PerformanceMonitor Darling" binPath= "C:\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" start= auto obj= "NT SERVICE\PerformanceMonitor Darling"
+sc create "PerformanceMonitor Darling" binPath= "\"C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe\"" start= auto obj= "NT SERVICE\PerformanceMonitor Darling"
 ```
 
 ```
@@ -308,7 +308,7 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 
    ```
    icacls "C:\ProgramData\PerformanceMonitorDarling" /grant "DOMAIN\svc-account:(OI)(CI)F"
-   icacls "C:\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
+   icacls "C:\Program Files\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
    ```
 
    Adjust the second path to wherever `darling.json` sits beside the service exe; the first covers the logs and, in managed mode, the store's data directory. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.

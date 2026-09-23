@@ -77,7 +77,7 @@ internal static class DarlingInstallLocation
 {
     /// <summary>The documented machine-scoped location, named in every remedy this class prints so the
     /// operator is never left with a refusal and no destination.</summary>
-    internal const string DocumentedInstallDirectory = @"C:\PerformanceMonitorDarling";
+    internal const string DocumentedInstallDirectory = @"C:\Program Files\PerformanceMonitorDarling";
 
     /// <summary>
     /// The one message, logged critical, when <paramref name="installDirectory"/> is somewhere the service

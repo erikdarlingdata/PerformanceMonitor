@@ -82,9 +82,9 @@ public sealed class DarlingServiceInstallLocationTests
 
         /* The documented location and the other machine-scoped ones #2187 asked about explicitly. These are
            the rows that decide whether the message is credible when it does appear. */
-        (@"C:\PerformanceMonitorDarling", InstallLocationVerdict.None, "the documented install location"),
+        (@"C:\PerformanceMonitorDarling", InstallLocationVerdict.None, "machine-scoped, a folder directly under the volume root"),
         (@"C:\ProgramData\PerformanceMonitorDarling", InstallLocationVerdict.None, "machine-scoped"),
-        (@"C:\Program Files\PerformanceMonitorDarling", InstallLocationVerdict.None, "machine-scoped"),
+        (@"C:\Program Files\PerformanceMonitorDarling", InstallLocationVerdict.None, "the documented install location"),
         (@"D:\PerformanceMonitorDarling", InstallLocationVerdict.None, "a second local volume is fine"),
 
         /* The network half. The reason differs from the profile case - a virtual account reaches the network

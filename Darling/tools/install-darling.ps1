@@ -6,7 +6,7 @@ and creates Desktop + Start Menu shortcuts for the bundled viewer.
 .DESCRIPTION
 Run from an ELEVATED PowerShell, from the folder you extracted the Darling zip into (the script
 installs the service pointing at THAT folder - extract to the final location first, e.g.
-C:\PerformanceMonitorDarling). What it does, in order:
+C:\Program Files\PerformanceMonitorDarling). What it does, in order:
 
   1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
      and stops so you can edit it - the service is not installed with an unedited sample).
@@ -20,7 +20,7 @@ C:\PerformanceMonitorDarling). What it does, in order:
      (C:\Users\...), or a UNC / mapped-drive path. The service runs as an unprivileged virtual account
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
      service installs cleanly and then dies at the bundled PostgreSQL's first step (#2185, #2187).
-     Extract to a machine-scoped local path such as C:\PerformanceMonitorDarling instead.
+     Extract to a machine-scoped local path such as C:\Program Files\PerformanceMonitorDarling instead.
   1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
      directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
      folder and run this straight away; no lock can undo a file swapped before it.
@@ -739,7 +739,7 @@ else {
 # with no BUILTIN\Users, no Authenticated Users, and no CREATOR OWNER - so the account cannot read the
 # program files it was pointed at, and cannot even read back what it writes there itself. The documented
 # location inherits BUILTIN\Users:(I)(OI)(CI)(RX) from the volume root instead, which every service
-# account is a member of, which is why C:\PerformanceMonitorDarling works and this does not.
+# account is a member of, which is why C:\Program Files\PerformanceMonitorDarling works and this does not.
 #
 # Step 4b is not a substitute: its ACL work is scoped to darling.json and its .bak-* copies, so pg-runtime
 # keeps whatever the profile gave it. Fixing the tree's ACLs instead of refusing was considered and
@@ -749,7 +749,7 @@ else {
 # and is refused, but an install there would actually WORK - it grants NT AUTHORITY\SERVICE:(OI)(CI)(IO)(M,DC),
 # which every service account holds. It is deliberately not carved out. Nobody installs a Windows service
 # into the shared documents profile, a carve-out would amount to documenting it as a reasonable place to
-# install, and the refusal is not a dead end - it names C:\PerformanceMonitorDarling. One rule, no
+# install, and the refusal is not a dead end - it names C:\Program Files\PerformanceMonitorDarling. One rule, no
 # exceptions, and the one location it costs is one nobody wants.
 #
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
@@ -801,12 +801,14 @@ at all. Either way the service installs cleanly and then cannot read its own pro
     }
 
     $fix = @"
-Move the extracted folder to a machine-scoped local path and run this script again from there:
+Extract the zip again, from an elevated session, into a machine-scoped local folder that only
+administrators can write, and run this script from there:
 
-  C:\PerformanceMonitorDarling
+  C:\Program Files\PerformanceMonitorDarling
 
-That is the documented location, and a folder created there inherits read + execute for BUILTIN\Users,
-which the service's virtual account is a member of. Your darling.json can move with it.
+That is the documented location. A folder created there inherits read + execute for BUILTIN\Users,
+which the service's virtual account is a member of, and ordinary users can't write to it (#4043).
+Copy your darling.json across if you have one.
 "@
 
     if (-not $existing) {

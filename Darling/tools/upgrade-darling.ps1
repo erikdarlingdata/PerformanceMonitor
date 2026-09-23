@@ -596,7 +596,8 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
 # where this script happens to be sitting. Returns $null when the service is not installed.
 #
-# The ImagePath is quoted when it contains spaces and 'C:\PerformanceMonitorDarling' usually does not, so
+# The ImagePath is quoted when it contains spaces (the documented 'C:\Program Files\PerformanceMonitorDarling' does; an older
+# folder made directly under C:\ usually does not), so
 # both spellings are handled; a path that cannot be parsed returns $null and the caller asks for
 # -InstallRoot rather than upgrading a directory it guessed at.
 function Get-DarlingInstallRootFromService([string]$name) {
