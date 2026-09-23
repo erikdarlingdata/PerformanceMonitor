@@ -368,10 +368,11 @@ public sealed class PgServerConfigScopeRungTests
             {
                 /* The inner per-server anchor subqueries: `FROM pg_server_config` with no alias immediately
                    followed by `WHERE server_id = $1)` — or by the as-of form `WHERE server_id = $1 AND
-                   collection_time <= $2)` the fact collectors anchor on — per SERVER, never per name, so they
-                   need no predicate and are not reads. */
+                   collection_time <= $2)` the fact collectors anchor on, and #3928's lower bound
+                   `AND collection_time >= $N` before it — per SERVER, never per name, so they need no
+                   predicate and are not reads. */
                 var tail = clean[match.Index..Math.Min(clean.Length, match.Index + 200)];
-                if (Regex.IsMatch(tail, @"^FROM\s+(?:collect\.)?pg_server_config\s*\n?\s*WHERE\s+server_id = \$1(?:\s*\n?\s*AND\s+collection_time <= \$\d+)?\)"))
+                if (Regex.IsMatch(tail, @"^FROM\s+(?:collect\.)?pg_server_config\s*\n?\s*WHERE\s+server_id = \$1(?:\s*\n?\s*AND\s+collection_time >= \$\d+)?(?:\s*\n?\s*AND\s+collection_time <= \$\d+)?\)"))
                 {
                     continue;
                 }

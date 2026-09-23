@@ -75,7 +75,8 @@ ORDER BY collection_time, blocking_pid, blocked_pid";
     /// window's end, the config family's own read shape (<c>PgTargetFactCollector.Config.cs</c>), including its
     /// three-value <c>source</c> exclusion — copied, not narrowed, for the reason that file gives. The config family
     /// emits neither name as a context fact (its list is the knobs and conventions it grades), so this family reads
-    /// them itself. <c>$1</c> server_id, <c>$2</c> window end.
+    /// them itself. <c>$1</c> server_id, <c>$2</c> window end, <c>$3</c> the lower bound
+    /// <see cref="ConfigSnapshotLowerBounds"/> hands it (#3928).
     /// </summary>
     public const string PgTargetBlockingSettingsSql = @"
 SELECT
@@ -84,10 +85,12 @@ SELECT
     c.unit
 FROM pg_server_config AS c
 WHERE c.server_id = $1
+AND   c.collection_time >= $3
 AND   c.collection_time = (
           SELECT MAX(collection_time)
           FROM pg_server_config
           WHERE server_id = $1
+          AND   collection_time >= $3
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
 /* V138 (#3691): server-wide rows only. pg_server_config now also holds the per-database and per-role
@@ -319,30 +322,40 @@ LIMIT 25";
 
     private async Task<PgBlockingSettings> ReadBlockingSettingsAsync(NpgsqlConnection connection, AnalysisContext context)
     {
-        using var cmd = new NpgsqlCommand(PgTargetBlockingSettingsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-        cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
         var deadlockTimeoutMs = PgTargetScorer.DeadlockTimeoutDefaultMs;
         var fromSnapshot = false;
         bool? logLockWaitsOn = null;
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-        while (await reader.ReadAsync(context.CancellationToken))
+
+        /* #3928: the day first, and every retained snapshot only when that found nothing. */
+        foreach (var lowerBound in ConfigSnapshotLowerBounds(context.TimeRangeEnd))
         {
-            var name = reader.GetString(0);
-            var setting = reader.IsDBNull(1) ? null : reader.GetString(1);
-            var unit = reader.IsDBNull(2) ? null : reader.GetString(2);
-            if (name == "deadlock_timeout" && ParseDurationMs(setting, unit) is { } ms)
+            using var cmd = new NpgsqlCommand(PgTargetBlockingSettingsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+            cmd.Parameters.AddWithValue(lowerBound);
+
+            var found = false;
+            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+            while (await reader.ReadAsync(context.CancellationToken))
             {
-                deadlockTimeoutMs = ms;
-                fromSnapshot = true;
+                found = true;
+                var name = reader.GetString(0);
+                var setting = reader.IsDBNull(1) ? null : reader.GetString(1);
+                var unit = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (name == "deadlock_timeout" && ParseDurationMs(setting, unit) is { } ms)
+                {
+                    deadlockTimeoutMs = ms;
+                    fromSnapshot = true;
+                }
+                else if (name == "log_lock_waits" && setting is not null)
+                {
+                    /* pg_settings spells booleans "on" / "off" (never true/false) — the same rule the config family's
+                       autovacuum convention check reads by. */
+                    logLockWaitsOn = string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase);
+                }
             }
-            else if (name == "log_lock_waits" && setting is not null)
-            {
-                /* pg_settings spells booleans "on" / "off" (never true/false) — the same rule the config family's
-                   autovacuum convention check reads by. */
-                logLockWaitsOn = string.Equals(setting, "on", StringComparison.OrdinalIgnoreCase);
-            }
+
+            if (found) break;
         }
 
         return new PgBlockingSettings(deadlockTimeoutMs, fromSnapshot, logLockWaitsOn);

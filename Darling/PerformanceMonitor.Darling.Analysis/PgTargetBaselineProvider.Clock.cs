@@ -60,20 +60,25 @@ public sealed partial class PgTargetBaselineProvider
     /// <summary>
     /// The target's <c>TimeZone</c> setting from the latest <c>pg_server_config</c> snapshot at or before <c>$2</c>,
     /// session-scoped sources excluded — the config facts' anchor and exclusion, spelled inline so the parse-analysis
-    /// pin over the shipped reads can check it as SQL. <c>$1</c> server_id, <c>$2</c> window end (naive UTC). One
-    /// row at most (a snapshot holds one <c>TimeZone</c> row; the <c>LIMIT</c> says so to the planner), through
-    /// <c>idx_pg_server_config_time</c> — a one-row indexed read beside a 30-day aggregate scan, on the compute's
-    /// own connection and inside its one classified catch, exactly where the base puts its clock read.
+    /// pin over the shipped reads can check it as SQL. <c>$1</c> server_id, <c>$2</c> window end (naive UTC), <c>$3</c>
+    /// the lower bound <see cref="PgTargetFactCollector.ConfigSnapshotLowerBounds"/> hands the config facts' reads
+    /// (#3928): the day first, every retained snapshot only when that found nothing, so the snapshot that applied is
+    /// the same one it always was and only the planning shrinks. One row at most (a snapshot holds one
+    /// <c>TimeZone</c> row; the <c>LIMIT</c> says so to the planner), through <c>idx_pg_server_config_time</c> — a
+    /// one-row indexed read beside a 30-day aggregate scan, on the compute's own connection and inside its one
+    /// classified catch, exactly where the base puts its clock read.
     /// </summary>
     internal const string PgTargetClockSql = @"
 SELECT c.setting
 FROM pg_server_config AS c
 WHERE c.server_id = $1
 AND   c.name = 'TimeZone'
+AND   c.collection_time >= $3
 AND   c.collection_time = (
           SELECT MAX(collection_time)
           FROM pg_server_config
           WHERE server_id = $1
+          AND   collection_time >= $3
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
 /* V138 (#3691): the SERVER's TimeZone, never a per-database or per-role override of it. pg_server_config
@@ -96,10 +101,19 @@ LIMIT 1";
     protected override async Task<(int? UtcOffsetMinutes, string? TimeZoneId)> ReadServerClockAsync(
         NpgsqlConnection connection, int serverId, DateTime windowEndUtc, CancellationToken cancellationToken)
     {
-        using var cmd = new NpgsqlCommand(PgTargetClockSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
-        cmd.Parameters.AddWithValue(serverId);
-        cmd.Parameters.AddWithValue(windowEndUtc);
-        var setting = await cmd.ExecuteScalarAsync(cancellationToken) as string;
-        return string.IsNullOrWhiteSpace(setting) ? (null, null) : (null, setting.Trim());
+        /* #3928: the day first, and every retained snapshot only when that found nothing. */
+        foreach (var lowerBound in PgTargetFactCollector.ConfigSnapshotLowerBounds(windowEndUtc))
+        {
+            using var cmd = new NpgsqlCommand(PgTargetClockSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(serverId);
+            cmd.Parameters.AddWithValue(windowEndUtc);
+            cmd.Parameters.AddWithValue(lowerBound);
+            if (await cmd.ExecuteScalarAsync(cancellationToken) is string setting)
+            {
+                return string.IsNullOrWhiteSpace(setting) ? (null, null) : (null, setting.Trim());
+            }
+        }
+
+        return (null, null);
     }
 }
