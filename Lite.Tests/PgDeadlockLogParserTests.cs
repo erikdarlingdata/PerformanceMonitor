@@ -472,6 +472,42 @@ public sealed class PgDeadlockLogParserTests
     }
 
     /// <summary>
+    /// #4041: <c>'%m %u@%d [%p] '</c> puts fields between the zone and the pid. Both the pattern and the assembler
+    /// behind it wanted the bracket right after the zone, so every report under that prefix was dropped and the
+    /// server read as having no deadlocks.
+    /// </summary>
+    [Fact]
+    public void AReportUnderACustomPrefixWithFieldsBeforeThePid_StillReads()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportUnder("2026-08-26 22:25:24.100 UTC app_user@app_db [1549] ")));
+
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, 100, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+        Assert.Equal(2, deadlock.ParticipantCount);
+        Assert.Equal(Assert.Single(PgDeadlockLogParser.Extract(RealBlock)).GraphText, deadlock.GraphText);
+    }
+
+    /// <summary>
+    /// #4041, the forgeries the widened space family must still refuse: a header behind the line's real bracket
+    /// (the gap stops at the first bracket), and one on a line with no bracket before its label (the gap cannot
+    /// cross a field label). A real report after them still reads.
+    /// </summary>
+    [Fact]
+    public void AForgedHeaderUnderACustomPrefix_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-08-25 14:50:05.000 UTC app_user@app_db [58] STATEMENT:  SELECT 1 -- [1] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 11 waits for ShareLock on transaction 5; blocked by process 12.\n"
+            + "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.\n"
+            + "2026-08-25 14:50:05.000 UTC app_user@app_db LOG:  statement: SELECT 'x [2] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 21 waits for ShareLock on transaction 7; blocked by process 22.\n"
+            + "\tProcess 22 waits for ShareLock on transaction 8; blocked by process 21.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+        Assert.Equal(1549, Assert.Single(PgDeadlockLogParser.Extract(forged + ReportUnder("2026-08-26 22:25:24.100 UTC app_user@app_db [1549] "))).VictimPid);
+    }
+
+    /// <summary>
     /// Participants are counted from the wait EDGES, not from the <c>Process N:</c> statement headers: the
     /// server omits a header when it could not recover the text, and a participant with no statement is
     /// still in the cycle. Counting headers would under-report it.

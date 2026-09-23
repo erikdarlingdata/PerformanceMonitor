@@ -34,7 +34,8 @@ namespace PerformanceMonitor.Collectors;
 /// carries colons of its own and a union reads a UTC server as non-UTC on an IPv6 <c>%r</c> — the deadlock
 /// parser's header carries the worked case. <c>%Q</c> glues the query id to the label with no separator
 /// (<c>[1549] 322048460535975151ERROR:</c>), so the label is found by a LAZY run to the first
-/// <c>LABEL:  </c>, never by requiring whitespace before it.</para>
+/// <c>LABEL:  </c>, never by requiring whitespace before it. The space family also reads fields between the zone
+/// and the pid (#4041), as <c>%m %u@%d [%p] </c> renders them, through a gap that stops at the first bracket.</para>
 ///
 /// <para><b>Only <c>stderr</c> format.</b> <c>csvlog</c> and <c>jsonlog</c> are different formats with the
 /// same content, and neither existing log reader handles them; a target whose <c>log_destination</c> is
@@ -89,20 +90,46 @@ public static class PgLogEntryAssembler
        `SORGU: BEGIN ... 'ERROR:  ...'` passed the shape rule, the run crossed it, and the ERROR inside the body
        opened an event carrying the body's password. The one thing after a named label's colon that does not make
        it a label is a pid in brackets: the managed family writes `%u@%d:[%p]:`, and a database or role whose name
-       ends in one (`검색쿼리`) would otherwise lose every line. */
-    private static readonly string s_prefixRun =
-        @"(?:(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
-        + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])[^\n])*?";
+       ends in one (`검색쿼리`) would otherwise lose every line.
+
+       A THIRD alternative (#4041): the space family with fields between the zone and the pid, as
+       '%m %u@%d [%p] ' renders them (`UTC app@db [5555] ERROR:  `). Its gap is s_prefixRun's step with '[' taken
+       out of the class, so it holds to both rules at once. It cannot cross a label, by the run's own boundaries, so
+       it never leaves the line's prefix for its text, which is where a forged bracket or label has to live. And it
+       cannot consume a bracket, so the pid is the FIRST bracket after the zone's space and nothing can backtrack
+       past it to a later one (plan capture's #4008 rule). `rest` after it is the unchanged run, so from the zone to
+       the label the whole path crosses no label anywhere, and the label read is the line's first.
+
+       Tried LAST, so a line the first two read is read exactly as before: the engine takes the first alternative
+       that completes the line, and the old space family is this one with an empty gap. A managed line whose user or
+       database holds a space (`...:app@my db:[5555]:`) would otherwise be read by this one first, with the zone
+       running to that space, and the zone check would refuse the whole read.
+
+       Its zone holds no colon and no bracket, so this alternative reads only lines whose first token is
+       colon-free, and there that token is the zone. A first token with a colon in it belongs to the managed family,
+       tried before this one. Allowed a colon, this zone ran over a managed line's whole prefix, its pid and its
+       translated label (`UTC:...:[4503]:ANWEISUNG:`) to the first space, the gap found `[1]` inside the statement,
+       and the zone check refused every read of the target. A numeric zone with a colon (`+05:30`) under this
+       prefix reads through the managed family instead, up to its first colon, with the same verdict; the deadlock
+       parser's header argues that trade. */
+    private static readonly string s_prefixRunStep =
+        @"(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
+        + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])";
+
+    private static readonly string s_prefixRun = @"(?:" + s_prefixRunStep + @"[^\n])*?";
+
+    private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"[^\[\n])*?";
 
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
-        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\])"
+        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\]"
+        + @"|(?<zone>[^ :\[\n]+) (?<mid>" + s_prefixGapBeforePid + @")\[(?<pid>\d+)\])"
         + @"(?<rest>" + s_prefixRun + ")"
         + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /* %u@%d anywhere in the prefix's non-pid text. Both halves required: a background process renders
-       `@` alone under that prefix and means neither. */
+    /* %u@%d anywhere in the prefix's non-pid text, before the pid or after it. Both halves required: a background
+       process renders `@` alone under that prefix and means neither. */
     private static readonly Regex s_userAtDatabase = new(
         @"(?<![\w@.-])(?<user>[A-Za-z_][\w$.-]*)@(?<db>[A-Za-z_][\w$.-]*)(?![\w@])",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -246,7 +273,9 @@ public static class PgLogEntryAssembler
             _zone = match.Groups["zone"].Value;
             Pid = match.Groups["pid"].Value;
             _severity = match.Groups["label"].Value;
-            _prefixRest = (match.Groups["mid"].Value + match.Groups["rest"].Value).Trim();
+            /* The fields before the pid and after it, a space between so the two never glue into one token
+               (`%u@%d[%p]%e` would read the database as `app_db28P01`). */
+            _prefixRest = (match.Groups["mid"].Value + " " + match.Groups["rest"].Value).Trim();
 
             /* THROWN rather than skipped, and it is the one intolerant thing in the assembler — see the
                type header and PgDeadlockLogParser.FromReport for why a per-line skip is the silent-wrong
