@@ -211,13 +211,34 @@ public sealed class ForcePlanFailuresAccessPathTests
             }
 
             /* The planner needs the visibility map current (the product keeps it so with the insert-autovacuum
-               override; a test cannot wait for autovacuum) and statistics for the rows just written. */
-            using (var vacuum = new NpgsqlCommand("VACUUM ANALYZE collect.query_store_stats", connection))
+               override; a test cannot wait for autovacuum) and statistics for the rows just written. VACUUM can
+               only mark the freshly-inserted pages all-visible once no snapshot on this shared database predates
+               them (#3945): under full-suite load, some other backend on darlingtest - another live-postgres
+               class serialized right before this one, or an autovacuum worker already vacuuming a different
+               chunk - can still be holding a snapshot open from before these rows were inserted, which defers
+               exactly that. Reproduced directly: holding a REPEATABLE READ transaction open across the seed
+               above reliably flips the plan away from the Index Only Scan this test proves. That backend always
+               finishes on its own, so retry the VACUUM a bounded number of times rather than fail on what is a
+               timing accident, not a plan defect; fail loud (with the real plan) if it never converges. */
+            string plan;
+            var vacuumAttempt = 0;
+            const int maxVacuumAttempts = 10;
+            while (true)
             {
-                await vacuum.ExecuteNonQueryAsync(ct);
-            }
+                using (var vacuum = new NpgsqlCommand("VACUUM ANALYZE collect.query_store_stats", connection))
+                {
+                    await vacuum.ExecuteNonQueryAsync(ct);
+                }
 
-            var plan = await ExplainShippedReadAsync(connection, utcNow - DarlingAlertReadAdapter.ForcePlanFailureWindow, ct);
+                plan = await ExplainShippedReadAsync(connection, utcNow - DarlingAlertReadAdapter.ForcePlanFailureWindow, ct);
+                vacuumAttempt++;
+                if (plan.Contains("Index Only Scan", StringComparison.Ordinal) || vacuumAttempt >= maxVacuumAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
 
             /* The chunk copy of a hypertable index is named <chunk>_<index>, truncated to 63 characters, so match
                on the name's stable prefix rather than its whole. */
