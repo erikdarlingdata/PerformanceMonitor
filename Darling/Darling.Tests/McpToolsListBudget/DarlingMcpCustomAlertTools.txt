@@ -19,7 +19,7 @@ tool test_custom_alert_rule 612
 param test_custom_alert_rule.definition 117
 param test_custom_alert_rule.rule_id 100
 
-tool update_custom_alert_rule 618
+tool update_custom_alert_rule 591
 param update_custom_alert_rule.definition 113
 param update_custom_alert_rule.description 106
 param update_custom_alert_rule.enabled 101

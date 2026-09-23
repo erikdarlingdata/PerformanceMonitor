@@ -41,8 +41,8 @@ public sealed class McpToolGuideHeadsCustomAlertTests
         ("test_custom_alert_rule", "A null current_value is no-data and never breaches"),
         ("test_custom_alert_rule", "Zero in-scope servers returns status:no_in_scope_servers with empty results, not an error"),
 
-        ("update_custom_alert_rule", "an omitted field keeps its current value, EXCEPT description"),
-        ("update_custom_alert_rule", "an empty string \"\" clears it"),
+        ("update_custom_alert_rule", "an omitted field keeps its current value"),
+        ("update_custom_alert_rule", "description ALSO accepts an empty string \"\" to clear it"),
         ("update_custom_alert_rule", "a mismatch returns {status:\"conflict\"} rather than overwriting"),
         ("update_custom_alert_rule", "Setting enabled:true is refused as {status:\"invalid\"} if it would push the fleet-wide enabled-rule count over its cap"),
 

@@ -182,11 +182,11 @@ public sealed class DarlingMcpCustomAlertTools
 
     [McpServerTool(Name = "update_custom_alert_rule"), Description(
         "Partial update of an existing rule: send only the fields to change (name, description, definition, enabled); an " +
-        "omitted field keeps its current value, EXCEPT description, where omitted means unchanged and an empty string \"\" " +
-        "clears it (vocabulary shared with update_custom_view). A new definition is validated first; an invalid one " +
-        "changes nothing. Pass the 'version' last read from get_custom_alert_rule: a mismatch returns {status:\"conflict\"} " +
-        "rather than overwriting. Setting enabled:true is refused as {status:\"invalid\"} if it would push the fleet-wide " +
-        "enabled-rule count over its cap. " +
+        "omitted field keeps its current value. description ALSO accepts an empty string \"\" to clear it (vocabulary " +
+        "shared with update_custom_view). A new definition is validated first; an invalid one changes nothing. Pass the " +
+        "'version' last read from get_custom_alert_rule: a mismatch returns {status:\"conflict\"} rather than overwriting. " +
+        "Setting enabled:true is refused as {status:\"invalid\"} if it would push the fleet-wide enabled-rule count over " +
+        "its cap. " +
         "<<GUIDE>> " +
         "Updates an existing custom alert rule in place - a PARTIAL update: send only the fields you want to " +
         "change (name, description, definition, enabled), and every field you omit keeps its current value " +
