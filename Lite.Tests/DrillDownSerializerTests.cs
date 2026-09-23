@@ -30,8 +30,8 @@ public sealed class DrillDownSerializerTests
         {
             ["parameter_sensitive_plans"] = new List<object>
             {
-                new { query_hash = "0xABC", cost_ratio = 345.9, database = "stash" },
-                new { query_hash = "0xDEF", cost_ratio = 12.5, database = "stash" },
+                new { query_hash = "0xABC", cost_ratio = 345.9, database = "sales" },
+                new { query_hash = "0xDEF", cost_ratio = 12.5, database = "sales" },
             },
             ["summary"] = new { plans = 2, worst = "0xABC" },
         };

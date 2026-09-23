@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// <para><b>Why the set is what it is, measured.</b> The body runs every due collector for a server
 /// together, and the outer launch loop will not relaunch it while it runs (INV-2, one body per server),
 /// so one slow collector delays every other collector for that server. From
-/// <c>collect.collection_log</c> on prod-pos-use1-monitor-01 over 24h (2026-09-03):</para>
+/// <c>collect.collection_log</c> on the use1 monitoring host over 24h (2026-09-03):</para>
 ///
 /// <list type="table">
 ///   <item><description><c>query_store</c> — p50 3,350ms, <b>p90 65,053ms</b>, max 364,202ms</description></item>

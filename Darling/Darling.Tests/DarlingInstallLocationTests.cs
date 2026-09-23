@@ -842,6 +842,54 @@ function Get-CimInstance {
     }
 
     /// <summary>
+    /// Found live on 2026-09-23, when dev's upgrade refused DARLING01's pre-#4038 install root: the refusal
+    /// listed "BUILTIN\Users on C:\PerformanceMonitorDarling" twice. A folder made under C:\ inherits
+    /// BUILTIN\Users as two ACEs (one grants append, one grants write), and two of the four callers did not
+    /// drop the repeated line. The function now returns each finding once, so every caller names a principal
+    /// once per path. Same shadowed <c>Get-Acl</c> idiom as
+    /// <see cref="ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl"/>. The two
+    /// ACEs get different inheritance flags so the ACL keeps them apart, as Windows did on the box, and the
+    /// probe counts them first so the test cannot pass on a single merged ACE.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_NamesAPrincipalOnce_WhenTwoOfItsAcesGrantWrite()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            $script:usersSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+            function Get-Acl {
+                [CmdletBinding()]
+                param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+                $sec = New-Object System.Security.AccessControl.DirectorySecurity
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($s in (Get-DarlingPreLockTrustedSids)) { $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($script:usersSid, 'AppendData', 'ContainerInherit', 'None', 'Allow')))
+                $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($script:usersSid, 'WriteData', 'ObjectInherit', 'None', 'Allow')))
+                $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)))
+                return $sec
+            }
+            """);
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine("""
+            $usersAces = @((Get-Acl).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $script:usersSid })
+            'usersAces=' + $usersAces.Count
+            $trusted = Get-DarlingPreLockTrustedSids
+            $found = @(Get-UntrustedWriteGrantees 'C:\does-not-need-to-exist-for-this-probe' $trusted)
+            'count=' + $found.Count
+            'text=' + ($found -join ';')
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("usersAces=2", answers);
+        Assert.Contains("count=1", answers);
+        Assert.Contains(answers, a => a.StartsWith("text=", StringComparison.Ordinal) && a.Contains("BUILTIN\\Users on C:\\does-not-need-to-exist-for-this-probe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// #4043 round-1 review, M2: the pre-lock check is now a RECURSIVE walk, not just the root and the
     /// service exe - a child with an untrusted OWNER, or an EXPLICIT (non-inherited) write grant to an
     /// untrusted principal, must be reported even when the root's own DACL is perfectly clean; a clean
