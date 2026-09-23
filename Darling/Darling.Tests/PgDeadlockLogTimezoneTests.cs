@@ -64,7 +64,14 @@ public sealed class PgDeadlockLogTimezoneTests
         var source = ReadRepoFile(Path.Combine("PerformanceMonitor.Collectors", "PgDeadlocksCollector.cs"));
 
         Assert.Contains("AS report_text", source, System.StringComparison.Ordinal);
-        Assert.Contains("PgDeadlockLogParser.FromReport(firstColumn)", source, System.StringComparison.Ordinal);
+
+        /* #4046: the candidate reaches the parser with the target's own log_timezone, read in the same statement,
+           which decides whether a line in another zone refuses the read or is skipped as not the server's. */
+        Assert.Contains("PgServerLogTail.LogTimezoneSql + @\" AS log_timezone", source, System.StringComparison.Ordinal);
+        Assert.Contains(
+            "PgDeadlockLogParser.FromReport(\n                firstColumn, PgServerLogTail.LogTimezoneIsUtc(reader, 1), out var foreignZoneLines)",
+            source.Replace("\r\n", "\n", System.StringComparison.Ordinal),
+            System.StringComparison.Ordinal);
 
         /* [^ \n]+ rather than \w+: a numeric-offset zone matched no block at all under \w+, so the
            server reported no deadlocks instead of reporting a zone this cannot store. Since #4041 the space

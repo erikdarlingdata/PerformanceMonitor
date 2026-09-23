@@ -6,6 +6,9 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Data.Common;
+
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
@@ -156,4 +159,56 @@ tail AS (
     /// </summary>
     public const string NoStderrLogFileMarkerSql =
         "pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)";
+
+    /// <summary>
+    /// The target's own <c>log_timezone</c>, which a consumer that reads each line's zone selects beside the text
+    /// (#4046), in the same statement, so the setting and the tail are one read. When it renders UTC
+    /// (<see cref="PgDeadlockLogParser.IsUtcLogTimezoneSetting"/>), a line stamped in another zone is not the server's
+    /// own, and the reader skips and counts it instead of refusing the target. The marker arms carry NULL in its
+    /// place, and a NULL keeps today's refusal. Plan capture reads no zone and does not select it.
+    /// </summary>
+    public const string LogTimezoneSql = "pg_catalog.current_setting('log_timezone')";
+
+    /// <summary>
+    /// Whether the current row's <see cref="LogTimezoneSql"/> column, at <paramref name="ordinal"/>, renders UTC
+    /// (#4046). False for a NULL (a marker row) and for a reader without the column, which keeps today's refusal.
+    /// </summary>
+    public static bool LogTimezoneIsUtc(DbDataReader reader, int ordinal)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        return reader.FieldCount > ordinal
+            && !reader.IsDBNull(ordinal)
+            && PgDeadlockLogParser.IsUtcLogTimezoneSetting(reader.GetString(ordinal));
+    }
+
+    /// <summary>
+    /// The count a consumer records on its collection-log row when a read skipped lines as not the server's own
+    /// (#4046, <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>); <see cref="ForeignZoneLinesNote"/>
+    /// says what it counts.
+    /// </summary>
+    public const string ForeignZoneLinesMeasurement = "foreign_zone_lines_skipped";
+
+    /// <summary>
+    /// The sentence the Darling runner puts beside <see cref="ForeignZoneLinesMeasurement"/> on the row (#4046): a
+    /// count label cannot name the setting or the issue, and an operator who finds the count needs both.
+    /// </summary>
+    public const string ForeignZoneLinesNote =
+        "Skipped log lines stamped in a zone other than UTC, which this target's UTC log_timezone did not write: a "
+        + "client can plant one with a failed login, since %u and %d in log_line_prefix echo its role and database "
+        + "names unescaped, and lines from before a log_timezone change look the same. The read went on without "
+        + "them (#4046)";
+
+    /// <summary>
+    /// Records the lines a read skipped as not the server's own (#4046) on this run's collection-log row. Nothing
+    /// for zero, so an ordinary run's row stays as it was.
+    /// </summary>
+    public static void MeasureForeignZoneLines(CollectorContext context, int foreignZoneLines)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (foreignZoneLines > 0)
+        {
+            context.Measure(ForeignZoneLinesMeasurement, foreignZoneLines);
+        }
+    }
 }

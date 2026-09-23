@@ -880,6 +880,69 @@ public sealed class PgDeadlockLogParserTests
         Assert.Equal("EST", ex.ObservedZone);
     }
 
+    /* #4046: the same straddle, read by a caller that knows the target's log_timezone renders UTC. The block in
+       another zone cannot be the server's own, so it is skipped and its three prefix lines counted, and the
+       readable report is stored instead of the whole read being refused. */
+    [Fact]
+    public async Task UnderAUtcLogTimezone_AnotherZonesReportIsSkippedAndCounted_AndTheReadGoesOn()
+    {
+        var foreign = RealBlock.Replace(" UTC [", " EST [", StringComparison.Ordinal)
+                               .Replace("1549", "1827", StringComparison.Ordinal)
+                               .Replace("1556", "1830", StringComparison.Ordinal);
+
+        Assert.Null(PgDeadlockLogParser.FromReport(foreign, logTimezoneIsUtc: true, out var skipped));
+        Assert.Equal(3, skipped);
+
+        var context = MakeContext();
+        var reader = new FakeCollectorDataReader(
+            new object[] { RealBlock, "UTC" },
+            new object[] { foreign, "Etc/UTC" });
+
+        var rows = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(1549, row.VictimPid);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(3, measured.Value);
+    }
+
+    /* #4046's other half: a target whose log_timezone is not UTC, or a row with no setting, is refused exactly
+       as before. Europe/London is the case a current-offset rule would get wrong: GMT all winter, BST all summer. */
+    [Theory]
+    [InlineData("America/New_York")]
+    [InlineData("Europe/London")]
+    [InlineData(null)]
+    public async Task UnderAnyOtherLogTimezone_AnotherZoneStillRefusesTheRead(string? setting)
+    {
+        var reader = new FakeCollectorDataReader(
+            new object[] { RealBlock, "UTC" },
+            new object[] { WithLogZone("EST"), (object?)setting ?? DBNull.Value });
+
+        var ex = await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None));
+
+        Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    [Theory]
+    [InlineData("UTC", true)]
+    [InlineData("Etc/UTC", true)]
+    [InlineData("utc", true)]
+    [InlineData(" GMT ", true)]
+    [InlineData("Etc/Greenwich", true)]
+    [InlineData("Zulu", true)]
+    [InlineData("Europe/London", false)]
+    [InlineData("Africa/Abidjan", false)]
+    [InlineData("UTC0", false)]
+    [InlineData("localtime", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsUtcLogTimezoneSetting_IsAnAllowlistOfZeroOffsetZones(string? setting, bool expected)
+    {
+        Assert.Equal(expected, PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting));
+    }
+
     /* The fixture's own positive control: without it a straddled slab that had somehow stopped holding
        two recognisable blocks would satisfy the refusal above for the wrong reason. */
     private static readonly System.Text.RegularExpressions.Regex s_blockCount =

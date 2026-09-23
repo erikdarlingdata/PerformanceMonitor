@@ -127,20 +127,26 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        A second marker arm (#3997) is the narrower gap: logging_collector on, but every file the shared tail
        saw was a csvlog/jsonlog sibling (log_destination carries no stderr), so newest came back empty for a
        different reason than the setting being off. ReadAsync throws PgNoStderrLogFileException for that one;
-       the two predicates cannot both hold, since one needs the setting off and the other needs it on. */
+       the two predicates cannot both hold, since one needs the setting off and the other needs it on.
+
+       The second column is the target's log_timezone, read in this statement with the tail (#4046). Under a
+       setting that renders UTC, a candidate in another zone is not the server's own (a client plants one
+       through %u or %d with a failed login), so ReadAsync skips and counts it instead of refusing the read.
+       The marker arms carry NULL there. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
-    m[1]    AS report_text
+    m[1]    AS report_text,
+    " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail,
      regexp_matches(
          tail.body,
          '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"'
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT '" + PgNoStderrLogFileException.Marker + @"'
+SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 500";
 
@@ -211,8 +217,11 @@ LIMIT 500";
                the refusal against log_timezone instead of storing a shifted occurred_at. The throw abandons
                rows already read in this batch, which is the trade PgDeadlockLogParser.Extract's remarks argue
                for: a partial history from a target declared unreadable is worse for the reader than a
-               refusal that says one thing. */
-            var parsed = PgDeadlockLogParser.FromReport(firstColumn);
+               refusal that says one thing. Unless the target's own log_timezone renders UTC: then a candidate
+               in another zone is not the server's, and it is skipped and counted instead (#4046). */
+            var parsed = PgDeadlockLogParser.FromReport(
+                firstColumn, PgServerLogTail.LogTimezoneIsUtc(reader, 1), out var foreignZoneLines);
+            PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
 
             /* A block that will not parse is skipped rather than reported. The window is bounded, so a
                report cut in half at its edge is ordinary and is read whole on the next overlapping pass. */

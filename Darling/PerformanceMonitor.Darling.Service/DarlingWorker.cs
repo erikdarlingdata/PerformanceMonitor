@@ -9492,6 +9492,10 @@ LIMIT 1";
                carries that on its row, through the same HostNote channel; taking it clears it, so no later run does. */
             result = _logHashKeyRotation.ApplyTo(collectorName, result);
 
+            /* #4046: a log read that skipped lines stamped outside the target's UTC log_timezone carries their count;
+               this puts the sentence that names the setting and the issue beside it, on the same HostNote channel. */
+            result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);
+
             /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
                per-database fault split takes its arm's level — see LogPerDatabaseFaultSplit's remarks. A
                timing on the default log with no reason beside it is the shape to avoid, and a run that
