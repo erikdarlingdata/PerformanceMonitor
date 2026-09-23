@@ -1069,23 +1069,6 @@ internal static class FindingMessageFormatter
     private const int DrillDownRowLimit = 3;
 
     /// <summary>
-    /// Flattens one drill-down value into the item's label/value field pairs. Arrays are capped at
-    /// the first <see cref="DrillDownRowLimit"/> elements; nested objects/arrays are rendered as compact JSON.
-    /// <para><b>#3644: an array of OBJECTS is also carried as <see cref="AlertDetailItem.Records"/>.</b> The
-    /// flat pairs (<c>#1 Database</c>, <c>#1 Query Hash</c>, … <c>#1 Query Text</c>, <c>#2 Database</c>, …)
-    /// are right for every surface that lays them out in one column, and wrong for exactly one: Slack's
-    /// two-across <c>fields</c> grid, where a seven-attribute record never stays together — #1's text lands
-    /// beside #2's hash, #3's database beside #2's SQL — and the reader reconstructs each query by hunting
-    /// <c>#N</c> labels across two columns and several screen-heights. Read live on a production High CPU
-    /// page during a sustained CPU arc. Fields are for PAIRED scalars; a repeating record is a list of rows,
-    /// so each row is ALSO packed as one record: the ordinal, one summary line of its non-empty scalars in
-    /// the record's own order (<see cref="IsTextProperty"/> decides which properties are text), and its
-    /// text(s) separately, so a renderer can set the summary over the text instead of beside it. The fields
-    /// are not changed by a byte — the persisted row, the email table, the in-app grid and every other flat
-    /// reader see what they saw — and the records are only populated when every kept element is an object,
-    /// so a mixed or scalar array keeps the flat shape alone (a scalar has no record to be).</para>
-    /// </summary>
-    /// <summary>
     /// One drill-down section as a finding alert's detail item carries it: <see cref="DrillDownHeading"/> over the
     /// section flattened by <see cref="FlattenInto"/>. Null when its shape is unexpected (the entry is skipped and the
     /// rest kept) or it flattens to nothing. Shared with the Darling re-mask of finding alerts stored before #4005
@@ -1110,6 +1093,23 @@ internal static class FindingMessageFormatter
     /// <summary>The heading a drill-down section's detail item carries: its key, humanized.</summary>
     internal static string DrillDownHeading(string key) => Humanize(key);
 
+    /// <summary>
+    /// Flattens one drill-down value into the item's label/value field pairs. Arrays are capped at
+    /// the first <see cref="DrillDownRowLimit"/> elements; nested objects/arrays are rendered as compact JSON.
+    /// <para><b>#3644: an array of OBJECTS is also carried as <see cref="AlertDetailItem.Records"/>.</b> The
+    /// flat pairs (<c>#1 Database</c>, <c>#1 Query Hash</c>, … <c>#1 Query Text</c>, <c>#2 Database</c>, …)
+    /// are right for every surface that lays them out in one column, and wrong for exactly one: Slack's
+    /// two-across <c>fields</c> grid, where a seven-attribute record never stays together — #1's text lands
+    /// beside #2's hash, #3's database beside #2's SQL — and the reader reconstructs each query by hunting
+    /// <c>#N</c> labels across two columns and several screen-heights. Read live on a production High CPU
+    /// page during a sustained CPU arc. Fields are for PAIRED scalars; a repeating record is a list of rows,
+    /// so each row is ALSO packed as one record: the ordinal, one summary line of its non-empty scalars in
+    /// the record's own order (<see cref="IsTextProperty"/> decides which properties are text), and its
+    /// text(s) separately, so a renderer can set the summary over the text instead of beside it. The fields
+    /// are not changed by a byte — the persisted row, the email table, the in-app grid and every other flat
+    /// reader see what they saw — and the records are only populated when every kept element is an object,
+    /// so a mixed or scalar array keeps the flat shape alone (a scalar has no record to be).</para>
+    /// </summary>
     private static void FlattenInto(AlertDetailItem item, JsonElement element)
     {
         var fields = item.Fields;

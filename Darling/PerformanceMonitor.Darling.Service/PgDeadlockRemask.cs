@@ -978,16 +978,21 @@ AND   xmin = $3::xid";
 
     /* The top exemplar's normalized fingerprint, the one the advice prose names (PgTargetAdvice.DescribeShape over
        the first exemplar). */
-    private static string? TopVictimFingerprint(object section) =>
-        section is JsonElement { ValueKind: JsonValueKind.Object } element
-        && element.TryGetProperty("exemplars", out var exemplars)
-        && exemplars.ValueKind == JsonValueKind.Array
-        && exemplars.GetArrayLength() > 0
-        && exemplars[0].ValueKind == JsonValueKind.Object
-        && exemplars[0].TryGetProperty("victim_statement_fingerprint", out var fingerprint)
-        && fingerprint.ValueKind == JsonValueKind.String
-            ? fingerprint.GetString()
-            : null;
+    private static string? TopVictimFingerprint(object section)
+    {
+        if (section is not JsonElement { ValueKind: JsonValueKind.Object } element
+            || !element.TryGetProperty("exemplars", out var exemplars)
+            || exemplars.ValueKind != JsonValueKind.Array
+            || exemplars.GetArrayLength() == 0
+            || exemplars[0].ValueKind != JsonValueKind.Object
+            || !exemplars[0].TryGetProperty("victim_statement_fingerprint", out var fingerprint)
+            || fingerprint.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return fingerprint.GetString();
+    }
 
     /// <summary>
     /// Examines one slice of stored finding alerts and rewrites the ones whose deadlock exemplar section was
