@@ -323,6 +323,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal("dbo.usp_Target", row.ModuleName);
     }
 
+    [Fact]
     public async Task TopQueries_ModuleFilterRunsAfterIntervalDedup()
     {
         await SeedAsync(BucketStart.AddMinutes(5), 104, 1004, FirstExecA, 10, 100, 200, 1,
