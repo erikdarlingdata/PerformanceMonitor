@@ -42,7 +42,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <see cref="MatchKind.StartsWith"/>, because an over-broad exclusion fails toward a MISSED shape, which is
 /// the half of a guard whose mistakes are silent (the <c>NonStoreTeardownTokens</c> reasoning, #3036).
 /// <see cref="MatchKind.Contains"/> is legal only on a RETAINED rule, where the worst a loose match can do
-/// is file a real entry under a friendlier heading while still storing its text.
+/// is file a real entry under a friendlier heading while still storing its text; and it never claims a LOG line
+/// of statement logging, whose message is SQL rather than prose (#3944's review).
 /// <see cref="EveryExcludingRuleIsAnchoredAndSeverityScoped"/> is not a comment — it is
 /// <c>StoreLogClassifierTests</c>' pin.</para>
 ///
