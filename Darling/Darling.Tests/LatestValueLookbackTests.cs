@@ -840,8 +840,8 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
 
             if (timescaleEnabled)
             {
-                var shippedChunks = ChunkScans(shipped);
-                var oracleChunks = ChunkScans(oracle);
+                var shippedChunks = PlanChunkScans.Count(shipped);
+                var oracleChunks = PlanChunkScans.Count(oracle);
                 Assert.True(oracleChunks >= 11,
                     $"the pre-#3896 read should plan every seeded chunk (eleven days of data), planned {oracleChunks}:\n{oracle}");
                 Assert.True(shippedChunks is >= 1 and <= 3,
