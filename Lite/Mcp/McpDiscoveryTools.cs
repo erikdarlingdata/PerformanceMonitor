@@ -8,7 +8,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpDiscoveryTools
 {
-    [McpServerTool(Name = "list_servers"), Description("Lists all monitored SQL Server instances with their current status and last collection time. Use this first to see available servers before calling other tools.")]
+    [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected." + McpToolGuide.Marker + " Use this first to see available servers before calling other tools. Lists all monitored SQL Server instances.")]
     public static async Task<string> ListServers(ServerManager serverManager, LocalDataService dataService)
     {
         var servers = serverManager.GetEnabledServers();
