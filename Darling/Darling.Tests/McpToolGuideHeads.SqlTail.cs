@@ -109,7 +109,7 @@ public sealed class McpToolGuideHeadsSqlTailDurationTrendTests
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
         ("get_query_duration_trend", "unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero"),
-        ("get_query_duration_trend", "status empty means a quiet window that has collected before; unavailable means query_stats has never been collected here"),
+        ("get_query_duration_trend", "unavailable means query_stats was never collected here; empty means it was (the message says quiet window or rollup coverage gap)"),
         ("get_query_duration_trend", "window_truncated is the store's retention floor, not a page cut"),
         ("get_procedure_duration_trend", "charged to the whole call rather than smeared across its statements"),
         ("get_procedure_duration_trend", "the empty/unavailable split and window_truncated (a retention floor, not a page cut) all follow get_query_duration_trend exactly"),

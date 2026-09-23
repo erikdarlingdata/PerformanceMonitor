@@ -25,7 +25,7 @@ param get_procedure_duration_trend.bucket_minutes 55
 param get_procedure_duration_trend.hours_back 29
 param get_procedure_duration_trend.server_name 28
 
-tool get_query_duration_trend 605
+tool get_query_duration_trend 614
 param get_query_duration_trend.as_of 167
 param get_query_duration_trend.bucket_minutes 55
 param get_query_duration_trend.hours_back 29
