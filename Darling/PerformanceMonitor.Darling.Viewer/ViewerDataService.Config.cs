@@ -78,11 +78,25 @@ public sealed partial class ViewerDataService
         ORDER BY database_name
         """;
 
+    /// <summary>
+    /// #3999: anchored on the trace_flags collector's newest SUCCESSFUL run, not the newest row. A capture
+    /// that finds every flag off writes ZERO rows (<c>DBCC TRACESTATUS(-1)</c> only lists flags that are ON),
+    /// so a plain <c>capture_time = MAX(capture_time)</c> falls back to an older capture that still had a
+    /// flag on. The second <c>AND</c> compares the newest row's timestamp against the newest SUCCESS this
+    /// collector logged in <c>v_collection_log</c>; if that run is newer, it found nothing on, and the whole
+    /// predicate goes false so the read reports no flags rather than a stale one. The <c>COALESCE</c> floor
+    /// only matters once collection_log's retention has aged past this collector's oldest trace_flags row,
+    /// and defaults to the pre-fix reading rather than wrongly suppressing a row it cannot corroborate.
+    /// </summary>
     public const string TraceFlagsSql = """
         SELECT trace_flag, status, is_global, is_session
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
+        AND   (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1) >= COALESCE(
+                  (SELECT MAX(collection_time) FROM v_collection_log
+                   WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'),
+                  TIMESTAMP '1900-01-01')
         ORDER BY trace_flag
         """;
 
