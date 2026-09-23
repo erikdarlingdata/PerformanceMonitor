@@ -175,6 +175,7 @@ public sealed class McpToolGuideTests
            about THIS test's host, not a family pin (that lives in McpToolGuideHeadsHealthParserTests). */
         var fixtureToolsWithGuides = new[]
         {
+            "get_collection_health",
             "get_file_io_stats",
             "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
             "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
