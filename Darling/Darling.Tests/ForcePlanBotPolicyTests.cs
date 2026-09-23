@@ -477,4 +477,38 @@ public sealed class ForcePlanBotPolicyTests
         var target = Assert.Single(FactRemediation.ExtractPlanRegressionTargets(finding));
         Assert.Equal(lastSeen, target.BestPlanLastSeenUtc);
     }
+    /// <summary>
+    /// #3953: the advice states how old the faster plan is when the fact carries <c>best_plan_age_days</c>, and says
+    /// what it always said when it does not (a fact from before the key existed, or Lite's older payloads).
+    /// </summary>
+    [Fact]
+    public void ThePlanRegressionAdvice_StatesTheBestPlansAge_WhenTheFactCarriesIt()
+    {
+        static IReadOnlyDictionary<string, Fact> Facts(double? ageDays)
+        {
+            var metadata = new Dictionary<string, double>
+            {
+                ["worst_regression_factor"] = 6,
+                ["offender_count"] = 2,
+                ["latest_cpu_per_exec_us"] = 60000,
+                ["best_cpu_per_exec_us"] = 10000,
+            };
+            if (ageDays is double age)
+            {
+                metadata["best_plan_age_days"] = age;
+            }
+
+            return new Dictionary<string, Fact>
+            {
+                ["PLAN_REGRESSION"] = new Fact { Source = "queries", Key = "PLAN_REGRESSION", Value = 6, Metadata = metadata },
+            };
+        }
+
+        Assert.Contains("the faster plan on record (it last ran 9 days ago), so",
+            FactAdvice.Compose("PLAN_REGRESSION", Facts(9.6))!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the faster plan on record (it last ran within the past day), so",
+            FactAdvice.Compose("PLAN_REGRESSION", Facts(0.4))!.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the faster plan on record, so",
+            FactAdvice.Compose("PLAN_REGRESSION", Facts(null))!.Investigation, StringComparison.Ordinal);
+    }
 }
