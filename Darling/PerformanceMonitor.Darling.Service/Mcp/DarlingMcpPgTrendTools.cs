@@ -124,19 +124,33 @@ public sealed class DarlingMcpPgTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_query_duration_trend"), Description("Gets a time series for ONE PostgreSQL statement by queryid: what a single execution cost in each collection interval, how many times it ran, and its call rate. This is the regression read - a query whose mean execution time steps up and stays up has changed plan or lost an index, and the step is visible here where a single-window average hides it. Use get_pg_top_queries first to get a queryid. mean_exec_ms is null rather than zero for an interval where the statement did not run, because a mean over no calls is absent rather than fast.")]
-    public static async Task<string> GetPgQueryDurationTrend(
+    [McpServerTool(Name = "get_pg_query_duration_trend"), Description("Gets a time series for ONE PostgreSQL statement by queryid, in time buckets: what a single execution cost, how many times it ran, and its call rate. This is the regression read - a query whose mean execution time steps up and stays up has changed plan or lost an index, and the step is visible here where a single-window average hides it. Use get_pg_top_queries first to get a queryid. mean_exec_ms is null rather than zero where the statement did not run, because a mean over no calls is absent rather than fast.")]
+    public static Task<string> GetPgQueryDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("The queryid from get_pg_top_queries; PostgreSQL query ids can be negative. Omit to follow the statement that spent the most time in the window.")] string? queryid = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
+        GetPgQueryDurationTrend(postgres, server_name, queryid, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgQueryDurationMaxPoints));
+
+    /// <summary>
+    /// get_pg_query_duration_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own,
+    /// the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. The window figures are counted from
+    /// the buckets' own interval counts and end intervals, so they are the numbers the per-interval read produced.
+    /// </summary>
+    internal static async Task<string> GetPgQueryDurationTrend(
+        NpgsqlDataSource postgres, string? server_name, string? queryid, int hours_back, string? as_of, int? bucket_minutes,
+        TrendBudget budget)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null) return validation;
+
+        var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+        if (bucketError != null) return bucketError;
 
         long parsedQueryId;
         var requested = !string.IsNullOrWhiteSpace(queryid);
@@ -177,8 +191,8 @@ public sealed class DarlingMcpPgTrendTools
                 parsedQueryId = long.Parse(queryid!.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture);
             }
 
-            var points = await DarlingPgTrendReader.GetQueryDurationTrendAsync(
-                postgres, resolved.ServerId, parsedQueryId, start, windowEnd);
+            var points = await DarlingPgTrendReader.GetQueryDurationBucketsAsync(
+                postgres, resolved.ServerId, parsedQueryId, start, windowEnd, bucketMinutes);
 
             if (points.Count == 0)
             {
@@ -202,24 +216,32 @@ public sealed class DarlingMcpPgTrendTools
                     ? "as requested"
                     : "chosen automatically: the statement with the most execution time in this window",
                 hours_back,
+                bucket = TrendBuckets.Word(bucketMinutes),
+                bucket_minutes = bucketMinutes,
+                aggregate_note = TrendBuckets.AggregateNote(bucketMinutes, bucket_minutes is not null, budget.AutoPoints),
                 status = "query_duration_trend",
                 point_count = points.Count,
-                intervals_with_calls = ran.Count,
+                /* The rated intervals the points summarize — what point_count counted before #3960 — and how many
+                   of them ran the statement, counted from each bucket's own tallies. */
+                interval_count = points.Sum(p => p.Intervals),
+                intervals_with_calls = points.Sum(p => p.IntervalsWithCalls),
                 /* The two ends of the series that actually ran, so a step is visible without reading every
-                   point - and null when nothing ran, rather than a shape invented from no executions. */
-                first_mean_exec_ms = ran.Count > 0 ? Math.Round(ran[0].MeanExecMs, 3) : (double?)null,
-                last_mean_exec_ms = ran.Count > 0 ? Math.Round(ran[^1].MeanExecMs, 3) : (double?)null,
-                note = "mean_exec_ms is the interval's total execution time over its calls - what ONE "
-                     + "execution cost then. It is null for an interval with no calls, because a mean over "
-                     + "no executions is absent rather than zero. A step that persists is a plan or index "
-                     + "change; a spike that recovers is usually contention, which get_pg_wait_trend and "
-                     + "get_pg_blocking speak to.",
+                   point - and null when nothing ran, rather than a shape invented from no executions. Still the
+                   first and last INTERVAL's mean: each bucket carries its own end intervals (#3960). */
+                first_mean_exec_ms = ran.Count > 0 && ran[0].FirstMeanExecMs is { } first ? Math.Round(first, 3) : (double?)null,
+                last_mean_exec_ms = ran.Count > 0 && ran[^1].LastMeanExecMs is { } last ? Math.Round(last, 3) : (double?)null,
+                note = "mean_exec_ms is the point's total execution time over its calls - what ONE "
+                     + "execution cost then - and peak_mean_exec_ms the costliest single interval inside it. Both "
+                     + "are null where nothing ran, because a mean over no executions is absent rather than zero. "
+                     + "A step that persists is a plan or index change; a spike that recovers is usually "
+                     + "contention, which get_pg_wait_trend and get_pg_blocking speak to.",
                 points = points.Select(p => new
                 {
                     collection_time = p.CollectionTimeUtc,
                     calls = p.Calls,
                     total_exec_ms = Math.Round(p.TotalExecMs, 3),
                     mean_exec_ms = p.Calls > 0 ? Math.Round(p.MeanExecMs, 3) : (double?)null,
+                    peak_mean_exec_ms = p.PeakMeanExecMs is { } peak ? Math.Round(peak, 3) : (double?)null,
                     calls_per_second = Math.Round(p.CallsPerSecond, 4),
                 }),
             }, McpHelpers.JsonOptions);

@@ -46,12 +46,24 @@ public static class DarlingPgTrendReader
 
     /// <param name="MeanExecMs">The interval's total execution time over its calls — what one execution
     /// cost during that interval, which is the number a regression moves.</param>
+    /// <param name="PeakMeanExecMs">#3960: on a bucketed point, the costliest single interval's mean, so the step a
+    /// regression makes survives the bucket; null where no interval in it ran.</param>
+    /// <param name="FirstMeanExecMs">#3960: the mean of the bucket's first interval that ran — with
+    /// <paramref name="LastMeanExecMs"/>, what the tool's window ends are read from, so they are the same
+    /// intervals' figures they always were.</param>
+    /// <param name="IntervalsWithCalls">#3960: how many of the bucket's intervals ran the statement.</param>
+    /// <param name="Intervals">#3960: how many rated intervals the bucket summarizes.</param>
     public readonly record struct PgQueryDurationTrendPoint(
         DateTime CollectionTimeUtc,
         long Calls,
         double TotalExecMs,
         double MeanExecMs,
-        double CallsPerSecond);
+        double CallsPerSecond,
+        double? PeakMeanExecMs = null,
+        double? FirstMeanExecMs = null,
+        double? LastMeanExecMs = null,
+        long IntervalsWithCalls = 0,
+        long Intervals = 0);
 
     /// <summary>
     /// One wait event over time, summed across the queries that waited on it.
@@ -127,23 +139,8 @@ public static class DarlingPgTrendReader
     /// renders as it did. No <c>ELSE 0</c>: the first snapshot of a pre-V128 series is absent rather than
     /// a fabricated 0.0.</para>
     /// </summary>
-    public const string QueryDurationTrendSql = """
-        WITH per_snapshot AS (
-            SELECT
-                collection_time,
-                SUM(delta_calls)                AS calls,
-                SUM(delta_total_exec_time_ms)   AS total_exec_ms,
-                CASE WHEN MAX(sample_interval_seconds) IS NULL
-                     THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))
-                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                END                             AS interval_seconds
-            FROM pg_statement_stats
-            WHERE server_id = $1
-            AND   queryid = $2
-            AND   collection_time >= $3
-            AND   collection_time <= $4
-            GROUP BY collection_time
-        )
+    public static readonly string QueryDurationTrendSql = $"""
+        WITH {QueryDurationSnapshotsCte()}
         SELECT
             collection_time,
             coalesce(calls, 0)::bigint                      AS calls,
@@ -163,6 +160,72 @@ public static class DarlingPgTrendReader
         ORDER BY collection_time
         """;
 
+
+    /// <summary>The statement's per-snapshot read (#3960), shared by <see cref="QueryDurationTrendSql"/> and
+    /// <see cref="QueryDurationTrendBucketedSql"/> so both read the same rows with the same interval. A METHOD,
+    /// not a field: its body contains a bare SELECT with no WITH of its own, so as a <c>const</c> or
+    /// <c>static readonly</c> field it would parse-check itself as a standalone statement
+    /// (<see cref="DarlingPgReadSqlParsesLiveTests"/> discovers every string field that contains SELECT) and fail —
+    /// it is a fragment, never run on its own. A method is invisible to that reflection, which reads FIELDS.</summary>
+    private static string QueryDurationSnapshotsCte() => """
+        per_snapshot AS (
+            SELECT
+                collection_time,
+                SUM(delta_calls)                AS calls,
+                SUM(delta_total_exec_time_ms)   AS total_exec_ms,
+                CASE WHEN MAX(sample_interval_seconds) IS NULL
+                     THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (ORDER BY collection_time)))
+                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                END                             AS interval_seconds
+            FROM pg_statement_stats
+            WHERE server_id = $1
+            AND   queryid = $2
+            AND   collection_time >= $3
+            AND   collection_time <= $4
+            GROUP BY collection_time
+        )
+        """;
+
+    /// <summary>
+    /// One statement over time, BUCKETED (#3960): <see cref="QueryDurationTrendSql"/>'s rated snapshots — the ones
+    /// its reader kept — gathered into buckets of <c>$5</c> minutes. Calls and execution time are summed; the mean is
+    /// the bucket's summed time over its summed calls (NULL where nothing ran: a mean over no executions is absent,
+    /// not fast); the call rate is the summed calls over the seconds the snapshots covered; and the peak is the
+    /// costliest single interval's mean, so the step a regression makes is not averaged into the calls around it.
+    /// The first and last intervals that ran keep their own means, which the tool's window ends are read from.
+    /// Each point is stamped at its bucket's start, the first at the window's start. $1 server_id, $2 queryid,
+    /// $3/$4 window (naive UTC), $5 the bucket width in minutes.
+    /// </summary>
+    public static readonly string QueryDurationTrendBucketedSql = $"""
+        WITH {QueryDurationSnapshotsCte()},
+        rated AS (
+            SELECT
+                collection_time,
+                coalesce(calls, 0)                            AS calls,
+                coalesce(total_exec_ms, 0)::double precision  AS total_exec_ms,
+                interval_seconds
+            FROM per_snapshot
+            WHERE interval_seconds > 0
+        )
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            SUM(calls)::bigint                                                   AS calls,
+            SUM(total_exec_ms)                                                   AS total_exec_ms,
+            CASE WHEN SUM(calls) > 0 THEN SUM(total_exec_ms) / SUM(calls) END    AS mean_exec_ms,
+            CASE WHEN SUM(interval_seconds) > 0
+                 THEN SUM(calls)::double precision / SUM(interval_seconds)
+            END                                                                  AS calls_per_second,
+            MAX(CASE WHEN calls > 0 THEN total_exec_ms / calls END)              AS peak_mean_exec_ms,
+            (array_agg(total_exec_ms / NULLIF(calls, 0) ORDER BY collection_time)
+                FILTER (WHERE calls > 0))[1]                                     AS first_mean_exec_ms,
+            (array_agg(total_exec_ms / NULLIF(calls, 0) ORDER BY collection_time DESC)
+                FILTER (WHERE calls > 0))[1]                                     AS last_mean_exec_ms,
+            COUNT(*) FILTER (WHERE calls > 0)                                    AS intervals_with_calls,
+            COUNT(*)                                                             AS intervals
+        FROM rated
+        GROUP BY 1
+        ORDER BY 1
+        """;
 
     /// <summary>
     /// The wait event with the most samples in the window, so a caller that has not chosen one gets the
@@ -269,6 +332,39 @@ public static class DarlingPgTrendReader
                 reader.IsDBNull(2) ? (double?)null : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : (int)reader.GetInt64(3),
                 !reader.IsDBNull(4) && reader.GetBoolean(4)));
+        }
+
+        return points;
+    }
+
+    /// <summary>Runs <see cref="QueryDurationTrendBucketedSql"/> (#3960): one point per bucket holding a rated
+    /// snapshot, <c>MeanExecMs</c> 0 where nothing ran (the tool publishes null there, as it always did).</summary>
+    public static async Task<List<PgQueryDurationTrendPoint>> GetQueryDurationBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, long queryId, DateTime startUtc, DateTime endUtc, int bucketMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        var points = new List<PgQueryDurationTrendPoint>();
+        await using var command = postgres.CreateCommand(QueryDurationTrendBucketedSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(queryId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            points.Add(new PgQueryDurationTrendPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
+                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5),
+                reader.IsDBNull(6) ? null : reader.GetDouble(6),
+                reader.IsDBNull(7) ? null : reader.GetDouble(7),
+                reader.GetInt64(8),
+                reader.GetInt64(9)));
         }
 
         return points;

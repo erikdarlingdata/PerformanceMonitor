@@ -76,9 +76,15 @@ public sealed class PerfmonIntervalAggregationTests
     [Fact]
     public void LitesPerfmonTrendTool_ProjectsTheInterval()
     {
-        var source = ParitySource.ReadFile("Lite/Mcp/McpPerfmonTools.cs");
+        /* #3960: the per-collection inline projection this pinned moved into the shared TrendPayloads.PerfmonTrend
+           builder (PerformanceMonitor.Common), which both SKUs now call — so the interval reaching the caller is
+           proven at the ONE site that projects it, and by McpPerfmonTools.cs calling that builder rather than
+           building its own envelope. */
+        var tool = ParitySource.ReadFile("Lite/Mcp/McpPerfmonTools.cs");
+        Assert.Contains("TrendPayloads.PerfmonTrend(", tool, StringComparison.Ordinal);
 
-        Assert.Contains("sample_interval_seconds = p.SampleIntervalSeconds", source, StringComparison.Ordinal);
+        var shared = ParitySource.ReadFile("PerformanceMonitor.Common/Mcp/TrendPayloads.cs");
+        Assert.Contains("[\"sample_interval_seconds\"] = seconds", shared, StringComparison.Ordinal);
     }
 
     private static int CountOccurrences(string haystack, string needle)

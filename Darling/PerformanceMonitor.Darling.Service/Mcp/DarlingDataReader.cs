@@ -16,6 +16,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -321,6 +322,60 @@ internal static class DarlingDataReader
         return samples;
     }
 
+    /// <summary>
+    /// CPU BUCKETED (#3960): <see cref="CpuUtilizationSql"/>'s de-skewed samples, byte for byte, averaged per bucket of
+    /// <c>$4</c> minutes on the samples' own UTC instant — the tool used to bucket every sample to the minute in C#,
+    /// after reading a week of them (40,000 rows on an Azure SQL DB source) — with the busiest sample's SQL and total
+    /// CPU beside the averages and the sample count. A NULL reading counts as 0, as the per-sample reader always read
+    /// it. Each point is stamped at its bucket's start and NOT clamped to the window's: the window is on
+    /// collection_time, and a collection can carry samples from before it, which the per-minute points always showed
+    /// at their own minute. $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public const string CpuUtilizationBucketedSql = $"""
+        SELECT
+            date_bin(CAST($4 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}) AS bucket_start,
+            AVG(COALESCE(sqlserver_cpu_utilization, 0)) AS sql_server_cpu,
+            AVG(COALESCE(other_process_cpu_utilization, 0)) AS other_process_cpu,
+            AVG(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS total_cpu,
+            AVG(GREATEST(0, 100 - (COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)))) AS idle_cpu,
+            MAX(COALESCE(sqlserver_cpu_utilization, 0)) AS peak_sql_server_cpu,
+            MAX(COALESCE(sqlserver_cpu_utilization, 0) + COALESCE(other_process_cpu_utilization, 0)) AS peak_total_cpu,
+            COUNT(*) AS samples
+        FROM (
+        {CpuUtilizationSql}
+        ) AS samples
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="CpuUtilizationBucketedSql"/>.</summary>
+    public static async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<CpuBucketPoint>();
+        await using var command = postgres.CreateCommand(CpuUtilizationBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new CpuBucketPoint(
+                reader.GetDateTime(0),
+                Convert.ToDouble(reader.GetValue(1)),
+                Convert.ToDouble(reader.GetValue(2)),
+                Convert.ToDouble(reader.GetValue(3)),
+                Convert.ToDouble(reader.GetValue(4)),
+                Convert.ToInt32(reader.GetValue(5)),
+                Convert.ToInt32(reader.GetValue(6)),
+                reader.GetInt64(7)));
+        }
+
+        return items;
+    }
+
     public sealed record CpuWindowAggregate(int SampleCount, DateTime? FirstSample, DateTime? LastSample, double? AvgSqlCpuPercent);
 
     /// <summary>
@@ -484,8 +539,20 @@ internal static class DarlingDataReader
     /// DuckDB↔Postgres) is what this read always did, so history keeps rendering. The first row of the
     /// window has no prior and no stored interval either way — NULL, not 0.</para>
     /// </summary>
-    public const string WaitTrendSql = """
-        WITH raw AS
+    public const string WaitTrendSql = $"""
+        WITH {WaitRawCte}
+        SELECT
+            collection_time,
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second
+        FROM raw
+        ORDER BY collection_time
+        """;
+
+    /// <summary>The wait trend's per-row read (#3960): shared, so the per-collection statement and the bucketed one
+    /// read the same rows with the same three-state interval.</summary>
+    private const string WaitRawCte = """
+        raw AS
         (
             SELECT
                 collection_time,
@@ -501,13 +568,65 @@ internal static class DarlingDataReader
             AND   collection_time >= $3
             AND   collection_time <= $4
         )
-        SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second
-        FROM raw
-        ORDER BY collection_time
         """;
+
+    /// <summary>
+    /// The wait trend BUCKETED (#3960): <see cref="WaitTrendSql"/>'s rows gathered into buckets of <c>$5</c> minutes.
+    /// Only a collection whose rate is knowable counts — each one's wait, signal wait and seconds are NULL through a
+    /// no-ELSE CASE otherwise, the same collections the per-collection reader drops — and a bucket holding none of
+    /// them is left out, as the reader left such a collection out. A bucket's rate is its summed wait over the
+    /// seconds its rated collections covered — time-weighted, never an average of per-collection rates — and its
+    /// peak is the busiest single collection, so a one-minute pile-up survives a ten-minute bucket.
+    /// $1 server_id, $2 wait_type, $3/$4 window (naive UTC), $5 the bucket width in minutes.
+    /// </summary>
+    public const string WaitTrendBucketedSql = $"""
+        WITH {WaitRawCte},
+        rated AS
+        (
+            SELECT
+                collection_time,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) END AS rated_wait_ms,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) END AS rated_signal_ms,
+                CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
+            FROM raw
+        )
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+            SUM(rated_signal_ms) / SUM(rated_seconds) AS signal_wait_time_ms_per_second,
+            MAX(wait_time_ms_per_second) AS peak_wait_time_ms_per_second
+        FROM rated
+        GROUP BY 1
+        HAVING COUNT(rated_seconds) > 0
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="WaitTrendBucketedSql"/>: only buckets holding a rated collection come back.</summary>
+    public static async Task<List<WaitBucketPoint>> GetWaitBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, string waitType, DateTime startUtc, DateTime endUtc, int bucketMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        var items = new List<WaitBucketPoint>();
+        await using var command = postgres.CreateCommand(WaitTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddText(command, waitType);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new WaitBucketPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3))));
+        }
+
+        return items;
+    }
 
     public static async Task<List<WaitTrendPoint>> GetWaitTrendAsync(
         NpgsqlDataSource postgres, int serverId, string waitType, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -732,6 +851,64 @@ internal static class DarlingDataReader
         }
 
         return samples;
+    }
+
+    /// <summary>
+    /// tempdb BUCKETED (#3960): <see cref="TempDbTrendSql"/>'s samples, byte for byte, gathered into buckets of
+    /// <c>$4</c> minutes — each space figure averaged, the fullest collection's reserved and version-store space as
+    /// the peaks, the most sessions any collection saw, and the single largest consumer (its session and its MB,
+    /// the earliest on a tie). A NULL reading counts as 0, as the per-sample reader always read it. $1 server_id,
+    /// $2/$3 window (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public const string TempDbTrendBucketedSql = $"""
+        SELECT
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(COALESCE(user_object_reserved_mb, 0)) AS user_objects_mb,
+            AVG(COALESCE(internal_object_reserved_mb, 0)) AS internal_objects_mb,
+            AVG(COALESCE(version_store_reserved_mb, 0)) AS version_store_mb,
+            AVG(COALESCE(total_reserved_mb, 0)) AS total_reserved_mb,
+            AVG(COALESCE(unallocated_mb, 0)) AS unallocated_mb,
+            MAX(COALESCE(total_reserved_mb, 0)) AS peak_total_reserved_mb,
+            MAX(COALESCE(version_store_reserved_mb, 0)) AS peak_version_store_mb,
+            MAX(COALESCE(total_sessions_using_tempdb, 0)) AS sessions_using_tempdb,
+            (array_agg(COALESCE(top_session_id, 0) ORDER BY COALESCE(top_session_tempdb_mb, 0) DESC, collection_time))[1] AS top_consumer_session_id,
+            MAX(COALESCE(top_session_tempdb_mb, 0)) AS top_consumer_mb
+        FROM (
+        {TempDbTrendSql}
+        ) AS samples
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="TempDbTrendBucketedSql"/>.</summary>
+    public static async Task<List<TempDbBucketPoint>> GetTempDbBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<TempDbBucketPoint>();
+        await using var command = postgres.CreateCommand(TempDbTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddInt(command, serverId);
+        AddTimestamp(command, startUtc);
+        AddTimestamp(command, endUtc);
+        AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new TempDbBucketPoint(
+                reader.GetDateTime(0),
+                Convert.ToDouble(reader.GetValue(1)),
+                Convert.ToDouble(reader.GetValue(2)),
+                Convert.ToDouble(reader.GetValue(3)),
+                Convert.ToDouble(reader.GetValue(4)),
+                Convert.ToDouble(reader.GetValue(5)),
+                Convert.ToDouble(reader.GetValue(6)),
+                Convert.ToDouble(reader.GetValue(7)),
+                Convert.ToInt64(reader.GetValue(8)),
+                Convert.ToInt32(reader.GetValue(9)),
+                Convert.ToDouble(reader.GetValue(10))));
+        }
+
+        return items;
     }
 
     /* ─────────────────────────── perfmon ─────────────────────────── */
