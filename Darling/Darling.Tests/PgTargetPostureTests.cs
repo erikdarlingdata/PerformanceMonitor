@@ -241,6 +241,10 @@ public sealed class PgTargetPostureTests
         Assert.Contains(sql, PgTargetFactCollector.AllSql);
         Assert.Contains("c.collection_time = (", sql, StringComparison.Ordinal);
         Assert.Contains("SELECT MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* The newest snapshot however old — no upper bound — with #3928's lower bound on the anchor and the row scan,
+           which the fallback lifts when the day holds no snapshot. */
+        Assert.DoesNotContain("collection_time <=", sql, StringComparison.Ordinal);
+        Assert.Equal(2, sql.Split("collection_time >= $2").Length - 1);
         /* The reader's exclusion list, verbatim (DarlingPgServerConfigReader.SessionScopedSources). */
         Assert.Contains("NOT IN (" + DarlingPgServerConfigReader.SessionScopedSources + ")", sql, StringComparison.Ordinal);
         Assert.Contains("c.name IN ('fsync', 'full_page_writes', 'synchronous_commit')", sql, StringComparison.Ordinal);

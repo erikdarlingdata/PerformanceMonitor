@@ -277,6 +277,20 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// A server's EFFECTIVE cadence for one collector, keyed the way the analysis pipeline and the alert read
+    /// adapter key servers — the deterministic storage-name hash — where this class keys them by connection
+    /// GUID. Null for a server the list no longer holds or a collector the schedule does not know, which
+    /// every caller reads as "use the shipped default". #3896's analysis lookback and the alert adapter's
+    /// snapshot-freshness bounds (#1812/#1839) both resolve through here.
+    /// </summary>
+    public int? GetFrequencyForStorageServer(ServerManager servers, int serverId, string collectorName)
+    {
+        var server = servers.GetAllServers().FirstOrDefault(s =>
+            RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)) == serverId);
+        return server is null ? null : GetScheduleForServer(server.Id, collectorName)?.FrequencyMinutes;
+    }
+
+    /// <summary>
     /// Records a collector run for a specific server.
     /// </summary>
     public void MarkCollectorRunForServer(string serverId, string collectorName, DateTime runTime)

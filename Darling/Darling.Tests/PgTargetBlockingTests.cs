@@ -581,6 +581,7 @@ public sealed class PgTargetBlockingTests
         var settings = PgTargetFactCollector.PgTargetBlockingSettingsSql;
         Assert.Contains("c.name IN ('deadlock_timeout', 'log_lock_waits')", settings, StringComparison.Ordinal);
         Assert.Contains("NOT IN ('client', 'session', 'override')", settings, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(settings, @"collection_time >= \$3").Count);
 
         var edges = PgTargetFactCollector.PgTargetBlockingEdgesSql;
         Assert.Contains("FROM pg_blocking_edges", edges, StringComparison.Ordinal);

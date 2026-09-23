@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
@@ -14,7 +15,7 @@ public partial class DuckDbFactCollector
 {
     /// <summary>
     /// Collects memory stats: total physical RAM, buffer pool size, target memory — the newest sample
-    /// within <see cref="AnalysisContext.LatestValueLookback"/> of the window's end (#3896).
+    /// within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896).
     /// These facts enable RESOURCE-based memory recommendations in the config audit: max server memory is
     /// sized against the host's physical RAM, and no check in that audit branches on the edition (which the
     /// payload reports for context only).
@@ -27,7 +28,7 @@ public partial class DuckDbFactCollector
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
-            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStart). ORDER BY ... LIMIT 1 cannot
+            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). ORDER BY ... LIMIT 1 cannot
                stop early across the hot table UNION the parquet archive, so without the bound this sorted the
                server's whole archive to return one row; a memory collector dead for a day now reads as no fact
                rather than a stale one. */
@@ -42,7 +43,7 @@ ORDER BY collection_time DESC
 LIMIT 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStart });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -199,7 +200,7 @@ AND   collection_time <= $3";
 
     /// <summary>
     /// Collects top memory clerks by size, each clerk's newest sample within
-    /// <see cref="AnalysisContext.LatestValueLookback"/> of the window's end (#3896). Context for
+    /// <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896). Context for
     /// understanding where memory is allocated.
     /// </summary>
     private async Task CollectMemoryClerkFactsAsync(AnalysisContext context, List<Fact> facts)
@@ -210,7 +211,7 @@ AND   collection_time <= $3";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
-            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStart); unbounded, the window
+            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor); unbounded, the window
                function numbered every clerk row in the hot table and the parquet archive to keep ten. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
@@ -228,7 +229,7 @@ ORDER BY memory_mb DESC
 LIMIT 10";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStart });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(MemoryClerksCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -442,7 +443,7 @@ FROM latest WHERE rn = 1";
     /// the Dashboard's report.plan_cache_bloat (install/47_create_reporting_views.sql:1456-1496), which
     /// SUMs single_use_plans / total_plans / single_use_size_mb / total_size_mb over the newest
     /// collection_time and derives single_use_percent. Read as a point-in-time state like
-    /// CollectMemoryFactsAsync: the newest snapshot within <see cref="AnalysisContext.LatestValueLookback"/>
+    /// CollectMemoryFactsAsync: the newest snapshot within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
     /// of the window's end (#3896 — the lookback start binds as $2; it was &lt;= TimeRangeEnd alone, which
     /// read the whole parquet archive); DENSE_RANK() picks every
     /// row of the newest collection (avoiding QUALIFY, which is DuckDB-only and banned in the shared PG
@@ -477,7 +478,7 @@ FROM ranked
 WHERE rnk = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStart });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor(PlanCacheStatsCollector.Instance.Name) });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

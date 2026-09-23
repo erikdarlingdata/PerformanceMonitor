@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using PerformanceMonitorDashboard.Analysis;
 using Xunit;
 
 namespace PerformanceMonitorDashboard.Tests;
@@ -16,28 +18,67 @@ namespace PerformanceMonitorDashboard.Tests;
 /// <summary>
 /// #3896, the frozen Dashboard's mirror: its "latest value" reads — database size, percent autogrowth, disk
 /// space, memory_stats, memory clerks and the autogrowth drill-down — take each series' newest sample within
-/// <c>AnalysisContext.LatestValueLookback</c> of the window's end, the Darling/Lite twins' bound. Unbounded, a
-/// dropped database's files stayed in <c>DATABASE_TOTAL_SIZE_MB</c> (and its ALTER DATABASE in the autogrowth
-/// drill-down) for the whole collection retention. Pinned on the source text, the only idiom this project has
-/// for its SQL-Server-side reads — there is no test database.
+/// its collector's lookback of the window's end (a day, or twice the collector's interval in
+/// <c>config.collection_schedule</c> if that is longer), the Darling/Lite twins' bound. Unbounded, a dropped
+/// database's files stayed in <c>DATABASE_TOTAL_SIZE_MB</c> (and its ALTER DATABASE in the autogrowth
+/// drill-down) for the whole collection retention. The reads are pinned on the source text, the only idiom
+/// this project has for its SQL-Server-side reads — there is no test database — and the bounds' arithmetic
+/// directly.
 /// </summary>
 public class LatestValueLookbackSqlTests
 {
     [Theory]
-    [InlineData("SqlServerFactCollector.Storage.cs", "CollectDatabaseSizeFactAsync")]
-    [InlineData("SqlServerFactCollector.Storage.cs", "CollectFileAutogrowthFactsAsync")]
-    [InlineData("SqlServerFactCollector.Storage.cs", "CollectDiskSpaceFactsAsync")]
-    [InlineData("SqlServerFactCollector.Resources.cs", "CollectMemoryFactsAsync")]
-    [InlineData("SqlServerFactCollector.Resources.cs", "CollectMemoryClerkFactsAsync")]
-    [InlineData("SqlServerDrillDownCollector.Storage.cs", "CollectAutogrowthPercentFiles")]
-    public void EachLatestValueRead_IsBoundedBelowByTheLookback_AndAboveByTheWindowEnd(string file, string method)
+    [InlineData("SqlServerFactCollector.Storage.cs", "CollectDatabaseSizeFactAsync", "FileIoStats")]
+    [InlineData("SqlServerFactCollector.Storage.cs", "CollectFileAutogrowthFactsAsync", "DatabaseSizeStats")]
+    [InlineData("SqlServerFactCollector.Storage.cs", "CollectDiskSpaceFactsAsync", "DatabaseSizeStats")]
+    [InlineData("SqlServerFactCollector.Resources.cs", "CollectMemoryFactsAsync", "MemoryStats")]
+    [InlineData("SqlServerFactCollector.Resources.cs", "CollectMemoryClerkFactsAsync", "MemoryClerks")]
+    [InlineData("SqlServerDrillDownCollector.Storage.cs", "CollectAutogrowthPercentFiles", "DatabaseSizeStats")]
+    public void EachLatestValueRead_IsBoundedBelowByItsCollectorsLookback_AndAboveByTheWindowEnd(string file, string method, string collector)
     {
         var body = MethodBody(Read("deprecated", "Dashboard", "Analysis", file), method);
 
         Assert.Contains("collection_time >= @lookbackStart", body);
         Assert.Contains("collection_time <= @endTime", body);
-        Assert.Contains("new SqlParameter(\"@lookbackStart\", context.LatestValueStart)", body);
+        Assert.Contains($"new SqlParameter(\"@lookbackStart\", context.LatestValueStartFor(SqlServerLatestValueBounds.{collector}))", body);
         Assert.Contains("new SqlParameter(\"@endTime\", context.TimeRangeEnd)", body);
+    }
+
+    /// <summary>The bounds are stamped before the first read, and the drill-down stamps a context it is handed
+    /// bare — the pass's own context arrives stamped, so the list and the count share one set.</summary>
+    [Fact]
+    public void TheBounds_AreStampedBeforeAnyRead_AndByTheDrillDown()
+    {
+        var collect = Read("deprecated", "Dashboard", "Analysis", "SqlServerFactCollector.cs");
+        var stamp = collect.IndexOf("await SqlServerLatestValueBounds.EnsureAsync(_connectionString, context);", StringComparison.Ordinal);
+        var firstRead = collect.IndexOf("await Collect", StringComparison.Ordinal);
+        Assert.True(stamp >= 0 && stamp < firstRead, "the bounds must be stamped before the first read");
+
+        var drill = MethodBody(Read("deprecated", "Dashboard", "Analysis", "SqlServerDrillDownCollector.Storage.cs"), "CollectAutogrowthPercentFiles");
+        Assert.Contains("await SqlServerLatestValueBounds.EnsureAsync(_connectionString, context);", drill);
+    }
+
+    /// <summary>
+    /// A day, or twice the collector's interval if that is longer — the daily collector keeps its fact for two
+    /// days instead of flapping between runs, and every default cadence keeps the flat day. Frequency 0 on the
+    /// Dashboard is "every master-collector tick", not on-load, so it takes the floor; so does a collector the
+    /// schedule has no row for.
+    /// </summary>
+    [Fact]
+    public void TheBounds_AreADayOrTwiceTheScheduledInterval()
+    {
+        var end = new DateTime(2026, 3, 1, 12, 0, 0);
+        var starts = SqlServerLatestValueBounds.Starts(end, new Dictionary<string, int>
+        {
+            ["database_size_stats_collector"] = 1440,
+            ["file_io_stats_collector"] = 1,
+            ["memory_clerks_stats_collector"] = 0,
+        });
+
+        Assert.Equal(end.AddHours(-48), starts[SqlServerLatestValueBounds.DatabaseSizeStats]);
+        Assert.Equal(end.AddHours(-24), starts[SqlServerLatestValueBounds.FileIoStats]);
+        Assert.Equal(end.AddHours(-24), starts[SqlServerLatestValueBounds.MemoryClerks]);
+        Assert.Equal(end.AddHours(-24), starts[SqlServerLatestValueBounds.MemoryStats]);
     }
 
     /// <summary>The fact and the drill-down that lists its files must agree on WHICH files, or the list names
