@@ -35,11 +35,11 @@ At dispatch:
 At each report:
 1. Stop the agent.
 2. Check that the shared checkout is clean.
-3. Read the PR's core product diff against the checklist below.
-4. A security PR, or an irreversible data rewrite, gets a review round first. Make the PR a draft for the review's
-   duration (`gh pr ready <n> --undo`, then `gh pr ready <n>`): a draft can't be merged from the UI, and two such
-   PRs were merged mid-review on 2026-09-23.
-5. Arm auto-merge only after that, with CI green.
+3. Read the PR's core product diff against the checklist below. Lane PRs arrive as drafts, which can't be merged
+   from the UI. On 2026-09-23, three PRs opened ready were merged before this step finished, and one of them
+   put a regression on dev.
+4. A security PR, or an irreversible data rewrite, gets a review round before it leaves draft.
+5. Mark it ready (`gh pr ready <n>`) and arm auto-merge only after that. Auto-merge waits for CI.
 
 When a PR's required check fails on a test it doesn't touch, don't just re-run it. Take a census of the last two
 days' failed first attempts: `gh run list --workflow Build`, each run's attempts through the REST
@@ -155,9 +155,11 @@ Never edit an existing migration.
 ## Finish
 
 - End each commit with `<CO_AUTHOR_TRAILER>` and `Claude-Session: <SESSION_URL>`.
-- Open the PR against `dev`. Title: the outcome in plain language, plus `(#<issue>)`. The body starts with
-  `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan` (checkboxes, measured numbers).
-- **Don't merge and don't enable auto-merge.** The coordinator does both.
+- Open the PR against `dev` **as a draft** (`gh pr create --draft`). Title: the outcome in plain language, plus
+  `(#<issue>)`. The body starts with `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan`
+  (checkboxes, measured numbers). List anything you did not run (a live test, the full suite) as an unchecked box.
+- **Don't mark it ready, don't merge, and don't enable auto-merge.** The coordinator does all three after
+  verifying.
 - A user-visible change gets a CHANGELOG entry in `<CHANGELOG_BUFFER_DIR>/<PR>-reported.txt`, in this form:
 
       SECTION: Fixed
