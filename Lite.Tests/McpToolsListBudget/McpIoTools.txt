@@ -1,0 +1,10 @@
+# McpIoTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_file_io_stats 690
+param get_file_io_stats.server_name 28
+
+tool get_file_io_trend 585
+param get_file_io_trend.as_of 167
+param get_file_io_trend.bucket_minutes 55
+param get_file_io_trend.database_name 56
+param get_file_io_trend.hours_back 29
+param get_file_io_trend.server_name 28

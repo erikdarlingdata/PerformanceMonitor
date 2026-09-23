@@ -33,12 +33,25 @@ namespace Darling.Tests;
 /// same <c>WithGeminiCompatibleTools</c> path the host registers every tool with, over the tool types the host
 /// source registers. Lite's twin is <c>Lite.Tests/McpToolsListBudgetTests</c> (D6 lockstep).
 ///
-/// <para><b>The pins are ceilings that only go down.</b> <c>McpToolsListBudget.txt</c> holds one line per tool
-/// (its served description's length) and per advertised parameter (its description's length). A value over its
-/// ceiling fails: put the new text after the tool's <see cref="McpToolGuide.Marker"/> instead, where
-/// <c>get_tool_guide</c> serves it. A value under its ceiling fails too, so a saving is banked the moment it
-/// lands and cannot be spent later: lower the line. A new tool or parameter adds its line deliberately, with
-/// the reason in the PR. The total's ceiling is below, with the reason for each change.</para>
+/// <para><b>The pins live one file per tool class</b> (#3898 step 0), under <c>McpToolsListBudget/</c>, named
+/// for the class that declares the tools (e.g. <c>DarlingMcpDataTools.txt</c>). Inside a file: one block per
+/// tool (a <c>tool &lt;name&gt; &lt;chars&gt;</c> line followed by that tool's sorted
+/// <c>param &lt;tool&gt;.&lt;param&gt; &lt;chars&gt;</c> lines), blocks sorted by tool name, exactly one blank
+/// line between blocks. Splitting the old single file this way means two content PRs that each touch a
+/// different tool class never conflict, and a blank line between every two tools in the SAME class means two
+/// PRs that each touch an adjacent tool in that class don't conflict either.</para>
+///
+/// <para><b>The pins are ceilings that only go down.</b> A value over its ceiling fails: put the new text after
+/// the tool's <see cref="McpToolGuide.Marker"/> instead, where <c>get_tool_guide</c> serves it. A value under
+/// its ceiling fails too, so a saving is banked the moment it lands and cannot be spent later: lower the line.
+/// A new tool or parameter adds its line deliberately, with the reason in the PR. Every failure names the file
+/// and line and gives the exact replacement line. The directory is also checked for layout: every served tool
+/// has exactly one block, in the file for the class that declares it; every file belongs to a registered class;
+/// and every file's bytes match its own canonical re-serialization (order, blank lines, no duplicates).</para>
+///
+/// <para><b>The total</b> (<see cref="TotalCeilingBytes"/>) is a growth-only ceiling; content PRs never lower
+/// it (that happens once, in the #3898 PR that ships the last converted family). The measured total is also
+/// written to the test output, so a run's log states it without re-deriving it.</para>
 ///
 /// <para><b>D2's absolute caps apply to converted tools</b> (a description carrying the marker): the served head
 /// at most 1,000 characters (the target is 600), every parameter description at most 200, and every tail and
@@ -46,9 +59,16 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class McpToolsListBudgetTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public McpToolsListBudgetTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
     /// <summary>
-    /// The serialized tools/list ceiling, in UTF-8 bytes. Change log (a ceiling only goes down, except for a
-    /// deliberate new tool or parameter, named here):
+    /// The serialized tools/list ceiling, in UTF-8 bytes. Growth-only; a content PR never lowers this (the
+    /// final #3898 PR does, once, after every family converts). Change log:
     /// <list type="bullet">
     /// <item>#3898 Phase 0 + seam: pinned at the measured value, which includes the new get_tool_guide and the
     /// converted get_health_parser_* family.</item>
@@ -59,59 +79,180 @@ public sealed class McpToolsListBudgetTests
     /// </summary>
     private const int TotalCeilingBytes = 329_494;
 
-    /// <summary>How far under the total ceiling the measured size may sit before the ceiling must be lowered.
-    /// The per-tool and per-parameter lines are exact; this slack only spares every small edit a conflict on
-    /// one shared line.</summary>
-    private const int TotalBankingSlackBytes = 4_096;
-
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
-    private const string BudgetFile = "McpToolsListBudget.txt";
+
+    /// <summary>The directory holding one budget file per tool class, next to this test.</summary>
+    private const string BudgetDir = "McpToolsListBudget";
+
+    private const string HeaderSuffix =
+        ": tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.";
+
+    private const string DebugPrefix = "darling-budget";
 
     [Fact]
-    public void ToolsList_TotalBytes_IsAtOrUnderTheCeiling_AndSavingsAreBanked()
+    public void ToolsList_TotalBytes_IsAtOrUnderTheCeiling()
     {
         var measured = Measure();
+        _output.WriteLine($"tools/list total: {measured.TotalBytes:N0} bytes (ceiling {TotalCeilingBytes:N0}).");
         Assert.True(measured.TotalBytes <= TotalCeilingBytes,
             $"tools/list is {measured.TotalBytes:N0} bytes, over its {TotalCeilingBytes:N0}-byte ceiling. Move reading guidance after the tool's {McpToolGuide.Marker} marker instead of growing the head.");
-        Assert.True(TotalCeilingBytes - measured.TotalBytes <= TotalBankingSlackBytes,
-            $"tools/list is {measured.TotalBytes:N0} bytes, {TotalCeilingBytes - measured.TotalBytes:N0} under its {TotalCeilingBytes:N0}-byte ceiling. Bank the saving: lower {nameof(TotalCeilingBytes)} to {measured.TotalBytes} and say why.");
     }
 
     [Fact]
     public void EveryServedDescription_AndEveryParameterDescription_MatchesItsCeiling()
     {
         var measured = Measure();
-        var pinned = ReadBudget();
+        var files = ReadBudgetFiles();
         var problems = new List<string>();
 
-        foreach (var (key, value) in measured.Lines)
+        var pinned = new Dictionary<string, (int Value, string FileName, int LineNumber)>(StringComparer.Ordinal);
+        foreach (var file in files)
         {
-            if (!pinned.TryGetValue(key, out var ceiling))
+            foreach (var entry in file.Entries)
             {
-                problems.Add($"{key}: {value} is not pinned. Add the line '{key} {value}' deliberately, with the reason in the PR.");
-            }
-            else if (value > ceiling)
-            {
-                problems.Add($"{key}: {value} is over its ceiling {ceiling}. Put the new text after the tool's {McpToolGuide.Marker} marker (get_tool_guide serves it) instead of raising the pin.");
-            }
-            else if (value < ceiling)
-            {
-                problems.Add($"{key}: {value} is under its ceiling {ceiling}. Bank the saving: lower the line to '{key} {value}'.");
+                if (!pinned.TryAdd(entry.Key, (entry.Value, file.FileName, entry.LineNumber)))
+                {
+                    var first = pinned[entry.Key];
+                    problems.Add($"{file.FileName}:{entry.LineNumber}: '{entry.Key}' duplicates the pin already at {first.FileName}:{first.LineNumber}. Remove one.");
+                }
             }
         }
 
-        foreach (var key in pinned.Keys.Where(k => !measured.Lines.ContainsKey(k)))
+        var measuredKeys = new SortedDictionary<string, (int Value, string ClassName)>(StringComparer.Ordinal);
+        foreach (var tool in measured.Tools)
         {
-            problems.Add($"{key}: pinned, but no such tool or parameter is served. Remove the line.");
+            measuredKeys[$"tool {tool.Name}"] = (tool.Served.Length, tool.ClassName);
+            foreach (var (parameter, length) in tool.ParameterDescriptionLengths)
+            {
+                measuredKeys[$"param {tool.Name}.{parameter}"] = (length, tool.ClassName);
+            }
+        }
+
+        foreach (var (key, measuredValue) in measuredKeys)
+        {
+            if (!pinned.TryGetValue(key, out var ceiling))
+            {
+                problems.Add($"{key}: {measuredValue.Value} is not pinned. Add the line '{key} {measuredValue.Value}' to {BudgetDir}/{measuredValue.ClassName}.txt.");
+            }
+            else if (measuredValue.Value > ceiling.Value)
+            {
+                problems.Add($"{ceiling.FileName}:{ceiling.LineNumber}: '{key}' is {measuredValue.Value}, over its ceiling {ceiling.Value}. Put the new text after the tool's {McpToolGuide.Marker} marker (get_tool_guide serves it) instead of raising the pin; if the growth is deliberate, replace the line with '{key} {measuredValue.Value}'.");
+            }
+            else if (measuredValue.Value < ceiling.Value)
+            {
+                problems.Add($"{ceiling.FileName}:{ceiling.LineNumber}: '{key}' is {measuredValue.Value}, under its ceiling {ceiling.Value}. Bank the saving: replace the line with '{key} {measuredValue.Value}'.");
+            }
+        }
+
+        foreach (var (key, ceiling) in pinned)
+        {
+            if (!measuredKeys.ContainsKey(key))
+            {
+                problems.Add($"{ceiling.FileName}:{ceiling.LineNumber}: '{key}' is pinned, but no such tool or parameter is served. Remove the line.");
+            }
         }
 
         if (problems.Count > 0)
         {
-            var path = Path.Combine(Path.GetTempPath(), "darling-" + BudgetFile);
-            File.WriteAllText(path, Render(measured));
-            Assert.Fail($"{problems.Count} tools/list budget line(s) moved (measured file written to {path}):\n"
-                + string.Join("\n", problems.Take(40)));
+            Assert.Fail($"{problems.Count} tools/list budget line(s) moved:\n"
+                + string.Join("\n", problems.OrderBy(p => p, StringComparer.Ordinal).Take(40)));
+        }
+    }
+
+    /// <summary>
+    /// The directory's layout, independent of the values inside it: every served tool has exactly one block,
+    /// filed under the class that declares it; every file belongs to a class that is actually registered; and
+    /// every file's bytes are its own canonical re-serialization (blocks sorted by tool name, exactly one blank
+    /// line between them, no duplicates). A file that fails the last check gets its corrected form written to a
+    /// temp path named in the failure.
+    /// </summary>
+    [Fact]
+    public void EveryBudgetFile_MatchesItsRegisteredClass_AndIsInCanonicalForm()
+    {
+        var measured = Measure();
+        var files = ReadBudgetFiles();
+        var registeredClassNames = measured.ClassNames.ToHashSet(StringComparer.Ordinal);
+        var problems = new List<string>();
+
+        var blockOwner = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var file in files)
+        {
+            foreach (var entry in file.Entries)
+            {
+                var (tool, parameter) = ParseKey(entry.Key);
+                if (parameter is null)
+                {
+                    blockOwner[tool] = file.ClassName;
+                }
+            }
+        }
+
+        foreach (var tool in measured.Tools)
+        {
+            if (!blockOwner.TryGetValue(tool.Name, out var actualClass))
+            {
+                problems.Add($"{tool.Name}: no block in any {BudgetDir} file. Add 'tool {tool.Name} {tool.Served.Length}' (and its param lines) to {BudgetDir}/{tool.ClassName}.txt.");
+            }
+            else if (!string.Equals(actualClass, tool.ClassName, StringComparison.Ordinal))
+            {
+                problems.Add($"{tool.Name}: blocked in {BudgetDir}/{actualClass}.txt, but is declared on {tool.ClassName}. Move its block to {BudgetDir}/{tool.ClassName}.txt.");
+            }
+        }
+
+        var measuredToolNames = measured.Tools.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var (toolName, className) in blockOwner)
+        {
+            if (!measuredToolNames.Contains(toolName))
+            {
+                problems.Add($"{BudgetDir}/{className}.txt: block for '{toolName}', which is not a served tool. Remove it.");
+            }
+        }
+
+        foreach (var file in files)
+        {
+            if (!registeredClassNames.Contains(file.ClassName))
+            {
+                problems.Add($"{BudgetDir}/{file.FileName}: '{file.ClassName}' is not a registered tool class. Delete the file.");
+            }
+        }
+
+        foreach (var file in files)
+        {
+            List<string> canonical;
+            try
+            {
+                canonical = CanonicalLinesFromEntries(file.ClassName, file.Entries);
+            }
+            catch (InvalidOperationException ex)
+            {
+                problems.Add($"{BudgetDir}/{file.FileName}: {ex.Message}");
+                continue;
+            }
+
+            if (canonical.SequenceEqual(file.RawLines, StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            var firstDiff = 0;
+            while (firstDiff < canonical.Count && firstDiff < file.RawLines.Count
+                && string.Equals(canonical[firstDiff], file.RawLines[firstDiff], StringComparison.Ordinal))
+            {
+                firstDiff++;
+            }
+
+            var tempPath = Path.Combine(Path.GetTempPath(), $"{DebugPrefix}-{file.FileName}");
+            File.WriteAllText(tempPath, JoinForDisk(canonical));
+            var expected = firstDiff < canonical.Count ? canonical[firstDiff] : "(end of file)";
+            var actual = firstDiff < file.RawLines.Count ? file.RawLines[firstDiff] : "(end of file)";
+            problems.Add($"{BudgetDir}/{file.FileName}:{firstDiff + 1}: not in canonical form (blocks sorted by tool name, exactly one blank line between blocks, no duplicates). Expected '{expected}', found '{actual}'. Canonical file written to {tempPath}.");
+        }
+
+        if (problems.Count > 0)
+        {
+            Assert.Fail($"{problems.Count} budget-layout problem(s):\n"
+                + string.Join("\n", problems.OrderBy(p => p, StringComparer.Ordinal).Take(40)));
         }
     }
 
@@ -181,12 +322,13 @@ public sealed class McpToolsListBudgetTests
 
     internal sealed record MeasuredTool(
         string Name,
+        string ClassName,
         string? Description,
         string Served,
         string? Tail,
         IReadOnlyList<(string Parameter, int Length)> ParameterDescriptionLengths);
 
-    internal sealed record Measurement(int TotalBytes, IReadOnlyList<MeasuredTool> Tools, IReadOnlyDictionary<string, int> Lines);
+    internal sealed record Measurement(int TotalBytes, IReadOnlyList<MeasuredTool> Tools, IReadOnlyList<string> ClassNames);
 
     private static Measurement? _cached;
 
@@ -202,17 +344,19 @@ public sealed class McpToolsListBudgetTests
         var json = JsonSerializer.Serialize(new ListToolsResult { Tools = protocolTools }, McpJsonUtilities.DefaultOptions);
         var totalBytes = Encoding.UTF8.GetByteCount(json);
 
-        var descriptions = types
-            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            .Select(m => (Attr: m.GetCustomAttribute<McpServerToolAttribute>(), Method: m))
+        var toolInfo = types
+            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static).Select(m => (Type: t, Method: m)))
+            .Select(x => (Attr: x.Method.GetCustomAttribute<McpServerToolAttribute>(), x.Method, x.Type))
             .Where(x => x.Attr is not null)
-            .ToDictionary(x => x.Attr!.Name!, x => x.Method.GetCustomAttribute<DescriptionAttribute>()?.Description, StringComparer.Ordinal);
+            .ToDictionary(
+                x => x.Attr!.Name!,
+                x => (ClassName: x.Type.Name, Description: x.Method.GetCustomAttribute<DescriptionAttribute>()?.Description),
+                StringComparer.Ordinal);
 
         var measuredTools = new List<MeasuredTool>();
-        var lines = new SortedDictionary<string, int>(StringComparer.Ordinal);
         foreach (var tool in protocolTools)
         {
-            var description = descriptions[tool.Name];
+            var (className, description) = toolInfo[tool.Name];
             var served = tool.Description ?? string.Empty;
             var tail = description is null ? null : McpToolGuide.Split(description).Tail;
             var parameters = new List<(string, int)>();
@@ -222,15 +366,14 @@ public sealed class McpToolsListBudgetTests
                 {
                     var length = property.Value.TryGetProperty("description", out var d) ? d.GetString()!.Length : 0;
                     parameters.Add((property.Name, length));
-                    lines[$"param {tool.Name}.{property.Name}"] = length;
                 }
             }
 
-            lines[$"tool {tool.Name}"] = served.Length;
-            measuredTools.Add(new MeasuredTool(tool.Name, description, served, tail, parameters));
+            measuredTools.Add(new MeasuredTool(tool.Name, className, description, served, tail, parameters));
         }
 
-        _cached = new Measurement(totalBytes, measuredTools, lines);
+        var classNames = types.Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
+        _cached = new Measurement(totalBytes, measuredTools, classNames);
         return _cached;
     }
 
@@ -271,36 +414,120 @@ public sealed class McpToolsListBudgetTests
         return (provider.GetServices<McpServerTool>().ToList(), types);
     }
 
-    private static Dictionary<string, int> ReadBudget()
+    /* ---------------- per-class budget files ---------------- */
+
+    internal sealed record BudgetEntry(string Key, int Value, int LineNumber);
+
+    internal sealed record BudgetFileContents(string ClassName, string FileName, IReadOnlyList<string> RawLines, IReadOnlyList<BudgetEntry> Entries);
+
+    private static List<BudgetFileContents> ReadBudgetFiles()
     {
-        var result = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var raw in File.ReadAllLines(RepoPath("Darling", "Darling.Tests", BudgetFile)))
+        var dir = RepoPath("Darling", "Darling.Tests", BudgetDir);
+        var files = new List<BudgetFileContents>();
+        foreach (var filePath in Directory.GetFiles(dir, "*.txt").OrderBy(p => p, StringComparer.Ordinal))
         {
-            var line = raw.Trim();
-            if (line.Length == 0 || line.StartsWith('#'))
+            var className = Path.GetFileNameWithoutExtension(filePath);
+            var rawLines = File.ReadAllLines(filePath);
+            var entries = new List<BudgetEntry>();
+            for (var i = 0; i < rawLines.Length; i++)
             {
-                continue;
+                var trimmed = rawLines[i].Trim();
+                if (trimmed.Length == 0 || trimmed.StartsWith('#'))
+                {
+                    continue;
+                }
+
+                var at = trimmed.LastIndexOf(' ');
+                entries.Add(new BudgetEntry(trimmed[..at], int.Parse(trimmed[(at + 1)..], CultureInfo.InvariantCulture), i + 1));
             }
 
-            var at = line.LastIndexOf(' ');
-            result.Add(line[..at], int.Parse(line[(at + 1)..], CultureInfo.InvariantCulture));
+            files.Add(new BudgetFileContents(className, Path.GetFileName(filePath), rawLines, entries));
         }
 
-        return result;
+        return files;
     }
 
-    private static string Render(Measurement measured)
+    /// <summary>Splits a budget key into its tool name and, for a parameter line, the parameter name.</summary>
+    private static (string Tool, string? Parameter) ParseKey(string key)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("# #3898 Phase 0: Darling's tools/list budget. Ceilings only go down; see McpToolsListBudgetTests.");
-        sb.AppendLine("# 'tool <name> <chars>' is the served description; 'param <tool>.<param> <chars>' is a parameter description.");
-        foreach (var (key, value) in measured.Lines)
+        if (key.StartsWith("tool ", StringComparison.Ordinal))
         {
-            sb.Append(key).Append(' ').Append(value.ToString(CultureInfo.InvariantCulture)).AppendLine();
+            return (key["tool ".Length..], null);
         }
 
-        return sb.ToString();
+        if (key.StartsWith("param ", StringComparison.Ordinal))
+        {
+            var rest = key["param ".Length..];
+            var dot = rest.IndexOf('.', StringComparison.Ordinal);
+            return (rest[..dot], rest[(dot + 1)..]);
+        }
+
+        throw new InvalidOperationException($"unrecognized budget key '{key}'");
     }
+
+    private sealed record Block(string Tool, int ToolValue, IReadOnlyList<(string Parameter, int Length)> Parameters);
+
+    /// <summary>The one formatter both the live-measurement renderer and the on-disk canonical-form checker
+    /// use, so a file this test generates always reads back as canonical.</summary>
+    private static List<string> CanonicalLines(string className, IEnumerable<Block> blocks)
+    {
+        var lines = new List<string> { "# " + className + HeaderSuffix };
+        var first = true;
+        foreach (var block in blocks.OrderBy(b => b.Tool, StringComparer.Ordinal))
+        {
+            if (!first)
+            {
+                lines.Add(string.Empty);
+            }
+
+            first = false;
+            lines.Add($"tool {block.Tool} {block.ToolValue.ToString(CultureInfo.InvariantCulture)}");
+            foreach (var (parameter, length) in block.Parameters.OrderBy(p => p.Parameter, StringComparer.Ordinal))
+            {
+                lines.Add($"param {block.Tool}.{parameter} {length.ToString(CultureInfo.InvariantCulture)}");
+            }
+        }
+
+        return lines;
+    }
+
+    internal static List<string> CanonicalLinesFromMeasurement(string className, IEnumerable<MeasuredTool> tools) =>
+        CanonicalLines(className, tools.Select(t => new Block(t.Name, t.Served.Length, t.ParameterDescriptionLengths)));
+
+    private static List<string> CanonicalLinesFromEntries(string className, IReadOnlyList<BudgetEntry> entries)
+    {
+        var toolValues = new Dictionary<string, int>(StringComparer.Ordinal);
+        var paramsByTool = new Dictionary<string, List<(string Parameter, int Length)>>(StringComparer.Ordinal);
+        foreach (var entry in entries)
+        {
+            var (tool, parameter) = ParseKey(entry.Key);
+            if (parameter is null)
+            {
+                toolValues[tool] = entry.Value;
+            }
+            else
+            {
+                if (!paramsByTool.TryGetValue(tool, out var list))
+                {
+                    list = new List<(string, int)>();
+                    paramsByTool[tool] = list;
+                }
+
+                list.Add((parameter, entry.Value));
+            }
+        }
+
+        var orphans = paramsByTool.Keys.Where(t => !toolValues.ContainsKey(t)).OrderBy(t => t, StringComparer.Ordinal).ToList();
+        if (orphans.Count > 0)
+        {
+            throw new InvalidOperationException($"parameter line(s) for tool(s) with no 'tool' line in this file: {string.Join(", ", orphans)}.");
+        }
+
+        return CanonicalLines(className, toolValues.Select(kv =>
+            new Block(kv.Key, kv.Value, paramsByTool.TryGetValue(kv.Key, out var ps) ? ps : new List<(string, int)>())));
+    }
+
+    private static string JoinForDisk(IEnumerable<string> lines) => string.Join("\r\n", lines) + "\r\n";
 
     private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
 

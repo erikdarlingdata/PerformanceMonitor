@@ -1,0 +1,6 @@
+# McpServerInfoTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_database_sizes 480
+param get_database_sizes.server_name 28
+
+tool get_server_properties 894
+param get_server_properties.server_name 28

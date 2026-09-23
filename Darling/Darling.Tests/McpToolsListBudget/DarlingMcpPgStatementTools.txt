@@ -1,0 +1,6 @@
+# DarlingMcpPgStatementTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_pg_top_queries 2210
+param get_pg_top_queries.as_of 167
+param get_pg_top_queries.hours_back 40
+param get_pg_top_queries.limit 228
+param get_pg_top_queries.server_name 28

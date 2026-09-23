@@ -1,0 +1,6 @@
+# DarlingMcpPlanCorrectionTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_plan_corrections 1672
+param get_plan_corrections.as_of 167
+param get_plan_corrections.hours_back 29
+param get_plan_corrections.limit 156
+param get_plan_corrections.server_name 28
