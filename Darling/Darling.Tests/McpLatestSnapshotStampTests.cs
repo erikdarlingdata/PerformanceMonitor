@@ -741,20 +741,50 @@ public sealed class McpLatestSnapshotStampTests
            further down can never be read as the tool's — which is exactly what a bare `Description(` search
            did on the const-described tools when this file was first executed. */
         var attribute = Regex.Match(body, @"\A\[McpServerTool\(Name = ""[a-z_0-9]+""\), Description\((?:\s*)(?:""((?:[^""\\]|\\.)*)""|(\w+))\)\]");
-        Assert.True(attribute.Success, $"{label}: could not locate the tool's Description on its McpServerTool attribute");
-        if (attribute.Groups[1].Success)
+        if (attribute.Success)
         {
-            return attribute.Groups[1].Value;
+            if (attribute.Groups[1].Success)
+            {
+                return attribute.Groups[1].Value;
+            }
+
+            var constName = attribute.Groups[2].Value;
+
+            /* The const lives in the same file, above the attribute; the body slice starts AT the attribute, so
+               it is not in the body — resolve it from the file the label points at. */
+            var (type, toolName, liteFile, _) = LatestTools.Single(t => label.EndsWith(t.ToolName, StringComparison.Ordinal));
+            return label.StartsWith("Darling", StringComparison.Ordinal)
+                ? (string)type.GetField(constName, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)!.GetRawConstantValue()!
+                : LiteConstLiteral(liteFile, constName);
         }
 
-        var constName = attribute.Groups[2].Value;
-
-        /* The const lives in the same file, above the attribute; the body slice starts AT the attribute, so it
-           is not in the body — resolve it from the file the label points at. */
-        var (type, toolName, liteFile, _) = LatestTools.Single(t => label.EndsWith(t.ToolName, StringComparison.Ordinal));
-        return label.StartsWith("Darling", StringComparison.Ordinal)
-            ? (string)type.GetField(constName, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)!.GetRawConstantValue()!
-            : LiteConstLiteral(liteFile, constName);
+        /* #3898: a converted tool's Description is a "head" + McpToolGuide.Marker + "tail" concatenation —
+           neither a single literal nor a single const. Join every quoted literal chunk in source order,
+           skipping the identifiers between them (the marker, McpToolGuideTopics.* consts); this test only
+           needs the plain prose, never the reading-guide plumbing those identifiers resolve to. */
+        var anchor = Regex.Match(body, @"\A\[McpServerTool\(Name = ""[a-z_0-9]+""\), Description\(");
+        Assert.True(anchor.Success, $"{label}: could not locate the tool's Description on its McpServerTool attribute");
+        var i = anchor.Length;
+        var sb = new System.Text.StringBuilder();
+        while (i < body.Length && !(body[i] == ')' && i + 1 < body.Length && body[i + 1] == ']'))
+        {
+            if (body[i] == '"')
+            {
+                i++;
+                while (i < body.Length && body[i] != '"')
+                {
+                    if (body[i] == '\\' && i + 1 < body.Length) { sb.Append(body[i + 1]); i += 2; }
+                    else { sb.Append(body[i]); i++; }
+                }
+                i++;
+            }
+            else
+            {
+                i++;
+            }
+        }
+        Assert.True(sb.Length > 0, $"{label}: Description( had no literal text before its closing )]");
+        return sb.ToString();
     }
 
     /// <summary>A Lite <c>const string</c>'s literal, read from source: <c>internal const string Name =\n "…";</c>.</summary>
