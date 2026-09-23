@@ -19,6 +19,7 @@ namespace Darling.Tests;
 /// <see cref="DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote"/>'s use of it alongside
 /// <see cref="PgReadBinaryFileCapability"/>'s cache.
 /// </summary>
+[Collection("pg-read-binary-file-statics")]
 public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
 {
     public PgReadBinaryFileAdvisoryTests()

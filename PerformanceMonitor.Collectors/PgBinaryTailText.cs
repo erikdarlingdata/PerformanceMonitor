@@ -91,7 +91,7 @@ public static class PgBinaryTailText
     /// throws 22021 on it first), so NUL is the one character this route must not hand on; it becomes
     /// U+FFFD like any other byte that is not valid text.
     /// </summary>
-    private static string WithoutNul(string text) => text.Contains('\0') ? text.Replace('\0', '�') : text;
+    private static string WithoutNul(string text) => text.Contains('\0') ? text.Replace('\0', '\uFFFD') : text;
 
     private static bool IsOctalDigit(char c) => c is >= '0' and <= '7';
 }

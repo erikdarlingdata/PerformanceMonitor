@@ -61,7 +61,7 @@ public sealed class PgBinaryTailTextTests
     [Fact]
     public void UnescapeAndDecode_OctalEscapedNul_BecomesReplacementCharacter()
     {
-        Assert.Equal("a�b", PgBinaryTailText.UnescapeAndDecode("a\\000b"));
+        Assert.Equal("a\uFFFDb", PgBinaryTailText.UnescapeAndDecode("a\\000b"));
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public sealed class PgBinaryTailTextTests
     {
         var bytes = new byte[] { (byte)'a', 0x00, (byte)'b' };
 
-        Assert.Equal("a�b", PgBinaryTailText.DecodeWhole(bytes));
+        Assert.Equal("a\uFFFDb", PgBinaryTailText.DecodeWhole(bytes));
     }
 
     /// <summary>

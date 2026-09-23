@@ -793,8 +793,8 @@ public sealed class DarlingCollectorRunner
             await using var connection = provider.CreateConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
             using var command = connection.CreateCommand();
-            command.CommandText = PgServerLogTail.LogTimezoneSql;
             command.CommandTimeout = 10;
+            command.CommandText = PgServerLogTail.LogTimezoneSql;
             var value = await command.ExecuteScalarAsync(cancellationToken);
             return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
         }
@@ -1031,6 +1031,27 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private static bool ReadsPgServerLogTail(string collectorName) =>
         collectorName is "pg_log_events" or "pg_deadlocks" or "pg_plan_capture";
+
+    /// <summary>
+    /// #4046 part 1c: sets <see cref="CollectorContext.PgReadBinaryFileGranted"/> for a PostgreSQL log-tail
+    /// collector from <see cref="PgReadBinaryFileCapability"/> (its own hourly cache), and leaves every other
+    /// collector on the default text route with no round trip. Its own method so the gate is testable; the
+    /// server-scoped path that calls it needs a live target.
+    /// </summary>
+    internal static async ValueTask ResolvePgReadBinaryFileGrantAsync(
+        CollectorContext context,
+        CollectorTargetEngine engine,
+        string collectorName,
+        DbConnection targetConnection,
+        string targetKey,
+        CancellationToken cancellationToken)
+    {
+        if (engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
+        {
+            context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
+                targetConnection, targetKey, cancellationToken);
+        }
+    }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
         ICollectorDefinition<TRow> definition,
@@ -2385,11 +2406,8 @@ public sealed class DarlingCollectorRunner
                    with no reconnect, so this is checked (through its own hourly cache) independently of
                    how long the connection has been open, rather than folded into the connect-time facts on
                    CollectorTargetInfo that live for the connection's whole life. */
-                if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(definition.Name))
-                {
-                    context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
-                        targetConnection, server.StorageName, cancellationToken);
-                }
+                await ResolvePgReadBinaryFileGrantAsync(
+                    context, server.Target.Engine, definition.Name, targetConnection, server.StorageName, cancellationToken);
 
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);

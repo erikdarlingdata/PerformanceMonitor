@@ -12,7 +12,6 @@ using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
-using Npgsql;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -23,6 +22,7 @@ namespace Darling.Tests;
 /// at most once per <see cref="PgReadBinaryFileCapability.CacheTtl"/>, so three log-tail collectors on the
 /// same cycle do not each pay a round trip to learn the same answer.
 /// </summary>
+[Collection("pg-read-binary-file-statics")]
 public sealed class PgReadBinaryFileCapabilityTests : IDisposable
 {
     /// <summary>Every test starts and ends clean — this is process-wide static state shared with every
@@ -211,77 +211,29 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     }
 
     /// <summary>
-    /// The real-server case (#4046 part 1c): a dedicated role with no grant at all reads false, and after
-    /// granting <c>pg_read_binary_file</c> and resetting the cache (a real cycle would simply wait out the
-    /// TTL) the same probe reads true. Same DARLING_TEST_PG gate and dedicated-role-create-and-drop shape as
-    /// the suite's other <c>*_AgainstDevPostgres</c> live tests.
+    /// The runner's gate (#4046 part 1c): a PostgreSQL log-tail collector takes the probe's answer; any other
+    /// collector, and any SQL Server target, stays on the text route with no round trip.
     /// </summary>
-    [Fact]
-    public async Task IsGrantedAsync_AgainstDevPostgres()
+    [Theory]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_log_events", true, 1)]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_deadlocks", true, 1)]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_plan_capture", true, 1)]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_database_stats", false, 0)]
+    [InlineData(CollectorTargetEngine.SqlServer, "pg_log_events", false, 0)]
+    public async Task TheRunnerGateProbesOnlyAPostgresLogTailCollector(
+        CollectorTargetEngine engine, string collectorName, bool expectedGranted, int expectedProbes)
     {
-        var connectionStringRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        if (string.IsNullOrWhiteSpace(connectionStringRoot))
+        var connection = new FakeScalarConnection { Scalar = true };
+        var context = new CollectorContext
         {
-            return;
-        }
+            ServerId = 1, ServerName = "gate-target", CollectionTime = new DateTime(2026, 9, 23, 0, 0, 0, DateTimeKind.Utc),
+            Deltas = new CollectorDeltaCalculator(),
+        };
 
-        const string role = "pm_test_pgreadbinaryfile_role";
+        await PerformanceMonitor.Darling.Service.DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync(
+            context, engine, collectorName, connection, "gate-target", CancellationToken.None);
 
-        await using var adminConnection = new NpgsqlConnection(connectionStringRoot);
-        await adminConnection.OpenAsync();
-
-        await using (var drop = adminConnection.CreateCommand())
-        {
-            drop.CommandText = $"DROP ROLE IF EXISTS {role}";
-            await drop.ExecuteNonQueryAsync();
-        }
-
-        await using (var create = adminConnection.CreateCommand())
-        {
-            create.CommandText = $"CREATE ROLE {role} LOGIN PASSWORD 'pm_test_pgreadbinaryfile' NOSUPERUSER";
-            await create.ExecuteNonQueryAsync();
-        }
-
-        try
-        {
-            var builder = new NpgsqlConnectionStringBuilder(connectionStringRoot)
-            {
-                Username = role,
-                Password = "pm_test_pgreadbinaryfile",
-            };
-
-            await using (var roleConnection = new NpgsqlConnection(builder.ConnectionString))
-            {
-                await roleConnection.OpenAsync();
-
-                var ungranted = await PgReadBinaryFileCapability.IsGrantedAsync(
-                    roleConnection, "dev-postgres-role-probe", CancellationToken.None);
-                Assert.False(ungranted);
-            }
-
-            await using (var grant = adminConnection.CreateCommand())
-            {
-                grant.CommandText =
-                    $"GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO {role}";
-                await grant.ExecuteNonQueryAsync();
-            }
-
-            PgReadBinaryFileCapability.Reset();
-
-            await using (var roleConnection = new NpgsqlConnection(builder.ConnectionString))
-            {
-                await roleConnection.OpenAsync();
-
-                var granted = await PgReadBinaryFileCapability.IsGrantedAsync(
-                    roleConnection, "dev-postgres-role-probe", CancellationToken.None);
-                Assert.True(granted);
-            }
-        }
-        finally
-        {
-            await using var drop = adminConnection.CreateCommand();
-            drop.CommandText = $"DROP ROLE IF EXISTS {role}";
-            await drop.ExecuteNonQueryAsync();
-        }
+        Assert.Equal(expectedGranted, context.PgReadBinaryFileGranted);
+        Assert.Equal(expectedProbes, connection.ExecuteCount);
     }
 }
