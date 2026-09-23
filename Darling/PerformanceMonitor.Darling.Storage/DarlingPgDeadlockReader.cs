@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// idempotent, so a row stored since comes back unchanged, and the 90-day retention ages the older ones out.
 /// Such a row's <c>deadlock_hash</c> is over its raw graph, which makes it a test for the literals the read
 /// just normalized away (#4004), so it is never returned and never looked up by:
-/// <see cref="PgDeadlockLogParser.LegacyIdentity"/> names that row instead, and
+/// <see cref="PgDeadlockLogParser.ReportIdentity"/> names that row instead, and
 /// <see cref="PgDeadlockLogParser.RawGraphHashSql"/> is how it is told apart.</para>
 /// </summary>
 public static class DarlingPgDeadlockReader
@@ -100,9 +100,9 @@ public static class DarlingPgDeadlockReader
     /// With one it answers about a single report; without one it returns the most recent graphs, which is
     /// the shape the SQL Server "Deadlock Graphs" panel already has and the reason a reader does not have to
     /// call the summary first just to see a graph. <c>$2</c> is a hash, <c>$3</c>/<c>$4</c> the timestamp and
-    /// victim pid of a <see cref="PgDeadlockLogParser.LegacyIdentity"/> (#4005). A hash finds only a row whose
-    /// hash is not over its raw graph and the pair only a row whose hash is, so a raw hash a reader computed
-    /// from a guess finds nothing.</para>
+    /// victim pid of a <see cref="PgDeadlockLogParser.ReportIdentity"/> (#4005). A hash finds only a row whose
+    /// hash is not over its raw graph, so a raw hash a reader computed from a guess finds nothing; the pair,
+    /// which every read shows anyway, finds the report whichever build stored it.</para>
     ///
     /// <para><c>DISTINCT ON (deadlock_hash)</c> for the same reason every read here groups: on the
     /// <c>pg_read_file</c> route the collector re-reads an overlapping tail, so without it the newest few
@@ -152,7 +152,6 @@ public static class DarlingPgDeadlockReader
             ) AS report
         ) AS r
         WHERE ($2::text IS NULL OR NOT r.raw_hash)
-        AND   ($3::timestamp IS NULL OR r.raw_hash)
         ORDER BY r.occurred_at DESC NULLS LAST, r.deadlock_hash
         LIMIT $5
         """;
@@ -191,22 +190,22 @@ public static class DarlingPgDeadlockReader
     }
 
     /// <param name="deadlockHash">An identity a read here returned: a hash, or a
-    /// <see cref="PgDeadlockLogParser.LegacyIdentity"/>. Null or blank for the most recent reports.</param>
+    /// <see cref="PgDeadlockLogParser.ReportIdentity"/>. Null or blank for the most recent reports.</param>
     public static async Task<List<PgDeadlockDetailRow>> GetDeadlockDetailAsync(
         NpgsqlDataSource postgres, int serverId, string? deadlockHash, int limit,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<PgDeadlockDetailRow>();
-        var legacy = PgDeadlockLogParser.TryParseLegacyIdentity(deadlockHash, out var legacyAt, out var legacyPid);
+        var byReport = PgDeadlockLogParser.TryParseReportIdentity(deadlockHash, out var reportAt, out var reportPid);
         await using var command = postgres.CreateCommand(DeadlockDetailSql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NpgsqlDbType.Text,
-            legacy || string.IsNullOrWhiteSpace(deadlockHash) ? DBNull.Value : (object)deadlockHash.Trim());
+            byReport || string.IsNullOrWhiteSpace(deadlockHash) ? DBNull.Value : (object)deadlockHash.Trim());
         /* Kind-Unspecified at the bind, per the store's naive-UTC discipline (see GetDeadlocksAsync). */
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp,
-            legacy ? DateTime.SpecifyKind(legacyAt, DateTimeKind.Unspecified) : (object)DBNull.Value);
-        command.Parameters.AddWithValue(NpgsqlDbType.Integer, legacy ? legacyPid : (object)DBNull.Value);
+            byReport ? DateTime.SpecifyKind(reportAt, DateTimeKind.Unspecified) : (object)DBNull.Value);
+        command.Parameters.AddWithValue(NpgsqlDbType.Integer, byReport ? reportPid : (object)DBNull.Value);
         command.Parameters.AddWithValue(limit);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -229,8 +228,8 @@ public static class DarlingPgDeadlockReader
 
     /// <summary>
     /// What a read returns as a report's identity (#4005): its stored hash, unless that hash is over the raw
-    /// graph, in which case the <see cref="PgDeadlockLogParser.LegacyIdentity"/> the detail read looks it up by.
+    /// graph, in which case the <see cref="PgDeadlockLogParser.ReportIdentity"/> the detail read looks it up by.
     /// </summary>
     public static string IdentityOf(string storedHash, bool rawHash, DateTime occurredAt, int victimPid) =>
-        rawHash ? PgDeadlockLogParser.LegacyIdentity(occurredAt, victimPid) : storedHash;
+        rawHash ? PgDeadlockLogParser.ReportIdentity(occurredAt, victimPid) : storedHash;
 }

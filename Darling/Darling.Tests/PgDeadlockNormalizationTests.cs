@@ -63,18 +63,18 @@ public sealed class PgDeadlockNormalizationTests
     }
 
     [Fact]
-    public void ALegacyIdentityRoundTrips_AndAHashIsNotOne()
+    public void AReportIdentityRoundTrips_AndAHashIsNotOne()
     {
         var at = new DateTime(2026, 8, 26, 22, 25, 24, 100);
-        var identity = PgDeadlockLogParser.LegacyIdentity(at, 1549);
+        var identity = PgDeadlockLogParser.ReportIdentity(at, 1549);
 
-        Assert.True(PgDeadlockLogParser.TryParseLegacyIdentity(identity, out var parsedAt, out var parsedPid));
+        Assert.True(PgDeadlockLogParser.TryParseReportIdentity(identity, out var parsedAt, out var parsedPid));
         Assert.Equal(at, parsedAt);
         Assert.Equal(1549, parsedPid);
 
-        Assert.False(PgDeadlockLogParser.TryParseLegacyIdentity(PgDeadlockLogParser.HashOf(LegacyGraph), out _, out _));
-        Assert.False(PgDeadlockLogParser.TryParseLegacyIdentity(null, out _, out _));
-        Assert.False(PgDeadlockLogParser.TryParseLegacyIdentity("legacy-2026", out _, out _));
+        Assert.False(PgDeadlockLogParser.TryParseReportIdentity(PgDeadlockLogParser.HashOf(LegacyGraph), out _, out _));
+        Assert.False(PgDeadlockLogParser.TryParseReportIdentity(null, out _, out _));
+        Assert.False(PgDeadlockLogParser.TryParseReportIdentity("at-2026", out _, out _));
     }
 
     /* ───────────────────────── live ───────────────────────── */
@@ -96,7 +96,7 @@ public sealed class PgDeadlockNormalizationTests
             var summary = Assert.Single(await DarlingPgDeadlockReader.GetDeadlocksAsync(
                 postgres, ServerId, at.AddHours(-1), at.AddHours(1), 25, ct));
             Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", summary.VictimStatement);
-            Assert.Equal(PgDeadlockLogParser.LegacyIdentity(at, 3101), summary.DeadlockHash);
+            Assert.Equal(PgDeadlockLogParser.ReportIdentity(at, 3101), summary.DeadlockHash);
             Assert.Equal(2, summary.TimesSeen);
 
             var recent = Assert.Single(await DarlingPgDeadlockReader.GetDeadlockDetailAsync(postgres, ServerId, null, 5, ct));
@@ -179,7 +179,7 @@ public sealed class PgDeadlockNormalizationTests
             AlertIncidentRenderer.Apply(context, incidents);
 
             var incident = Assert.Single(incidents);
-            Assert.Equal(PgDeadlockLogParser.LegacyIdentity(at, 3101), incident.DedupKey);
+            Assert.Equal(PgDeadlockLogParser.ReportIdentity(at, 3101), incident.DedupKey);
             Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", Assert.Single(incident.InvolvedObjects));
 
             foreach (var body in new[] { AlertContextSerializer.Serialize(context), AlertContextSerializer.SerializeIncidents(context) })

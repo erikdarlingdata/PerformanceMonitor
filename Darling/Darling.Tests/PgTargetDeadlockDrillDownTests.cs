@@ -107,6 +107,68 @@ public sealed class PgTargetDeadlockDrillDownTests
         Assert.DoesNotContain("DeSkew", code, StringComparison.Ordinal);
     }
 
+    /* ───────────────────────── stored findings (#4005) ───────────────────────── */
+
+    /// <summary>
+    /// #4005: a finding stored before the SQL in deadlock reports was normalized persisted its exemplar's victim
+    /// statement, graph and fingerprint raw, the fingerprint in its prose too, and a hash over the raw graph.
+    /// Every read of a stored finding brings it to the new rules: normalized, the prose's fingerprint replaced,
+    /// and the report named by timestamp and pid. A second pass changes nothing.
+    /// </summary>
+    [Fact]
+    public void AStoredFindingsExemplars_ReadBackNormalized_AndNameTheirReportByTimeAndPid()
+    {
+        const string rawStatement = "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111";
+        const string rawGraph = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\nProcess 12: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+        var rawHash = PgDeadlockLogParser.HashOf(rawGraph);
+        var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
+        var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{rawStatement}`, seen 1 time.";
+
+        var section = JsonSerializer.SerializeToElement(new
+        {
+            engine_counted = 1,
+            exemplars = new[]
+            {
+                new
+                {
+                    rank = 1,
+                    last_seen = lastSeen.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                    deadlock_hash = rawHash,
+                    victim_pid = 11,
+                    victim_statement_fingerprint = rawStatement,
+                    victim_statement = rawStatement,
+                    graph_text = rawGraph,
+                },
+            },
+            note = sentence,
+        });
+        var finding = new AnalysisFinding
+        {
+            StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Deadlocks", "Investigate. " + sentence, "Fix the order.")),
+            DrillDown = new Dictionary<string, object> { [PgTargetDrillDownCollector.DeadlockExemplarsSection] = section },
+        };
+
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+        var once = (JsonSerializer.Serialize(finding.DrillDown), finding.StoryText);
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+        Assert.Equal(once, (JsonSerializer.Serialize(finding.DrillDown), finding.StoryText));
+
+        var exemplar = ((JsonElement)finding.DrillDown![PgTargetDrillDownCollector.DeadlockExemplarsSection]).GetProperty("exemplars")[0];
+        Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", exemplar.GetProperty("victim_statement").GetString());
+        Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", exemplar.GetProperty("victim_statement_fingerprint").GetString());
+        Assert.Equal(PgDeadlockLogParser.NormalizeGraph(rawGraph), exemplar.GetProperty("graph_text").GetString());
+        Assert.Equal(PgDeadlockLogParser.ReportIdentity(lastSeen, 11), exemplar.GetProperty("deadlock_hash").GetString());
+
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.Contains("with the victim `UPDATE accounts SET pin = '?' WHERE card = ?`, seen 1 time.", advice.Investigation, StringComparison.Ordinal);
+
+        foreach (var text in new[] { once.Item1, finding.StoryText })
+        {
+            foreach (var secret in new[] { "4721", "9034", "4111111111111111", "5500005555555559", rawHash })
+                Assert.DoesNotContain(secret, text, StringComparison.Ordinal);
+        }
+    }
+
     /* ───────────────────────── bounds ───────────────────────── */
 
     [Fact]
@@ -335,7 +397,7 @@ public sealed class PgTargetDeadlockDrillDownTests
                 Assert.Equal(resourcesA, a.GetProperty("resources").GetString());
                 Assert.Equal(2, a.GetProperty("reports").GetInt32());
                 Assert.Equal(2, a.GetProperty("rows_captured").GetInt32());
-                Assert.Equal(PgDeadlockLogParser.LegacyIdentity(windowStart.AddMinutes(45), 4242), a.GetProperty("deadlock_hash").GetString());
+                Assert.Equal(PgDeadlockLogParser.ReportIdentity(windowStart.AddMinutes(45), 4242), a.GetProperty("deadlock_hash").GetString());
                 Assert.Equal("UPDATE orders SET status = $1 WHERE id = $2", a.GetProperty("victim_statement_fingerprint").GetString());
                 Assert.False(a.GetProperty("victim_statement_may_be_truncated").GetBoolean());
                 Assert.Equal(4, a.GetProperty("graph_text_lines_total").GetInt32());
@@ -375,6 +437,53 @@ public sealed class PgTargetDeadlockDrillDownTests
                     Assert.Contains("Exemplars: 4 reports captured", anomaly.GetProperty("advice").GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 }
             }
+
+            /* #4005: a finding a build before #4005 stored (an anchored run like the one above persists nothing)
+               reads back through PgFindingStore, get_analysis_findings' read, normalized and naming its report by
+               timestamp and pid, never by the stored hash. */
+            var rawStatement = "UPDATE orders SET status = 'held-4721' WHERE id = 7";
+            var preFix = new AnalysisFinding
+            {
+                FindingId = CollectionIdGenerator.Next(),
+                AnalysisTime = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified),
+                ServerId = ServerId,
+                ServerName = ServerName,
+                Severity = 0.6,
+                Confidence = 0.5,
+                Category = "database",
+                StoryPath = PgTargetFactKeys.DeadlockRate,
+                StoryPathHash = "4005-pre-fix-exemplar",
+                StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Deadlocks", $"with the victim `{rawStatement}`", "Fix the order.")),
+                RootFactKey = PgTargetFactKeys.DeadlockRate,
+                FactCount = 1,
+                DrillDown = new Dictionary<string, object>
+                {
+                    [PgTargetDrillDownCollector.DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(new
+                    {
+                        exemplars = new[]
+                        {
+                            new
+                            {
+                                last_seen = windowStart.AddMinutes(45).ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                                deadlock_hash = rawHashA2,
+                                victim_pid = 4242,
+                                victim_statement_fingerprint = rawStatement,
+                                victim_statement = rawStatement,
+                                graph_text = graphA,
+                            },
+                        },
+                    }),
+                },
+            };
+            await new PgFindingStore(postgres).InsertFindingsAsync(
+                [preFix],
+                new AnalysisContext { ServerId = ServerId, ServerName = ServerName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero });
+
+            var stored = await DarlingMcpTools.GetAnalysisFindings(service, postgres, ServerName, 24, include_drilldown: true);
+            Assert.Contains("4005-pre-fix-exemplar", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("4721", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain(rawHashA2, stored, StringComparison.Ordinal);
+            Assert.Contains(PgDeadlockLogParser.ReportIdentity(windowStart.AddMinutes(45), 4242), stored, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

@@ -453,34 +453,36 @@ public static class PgDeadlockLogParser
     /// A SQL predicate, true for a stored row whose <c>deadlock_hash</c> is <see cref="HashOf"/> over its
     /// <c>graph_text</c>: a row stored before #4005, when the graph was stored raw and hashed raw. That hash is
     /// a test for the literals a read normalizes away (#4004), so a read never returns it and never finds a row
-    /// by it; <see cref="LegacyIdentity"/> names such a row instead. A row stored since carries
+    /// by it; <see cref="ReportIdentity"/> names such a row instead. A row stored since carries
     /// <see cref="IdentityOf"/>, which covers the timestamp as well and so never satisfies this.
     /// </summary>
     public static string RawGraphHashSql(string hashColumn, string graphColumn) =>
         $"(upper(left(encode(sha256(convert_to({graphColumn}, 'UTF8')), 'hex'), 32)) = {hashColumn})";
 
-    /// <summary>What a read returns as the identity of a row <see cref="RawGraphHashSql"/> is true for, in place
-    /// of its hash: the report's timestamp and victim pid, which every read already shows.</summary>
-    public static string LegacyIdentity(DateTime occurredAt, int victimPid) =>
-        LegacyIdentityPrefix + occurredAt.ToString("yyyyMMdd'T'HHmmss.ffffff", CultureInfo.InvariantCulture)
+    /// <summary>A report named by its timestamp and victim pid, which every read already shows (#4005): what a
+    /// read returns in place of the hash of a row <see cref="RawGraphHashSql"/> is true for, and what an analysis
+    /// finding stored before #4005 names its exemplar by, since its stored hash may be one. The detail read finds
+    /// the report by it whichever build stored the row.</summary>
+    public static string ReportIdentity(DateTime occurredAt, int victimPid) =>
+        ReportIdentityPrefix + occurredAt.ToString("yyyyMMdd'T'HHmmss.ffffff", CultureInfo.InvariantCulture)
         + "-" + victimPid.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>The report a <see cref="LegacyIdentity"/> names.</summary>
-    public static bool TryParseLegacyIdentity(string? identity, out DateTime occurredAt, out int victimPid)
+    /// <summary>The report a <see cref="ReportIdentity"/> names.</summary>
+    public static bool TryParseReportIdentity(string? identity, out DateTime occurredAt, out int victimPid)
     {
         occurredAt = default;
         victimPid = 0;
-        var match = identity is null ? Match.Empty : s_legacyIdentity.Match(identity.Trim());
+        var match = identity is null ? Match.Empty : s_reportIdentity.Match(identity.Trim());
 
         return match.Success
             && DateTime.TryParseExact(match.Groups["at"].Value, "yyyyMMdd'T'HHmmss.ffffff", CultureInfo.InvariantCulture, DateTimeStyles.None, out occurredAt)
             && int.TryParse(match.Groups["pid"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out victimPid);
     }
 
-    private const string LegacyIdentityPrefix = "legacy-";
+    private const string ReportIdentityPrefix = "at-";
 
-    private static readonly Regex s_legacyIdentity = new(
-        "^" + LegacyIdentityPrefix + @"(?<at>[0-9]{8}T[0-9]{6}\.[0-9]{6})-(?<pid>[0-9]{1,10})$",
+    private static readonly Regex s_reportIdentity = new(
+        "^" + ReportIdentityPrefix + @"(?<at>[0-9]{8}T[0-9]{6}\.[0-9]{6})-(?<pid>[0-9]{1,10})$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>

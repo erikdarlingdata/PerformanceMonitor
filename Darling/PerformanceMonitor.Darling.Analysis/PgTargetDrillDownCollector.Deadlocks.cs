@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
@@ -85,7 +87,7 @@ public sealed partial class PgTargetDrillDownCollector
     ///
     /// <para>The exemplar of each shape is its LATEST report (<c>array_agg(… ORDER BY occurred_at DESC NULLS
     /// LAST)</c> — the first element), with its identity so <c>get_pg_deadlock_detail</c> can be pointed at it:
-    /// the hash, or the <c>PgDeadlockLogParser.LegacyIdentity</c> of a report whose hash is over its raw graph
+    /// the hash, or the <c>PgDeadlockLogParser.ReportIdentity</c> of a report whose hash is over its raw graph
     /// (#4005), which the read tells apart by <c>latest_hash_is_raw</c>.
     /// The statement and graph are cut in the read to their caps and the untruncated lengths ride beside them
     /// for the flags. <c>count(*) OVER ()</c> and the two <c>SUM(…) OVER ()</c> put the window totals on every
@@ -315,6 +317,74 @@ LIMIT $4";
             return (string.Join('\n', lines), lines.Length, charTruncated);
 
         return (string.Join('\n', lines.Take(GraphTextLineCap)), lines.Length, true);
+    }
+
+    /// <summary>
+    /// A stored finding's deadlock exemplars brought to #4005's rules on the way out, as
+    /// <see cref="DarlingPgDeadlockReader"/> brings a stored report: a finding persists its drill-down and its
+    /// prose (#2060), so one written before #4005 kept each exemplar's victim statement, its fingerprint in the
+    /// advice sentence, and its graph with their literals, for the 30 days findings are kept. Each is normalized
+    /// again, and the fingerprint replaced in the prose where the stored one stands. The stored
+    /// <c>deadlock_hash</c> may be a hash over a raw graph, which a finding cannot tell from one that is not, so
+    /// every one is replaced by the <see cref="PgDeadlockLogParser.ReportIdentity"/> of the exemplar's latest
+    /// report, which <c>get_pg_deadlock_detail</c> takes. Idempotent, and a no-op on a finding with no exemplars.
+    /// </summary>
+    internal static void NormalizeStoredDeadlockExemplars(AnalysisFinding finding)
+    {
+        if (finding.DrillDown is null
+            || !finding.DrillDown.TryGetValue(DeadlockExemplarsSection, out var section)
+            || section is not JsonElement { ValueKind: JsonValueKind.Object } element
+            || JsonNode.Parse(element.GetRawText()) is not JsonObject node
+            || node["exemplars"] is not JsonArray exemplars)
+            return;
+
+        var fingerprints = new List<(string Stored, string Normalized)>();
+        foreach (var exemplar in exemplars.OfType<JsonObject>())
+        {
+            var statement = PgDeadlockLogParser.NormalizeStatement(StringOf(exemplar["victim_statement"]));
+            var storedFingerprint = StringOf(exemplar["victim_statement_fingerprint"]);
+            var fingerprint = Fingerprint(statement);
+            exemplar["victim_statement"] = statement;
+            exemplar["victim_statement_fingerprint"] = fingerprint;
+            exemplar["graph_text"] = PgDeadlockLogParser.NormalizeGraph(StringOf(exemplar["graph_text"]));
+            if (storedFingerprint is not null && storedFingerprint != fingerprint)
+                fingerprints.Add(($"`{storedFingerprint}`", $"`{fingerprint}`"));
+
+            var identity = StringOf(exemplar["deadlock_hash"]);
+            if (identity is not null && !PgDeadlockLogParser.TryParseReportIdentity(identity, out _, out _))
+            {
+                exemplar["deadlock_hash"] =
+                    DateTime.TryParse(StringOf(exemplar["last_seen"]), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var lastSeen)
+                    && exemplar["victim_pid"] is JsonValue pid && pid.TryGetValue<int>(out var victimPid)
+                        ? PgDeadlockLogParser.ReportIdentity(lastSeen, victimPid)
+                        : null;
+            }
+        }
+
+        if (StringOf(node["note"]) is { } note)
+            node["note"] = Replace(note, fingerprints);
+
+        finding.DrillDown[DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(node);
+
+        if (fingerprints.Count > 0 && FactAdvice.TryReadStoryText(finding.StoryText) is { } advice)
+        {
+            finding.StoryText = FactAdvice.SerializeForStoryText(advice with
+            {
+                Headline = Replace(advice.Headline, fingerprints),
+                Investigation = Replace(advice.Investigation, fingerprints),
+                Remediation = Replace(advice.Remediation, fingerprints),
+            });
+        }
+
+        static string? StringOf(JsonNode? value) =>
+            value is JsonValue text && text.TryGetValue<string>(out var s) ? s : null;
+
+        static string Replace(string text, List<(string Stored, string Normalized)> pairs)
+        {
+            foreach (var (stored, normalized) in pairs)
+                text = text.Replace(stored, normalized, StringComparison.Ordinal);
+            return text;
+        }
     }
 
     private static readonly Regex s_whitespaceRun = new(@"\s+", RegexOptions.Compiled);
