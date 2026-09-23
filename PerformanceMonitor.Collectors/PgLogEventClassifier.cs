@@ -91,6 +91,17 @@ public sealed class PgLogEventClassifier
     public List<PgLogEvent> Classify(string? logBody)
         => Classify(PgLogEntryAssembler.Assemble(logBody));
 
+    /// <summary>
+    /// <see cref="Classify(string?)"/> for a caller that read the target's <c>log_timezone</c> with the text (#4046):
+    /// under a setting that renders UTC, a line in another zone is skipped and counted in
+    /// <paramref name="foreignZoneLines"/> rather than refusing the read. See
+    /// <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>.
+    /// </summary>
+    /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: the
+    /// log is stamped in a non-UTC zone (#2993).</exception>
+    public List<PgLogEvent> Classify(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
+        => Classify(PgLogEntryAssembler.Assemble(logBody, logTimezoneIsUtc, out foreignZoneLines));
+
     /// <summary>The walk itself, over entries already assembled — for a transport that assembled them for another consumer too.</summary>
     public List<PgLogEvent> Classify(IReadOnlyList<PgLogEntry> entries)
     {

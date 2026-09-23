@@ -679,6 +679,22 @@ public sealed class DarlingCollectorRunner
     private RdsCpuIngestor? _rdsCpu;
 
     /// <summary>
+    /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
+    /// when the run's definition recorded <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/> (#4046), so the
+    /// row that carries the count also says what it counts and names the issue; otherwise <paramref name="result"/>
+    /// unchanged. Host note, not the composed <see cref="CollectorRunResult.Note"/>, which would lose the count.
+    /// </summary>
+    internal static CollectorRunResult WithForeignZoneLinesNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgServerLogTail.ForeignZoneLinesMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgServerLogTail.ForeignZoneLinesNote) }
+            : result;
+    }
+
+    /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
     ///
     /// <para>Reported as a normal <see cref="CollectorRunResult"/> so the cycle accounts for it exactly like
