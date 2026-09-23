@@ -3211,13 +3211,16 @@ internal sealed class CollectorHealth
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.
-    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average
-    /// duration by this same cadence, so both readers of it share one resolution.</summary>
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so
+    /// a 0 default — an on-load collector's catalog entry, or a collector no longer in the catalog at all —
+    /// reads as the daily recapture interval instead of the floor thresholds a raw 0 used to fall to, which
+    /// is what lets <see cref="CollectorHealthClassifier.Classify"/> band an on-load collector on the SAME
+    /// ladder as any other. The banding uses the shipped default, not the resolved per-server override, so
+    /// all three surfaces stay in parity. Internal since #2296: the tool's sweep-pressure roll-up amortizes
+    /// each collector's average duration by this same cadence, so both readers of it share one resolution.</summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0);
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
@@ -3234,7 +3237,7 @@ internal sealed class CollectorHealth
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */

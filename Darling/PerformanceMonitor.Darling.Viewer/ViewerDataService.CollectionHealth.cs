@@ -664,12 +664,16 @@ public class CollectorHealthRow
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not any per-install override: the viewer has no cheap per-collector effective
-    /// frequency at the row level, and using the same default across all three surfaces keeps them in parity.</summary>
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so
+    /// a 0 default — an on-load collector's catalog entry, or a collector no longer in the catalog at all —
+    /// reads as the daily recapture interval instead of the floor thresholds a raw 0 used to fall to, which
+    /// is what lets <see cref="CollectorHealthClassifier.Classify"/> band an on-load collector on the SAME
+    /// ladder as any other. The banding uses the shipped default, not any per-install override: the viewer
+    /// has no cheap per-collector effective frequency at the row level, and using the same default across
+    /// all three surfaces keeps them in parity.</summary>
     private int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0);
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
@@ -680,7 +684,7 @@ public class CollectorHealthRow
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
         RegressedFromProductive);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
