@@ -1016,7 +1016,12 @@ public sealed class DarlingWorker : BackgroundService
        indistinguishable from a healthy service on every automated surface there is. */
     private readonly CollectorRuntimeState _collectorState;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState)
+    /* #3941: the process's shared baseline tier, handed to every per-pass DarlingAnalysisService so a pass inside an
+       analysis hour another pass (or an MCP/web read) already computed reads no 30-day baseline — the same singleton
+       the MCP and web hosts hand theirs. */
+    private readonly BaselineCache _baselineCache;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -1025,6 +1030,7 @@ public sealed class DarlingWorker : BackgroundService
         _registryState = registryState;
         _collectorState = collectorState;
         _webTlsCertState = webTlsCertState;
+        _baselineCache = baselineCache;
     }
 
     private sealed class ServerLoopState
@@ -7244,7 +7250,7 @@ LIMIT 1";
 
         try
         {
-            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger);
+            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache);
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout

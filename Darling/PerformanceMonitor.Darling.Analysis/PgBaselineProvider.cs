@@ -34,13 +34,17 @@ namespace PerformanceMonitor.Darling.Analysis;
 ///   Full (hour+dow) -> Hour-only -> Flat (global mean/stddev)
 /// Baselines are cached in memory with a 1-hour TTL to avoid redundant
 /// recomputation during rapid re-analysis. Collapse math, cache keys, and the
-/// public surface are Lite's, line-for-line.
+/// public surface are Lite's, line-for-line. Since #3941 the cache has a second,
+/// process-wide tier (<see cref="BaselineCache"/>) that the worker's per-pass
+/// services, the MCP host and the web host share, and the window ends on the
+/// analysis HOUR the cache keys on, so a shared entry is the answer a fresh
+/// compute would give.
 /// </para>
 ///
 /// <para>
 /// Postgres discipline (see PgFindingStore): the window bounds are bound
 /// naive-UTC Kind-Unspecified parameters ($1 server_id, $2 window start,
-/// $3 analysis time) — never a bare <c>now()</c>/<c>CURRENT_TIMESTAMP</c>, which
+/// $3 window end, the analysis hour) — never a bare <c>now()</c>/<c>CURRENT_TIMESTAMP</c>, which
 /// would be timestamptz and compare in the PG server's time zone. Lite's SQL
 /// already parameterized every bound, so no "now" replacement was needed here.
 /// </para>
@@ -130,14 +134,23 @@ public class PgBaselineProvider
 
     private readonly ConcurrentDictionary<string, CachedBaseline> _cache = new();
 
+    /* #3941: the process's shared tier (see BaselineCache for the invalidation rule), or null for a private cache. */
+    private readonly BaselineCache? _shared;
+
     /* #3691 lane 33: the keyed-cardinality note's once-per-cache-period gate (NoteKeyedCardinality). */
     private readonly object _keyedWarnGate = new();
     private DateTime? _keyedCardinalityWarnedAt;
 
-    public PgBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null)
+    /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
+    /// <param name="logger">Optional.</param>
+    /// <param name="sharedCache">#3941: the process's <see cref="BaselineCache"/>, consulted on a miss in this
+    /// provider's own cache and handed every successful compute. Null (every caller before #3941) keeps a private
+    /// cache and nothing else.</param>
+    public PgBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null, BaselineCache? sharedCache = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        _shared = sharedCache;
         /* Information, not Warning: "this host cannot resolve that zone id" is a statement about the host's
            configuration, made once per zone per process by the resolver itself — see BaselineLocalClock. */
         _localClock = new BaselineLocalClock(message => _logger?.LogInformation("{Message}", message));
@@ -257,16 +270,22 @@ public class PgBaselineProvider
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
     }
 
-    /// <summary>Forces cache eviction for a server — used during testing.</summary>
+    /// <summary>Forces cache eviction for a server — used during testing. Both tiers (#3941): a shared entry left
+    /// behind would answer the very next lookup and defeat the eviction.</summary>
     public void InvalidateCache(int serverId)
     {
         var keysToRemove = _cache.Keys.Where(k => k.StartsWith($"{serverId}:", StringComparison.Ordinal)).ToList();
         foreach (var key in keysToRemove)
             _cache.TryRemove(key, out _);
+        _shared?.Invalidate(serverId);
     }
 
-    /// <summary>Forces full cache clear — used during testing.</summary>
-    public void ClearCache() => _cache.Clear();
+    /// <summary>Forces full cache clear — used during testing. Both tiers (#3941).</summary>
+    public void ClearCache()
+    {
+        _cache.Clear();
+        _shared?.Clear();
+    }
 
     /// <summary>
     /// The cache identity of a series (#3691 lane 33): <c>{server}:{metric}</c> for the unkeyed series — the exact
@@ -308,7 +327,7 @@ public class PgBaselineProvider
         var cacheKey = CacheKeyFor(serverId, metricName, key: null);
         var roundedHour = RoundedHour(analysisTime);
 
-        if (TryGetFresh(cacheKey, roundedHour, out var cached))
+        if (TryGetFresh(serverId, cacheKey, roundedHour, out var cached))
         {
             return cached;
         }
@@ -322,7 +341,7 @@ public class PgBaselineProvider
             Buckets = BucketsOf(byMember, UnkeyedMember),
             Clock = clock
         };
-        _cache[cacheKey] = entry;
+        Store(serverId, cacheKey, entry);
 
         return entry;
     }
@@ -362,7 +381,7 @@ public class PgBaselineProvider
             }
 
             var cacheKey = CacheKeyFor(serverId, metricName, key);
-            if (TryGetFresh(cacheKey, roundedHour, out var cached))
+            if (TryGetFresh(serverId, cacheKey, roundedHour, out var cached))
             {
                 entries[key] = cached;
             }
@@ -393,7 +412,7 @@ public class PgBaselineProvider
                     Clock = clock,
                     Key = key
                 };
-                _cache[CacheKeyFor(serverId, metricName, key)] = entry;
+                Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
                 entries[key] = entry;
             }
         }
@@ -403,13 +422,53 @@ public class PgBaselineProvider
         return entries;
     }
 
-    private static DateTime RoundedHour(DateTime analysisTime)
+    /// <summary>The analysis hour: the cache key's time AND, since #3941, the end of the compute's window
+    /// (<see cref="ComputeBucketsAsync"/>), so the key names the rows its entry was computed from.</summary>
+    internal static DateTime RoundedHour(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
 
-    private bool TryGetFresh(string cacheKey, DateTime roundedHour, [NotNullWhen(true)] out CachedBaseline? cached)
-        => _cache.TryGetValue(cacheKey, out cached)
-           && cached.ComputedAt == roundedHour
-           && (DateTime.UtcNow - cached.RealTime) < CacheTtl;
+    /// <summary>This provider's engine in the shared tier's key (#3941): a SQL Server series and a PostgreSQL-target
+    /// series of one server id are never each other's.</summary>
+    private string SharedKind => GetType().FullName ?? GetType().Name;
+
+    /// <summary>
+    /// A fresh entry for the analysis hour, from this provider's own cache or, on a miss there, the process's shared
+    /// tier (#3941). Precedence: a local SUCCESS; then a shared one (copied into the local cache, so the rest of this
+    /// provider's life is a local hit); then a local FAILURE — "no baseline this pass", exactly as before #3941. A
+    /// shared success beats a local failure because it is the answer the failed compute was trying to get.
+    /// </summary>
+    private bool TryGetFresh(int serverId, string cacheKey, DateTime roundedHour, [NotNullWhen(true)] out CachedBaseline? cached)
+    {
+        var local = _cache.TryGetValue(cacheKey, out var own)
+                    && own.ComputedAt == roundedHour
+                    && (DateTime.UtcNow - own.RealTime) < CacheTtl;
+        if (local && own!.Buckets is not null)
+        {
+            cached = own;
+            return true;
+        }
+
+        if (_shared is not null && _shared.TryGet(SharedKind, serverId, cacheKey, roundedHour, out var shared))
+        {
+            _cache[cacheKey] = shared;
+            cached = shared;
+            return true;
+        }
+
+        cached = local ? own : null;
+        return local;
+    }
+
+    /// <summary>Files a compute in this provider's cache and, when it SUCCEEDED, in the shared tier (#3941). A failed
+    /// compute (null buckets) is this caller's "no baseline this pass" and nobody else's.</summary>
+    private void Store(int serverId, string cacheKey, CachedBaseline entry)
+    {
+        _cache[cacheKey] = entry;
+        if (entry.Buckets is not null)
+        {
+            _shared?.Put(SharedKind, serverId, cacheKey, entry);
+        }
+    }
 
     /// <summary>The member an UNKEYED compute's rows are filed under — keyed members are numbered from 1, so it can
     /// never collide with one.</summary>
@@ -683,8 +742,16 @@ LIMIT 1";
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
-        var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
-        var clock = LocalClockWindow.Utc(analysisTime);
+
+        /* #3941: the window ends at the analysis HOUR, not the analysis instant. The cache has always keyed an entry on
+           that hour, but computed it over whichever instant inside the hour asked first, so a later caller in the same
+           hour was answered from a window up to 59 minutes off its own. Ending the window on the key makes every caller
+           in the hour ask for the SAME rows — what lets the process share one compute between the scheduled pass,
+           analyze_server and compare_analysis (BaselineCache) without changing anyone's answer. The lookup still keys
+           the bucket on the analysis instant (LookUp); its hour-of-week is the hour's. */
+        var windowEnd = RoundedHour(analysisTime);
+        var windowStart = windowEnd.AddDays(-BaselineMath.BaselineWindowDays);
+        var clock = LocalClockWindow.Utc(windowEnd);
 
         /* Timed so the failure path can say how long it got, not just that it failed — see the catch. */
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
@@ -705,15 +772,15 @@ LIMIT 1";
                purpose — a store that cannot answer a one-row indexed read of server_properties cannot answer the
                aggregate scan either, and one classified catch (AnalysisShutdownResidueTests pins exactly one) is
                the right number of places for "this metric has no baseline this pass" to be said. */
-            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, AsNaive(analysisTime), cancellationToken);
-            clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, AsNaive(windowStart), AsNaive(analysisTime));
+            var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, AsNaive(windowEnd), cancellationToken);
+            clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, AsNaive(windowStart), AsNaive(windowEnd));
 
             using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
             /* Window bounds arrive as bound naive-UTC parameters (Kind-Unspecified so Npgsql
                maps them to `timestamp`, matching the naive-UTC columns) — never bare now(). */
             cmd.Parameters.AddWithValue(AsNaive(windowStart));
-            cmd.Parameters.AddWithValue(AsNaive(analysisTime));
+            cmd.Parameters.AddWithValue(AsNaive(windowEnd));
             /* $4..$6: the clock BaselineLocalClock.LocalCollectionTimeSql keys on — the transition instant (naive
                UTC, same `timestamp` mapping as the bounds) and the offset minutes before/after it. Every statement
                this method runs must reference all three; the engine will not say so if one does not. */
@@ -1377,7 +1444,9 @@ clean AS (
     private static DateTime AsNaive(DateTime value) =>
         DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
-    private class CachedBaseline
+    /// <summary>One computed series. Internal, not private, since #3941: <see cref="BaselineCache"/> holds the same
+    /// objects, and an entry is never mutated after it is built, so two tiers can share it.</summary>
+    internal sealed class CachedBaseline
     {
         public DateTime ComputedAt { get; init; }
         public DateTime RealTime { get; init; }

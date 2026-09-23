@@ -241,7 +241,9 @@ public partial class RecommendationsTab : UserControl
                 /* #3896: the cadence each collector runs at on this server, for the latest-value lookbacks. */
                 schedules is null
                     ? null
-                    : (id, collector) => schedules.GetFrequencyForStorageServer(servers, id, collector));
+                    : (id, collector) => schedules.GetFrequencyForStorageServer(servers, id, collector),
+                /* #3941: the store's shared baseline tier, which the scheduled passes keep warm. */
+                BaselineCache.For(_duckDb));
 
             var findings = await Task.Run(() => analysisService.AnalyzeAsync(serverId, serverName, hoursBack: 4));
 

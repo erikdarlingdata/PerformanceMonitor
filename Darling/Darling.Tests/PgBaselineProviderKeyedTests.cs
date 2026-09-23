@@ -90,8 +90,11 @@ public sealed class PgBaselineProviderKeyedTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(ProviderSource);
         Assert.Contains("var cacheKey = CacheKeyFor(serverId, metricName, key);", code, StringComparison.Ordinal);
         Assert.Contains("var cacheKey = CacheKeyFor(serverId, metricName, key: null);", code, StringComparison.Ordinal);
-        /* #3901: a set's misses are cached one entry per key, under the same identity a single-key compute uses. */
-        Assert.Contains("_cache[CacheKeyFor(serverId, metricName, key)] = entry;", code, StringComparison.Ordinal);
+        /* #3901: a set's misses are cached one entry per key, under the same identity a single-key compute uses —
+           through Store since #3941, which files the entry under that key in this provider's cache (and, on success,
+           the process's shared tier under the same key). */
+        Assert.Contains("Store(serverId, CacheKeyFor(serverId, metricName, key), entry);", code, StringComparison.Ordinal);
+        Assert.Contains("_cache[cacheKey] = entry;", code[code.IndexOf("private void Store(", StringComparison.Ordinal)..], StringComparison.Ordinal);
     }
 
     /* ───────────────────────── (2) the seam and the bind ───────────────────────── */
@@ -307,13 +310,13 @@ public sealed class PgBaselineProviderKeyedTests
         var keyedEnd = code.IndexOf("\n    private ", keyedStart, StringComparison.Ordinal);
         Assert.True(keyedStart > 0 && keyedEnd > keyedStart, "the keyed cache path moved");
         var keyedPath = code[keyedStart..keyedEnd];
-        var stored = keyedPath.IndexOf("_cache[CacheKeyFor(serverId, metricName, key)] = entry;", StringComparison.Ordinal);
+        var stored = keyedPath.IndexOf("Store(serverId, CacheKeyFor(serverId, metricName, key), entry);", StringComparison.Ordinal);
         var noted = keyedPath.IndexOf("NoteKeyedCardinality(serverId, metricName);", StringComparison.Ordinal);
         Assert.True(stored > 0 && noted > stored && noted - stored < 200, "the note is raised right after the keyed entries are stored");
 
         var unkeyedStart = code.IndexOf("Task<CachedBaseline> GetOrComputeBaselinesAsync(", StringComparison.Ordinal);
         var unkeyedPath = code[unkeyedStart..code.IndexOf("\n    private ", unkeyedStart, StringComparison.Ordinal)];
-        Assert.Contains("_cache[cacheKey] = entry;", unkeyedPath, StringComparison.Ordinal);
+        Assert.Contains("Store(serverId, cacheKey, entry);", unkeyedPath, StringComparison.Ordinal);
         Assert.DoesNotContain("NoteKeyedCardinality(", unkeyedPath, StringComparison.Ordinal);
     }
 

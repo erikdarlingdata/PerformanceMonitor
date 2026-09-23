@@ -68,12 +68,15 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_muteRuleService);
             var planFetcher = new SqlPlanFetcher(_serverManager);
             var schedules = _scheduleManager;
+            /* #3941: the store's shared baseline tier, so analyze_server and compare_analysis inside an analysis hour
+               a scheduled pass already computed read no 30-day baseline. */
             builder.Services.AddSingleton(new AnalysisService(
                 _duckDb,
                 planFetcher,
                 collectorFrequencyMinutes: schedules is null
                     ? null
-                    : (serverId, collector) => schedules.GetFrequencyForStorageServer(_serverManager, serverId, collector)));
+                    : (serverId, collector) => schedules.GetFrequencyForStorageServer(_serverManager, serverId, collector),
+                baselineCache: BaselineCache.For(_duckDb)));
 
             /* Register MCP server with all tool classes */
             builder.Services

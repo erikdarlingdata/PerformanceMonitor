@@ -11,6 +11,7 @@ using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 
@@ -433,6 +434,11 @@ builder.Services.AddSingleton<MonitoredServerRegistryState>();
    the reader are separate hosted services in one process, and the answer has to survive being asked at any
    moment rather than being computed on demand from something that might be down. */
 builder.Services.AddSingleton<CollectorRuntimeState>();
+
+/* #3941: the process's shared baseline tier. The worker's per-pass analysis services, the MCP host's and the web
+   host's each read the store as a different role (#3914), so they cannot share providers; they share the computed
+   30-day buckets instead, and a series is read from the store once per analysis hour between them. */
+builder.Services.AddSingleton<BaselineCache>();
 
 builder.Services.AddHostedService<DarlingWorker>();
 

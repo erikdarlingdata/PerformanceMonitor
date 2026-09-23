@@ -164,7 +164,9 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
     /// Fixture 1 through the product: a server whose <c>server_properties</c> row says UTC−5 and nothing about a
     /// zone, twelve CPU rows on two Tuesdays at 23:xxZ. Pre-Q6 the bucket was (23, Tue) and the label "Tue 23:00";
     /// now the rows key to (18, Tue), the analysis time 23:30Z looks up (18, Tue), and the label is "Tue 18:00".
-    /// The UTC-keyed lookup finds nothing at (18, Tue) — the same rows, the same store, the other key.
+    /// The UTC-keyed lookup finds nothing at (18, Tue) — the same rows, the same store, the other key. The lookup is
+    /// the NEXT Tuesday's: the window ends on the analysis hour (#3941), so the analysis day's own 23Z rows are never
+    /// in it.
     /// </summary>
     [Fact]
     public async Task Provider_OffsetOnly_TuesdayTwentyThreeZRows_AreTheTuesdayEighteenBucket()
@@ -175,7 +177,7 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
             for (var i = 0; i < 6; i++)
                 await SeedCpuAsync(tuesday.AddMinutes(i * 5), 50 + i);
 
-        var analysisTime = new DateTime(2026, 2, 17, 23, 30, 0);
+        var analysisTime = new DateTime(2026, 2, 24, 23, 30, 0);
         var bucket = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, analysisTime);
 
         Assert.Equal(BaselineTier.Full, bucket.Tier);
@@ -196,6 +198,8 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
     /// Fixture 3 through the product, with the DST straddle: the zone id is present, the window crosses
     /// 2026-03-08 07:00Z, and rows at Tue 22:00Z (EST) and Tue 21:00Z (EDT) — both 17:00 on the server — are ONE
     /// twelve-sample (17, Tue) bucket over two local days. Rows at Wednesday 03:xxZ are (22, Tue), dated Tuesday.
+    /// Both lookups are a week after the rows they find: the window ends on the analysis hour (#3941), so the analysis
+    /// day's own rows in that hour are never in it.
     /// </summary>
     [Fact]
     public async Task Provider_ZoneId_EstAndEdtRowsAcrossTheSpringForward_ShareOneLocalBucket()
@@ -212,7 +216,7 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
         for (var i = 0; i < 10; i++)
             await SeedCpuAsync(wednesdayThreeZ.AddMinutes(i * 5), 99);
 
-        var analysisTime = new DateTime(2026, 3, 10, 21, 30, 0);
+        var analysisTime = new DateTime(2026, 3, 17, 21, 30, 0);
         var seventeen = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, analysisTime);
         Assert.Equal(BaselineTier.Full, seventeen.Tier);
         Assert.Equal((17, Tuesday), (seventeen.HourOfDay, seventeen.DayOfWeek));
@@ -221,7 +225,7 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
         Assert.Equal((40 + 41 + 42 + 43 + 44 + 45 + 60 + 61 + 62 + 63 + 64 + 65) / 12.0, seventeen.Mean, 0.001);
 
         _provider.ClearCache();
-        var rollover = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, new DateTime(2026, 3, 4, 3, 50, 0)); // after the last row; the window end is exclusive
+        var rollover = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, new DateTime(2026, 3, 11, 2, 50, 0)); // Tue 22:50 EDT, the next Tuesday's 22h
         Assert.Equal(BaselineTier.Full, rollover.Tier);
         Assert.Equal((22, Tuesday), (rollover.HourOfDay, rollover.DayOfWeek));
         Assert.Equal(10L, rollover.SampleCount);
@@ -240,7 +244,7 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
         for (var i = 0; i < 10; i++)
             await SeedCpuAsync(tuesday.AddMinutes(i * 5), 50);
 
-        var bucket = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, tuesday.AddMinutes(50)); // after the last row; the window end is exclusive
+        var bucket = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, tuesday.AddDays(7).AddMinutes(50)); // the next Tuesday's 23h: the window ends on the analysis hour (#3941)
         Assert.Equal((23, Tuesday), (bucket.HourOfDay, bucket.DayOfWeek));
         Assert.Equal(10L, bucket.SampleCount);
     }
