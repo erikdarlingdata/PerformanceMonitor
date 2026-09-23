@@ -288,7 +288,7 @@ public sealed class DarlingServiceInstallLocationTests
 
             /* The remedy, with a destination. A refusal that does not name where to go instead is where
                #2185's reporter already was. */
-            Assert.Contains(DarlingInstallLocation.DocumentedInstallDirectory, message, StringComparison.Ordinal);
+            Assert.Contains(DarlingInstallPaths.DocumentedInstallDirectory, message, StringComparison.Ordinal);
             Assert.Contains("install-darling.ps1", message, StringComparison.Ordinal);
 
             /* And the connection to what they have already seen: the loader status (#2186) and the credential
@@ -363,7 +363,7 @@ public sealed class DarlingServiceInstallLocationTests
     {
         var log = new CountingLogger();
 
-        DarlingInstallLocation.Report(DarlingInstallLocation.DocumentedInstallDirectory, runningAsWindowsService: true, log);
+        DarlingInstallLocation.Report(DarlingInstallPaths.DocumentedInstallDirectory, runningAsWindowsService: true, log);
 
         Assert.Equal(0, log.Total);
     }

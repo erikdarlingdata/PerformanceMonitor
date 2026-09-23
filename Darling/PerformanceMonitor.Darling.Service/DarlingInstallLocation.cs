@@ -75,10 +75,6 @@ internal enum InstallLocationVerdict
 [SupportedOSPlatform("windows")]
 internal static class DarlingInstallLocation
 {
-    /// <summary>The documented machine-scoped location, named in every remedy this class prints so the
-    /// operator is never left with a refusal and no destination.</summary>
-    internal const string DocumentedInstallDirectory = @"C:\Program Files\PerformanceMonitorDarling";
-
     /// <summary>
     /// The one message, logged critical, when <paramref name="installDirectory"/> is somewhere the service
     /// account cannot read. Never throws: a diagnostic that costs the service its start is worse than the
@@ -326,7 +322,7 @@ internal static class DarlingInstallLocation
             .Append(" With the shipped managed store (postgres.managed = true, the default) it is the bundled PostgreSQL bootstrap: initdb.exe dies at exit code -1073741515 (0xC0000135, STATUS_DLL_NOT_FOUND) in the Windows loader, before it can write a word of output — and the messages after it are downstream of THIS rather than faults of their own, including a missing pg-admin-credential.dpapi and advice to start the service once, which starting the service again will not satisfy (#2185).")
             .Append(" Pointed at your own PostgreSQL (postgres.managed = false) there is no initdb to fail, and the unreadability surfaces wherever the service next reads this folder instead — \"Cannot load configuration\", from a darling.json sitting right here that it cannot open, is the usual one.")
             .Append(" FIX: stop the service, move the install to a machine-scoped local path — ")
-            .Append(DocumentedInstallDirectory)
+            .Append(DarlingInstallPaths.DocumentedInstallDirectory)
             .Append(" is the documented one, and a folder created there inherits read + execute for BUILTIN\\Users, which the service account is a member of — then re-run install-darling.ps1 from the new location. It updates the service in place; darling.json can move with the folder, and the store under %ProgramData%\\PerformanceMonitorDarling and its credentials stay exactly where they are.");
 
         return message.ToString();
@@ -418,4 +414,15 @@ internal static class DarlingInstallLocation
             return false;
         }
     }
+}
+
+/// <summary>
+/// The documented machine-scoped install location, named in every remedy that points an operator somewhere
+/// else, so a refusal never leaves them with no destination. It sits outside <see cref="DarlingInstallLocation"/>,
+/// which is Windows-only, so a message built on any platform can name it too, as
+/// <see cref="DarlingToolExitCode"/>'s loader diagnosis does.
+/// </summary>
+internal static class DarlingInstallPaths
+{
+    internal const string DocumentedInstallDirectory = @"C:\Program Files\PerformanceMonitorDarling";
 }

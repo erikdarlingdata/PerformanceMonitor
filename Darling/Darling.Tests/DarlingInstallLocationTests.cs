@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -1027,29 +1028,26 @@ function Get-CimInstance {
         }
     }
 
-    /// <summary>#4043: the staging lock leaves SYSTEM and Administrators ONLY even when the folder starts with
-    /// explicit entries. A parent that passes nothing on gives a new folder its creator's default DACL as
-    /// explicit entries, which <c>icacls /inheritance:r</c> alone does not strip; CI's elevated runner hit this
-    /// with three rules where two were expected. The parent here is built to pass nothing on, so any box
-    /// reproduces it, elevated or not.</summary>
+    /// <summary>#4043: the staging lock leaves SYSTEM and Administrators ONLY even when the folder already carries
+    /// explicit entries. <c>icacls /inheritance:r</c> strips only INHERITED entries, and CI's elevated runner makes
+    /// a TEMP folder with an explicit one of its own: three rules where two were expected. The entry is planted here
+    /// directly, BUILTIN\Users with Modify, so every box reproduces it, elevated or not. An earlier version of this
+    /// test left it to the creator's default DACL to supply one, and CI's runner supplies none that way.</summary>
     [Fact]
-    public void ProtectDarlingStagingFolder_StripsExplicitEntriesTheFolderWasCreatedWith()
+    public void ProtectDarlingStagingFolder_StripsExplicitEntriesAlreadyOnTheFolder()
     {
         var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(upgrade, "Protect-DarlingStagingFolder"));
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
-            $parent = Join-Path $env:TEMP ('pm4043-np-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-            New-Item -ItemType Directory -Path $parent -Force | Out-Null
-            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $path = Join-Path $env:TEMP ('pm4043-np-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $usersSid = 'S-1-5-32-545'
             try {
-                # Full control for the creator on the parent itself, inheritable to nothing.
-                icacls.exe $parent /inheritance:r /grant:r "*${me}:F" | Out-Null
-                $path = Join-Path $parent 'staging'
-                New-Item -ItemType Directory -Path $path -Force | Out-Null
-                $sidType = [System.Security.Principal.SecurityIdentifier]
-                'explicitBefore=' + @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType)).Count
+                icacls.exe $path /grant "*${usersSid}:(OI)(CI)M" | Out-Null
+                'usersExplicitBefore=' + (@((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference.Value -eq $usersSid }).Count -gt 0)
                 try { Protect-DarlingStagingFolder $path } catch { 'protectThrew=' + $_.Exception.Message }
                 $rules = @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType))
                 'ruleCount=' + $rules.Count
@@ -1060,18 +1058,144 @@ function Get-CimInstance {
                 'onlySystemAndAdmins=' + (@($rules | Where-Object { $allowed -notcontains $_.IdentityReference.Value }).Count -eq 0)
             }
             finally {
-                icacls.exe $parent /grant "*${me}:(OI)(CI)F" /T /C /Q 2>&1 | Out-Null
-                Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction SilentlyContinue
+                icacls.exe $path /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
             }
             """);
 
         var answers = RunWindowsPowerShell(probe.ToString());
 
-        /* The precondition, so the test cannot pass by the folder simply starting empty: it must begin with
-           explicit entries for the lock to strip. */
-        Assert.Contains(answers, a => a.StartsWith("explicitBefore=", StringComparison.Ordinal) && a != "explicitBefore=0");
+        /* The precondition, so the test cannot pass by the folder simply starting without the entry: the lock
+           must have something explicit to strip. */
+        Assert.Contains("usersExplicitBefore=True", answers);
         Assert.Contains("ruleCount=2", answers);
         Assert.Contains("onlySystemAndAdmins=True", answers);
+    }
+
+    /// <summary>#4043 round-2 review, M-a: a folder the recursive walk cannot list is a finding, not a silent
+    /// skip. <c>Get-ChildItem -ErrorAction SilentlyContinue</c> used to drop it, and nothing under it reached the
+    /// checks, so a tree hiding a swapped binary behind a folder that refuses listing read as clean. The running
+    /// account is denied List Folder on one child and trusted everywhere else, so the one thing the walk can say
+    /// about that child is that it could not look inside. Both scripts, since each ships its own copy.</summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void ThePreLockWritableExtractionCheck_ReportsAFolderItCannotList_RatherThanSkippingIt(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm4043-ma-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            try {
+                New-Item -ItemType Directory -Path "$root\sealed" -Force | Out-Null
+                Set-Content -LiteralPath "$root\sealed\payload.dll" -Value 'x'
+                icacls.exe "$root\sealed" /deny "*$($me.Value):(RD)" | Out-Null
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $trusted = @(
+                    $me,
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)))
+                $found = @(Get-UntrustedWriteGrantees $root $trusted -Recurse)
+                foreach ($f in $found) { 'finding=' + $f }
+                'namesTheSealedFolder=' + (@($found | Where-Object { $_ -like "*\sealed (its contents could not be listed:*" }).Count -eq 1)
+            }
+            finally {
+                if (Test-Path -LiteralPath "$root\sealed") { icacls.exe "$root\sealed" /remove:d "*$($me.Value)" 2>&1 | Out-Null }
+                if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.True(answers.Contains("namesTheSealedFolder=True"),
+            "the walk must name the folder it could not list, not skip it: " + string.Join(" | ", answers));
+    }
+
+    /// <summary>#4043 round-2 review: without -Sha256, SHA256SUMS.txt is the whole proof, so the upgrade reads it
+    /// only after its folder passes the recursive check and the check's refusal, and reads it once. A read moved
+    /// above the check, or a second read by any route, trusts a sidecar that anyone able to write the folder could
+    /// have edited.</summary>
+    [Fact]
+    public void TheSha256SumsSidecarIsReadOnlyAfterItsFolderPassesTheRecursiveCheck()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        const string read = "Get-Content -LiteralPath $sums";
+
+        var check = upgrade.IndexOf("$sumsFolderWritable = @(Get-UntrustedWriteGrantees $sourceRoot $preLockTrusted -Recurse)", StringComparison.Ordinal);
+        Assert.True(check >= 0, "upgrade-darling.ps1 no longer checks the folder SHA256SUMS.txt sits in (#4043 round-1 review, H1)");
+        var refuse = upgrade.IndexOf("if ($sumsFolderWritable.Count -gt 0) {", check, StringComparison.Ordinal);
+        Assert.True(refuse > check, "the SHA256SUMS.txt folder check no longer refuses on a finding");
+        var readAt = upgrade.IndexOf(read, StringComparison.Ordinal);
+        Assert.True(readAt > refuse, "SHA256SUMS.txt must be read only AFTER its folder passes the check");
+        var fail = upgrade.IndexOf("Fail @\"", refuse, StringComparison.Ordinal);
+        Assert.True(fail > refuse && fail < readAt, "the SHA256SUMS.txt folder check must stop the run before the file is read");
+
+        /* Every use of $sums is the path, the existence test or the one read below the check. */
+        foreach (Match use in Regex.Matches(upgrade, @"\$sums\b"))
+        {
+            var start = upgrade.LastIndexOf('\n', use.Index) + 1;
+            var end = upgrade.IndexOf('\n', use.Index);
+            var line = (end < 0 ? upgrade.Substring(start) : upgrade.Substring(start, end - start)).Trim();
+            Assert.True(
+                line == "$sums = Join-Path $sourceRoot 'SHA256SUMS.txt'"
+                || line == "if (Test-Path -LiteralPath $sums) {"
+                || (use.Index >= readAt && use.Index < readAt + read.Length),
+                $"an unexpected use of $sums: '{line}'. SHA256SUMS.txt is read once, after its folder check");
+        }
+    }
+
+    /// <summary>#4043: each script checks the tree for write grants BEFORE it changes anything. A check after the
+    /// lock would pass a tree the lock had just rewritten, which says nothing about who could write to it before;
+    /// a check after the service stop, the backup or the extract refuses a tree this run has already changed.
+    /// Same shape as <see cref="LocationGuard_RunsBeforeAnythingIsInstalled"/>.</summary>
+    [Fact]
+    public void TheWritableTreeCheck_RunsBeforeEitherScriptChangesAnything()
+    {
+        AssertRunsFirst(
+            InstallScript,
+            "install-darling.ps1",
+            "$writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted -Recurse)",
+            new[]
+            {
+                ("Invoke-InstallTreeLock $lockAccount -StopOnOpen", "the step 1b2 install-tree lock"),
+                ("Copy-Item $samplePath $configPath", "copying darling.sample.json to darling.json"),
+                ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
+                ("New-EventLog -LogName Application", "registering the Event Log source"),
+                ("& sc.exe create $serviceName", "creating the service"),
+                ("Set-Acl -Path $secretFile", "hardening the config's ACL"),
+                ("Start-Service -Name $serviceName", "starting the service"),
+            });
+
+        AssertRunsFirst(
+            ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1")),
+            "upgrade-darling.ps1",
+            "$writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted -Recurse)",
+            new[]
+            {
+                ("$zipStagingFolder = New-DarlingProtectedStagingFolder", "creating the zip staging folder"),
+                ("Copy-Item -LiteralPath $Source -Destination $stagedZip", "staging the zip"),
+                ("Stop-Service -Name $serviceName -Force", "stopping the service"),
+                ("Lock-DarlingInstallTree $InstallRoot $logonAccount", "locking the install tree"),
+                ("New-Item -ItemType Directory -Path $backupPath", "creating the rollback backup"),
+                ("Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot", "extracting a zip over the tree"),
+                ("Copy-Item -Path (Join-Path $Source '*') -Destination $InstallRoot", "copying a folder over the tree"),
+                ("Start-Service -Name $serviceName", "starting the service"),
+            });
+
+        static void AssertRunsFirst(string script, string scriptName, string check, (string Marker, string What)[] steps)
+        {
+            var at = script.IndexOf(check, StringComparison.Ordinal);
+            Assert.True(at >= 0, $"{scriptName} no longer checks the tree for write grants before it changes anything (#4043)");
+            foreach (var (marker, what) in steps)
+            {
+                var step = script.IndexOf(marker, StringComparison.Ordinal);
+                Assert.True(step >= 0, $"{scriptName} no longer contains {what} ('{marker}')");
+                Assert.True(at < step, $"{scriptName} must check the tree BEFORE {what} (#4043)");
+            }
+        }
     }
 
     /// <summary>

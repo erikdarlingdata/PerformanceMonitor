@@ -209,12 +209,18 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
 
     $result = @(Get-DarlingOneObjectWriteFindings $path $true)
     if ($Recurse) {
-        foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue)) {
+        # -ErrorVariable, so a folder the walk cannot list is a finding of its own (#4043 round-2 review).
+        # Skipped silently, nothing under it reached the checks above and the tree read as clean.
+        foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listFailures)) {
             if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                 $result += "$($child.FullName) (a junction or link)"
                 continue
             }
             $result += Get-DarlingOneObjectWriteFindings $child.FullName $false
+        }
+        foreach ($failure in @($listFailures)) {
+            $unlisted = if ($failure.TargetObject) { "$($failure.TargetObject)" } else { $path }
+            $result += "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
         }
     }
     return @($result)
