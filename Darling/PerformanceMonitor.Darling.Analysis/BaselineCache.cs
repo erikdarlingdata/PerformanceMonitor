@@ -110,20 +110,36 @@ public sealed class BaselineCache
     /// the process: the keyed series follow each server's top statements, whose ids change from pass to pass.</summary>
     internal void SweepIfDue(DateTime nowUtc)
     {
-        var last = Interlocked.Read(ref _lastSweepTicks);
-        if (nowUtc.Ticks - last < PgBaselineProvider.CacheTtl.Ticks / 4
-            || Interlocked.CompareExchange(ref _lastSweepTicks, nowUtc.Ticks, last) != last)
+        if (SweepIsDue(ref _lastSweepTicks, nowUtc))
         {
-            return;
+            RemoveDead(_entries, nowUtc);
         }
+    }
 
-        foreach (var pair in _entries)
+    /// <summary>The sweep's gate, shared with each provider's own cache: true at most once per quarter of
+    /// <see cref="PgBaselineProvider.CacheTtl"/> per <paramref name="lastSweepTicks"/>, and to one caller only.</summary>
+    internal static bool SweepIsDue(ref long lastSweepTicks, DateTime nowUtc)
+    {
+        var last = Interlocked.Read(ref lastSweepTicks);
+        return nowUtc.Ticks - last >= PgBaselineProvider.CacheTtl.Ticks / 4
+               && Interlocked.CompareExchange(ref lastSweepTicks, nowUtc.Ticks, last) == last;
+    }
+
+    /// <summary>Drops every entry of <paramref name="entries"/> no lookup can take any more (a full
+    /// <see cref="PgBaselineProvider.CacheTtl"/> old), and says how many.</summary>
+    internal static int RemoveDead<TKey>(ConcurrentDictionary<TKey, PgBaselineProvider.CachedBaseline> entries, DateTime nowUtc)
+        where TKey : notnull
+    {
+        var removed = 0;
+        foreach (var pair in entries)
         {
             /* The pair, not the key: a compute that replaced this entry since the enumeration read it stays. */
-            if (!IsLive(pair.Value, nowUtc))
+            if (!IsLive(pair.Value, nowUtc) && entries.TryRemove(pair))
             {
-                _entries.TryRemove(pair);
+                removed++;
             }
         }
+
+        return removed;
     }
 }

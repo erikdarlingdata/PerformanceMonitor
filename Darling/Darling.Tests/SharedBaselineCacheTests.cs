@@ -99,6 +99,27 @@ public sealed class SharedBaselineCacheTests
         Assert.True(cache.TryGet("pg", 12, "12:pg_tps", Hour, out _));
     }
 
+    /// <summary>The sweep's two halves, shared by the tier and every provider's own cache: the gate opens once per quarter
+    /// TTL, to one caller; the removal takes exactly the entries no lookup can take.</summary>
+    [Fact]
+    public void TheSweepGate_OpensOncePerQuarterTtl_AndRemoveDead_TakesOnlyTheDead()
+    {
+        var now = DateTime.UtcNow;
+        var lastSweep = now.Ticks;
+        Assert.False(BaselineCache.SweepIsDue(ref lastSweep, now + PgBaselineProvider.CacheTtl / 5));
+        Assert.True(BaselineCache.SweepIsDue(ref lastSweep, now + PgBaselineProvider.CacheTtl / 3));
+        Assert.False(BaselineCache.SweepIsDue(ref lastSweep, now + PgBaselineProvider.CacheTtl / 3));
+
+        var map = new ConcurrentDictionary<string, PgBaselineProvider.CachedBaseline>(StringComparer.Ordinal)
+        {
+            ["1:cpu"] = Entry(Hour, now),
+            ["1:pg_statement_share:42"] = Entry(Hour, now - PgBaselineProvider.CacheTtl),
+            ["1:pg_statement_share:43"] = Entry(Hour.AddHours(-2), now - TimeSpan.FromHours(3)),
+        };
+        Assert.Equal(2, BaselineCache.RemoveDead(map, now));
+        Assert.Equal(["1:cpu"], map.Keys);
+    }
+
     /// <summary>
     /// The wiring: ONE instance per process, registered as a singleton and handed to every host's analysis service — the
     /// worker's per-pass services, the MCP host's and the web host's. Any host constructing its service without it would
@@ -228,6 +249,29 @@ public sealed class SharedBaselineCacheLiveTests
         var (_, afterInvalidate) = await CommandCapture.CountBaselineReadsAsync(
             () => new PgTargetBaselineProvider(store.Postgres, null, shared).GetBaselineAsync(ServerId, MetricNames.PgTps, h.AddMinutes(5), ct));
         Assert.Equal(1, afterInvalidate);
+    }
+
+    /// <summary>
+    /// A long-lived provider (the MCP and web hosts' singletons) forgets the series no lookup can take any more: its own
+    /// cache is swept like the shared tier, so the keyed series it was asked for on earlier passes — keys that follow each
+    /// server's top statements — stop counting toward the keyed-cardinality note's bar once they are a TTL old.
+    /// </summary>
+    [Fact]
+    public async Task Live_ALongLivedProvider_SweepsItsDeadSeries()
+    {
+        await using var store = await SeededStore.CreateAsync();
+        if (store is null) return;
+        var (h, ct) = (store.Hour, TestContext.Current.CancellationToken);
+        var provider = new PgTargetBaselineProvider(store.Postgres);
+
+        await provider.GetBaselinesAsync(ServerId, MetricNames.PgStatementShare, store.StatementKeys, h.AddMinutes(5), ct);
+        Assert.Equal(store.StatementKeys.Length, provider.KeyedEntryCount);
+
+        provider.SweepIfDue(DateTime.UtcNow + PgBaselineProvider.CacheTtl / 2);
+        Assert.Equal(store.StatementKeys.Length, provider.KeyedEntryCount);
+
+        provider.SweepIfDue(DateTime.UtcNow + PgBaselineProvider.CacheTtl + TimeSpan.FromMinutes(1));
+        Assert.Equal(0, provider.KeyedEntryCount);
     }
 
     /// <summary>

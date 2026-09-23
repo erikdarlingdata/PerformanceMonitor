@@ -468,6 +468,25 @@ public class PgBaselineProvider
         {
             _shared?.Put(SharedKind, serverId, cacheKey, entry);
         }
+
+        SweepIfDue(DateTime.UtcNow);
+    }
+
+    private long _lastSweepTicks = DateTime.UtcNow.Ticks;
+
+    /// <summary>
+    /// The shared tier's sweep, over this provider's own cache (#3941): at most once per quarter of <see cref="CacheTtl"/>,
+    /// drops the entries no lookup can take any more. A per-pass provider dies before it matters; the long-lived ones —
+    /// the MCP and web hosts' singletons, the viewer's — kept every keyed series they were ever asked for, because the
+    /// keys follow each server's top statements, and <see cref="KeyedEntryCount"/> counted those dead series toward the
+    /// cardinality note's bar, so a bounded consumer would have tripped it after enough days.
+    /// </summary>
+    internal void SweepIfDue(DateTime nowUtc)
+    {
+        if (BaselineCache.SweepIsDue(ref _lastSweepTicks, nowUtc))
+        {
+            BaselineCache.RemoveDead(_cache, nowUtc);
+        }
     }
 
     /// <summary>The member an UNKEYED compute's rows are filed under — keyed members are numbered from 1, so it can
