@@ -146,6 +146,28 @@ SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Mar
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 2000";
 
+    /* The binary-route twin (#4046 part 1c) — same parity gap as the deadlock reader, since both filter
+       tail.body with a server-side regexp_matches: encode(..., 'escape') feeds the identical pattern, and
+       ReadAsync reverses it on plan_json via PgBinaryTailText.UnescapeAndDecode. The marker arms are
+       untouched: their third column is a plain text literal on both routes. */
+    private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT
+    (m[1])::bigint                                   AS query_id,
+    (m[2])::double precision                         AS duration_ms,
+    replace(m[3], chr(9), '')                        AS plan_json
+FROM tail,
+     regexp_matches(
+         pg_catalog.encode(tail.body, 'escape'),
+         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         'gn') AS m
+UNION ALL
+SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
+LIMIT 2000";
+
     public override string Name => "pg_plan_capture";
 
     public override string TargetTable => "pg_plan_capture";
@@ -168,7 +190,8 @@ LIMIT 2000";
     /// <summary>Server-wide: one log holds every database's plans.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    public override CollectorQuery BuildQuery(CollectorContext context) =>
+        new(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -211,13 +234,22 @@ LIMIT 2000";
                 throw new PgNoStderrLogFileException();
             }
 
+            /* #4046 part 1c: on the binary route plan_json came back through encode(..., 'escape'),
+               reversed here before the parser sees it — after both marker checks above, which compare
+               against the literal (never-escaped) marker constants. */
+            var planJson = reader.IsDBNull(2) ? null : reader.GetString(2);
+            if (planJson is not null && context.PgReadBinaryFileGranted)
+            {
+                planJson = PgBinaryTailText.UnescapeAndDecode(planJson);
+            }
+
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
                transport (#2538). Two implementations of the redaction would eventually disagree, and the
                cost of THAT divergence is customer data rather than a wrong number. */
             var parsed = PgPlanLogParser.FromBlock(
                 reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2));
+                planJson);
 
             /* Null is a block the bounded tail read cut in half, which is ordinary rather than
                exceptional: the window can begin mid-plan. Skipped, not stored half-parsed. */

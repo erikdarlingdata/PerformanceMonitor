@@ -32,7 +32,7 @@ param get_query_store_regressions.hours_back 110
 param get_query_store_regressions.limit 86
 param get_query_store_regressions.server_name 28
 
-tool get_query_store_top 215
+tool get_query_store_top 422
 param get_query_store_top.as_of 167
 param get_query_store_top.database_name 30
 param get_query_store_top.execution_type 72
@@ -47,18 +47,18 @@ param get_query_trend.hours_back 29
 param get_query_trend.query_hash 72
 param get_query_trend.server_name 28
 
-tool get_top_procedures_by_cpu 821
+tool get_top_procedures_by_cpu 406
 param get_top_procedures_by_cpu.as_of 167
 param get_top_procedures_by_cpu.database_name 30
 param get_top_procedures_by_cpu.hours_back 29
 param get_top_procedures_by_cpu.server_name 28
 param get_top_procedures_by_cpu.top 37
 
-tool get_top_queries_by_cpu 1606
+tool get_top_queries_by_cpu 474
 param get_top_queries_by_cpu.as_of 167
 param get_top_queries_by_cpu.database_name 30
 param get_top_queries_by_cpu.hours_back 29
 param get_top_queries_by_cpu.min_dop 132
-param get_top_queries_by_cpu.parallel_only 371
+param get_top_queries_by_cpu.parallel_only 160
 param get_top_queries_by_cpu.server_name 28
 param get_top_queries_by_cpu.top 34

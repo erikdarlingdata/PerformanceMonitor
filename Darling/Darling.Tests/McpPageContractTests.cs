@@ -330,7 +330,7 @@ public sealed class McpPageContractTests
         foreach (var (_, _, liteFile, liteName) in PagedTools)
         {
             var body = ToolBody(ReadRepoFileLf(liteFile.Split('/')), liteName);
-            var description = Regex.Match(body, @"Description\((?:\s*)""((?:[^""\\]|\\.)*)""\)\]").Groups[1].Value;
+            var description = DescriptionLiteralConcat(body);
             Assert.False(string.IsNullOrEmpty(description), $"{liteFile}: could not locate {liteName}'s Description");
             Assert.Contains("truncated", description, StringComparison.Ordinal);
             Assert.Contains("limit", description, StringComparison.Ordinal);
@@ -947,11 +947,16 @@ public sealed class McpPageContractTests
             /* And the payload publishes what was observed, under the one key. */
             Assert.Matches(new Regex(@"\n\s+truncated,"), observing);
 
-            /* The parameter says what it bounds and names the flag, in the #3679 wording. */
+            /* The parameter says what it bounds and names the flag, in the #3679 wording — or, for a tool
+               #3898 converted (marker present), the parameter carries only the guardrail sentence and a
+               pointer, and the #3679 wording moved verbatim into the tool's own reading guide (D2). Re-pointed
+               deliberately for get_pg_deadlocks and get_pg_index_bloat, both converted in the pgA lane. */
             var limit = ToolMethod(type, name).GetParameters().Single(p => p.Name == "limit");
             var description = limit.GetCustomAttribute<DescriptionAttribute>()!.Description;
-            Assert.Contains("This is what bounds the page", description, StringComparison.Ordinal);
-            Assert.Contains("truncated", description, StringComparison.Ordinal);
+            var toolDescription = ToolMethod(type, name).GetCustomAttribute<DescriptionAttribute>()!.Description;
+            var pageContractText = McpToolGuide.Split(toolDescription).Tail ?? description;
+            Assert.Contains("This is what bounds the page", pageContractText, StringComparison.Ordinal);
+            Assert.Contains("truncated", pageContractText, StringComparison.Ordinal);
         }
     }
 
@@ -1177,6 +1182,38 @@ public sealed class McpPageContractTests
         Assert.True(start >= 0, $"no tool named {toolName} in the source");
         var next = source.IndexOf("[McpServerTool(", start + marker.Length, StringComparison.Ordinal);
         return next < 0 ? source[start..] : source[start..next];
+    }
+
+    /// <summary>The tool's Description, from source: the FIRST <c>Description(</c> in a <see cref="ToolBody"/>
+    /// slice is always the tool's own (a parameter's own <c>[Description("...")]</c> comes later, on the
+    /// method signature). #3898: a converted tool's Description is a <c>"head" + McpToolGuide.Marker +
+    /// "tail"</c> concatenation, not one literal, so this joins every quoted chunk up to the attribute's
+    /// closing <c>)]</c> and skips the identifiers between them (the marker, McpToolGuideTopics.* consts) —
+    /// this reads the prose only, never the reading-guide plumbing those identifiers resolve to.</summary>
+    private static string DescriptionLiteralConcat(string body)
+    {
+        var start = body.IndexOf("Description(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "no Description( found in body");
+        var i = start + "Description(".Length;
+        var sb = new System.Text.StringBuilder();
+        while (i < body.Length && !(body[i] == ')' && i + 1 < body.Length && body[i + 1] == ']'))
+        {
+            if (body[i] == '"')
+            {
+                i++;
+                while (i < body.Length && body[i] != '"')
+                {
+                    if (body[i] == '\\' && i + 1 < body.Length) { sb.Append(body[i + 1]); i += 2; }
+                    else { sb.Append(body[i]); i++; }
+                }
+                i++;
+            }
+            else
+            {
+                i++;
+            }
+        }
+        return sb.ToString();
     }
 
     /// <summary>A non-tool member's span (LF source): from its <c>static &lt;type&gt; Name(</c> declaration to the

@@ -150,6 +150,31 @@ SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 500";
 
+    /* The binary-route twin (#4046 part 1c), sent instead of QueryText once PgReadBinaryFileCapability
+       finds the grant: the same tailer, in its bytea form, with tail.body wrapped in
+       encode(..., 'escape') before the SAME pattern runs over it — verified on the rig (PostgreSQL 18.6)
+       that escape() leaves every byte the pattern matches on literally (newline, tab, the digits and
+       punctuation in a timestamp) and only backslash-doubles and NUL/high-byte-octal-escapes, so the
+       pattern needs no change; see PgBinaryTailText.UnescapeAndDecode for the reversal ReadAsync applies
+       to m[1] afterward. The marker arms are untouched: m[1] is text on both routes, so there is no
+       bytea/text mismatch here the way there is in PgLogEventsCollector's whole-body column. */
+    private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT
+    m[1]    AS report_text,
+    " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail,
+     regexp_matches(
+         pg_catalog.encode(tail.body, 'escape'),
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         'gn') AS m
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
+LIMIT 500";
+
     public override string Name => "pg_deadlocks";
 
     public override string TargetTable => "pg_deadlocks";
@@ -165,7 +190,8 @@ LIMIT 500";
     /// <summary>Server-wide: one log holds every database's deadlocks.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    public override CollectorQuery BuildQuery(CollectorContext context) =>
+        new(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -210,6 +236,14 @@ LIMIT 500";
             if (string.Equals(firstColumn, PgNoStderrLogFileException.Marker, System.StringComparison.Ordinal))
             {
                 throw new PgNoStderrLogFileException();
+            }
+
+            /* #4046 part 1c: on the binary route the candidate came back through encode(..., 'escape'), so
+               it is reversed here before the parser sees it — after the marker checks above, since a marker
+               is never escaped text and must be compared to the literal constant first. */
+            if (context.PgReadBinaryFileGranted)
+            {
+                firstColumn = PgBinaryTailText.UnescapeAndDecode(firstColumn);
             }
 
             /* One column, the candidate's text (#4005). Reaching the parser is what makes the stamp's meaning

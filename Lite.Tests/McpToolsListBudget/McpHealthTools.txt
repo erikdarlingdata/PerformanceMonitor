@@ -4,17 +4,17 @@ param get_blocking_stats.as_of 167
 param get_blocking_stats.hours_back 191
 param get_blocking_stats.server_name 28
 
-tool get_collection_health 21026
+tool get_collection_health 583
 param get_collection_health.server_name 28
 
-tool get_collection_log 4405
+tool get_collection_log 606
 param get_collection_log.as_of 167
-param get_collection_log.collector_name 244
+param get_collection_log.collector_name 149
 param get_collection_log.hours_back 191
 param get_collection_log.limit 120
-param get_collection_log.min_duration_ms 382
+param get_collection_log.min_duration_ms 191
 param get_collection_log.server_name 28
-param get_collection_log.status 481
+param get_collection_log.status 195
 
 tool get_current_waits_trend 443
 param get_current_waits_trend.as_of 167

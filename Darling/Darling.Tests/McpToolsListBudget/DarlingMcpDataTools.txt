@@ -4,17 +4,17 @@ param get_blocking_stats.as_of 167
 param get_blocking_stats.hours_back 191
 param get_blocking_stats.server_name 28
 
-tool get_collection_health 21026
+tool get_collection_health 583
 param get_collection_health.server_name 28
 
-tool get_collection_log 6995
+tool get_collection_log 606
 param get_collection_log.as_of 167
-param get_collection_log.collector_name 244
+param get_collection_log.collector_name 149
 param get_collection_log.hours_back 191
 param get_collection_log.limit 120
-param get_collection_log.min_duration_ms 382
+param get_collection_log.min_duration_ms 191
 param get_collection_log.server_name 96
-param get_collection_log.status 481
+param get_collection_log.status 195
 
 tool get_cpu_utilization 249
 param get_cpu_utilization.as_of 167
@@ -28,7 +28,7 @@ param get_current_waits_trend.database_name 73
 param get_current_waits_trend.hours_back 190
 param get_current_waits_trend.server_name 28
 
-tool get_file_io_stats 690
+tool get_file_io_stats 437
 param get_file_io_stats.server_name 28
 
 tool get_memory_clerks 232
@@ -37,12 +37,12 @@ param get_memory_clerks.server_name 28
 tool get_memory_stats 480
 param get_memory_stats.server_name 28
 
-tool get_perfmon_stats 1034
+tool get_perfmon_stats 521
 param get_perfmon_stats.counter_name 61
 param get_perfmon_stats.instance_name 57
 param get_perfmon_stats.server_name 28
 
-tool get_query_store_top 609
+tool get_query_store_top 422
 param get_query_store_top.as_of 167
 param get_query_store_top.database_name 30
 param get_query_store_top.execution_type 72
@@ -50,7 +50,7 @@ param get_query_store_top.hours_back 29
 param get_query_store_top.server_name 28
 param get_query_store_top.top 34
 
-tool get_server_properties 894
+tool get_server_properties 571
 param get_server_properties.server_name 28
 
 tool get_tempdb_trend 254
@@ -59,24 +59,24 @@ param get_tempdb_trend.bucket_minutes 55
 param get_tempdb_trend.hours_back 29
 param get_tempdb_trend.server_name 28
 
-tool get_top_procedures_by_cpu 821
+tool get_top_procedures_by_cpu 406
 param get_top_procedures_by_cpu.as_of 167
 param get_top_procedures_by_cpu.database_name 30
 param get_top_procedures_by_cpu.hours_back 29
 param get_top_procedures_by_cpu.server_name 28
 param get_top_procedures_by_cpu.top 37
 
-tool get_top_queries_by_cpu 1837
+tool get_top_queries_by_cpu 474
 param get_top_queries_by_cpu.as_of 167
 param get_top_queries_by_cpu.database_name 30
-param get_top_queries_by_cpu.group_by 616
+param get_top_queries_by_cpu.group_by 167
 param get_top_queries_by_cpu.hours_back 29
 param get_top_queries_by_cpu.min_dop 132
-param get_top_queries_by_cpu.parallel_only 371
+param get_top_queries_by_cpu.parallel_only 160
 param get_top_queries_by_cpu.server_name 28
 param get_top_queries_by_cpu.top 34
 
-tool get_wait_stats 644
+tool get_wait_stats 316
 param get_wait_stats.as_of 167
 param get_wait_stats.hours_back 40
 param get_wait_stats.limit 145
@@ -94,4 +94,4 @@ param get_wait_types.as_of 167
 param get_wait_types.hours_back 29
 param get_wait_types.server_name 28
 
-tool list_servers 1228
+tool list_servers 382

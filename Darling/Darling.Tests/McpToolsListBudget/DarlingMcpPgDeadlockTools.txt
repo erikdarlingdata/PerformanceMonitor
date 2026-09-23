@@ -4,8 +4,8 @@ param get_pg_deadlock_detail.deadlock_hash 71
 param get_pg_deadlock_detail.limit 58
 param get_pg_deadlock_detail.server_name 28
 
-tool get_pg_deadlocks 2839
+tool get_pg_deadlocks 605
 param get_pg_deadlocks.as_of 167
 param get_pg_deadlocks.hours_back 40
-param get_pg_deadlocks.limit 245
+param get_pg_deadlocks.limit 70
 param get_pg_deadlocks.server_name 28

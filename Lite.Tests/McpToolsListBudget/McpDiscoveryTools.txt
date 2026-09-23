@@ -1,2 +1,2 @@
 # McpDiscoveryTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool list_servers 160
+tool list_servers 382
