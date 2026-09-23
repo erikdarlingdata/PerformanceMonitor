@@ -31,6 +31,8 @@ At dispatch:
 - Run code-editing lanes with worktree isolation (Claude Code: `isolation: "worktree"`).
 - Give each lane its own rig port.
 - Set a wall-clock check at each lane's deadline; don't wait on notifications.
+- Label each issue the lane takes `in-progress` (`gh issue edit <n> --add-label in-progress`), so the board shows
+  it as taken; remove the label when the issue closes or the work stops.
 
 At each report:
 1. Stop the agent.
@@ -40,6 +42,13 @@ At each report:
    put a regression on dev.
 4. A security PR, or an irreversible data rewrite, gets a review round before it leaves draft.
 5. Mark it ready (`gh pr ready <n>`) and arm auto-merge only after that. Auto-merge waits for CI.
+
+At each wave boundary, backtrack every issue number the wave filed or touched:
+- close what is done;
+- give every open issue a disposition comment and a work-order rank;
+- fix the `in-progress` labels.
+A wave that files follow-ups faster than it closes them hides its own backlog. On 2026-09-23 a backtrack of
+#3898-#4043 found 22 stale `in-progress` labels and three worked issues missing one.
 
 When a PR's required check fails on a test it doesn't touch, don't just re-run it. Take a census of the last two
 days' failed first attempts: `gh run list --workflow Build`, each run's attempts through the REST

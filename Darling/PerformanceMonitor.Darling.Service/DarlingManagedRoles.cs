@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -330,7 +331,7 @@ public static class DarlingManagedRoles
             logger.LogWarning(
                 "The compose store's credentials directory {Directory} is not trusted ({Reason}), so no credential file in it is read this start: every role gets a new password, re-asserted on the role{Written}.",
                 credentialDirectory, distrust,
-                directory.MayWrite ? ", and the new files replace the old" : ", and none is written there, so every start does the same until the directory is fixed");
+                directory.MayWrite ? ", and the new files replace the old" : ", and none is written there this start");
         }
 
         var readFiles = directory.Distrust is null;
@@ -1388,9 +1389,11 @@ WHERE u.rolname = current_user";
     /// for a role carrying <see cref="ComposeStoreRoleMarker"/>, so a trusted file is a login its role accepted when
     /// it was written, and the surface stays on its least-privilege role instead of the owner. Trusted by the
     /// worker's own checks: the directory set owner-only again first (<see cref="PrepareComposeCredentialDirectory"/>),
-    /// then the file (<see cref="UntrustedComposeCredentialReason"/>). Never deletes, generates or writes anything:
-    /// replacing a distrusted file is the next provisioning's job, and only the worker's batch ever sets a role's
-    /// password from a file, so the worst a planted file can do here is a login the store refuses.
+    /// then the file (<see cref="UntrustedComposeCredentialReason"/>). Never generates or writes anything: replacing a
+    /// distrusted file is the next provisioning's job, and only the worker's batch ever sets a role's password from a
+    /// file, so the worst a planted file can do here is a login the store refuses. The one removal is the directory
+    /// check's own: a directory found open to other users' writes loses every file it holds right there, whichever
+    /// caller finds it (#4004 review), because this read sets it owner-only and the next start would trust them.
     /// </summary>
     /// <returns>The password, or why there is none this surface can use.</returns>
     internal static EarlierComposeCredential ReadEarlierComposeCredential(string directory, string role, ILogger logger)
@@ -1511,12 +1514,16 @@ WHERE u.rolname = current_user";
     /// <summary>
     /// Sets the compose store's credentials directory owner-only again before any file in it is read, and says what
     /// the service may do with it this start (#3914). A symbolic link is never followed: nothing in it is read or
-    /// written. Unix: 0700 is re-applied every start and the result read back
-    /// (<see cref="JudgeComposeCredentialDirectory"/>). Windows (the live tests' runtime): a directory the service
-    /// creates is hardened as it is created, and each file's owner and readability carry the rest.
-    /// <paramref name="create"/> makes a missing directory; only the worker passes it. Never throws: a directory
-    /// that cannot be created or checked (a read-only mount, say) is one nothing is read from or written to, and
-    /// the roles are still provisioned with this start's passwords, as they were when only the write could fail.
+    /// written. Unix: 0700 is re-applied on every call and the result read back
+    /// (<see cref="JudgeComposeCredentialDirectory"/>), and a directory this call found open to other users' writes
+    /// has every file the service reads from it removed before the call returns
+    /// (<see cref="DiscardWhatOthersCouldHavePut"/>, #4004 review), under a lock every caller in the process shares
+    /// (<see cref="ComposeCredentialDirectoryGuard"/>). Windows
+    /// (the live tests' runtime): a directory the service creates is hardened as it is created, and each file's
+    /// owner and readability carry the rest. <paramref name="create"/> makes a missing directory; only the worker
+    /// passes it. Never throws: a directory that cannot be created or checked (a read-only mount, say) is one
+    /// nothing is read from or written to, and the roles are still provisioned with this start's passwords, as
+    /// they were when only the write could fail.
     /// </summary>
     internal static ComposeCredentialDirectoryTrust PrepareComposeCredentialDirectory(string directory, bool create, ILogger logger)
     {
@@ -1531,6 +1538,48 @@ WHERE u.rolname = current_user";
             if (!info.Exists && !create)
             {
                 return new ComposeCredentialDirectoryTrust(null, MayWrite: false);
+            }
+
+            var guard = ComposeCredentialDirectoryGuard.Current;
+            if (guard.UnixModes is { } modes)
+            {
+                /* #4004 review, round 2: the look, the chmod and the discard below are one step for every caller in
+                   this process (role provisioning, a host's earlier-credential read, the log-hash key's load), so no
+                   caller can find the directory owner-only between the chmod and the discard and read a file that
+                   was about to go. */
+                lock (guard.Gate)
+                {
+                    if (!info.Exists)
+                    {
+                        modes.CreateOwnerOnly(directory);
+                    }
+
+                    var before = modes.Get(directory);
+                    try
+                    {
+                        modes.Set(directory, OwnerOnlyDirectory);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        /* Neither its owner nor root: a rootless container on someone else's bind mount. The mode
+                           read back below decides. */
+                        logger.LogDebug("Could not set {Directory} to owner-only: {Message}", directory, ex.Message);
+                    }
+
+                    var verdict = JudgeComposeCredentialDirectory(before, modes.Get(directory));
+                    if (verdict.Distrust is not { } wasOpen || !verdict.MayWrite)
+                    {
+                        /* #4004 review, round 3: a directory this process found open and could not empty stays refused
+                           to every later caller this start, though it now reads owner-only, so "nothing in it is used this
+                           start" holds for all of them. The next start trusts it: only a directory can be left, and no
+                           reader takes one for a credential. */
+                        return verdict.Distrust is null && guard.LeftBehind(directory) is { } leftBehind
+                            ? new ComposeCredentialDirectoryTrust(leftBehind, MayWrite: false)
+                            : verdict;
+                    }
+
+                    return DiscardWhatOthersCouldHavePut(directory, wasOpen, guard, logger);
+                }
             }
 
             if (OperatingSystem.IsWindows())
@@ -1552,24 +1601,8 @@ WHERE u.rolname = current_user";
                 return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
             }
 
-            if (!info.Exists)
-            {
-                Directory.CreateDirectory(directory, OwnerOnlyDirectory);
-            }
-
-            var before = File.GetUnixFileMode(directory);
-            try
-            {
-                File.SetUnixFileMode(directory, OwnerOnlyDirectory);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                /* Neither its owner nor root: a rootless container on someone else's bind mount. The mode read back
-                   below decides. */
-                logger.LogDebug("Could not set {Directory} to owner-only: {Message}", directory, ex.Message);
-            }
-
-            return JudgeComposeCredentialDirectory(before, File.GetUnixFileMode(directory));
+            /* Unreachable: every platform but Windows has Unix modes. */
+            return new ComposeCredentialDirectoryTrust("this platform has no way to check it", MayWrite: false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1587,8 +1620,9 @@ WHERE u.rolname = current_user";
     /// old.</description></item>
     /// <item><description>Writable by other users BEFORE: anyone could have put a file in it until now, and a planted
     /// 0600 file passes the file check (<see cref="UntrustedComposeCredentialReason"/> cannot see its owner), so none
-    /// of its files is read this start. The new ones are written, since only the service can reach the directory
-    /// now, and they replace whatever was planted.</description></item>
+    /// of its files is read as it stands: <see cref="PrepareComposeCredentialDirectory"/> removes every one of them
+    /// at once (#4004 review), and new ones are written, since only the service can reach the directory
+    /// now.</description></item>
     /// </list>
     /// </summary>
     internal static ComposeCredentialDirectoryTrust JudgeComposeCredentialDirectory(UnixFileMode before, UnixFileMode after)
@@ -1610,11 +1644,116 @@ WHERE u.rolname = current_user";
         return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
     }
 
+    /// <summary>
+    /// Every file the service reads from a credentials directory, and the temporary file each is written through
+    /// (#4004 review, round 2): the three role passwords and the log-hash key, under both platforms' names.
+    /// </summary>
+    internal static IReadOnlyList<string> CredentialDirectoryFileNames { get; } = BuildCredentialDirectoryFileNames();
+
+    private static string[] BuildCredentialDirectoryFileNames()
+    {
+        var names = new List<string>
+        {
+            ComposeStoreCredentialFileName(DarlingManagedPostgres.AdminRoleName),
+            ComposeStoreCredentialFileName(DarlingManagedPostgres.ViewerRoleName),
+            ComposeStoreCredentialFileName(DarlingManagedPostgres.McpRoleName),
+            DarlingLogHashKeyFile.UnixFileName,
+            DarlingLogHashKeyFile.WindowsFileName,
+        };
+        return names.SelectMany(name => new[] { name, name + ".tmp" }).ToArray();
+    }
+
+    /// <summary>
+    /// The directory was open to other users until this call set it owner-only (#4004 review, round 2), so any file
+    /// in it could have been planted, and the file check cannot tell (it cannot see a Unix owner). Every entry at a
+    /// name the service reads is removed NOW, before anything reads it, so the discard does not depend on this start
+    /// living long enough to reach whichever step would have replaced that file: the chmod is permanent, and the
+    /// next start, finding the directory owner-only, trusts what is left. Removed, the directory holds only what the
+    /// service writes from here on, so it is trusted.
+    ///
+    /// <para><b>Every name is tried, and the directory stays owner-only whatever is left</b> (#4004 review, round 3).
+    /// Round 2 stopped at the first entry it could not remove and set the directory back to the mode it was found
+    /// with, so a directory planted at the first name shielded 0600 files planted at the later ones: an operator who
+    /// did what the refusal said (set the directory 0700, remove the entry it named) got a next start that trusted the
+    /// rest. Now a file or a link at any name is removed, and so is an empty directory. Only a directory with
+    /// something in it can be left, a tree that is someone else's and is never removed recursively: in a directory
+    /// this call has just set owner-only (the chmod took, so the service owns it or is root), unlinking a file or a
+    /// link fails only for someone who can set an immutable attribute or mount over a file, which is more than
+    /// writing to the directory gives. Every reader refuses a directory at a credential's name, so what is left is
+    /// never read as one, and the next start, finding the directory owner-only, trusts only what the service writes
+    /// there. Reopening it instead would let anyone put files in it again until an operator closed it. When anything
+    /// is left, nothing in the directory is read or written this start, by this caller or any later one in the process
+    /// (<see cref="ComposeCredentialDirectoryGuard.LeftBehind"/>), and the reason names every path to remove.</para>
+    ///
+    /// <para>A key removed here is recorded on <paramref name="guard"/>, so the key's load can say the key it
+    /// generates replaced one (<see cref="ComposeCredentialDirectoryGuard.TakeDiscardedKey"/>).</para>
+    /// </summary>
+    private static ComposeCredentialDirectoryTrust DiscardWhatOthersCouldHavePut(
+        string directory, string wasOpen, ComposeCredentialDirectoryGuard guard, ILogger logger)
+    {
+        var removed = new List<string>();
+        var left = new List<string>();
+        foreach (var name in CredentialDirectoryFileNames)
+        {
+            var path = Path.Combine(directory, name);
+            var info = new FileInfo(path);
+            var isDirectory = info.LinkTarget is null && Directory.Exists(path);
+            if (info.LinkTarget is null && !info.Exists && !isDirectory)
+            {
+                continue;
+            }
+
+            try
+            {
+                /* A symbolic link is removed itself, never followed. A directory only when it is empty: the delete is
+                   not recursive, so nothing in someone else's tree is touched. */
+                if (isDirectory)
+                {
+                    Directory.Delete(path, recursive: false);
+                }
+                else
+                {
+                    File.Delete(path);
+                }
+
+                removed.Add(name);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                left.Add($"{path} ({ex.Message})");
+            }
+        }
+
+        if (removed.Contains(DarlingLogHashKeyFile.FileName, StringComparer.Ordinal))
+        {
+            guard.RecordDiscardedKey(directory, wasOpen);
+        }
+
+        if (removed.Count > 0)
+        {
+            logger.LogError(
+                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded (#4004). Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat, and run one service per credentials volume (on Kubernetes, one replica with strategy: Recreate): a second one starting beside this one could read the directory between this start's chmod and this removal.",
+                directory, wasOpen, string.Join(", ", removed));
+        }
+
+        if (left.Count > 0)
+        {
+            var reason = $"{wasOpen}, and {(left.Count == 1 ? "this entry at a credential's name" : "these entries at credentials' names")} could not be removed, so nothing in it is used this start: "
+                + $"{string.Join("; ", left)}. Every other credential file there is removed and the directory stays owner-only, so remove {(left.Count == 1 ? "it" : "each of them")} and restart";
+            logger.LogError("The credentials directory {Directory} is not trusted ({Reason}) (#4004).", directory, reason);
+            guard.RecordLeftBehind(directory, reason);
+            return new ComposeCredentialDirectoryTrust(reason, MayWrite: false);
+        }
+
+        guard.RecordLeftBehind(directory, null);
+        return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+    }
+
     private const UnixFileMode GroupOrOtherAccess =
         UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
         | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
 
-    private const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+    internal const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
 
     internal const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
 
@@ -1644,6 +1783,7 @@ WHERE u.rolname = current_user";
                 using (var writer = new StreamWriter(stream))
                 {
                     writer.Write(credential.Password);
+                    FlushToDisk(writer, stream);
                 }
 
                 if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
@@ -1667,6 +1807,7 @@ WHERE u.rolname = current_user";
                 });
                 using var writer = new StreamWriter(stream);
                 writer.Write(credential.Password);
+                FlushToDisk(writer, stream);
             }
 
             File.Move(temporary, path, overwrite: true);
@@ -1687,6 +1828,17 @@ WHERE u.rolname = current_user";
                 logger.LogDebug("Could not remove {File}: {Message}", temporary, cleanup.Message);
             }
         }
+    }
+
+    /// <summary>
+    /// Puts what <paramref name="writer"/> wrote on the disk before its file is renamed into place (#4004 review). A
+    /// rename can reach the disk before the data it names does, so a power loss could otherwise leave a zero-length
+    /// file where a good one was: a key refused at every start, or a role credential a host can no longer use.
+    /// </summary>
+    internal static void FlushToDisk(StreamWriter writer, FileStream stream)
+    {
+        writer.Flush();
+        stream.Flush(flushToDisk: true);
     }
 
     /// <summary>One role's compose-store password and whether it was generated this start (#3914). A class, not
@@ -1859,3 +2011,138 @@ internal sealed class EarlierComposeCredential
 /// <param name="Distrust">Why none of its files is read this start; null when they are.</param>
 /// <param name="MayWrite">Whether a credential generated this start is written there.</param>
 internal sealed record ComposeCredentialDirectoryTrust(string? Distrust, bool MayWrite);
+
+/// <summary>
+/// How this process looks at its credentials directories (#4004 review): the Unix mode calls, and the one lock every
+/// caller of <see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/> takes (role provisioning, a host's
+/// <see cref="DarlingManagedRoles.ReadEarlierComposeCredential"/>, <see cref="DarlingLogHashKeyFile.Load"/>), so the
+/// look, the chmod and the discard of whatever an open directory held are one step.
+///
+/// <para>Round 1 kept the mode each directory had at the process's FIRST look and judged every later caller by it. That
+/// record lived only in memory while the chmod was permanent, so a start that closed the directory and ended before
+/// the step that replaced a planted file (a stand-down, a crash) left the file for the next start to trust, and a
+/// directory opened again after the first look was still judged by it. The discard now happens at the look itself,
+/// so the verdict is on disk, and nothing needs remembering: only the lock is kept, because without it a second
+/// caller could find the directory owner-only between the first caller's chmod and its discard, and read a planted
+/// file before it went.</para>
+///
+/// <para><b>One process per volume.</b> The lock is the process's: the shipped compose runs the worker, MCP and web in
+/// one process, so it covers every caller there. Two services on one credentials volume (a Kubernetes rolling update,
+/// a second replica) are not covered, and one could find the directory owner-only between the other's chmod and its
+/// discard. That is documented as unsupported (one replica, <c>strategy: Recreate</c>) rather than locked across
+/// processes (#4004 review, round 3): the only place both could lock is a file in this directory, which is the one
+/// place the check exists to distrust. While the directory is open, whoever else can write to it can put a symbolic
+/// link at the lock's name, which the service, running as root, would open through (.NET cannot open without
+/// following one), or hold the lock forever.</para>
+///
+/// A test stands in its own Unix mode calls (<see cref="BeginForTest"/>).
+/// </summary>
+internal sealed class ComposeCredentialDirectoryGuard
+{
+    private static readonly ComposeCredentialDirectoryGuard Process = new(PlatformModes());
+
+    private static readonly AsyncLocal<ComposeCredentialDirectoryGuard?> TestGuard = new();
+
+    private static PlatformUnixDirectoryModes? PlatformModes()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        return new PlatformUnixDirectoryModes();
+    }
+
+    private ComposeCredentialDirectoryGuard(IUnixDirectoryModes? unixModes) => UnixModes = unixModes;
+
+    /// <summary>The process's, or the calling test's.</summary>
+    internal static ComposeCredentialDirectoryGuard Current => TestGuard.Value ?? Process;
+
+    /// <summary>The Unix mode calls; null on Windows, which judges by ACL instead.</summary>
+    internal IUnixDirectoryModes? UnixModes { get; }
+
+    /// <summary>Held across the look, the chmod and the discard.</summary>
+    internal Lock Gate { get; } = new();
+
+    /* Both keyed by the directory's full path with trailing separators trimmed, so every caller's spelling of it meets. */
+    private readonly ConcurrentDictionary<string, string> _discardedKeys = new(StringComparer.Ordinal);
+
+    private readonly ConcurrentDictionary<string, string> _leftBehind = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Records why the discard left entries in <paramref name="directory"/> this start, or clears that with null
+    /// (#4004 review, round 3), so every later caller in this process gets the same refusal.
+    /// </summary>
+    internal void RecordLeftBehind(string directory, string? reason)
+    {
+        if (reason is null)
+        {
+            _leftBehind.TryRemove(Key(directory), out _);
+        }
+        else
+        {
+            _leftBehind[Key(directory)] = reason;
+        }
+    }
+
+    /// <summary>Why the discard left entries in <paramref name="directory"/> in this process; null when it did not.</summary>
+    internal string? LeftBehind(string directory) => _leftBehind.TryGetValue(Key(directory), out var reason) ? reason : null;
+
+    /// <summary>
+    /// Records that the discard removed the log-hash key from <paramref name="directory"/> because
+    /// <paramref name="reason"/> (#4004 review, round 3): the look that removes it can be any caller's, and only the
+    /// key's own load knows whether it then generates the replacement.
+    /// </summary>
+    internal void RecordDiscardedKey(string directory, string reason) => _discardedKeys[Key(directory)] = reason;
+
+    /// <summary>
+    /// Why the discard removed the log-hash key from <paramref name="directory"/> in this process, once: null when it
+    /// did not, or when this was already taken.
+    /// </summary>
+    internal string? TakeDiscardedKey(string directory) => _discardedKeys.TryRemove(Key(directory), out var reason) ? reason : null;
+
+    private static string Key(string directory) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+
+    /// <summary>
+    /// Stands in <paramref name="unixModes"/> for the calling test's flow only, so the Unix verdict and the discard are
+    /// pinned on the Windows box the suite runs on. Disposing it ends that; beginning another with the same stand-in,
+    /// which keeps the mode the service set, is the service's next start.
+    /// </summary>
+    internal static IDisposable BeginForTest(IUnixDirectoryModes unixModes)
+    {
+        ArgumentNullException.ThrowIfNull(unixModes);
+        var previous = TestGuard.Value;
+        TestGuard.Value = new ComposeCredentialDirectoryGuard(unixModes);
+        return new EndTest(previous);
+    }
+
+    private sealed class EndTest(ComposeCredentialDirectoryGuard? previous) : IDisposable
+    {
+        public void Dispose() => TestGuard.Value = previous;
+    }
+}
+
+/// <summary>
+/// The Unix mode calls behind the credentials-directory verdict (#4004 review): create a directory owner-only, read its
+/// mode, set it. A seam, so a test can stand in a directory reported as 0777
+/// (<see cref="ComposeCredentialDirectoryGuard.BeginForTest"/>).
+/// </summary>
+internal interface IUnixDirectoryModes
+{
+    void CreateOwnerOnly(string directory);
+
+    UnixFileMode Get(string directory);
+
+    void Set(string directory, UnixFileMode mode);
+}
+
+/// <summary>The platform's own <see cref="IUnixDirectoryModes"/>, on every platform but Windows.</summary>
+[UnsupportedOSPlatform("windows")]
+internal sealed class PlatformUnixDirectoryModes : IUnixDirectoryModes
+{
+    public void CreateOwnerOnly(string directory) => Directory.CreateDirectory(directory, DarlingManagedRoles.OwnerOnlyDirectory);
+
+    public UnixFileMode Get(string directory) => File.GetUnixFileMode(directory);
+
+    public void Set(string directory, UnixFileMode mode) => File.SetUnixFileMode(directory, mode);
+}
