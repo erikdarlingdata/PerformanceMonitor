@@ -17,6 +17,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -133,7 +134,8 @@ public sealed class McpToolsListBudgetTests
         {
             if (!pinned.TryGetValue(key, out var ceiling))
             {
-                problems.Add($"{key}: {measuredValue.Value} is not pinned. Add the line '{key} {measuredValue.Value}' to {BudgetDir}/{measuredValue.ClassName}.txt.");
+                var diagnostic = DescribeUnpinnedIfServiceLeak(key);
+                problems.Add($"{key}: {measuredValue.Value} is not pinned. Add the line '{key} {measuredValue.Value}' to {BudgetDir}/{measuredValue.ClassName}.txt.{diagnostic}");
             }
             else if (measuredValue.Value > ceiling.Value)
             {
@@ -330,16 +332,29 @@ public sealed class McpToolsListBudgetTests
 
     internal sealed record Measurement(int TotalBytes, IReadOnlyList<MeasuredTool> Tools, IReadOnlyList<string> ClassNames);
 
-    private static Measurement? _cached;
+    /// <summary>How many times <see cref="Build"/> actually ran (should be exactly 1 per test process; more
+    /// than 1 would mean the <see cref="Lazy{T}"/> re-entered or was replaced, which the diagnostic below
+    /// reports if it ever happens again).</summary>
+    private static int _measureBuildCount;
 
-    internal static Measurement Measure()
+    /// <summary>The managed thread that ran <see cref="Build"/>, for the "0 is not pinned" diagnostic below.</summary>
+    private static int _measureBuildThreadId;
+
+    /// <summary>The <c>IServiceProviderIsService</c> from the provider <see cref="BuildServedTools"/> built,
+    /// captured so a later assertion failure can ask it directly whether a given CLR type reads as a DI
+    /// service to that same provider (see #4075's "0 is not pinned" diagnostic below).</summary>
+    private static IServiceProviderIsService? _measureServiceProviderIsService;
+
+    private static readonly Lazy<Measurement> _measured = new(Build, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    internal static Measurement Measure() => _measured.Value;
+
+    private static Measurement Build()
     {
-        if (_cached is not null)
-        {
-            return _cached;
-        }
-
-        var (tools, types) = BuildServedTools();
+        Interlocked.Increment(ref _measureBuildCount);
+        _measureBuildThreadId = Environment.CurrentManagedThreadId;
+        var (tools, types, isService) = BuildServedTools();
+        _measureServiceProviderIsService = isService;
         var protocolTools = tools.Select(t => t.ProtocolTool).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
         var json = JsonSerializer.Serialize(new ListToolsResult { Tools = protocolTools }, McpJsonUtilities.DefaultOptions);
         var totalBytes = Encoding.UTF8.GetByteCount(json);
@@ -350,13 +365,14 @@ public sealed class McpToolsListBudgetTests
             .Where(x => x.Attr is not null)
             .ToDictionary(
                 x => x.Attr!.Name!,
-                x => (ClassName: x.Type.Name, Description: x.Method.GetCustomAttribute<DescriptionAttribute>()?.Description),
+                x => (ClassName: x.Type.Name, Description: x.Method.GetCustomAttribute<DescriptionAttribute>()?.Description, Method: x.Method),
                 StringComparer.Ordinal);
 
         var measuredTools = new List<MeasuredTool>();
+        var parameterTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
         foreach (var tool in protocolTools)
         {
-            var (className, description) = toolInfo[tool.Name];
+            var (className, description, method) = toolInfo[tool.Name];
             var served = tool.Description ?? string.Empty;
             var tail = description is null ? null : McpToolGuide.Split(description).Tail;
             var parameters = new List<(string, int)>();
@@ -366,18 +382,74 @@ public sealed class McpToolsListBudgetTests
                 {
                     var length = property.Value.TryGetProperty("description", out var d) ? d.GetString()!.Length : 0;
                     parameters.Add((property.Name, length));
+                    var parameterInfo = method.GetParameters().FirstOrDefault(p => string.Equals(p.Name, property.Name, StringComparison.Ordinal));
+                    if (parameterInfo is not null)
+                    {
+                        parameterTypes[$"{tool.Name}.{property.Name}"] = parameterInfo.ParameterType;
+                    }
                 }
             }
 
             measuredTools.Add(new MeasuredTool(tool.Name, className, description, served, tail, parameters));
         }
 
+        _measureParameterTypes = parameterTypes;
         var classNames = types.Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToList();
-        _cached = new Measurement(totalBytes, measuredTools, classNames);
-        return _cached;
+        return new Measurement(totalBytes, measuredTools, classNames);
     }
 
-    private static (List<McpServerTool> Tools, List<Type> Types) BuildServedTools()
+    /// <summary>The CLR parameter type behind every served <c>tool.parameter</c> key measured in the most
+    /// recent <see cref="Build"/>, for the "0 is not pinned" diagnostic below.</summary>
+    private static Dictionary<string, Type>? _measureParameterTypes;
+
+    /// <summary>
+    /// #4075: an unpinned "param X.Y: 0" almost always means a plain new parameter (add the pin line and
+    /// move on). But if the key's CLR type reads as a DI service (<see cref="McpServedSchema.IsServiceParameter"/>),
+    /// that would mean a DI service leaked into the served schema, which the null-singleton registration in
+    /// <see cref="BuildServedTools"/> is supposed to make impossible. Root cause is still open (see issue
+    /// #4075); this appends everything the next sighting needs to diagnose it, without changing pass/fail.
+    /// </summary>
+    private static string DescribeUnpinnedIfServiceLeak(string key)
+    {
+        if (!key.StartsWith("param ", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        var parameterKey = key["param ".Length..];
+        if (_measureParameterTypes is null || !_measureParameterTypes.TryGetValue(parameterKey, out var parameterType)
+            || !McpServedSchema.IsServiceParameter(parameterType))
+        {
+            return string.Empty;
+        }
+
+        var isServiceResult = _measureServiceProviderIsService is null
+            ? "(no provider captured)"
+            : _measureServiceProviderIsService.IsService(parameterType).ToString();
+        var ranClasses = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(a =>
+            {
+                try
+                {
+                    return a.GetTypes();
+                }
+                catch
+                {
+                    return Array.Empty<Type>();
+                }
+            })
+            .Where(t => t.Namespace is "Lite.Tests" or "Darling.Tests" && t.Name.EndsWith("Tests", StringComparison.Ordinal))
+            .Select(t => t.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        return $" #4075 (DI service leaked into served schema; root cause still open): parameter CLR type is "
+            + $"'{parameterType.FullName}'; IServiceProviderIsService.IsService(type) on this build's provider = {isServiceResult}; "
+            + $"Measure() built on managed thread {_measureBuildThreadId}, build count = {_measureBuildCount}; "
+            + $"loaded test classes = [{string.Join(", ", ranClasses)}].";
+    }
+
+    private static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
     {
         var registered = Regex
             .Matches(File.ReadAllText(RepoPath("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs")),
@@ -411,7 +483,8 @@ public sealed class McpToolsListBudgetTests
         }
 
         var provider = services.BuildServiceProvider();
-        return (provider.GetServices<McpServerTool>().ToList(), types);
+        var isService = provider.GetRequiredService<IServiceProviderIsService>();
+        return (provider.GetServices<McpServerTool>().ToList(), types, isService);
     }
 
     /* ---------------- per-class budget files ---------------- */
