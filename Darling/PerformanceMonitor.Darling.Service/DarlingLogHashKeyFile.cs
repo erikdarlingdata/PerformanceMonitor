@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
@@ -37,7 +39,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Trusted the way #3983 trusts the compose role passwords</b>: the directory is set owner-only again first
 /// (<see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/>), then the file must be a regular file no one
 /// else can reach (<see cref="DarlingManagedRoles.UntrustedComposeCredentialReason"/>): no group or other bits on
-/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users.</para>
+/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users, then held to an allowlist: no
+/// access for anyone beyond SYSTEM, Administrators and the service account (#4028), judged and read through one
+/// handle nobody can rename, replace or write while it is open (<see cref="DarlingFileSecurity.OpenForServiceOnlyRead"/>).</para>
 ///
 /// <para><b>Where it parts from #3983: an existing key is not replaced, with one exception.</b> A role password costs
 /// only a re-assert to regenerate, so #3983 discards a file it cannot trust. A new key gives every stored log event a
@@ -179,7 +183,21 @@ public static class DarlingLogHashKeyFile
                     return Refuse(path, untrusted);
                 }
 
-                return Read(path, logger);
+                if (!OperatingSystem.IsWindows())
+                {
+                    return Read(path, held: null, logger);
+                }
+
+                /* #4028: the shared check above only refuses a key Users, Authenticated Users or Everyone can read,
+                   since the credential files it also judges were built against that denylist. The key is read by
+                   the service alone, so on Windows it is held to an allowlist: an account beyond SYSTEM,
+                   Administrators and the service account (INTERACTIVE, Domain Users, one named user) that can read it
+                   has the key, and with it the literals the keyed hashes hide; one that can write it or re-permission
+                   it can make that so (#4044 review). Judged and read through ONE handle that nobody can rename,
+                   replace or write while it is open, so the key read is the key judged, whoever controls the
+                   directory. */
+                using var held = DarlingFileSecurity.OpenForServiceOnlyRead(path, out var refusal);
+                return held is null ? Refuse(path, refusal ?? "it could not be checked") : Read(path, held, logger);
             }
 
             var generated = Generate(path, logger);
@@ -199,12 +217,39 @@ public static class DarlingLogHashKeyFile
         return info.LinkTarget is not null || info.Exists || Directory.Exists(path);
     }
 
-    private static DarlingLogHashKeyLoad Read(string path, ILogger logger)
+    /// <summary>The most a key file's bytes may run to. A key this service writes is about 350 on Windows (a DPAPI blob
+    /// of the base64 key, in base64) and 44 elsewhere.</summary>
+    private const int MaxKeyFileBytes = 1024;
+
+    /// <summary>Reads the key from <paramref name="held"/>, the stream <see cref="Load"/> judged the file through, or
+    /// from the path when there is none (Unix, where mode and owner are the shared check's).</summary>
+    private static DarlingLogHashKeyLoad Read(string path, FileStream? held, ILogger logger)
     {
         string text;
         try
         {
-            text = File.ReadAllText(path).Trim();
+            if (held is null)
+            {
+                text = File.ReadAllText(path).Trim();
+            }
+            else
+            {
+                var buffer = new byte[MaxKeyFileBytes + 1];
+                var length = 0;
+                int read;
+                while (length < buffer.Length && (read = held.Read(buffer, length, buffer.Length - length)) > 0)
+                {
+                    length += read;
+                }
+
+                if (length > MaxKeyFileBytes)
+                {
+                    return Refuse(path, $"it is larger than {MaxKeyFileBytes.ToString(CultureInfo.InvariantCulture)} bytes, which no key this service writes is");
+                }
+
+                using var reader = new StreamReader(new MemoryStream(buffer, 0, length), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+                text = reader.ReadToEnd().Trim();
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -274,13 +319,15 @@ public static class DarlingLogHashKeyFile
                     DarlingManagedRoles.FlushToDisk(writer, stream);
                 }
 
-                if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                /* The same allowlist a key is loaded under (#4028), so a key is never written that its next start
+                   would refuse. */
+                if (DarlingFileSecurity.AccessBeyondTrusted(temporary) is not null)
                 {
                     DarlingFileSecurity.HardenFile(temporary, allowInteractiveRead: false);
-                    if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                    if (DarlingFileSecurity.AccessBeyondTrusted(temporary) is { } accounts)
                     {
                         throw new InvalidOperationException(
-                            "ordinary local users could read it even after it was created owner-only and hardened again"
+                            $"accounts beyond SYSTEM, Administrators and the service account had access to it even after it was created owner-only and hardened again: {accounts}"
                             + DarlingFileSecurity.DescribeOwnerAndExposure(temporary));
                     }
                 }
