@@ -10018,19 +10018,18 @@ LIMIT 1";
                Total by construction: a fault with no phase — which is every fault that is not a COPY —
                gets the very string it has now, with nothing allocated. That matters here specifically,
                because this arm is also the OutOfMemoryException landing pad. */
-            /* #4046 part 1c: a log-tail read the server refused to decode lands here on purpose and keeps
-               ERROR, with the sentence naming the planted byte and the grant (see
-               LogTailUndecodableByteExplanation, which allocates nothing on the way to null). */
-            var message = LogTailUndecodableByteExplanation(ex, collectorName, runtime.ConnectedDatabase)
-                ?? CollectorFaultCopyPhase.Describe(ex);
+            var message = CollectorFaultCopyPhase.Describe(ex);
+
+            /* #4046 part 1c: a 22021 on a log-tail read keeps ERROR, with the planted-byte sentence. */
+            message = LogTailUndecodableByteExplanation(ex, collectorName, runtime.ConnectedDatabase) ?? message;
+
+            _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
+                server.Config.DisplayName, collectorName, message);
 
             /* #4051 review L1: after a 22021 the next cycle re-checks the grant, so one made in answer to the
                sentence above takes effect then rather than up to an hour later. */
             DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(
                 collectorName, (ex as PostgresException)?.SqlState, runtime.StorageName);
-
-            _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
-                server.Config.DisplayName, collectorName, message);
 
             /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
                matters as much as the SQL Server one and is deliberately NARROWER than "any
