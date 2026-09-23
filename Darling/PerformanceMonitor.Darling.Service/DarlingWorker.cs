@@ -9763,8 +9763,10 @@ LIMIT 1";
         }
         catch (PgLogTimezoneUnsupportedException ex)
         {
-            /* #2993: this target's log_timezone is not UTC, so the deadlock reports in its server log are
-               stamped in local time and occurred_at cannot be filled from them.
+            /* #2993: this target's log_timezone is not UTC, so the lines in its server log are stamped in
+               local time and cannot be stored against UTC. Both readers that assemble log entries through
+               PgLogEntryAssembler (pg_log_events and pg_deadlocks) land here, which is why the message names
+               the log, not deadlocks.
 
                PERMISSIONS for the same reason the PostgresException FeatureDisabled arm below is: none of
                the store's five statuses means "this target is configured in a way this source cannot be
