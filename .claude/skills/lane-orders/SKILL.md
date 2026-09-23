@@ -14,11 +14,11 @@ conflict.
 **The coordinator fills these per wave, in every brief:**
 - `<LANE>`, `<ISSUES>`, `<DEADLINE>`;
 - `<RIG_PORT>`, `<RIG_DIR>`, `<PG_RUNTIME_ZIP>`;
-- `<REPORT_FILE>`, `<CHANGELOG_BUFFER_DIR>`. Under worktree isolation, `<REPORT_FILE>` must be inside the lane's
-  own worktree (for example `.lane-report.md`, untracked), because the harness blocks writes to the coordinator's
-  scratchpad. Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not
-  exclude that path;
+- `<CHANGELOG_BUFFER_DIR>`;
 - `<CO_AUTHOR_TRAILER>`, `<SESSION_URL>`.
+
+Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not exclude that
+path.
 
 ## For the coordinator
 
@@ -36,7 +36,16 @@ At each report:
 1. Stop the agent.
 2. Check that the shared checkout is clean.
 3. Read the PR's core product diff against the checklist below.
-4. Arm auto-merge only after that, with CI green.
+4. A security PR, or an irreversible data rewrite, gets a review round first. Make the PR a draft for the review's
+   duration (`gh pr ready <n> --undo`, then `gh pr ready <n>`): a draft can't be merged from the UI, and two such
+   PRs were merged mid-review on 2026-09-23.
+5. Arm auto-merge only after that, with CI green.
+
+When a PR's required check fails on a test it doesn't touch, don't just re-run it. Take a census of the last two
+days' failed first attempts: `gh run list --workflow Build`, each run's attempts through the REST
+`actions/runs/<id>/attempts/<n>/jobs` endpoint, and a `[FAIL]` grep of each failed job's log. Fix every flake it
+finds, in one PR. A flake that stalls every lane outranks the rest of the queue (2026-09-23: four flakes in one
+census, one of them introduced by that night's own wave).
 
 **Verification checklist** (the invariants agents most often miss):
 - **Storage precision:** PostgreSQL and DuckDB keep microseconds; a .NET tick is not stored.
@@ -58,8 +67,11 @@ At each report:
 - Stop and write a handoff note when your context passes about 150k.
 - Never end your turn to wait for a background notification. Run the full suite in the foreground (about 10
   minutes), or poll your own output file.
-- Write your full final report to `<REPORT_FILE>`. Your last message is a summary of 300 words or fewer that points
-  to it.
+- Put your full report in the PR body (see "Final report"). Your last message is 400 words or fewer and links the
+  PR. Don't write report files: the harness can block a subagent's file writes outside its worktree, or all of
+  them, and a PR body outlives any scratch file.
+- Before you call a failure pre-existing, re-run it alone on a freshly created database, after merging `origin/dev`.
+  If it passes there, the cause was your database or your stale base, not the code; don't file it.
 - Finish, or stop at a committed and pushed checkpoint with a handoff, by `<DEADLINE>`.
 - **Never stop to ask.** If an item needs a decision nobody has made, park it with the question in your report and
   move on.
@@ -152,7 +164,9 @@ Never edit an existing migration.
 
   Plain punctuation, no em dashes. A test-only PR gets none.
 
-## Final report (in `<REPORT_FILE>`)
+## Final report (the PR body)
+
+The PR body carries it under its sections. A parked item with no PR gets it as a comment on the issue instead.
 
 - the PR URL, or why the issue was parked;
 - the diagnosis, confirmed or corrected, with before and after numbers;
