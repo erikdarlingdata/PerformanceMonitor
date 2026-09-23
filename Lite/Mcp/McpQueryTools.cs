@@ -245,7 +245,8 @@ public sealed class McpQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -257,8 +258,11 @@ public sealed class McpQueryTools
 
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
+            execution_type = NormalizeExecutionType(execution_type);
+            if (execution_type == "INVALID")
+                return McpHelpers.Status("invalid", "execution_type must be Regular, Aborted, or Exception.");
 
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
+            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, executionType: execution_type);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
@@ -281,6 +285,7 @@ public sealed class McpQueryTools
                 plan_id = r.PlanId,
                 query_hash = r.QueryHash,
                 query_plan_hash = r.QueryPlanHash,
+                execution_type = r.ExecutionTypeDesc,
                 execution_count = r.TotalExecutions,
                 avg_duration_ms = r.AvgDurationMs,
                 avg_cpu_ms = r.AvgCpuTimeMs,
@@ -303,6 +308,15 @@ public sealed class McpQueryTools
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
+    }
+
+    private static string? NormalizeExecutionType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (value.Equals("Regular", StringComparison.OrdinalIgnoreCase)) return "Regular";
+        if (value.Equals("Aborted", StringComparison.OrdinalIgnoreCase)) return "Aborted";
+        if (value.Equals("Exception", StringComparison.OrdinalIgnoreCase)) return "Exception";
+        return "INVALID";
     }
 
     [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]

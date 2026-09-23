@@ -760,7 +760,8 @@ public sealed class DarlingMcpDataTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -769,12 +770,15 @@ public sealed class DarlingMcpDataTools
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
+        execution_type = NormalizeExecutionType(execution_type);
+        if (execution_type == "INVALID")
+            return McpHelpers.Status("invalid", "execution_type must be Regular, Aborted, or Exception.");
 
         try
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name);
+            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type);
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
                say nothing about how far back the read reached -- the most expensive query in a month may have
@@ -812,6 +816,7 @@ public sealed class DarlingMcpDataTools
                 plan_id = r.PlanId,
                 query_hash = r.QueryHash,
                 query_plan_hash = r.QueryPlanHash,
+                execution_type = r.ExecutionTypeDesc,
                 execution_count = r.TotalExecutions,
                 avg_duration_ms = r.AvgDurationMs,
                 avg_cpu_ms = r.AvgCpuTimeMs,
@@ -855,6 +860,15 @@ public sealed class DarlingMcpDataTools
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
+    }
+
+    private static string? NormalizeExecutionType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (value.Equals("Regular", StringComparison.OrdinalIgnoreCase)) return "Regular";
+        if (value.Equals("Aborted", StringComparison.OrdinalIgnoreCase)) return "Aborted";
+        if (value.Equals("Exception", StringComparison.OrdinalIgnoreCase)) return "Exception";
+        return "INVALID";
     }
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */

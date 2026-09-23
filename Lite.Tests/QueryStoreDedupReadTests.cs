@@ -96,7 +96,8 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         long? intervalId = null,
         DateTime? intervalStart = null,
         long avgWrites = 0,
-        long avgPhysicalReads = 0)
+        long avgPhysicalReads = 0,
+        string executionType = "Regular")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -117,7 +118,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = Db });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = planId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)firstExecutionTime ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT {queryId}" });
@@ -250,6 +251,24 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(2.0, a.AvgDurationMs, precision: 6);
         Assert.Equal(7.0, b.AvgDurationMs, precision: 6);
         Assert.Equal(0.3, b.AvgCpuTimeMs, precision: 6);
+    }
+
+    [Fact]
+    public async Task TopQueries_ExecutionTypeFilterSeparatesOutcomesBeforeRanking()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 201, 2001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xREG", intervalId: 9401, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(6), 202, 2002, FirstExecB, 3, 200, 500, 1,
+            "0xABORT", intervalId: 9402, intervalStart: BucketStart, executionType: "Aborted");
+        await SeedAsync(BucketStart.AddMinutes(7), 203, 2003, FirstExecB.AddMinutes(1), 2, 300, 700, 1,
+            "0xEX", intervalId: 9403, intervalStart: BucketStart, executionType: "Exception");
+
+        var service = new LocalDataService(_duckDb);
+        var aborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        var exception = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Exception"));
+
+        Assert.Equal("Aborted", aborted.ExecutionTypeDesc);
+        Assert.Equal("Exception", exception.ExecutionTypeDesc);
     }
 
     [Fact]

@@ -135,7 +135,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
     [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]
     [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
-    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of")]
+    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of,execution_type")]
     [InlineData("get_collection_health", "server_name")]
     /* #3287 gave this read two filters, on BOTH SKUs and in the same relative order, so it joins the theory
        rather than sitting outside it. The two are LAST because as_of and collector_name are both `string?`:
@@ -677,8 +677,10 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("AVG(CAST(avg_duration_us AS double precision))", sql, StringComparison.Ordinal);
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
            primary and secondary workload blended into one row. */
-        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, replica_role", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
+        Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
+        Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(execution_count)", sql, StringComparison.Ordinal);
     }
 

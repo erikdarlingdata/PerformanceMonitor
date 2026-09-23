@@ -160,7 +160,7 @@ ORDER BY bucket";
         return items;
     }
 
-    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? executionType = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         using var connection = await OpenConnectionAsync();
@@ -168,6 +168,10 @@ ORDER BY bucket";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        var executionTypeParameterIndex = 5 + dbValues.Count;
+        var executionTypeClause = string.IsNullOrWhiteSpace(executionType)
+            ? ""
+            : $" AND execution_type_desc = ${executionTypeParameterIndex}";
 
         command.CommandText = @"
 WITH deduped AS (
@@ -211,7 +215,8 @@ ranked AS (
            server every row shares one value (NULL, or 'Primary' on 2025), so the grouping is a no-op
            and the grid is unchanged. */
         replica_role,
-        MAX(module_name) AS module_name,
+        module_name,
+        execution_type_desc,
         SUM(execution_count) AS total_executions,
         AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
         AVG(CAST(avg_cpu_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_cpu_time_ms,
@@ -225,7 +230,6 @@ ranked AS (
         MAX(query_plan_hash) AS query_plan_hash,
         MAX(CASE WHEN is_forced_plan THEN TRUE ELSE FALSE END) AS is_forced_plan,
         MAX(plan_forcing_type) AS plan_forcing_type,
-        MAX(execution_type_desc) AS execution_type_desc,
         MIN(first_execution_time) AS first_execution_time,
         AVG(CAST(avg_clr_time_us AS DOUBLE PRECISION)) / 1000.0 AS avg_clr_time_ms,
         AVG(CAST(avg_tempdb_space_used AS DOUBLE PRECISION)) AS avg_tempdb_space_used,
@@ -259,8 +263,8 @@ ranked AS (
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
-    WHERE rn = 1
-    GROUP BY database_name, query_id, plan_id, query_hash, replica_role
+    WHERE rn = 1" + executionTypeClause + @"
+    GROUP BY database_name, query_id, plan_id, query_hash, module_name, execution_type_desc, replica_role
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
     LIMIT $4 + 5
 )
@@ -340,6 +344,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = top });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        if (!string.IsNullOrWhiteSpace(executionType))
+            command.Parameters.Add(new DuckDBParameter { Value = executionType });
 
         var items = new List<QueryStoreRow>();
         using var reader = await command.ExecuteReaderAsync();
