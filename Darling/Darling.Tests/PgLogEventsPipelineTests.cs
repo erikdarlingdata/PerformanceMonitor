@@ -119,6 +119,21 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains(P + "[4102] STATEMENT:  UPDATE orders", lockWait.RawText, StringComparison.Ordinal);
     }
 
+    /// <summary>#4047 review: %r's port is never a SQLSTATE, under IPv4 or IPv6, while an %e beside it still is.</summary>
+    [Fact]
+    public void APortInPercentR_IsNotReadAsASqlState_ButAnPercentEBesideItIs()
+    {
+        var entries = PgLogEntryAssembler.Assemble(
+            "2026-09-18 03:07:12 UTC:fe80::1(53100):app_rw@app_db:[4102]:LOG:  connection authorized: user=app_rw database=app_db\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(57014):app_rw@app_db:[4103]:28P01:FATAL:  password authentication failed for user \"app_rw\"\n");
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(4102, entries[0].Pid);
+        Assert.Null(entries[0].SqlState);
+        Assert.Equal(4103, entries[1].Pid);
+        Assert.Equal("28P01", entries[1].SqlState);
+    }
+
     [Fact]
     public void TheAssembler_ReadsBothPrefixFamilies_AndLiftsUserDatabaseAndSqlStateFromThePrefix()
     {
@@ -129,6 +144,8 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(4102, managed[0].Pid);
         Assert.Equal(new DateTime(2026, 9, 18, 3, 7, 12, DateTimeKind.Utc), managed[0].OccurredAtUtc);
         Assert.StartsWith("SELECT count(*)", managed[0].Statement, StringComparison.Ordinal);
+        /* %r renders `host(port)`: the port 52345 is not a SQLSTATE, and this prefix carries no %e (#4047 review). */
+        Assert.Null(managed[0].SqlState);
         /* A background process renders `@` alone under %u@%d: neither half is a name. */
         Assert.Null(managed[1].UserName);
         Assert.Null(managed[1].DatabaseName);
@@ -1118,6 +1135,101 @@ public sealed class PgLogEventsPipelineTests
         Assert.All(events, e => Assert.DoesNotContain("Leak4006", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
     }
 
+    /* #4041: '%m %u@%d [%p] ', fields between the zone and the pid. */
+    private const string C = "2026-09-18 03:07:12.345 UTC ";
+
+    /// <summary>
+    /// #4041: under a prefix with fields between the zone and the pid every line was dropped, because the space
+    /// family wanted the bracket right after the zone. The user and database sit BEFORE the pid now, and are still
+    /// lifted from the prefix.
+    /// </summary>
+    [Fact]
+    public void ACustomPrefixWithFieldsBeforeThePid_ReadsItsEntries_AndLiftsUserAndDatabase()
+    {
+        var log =
+            C + "app_rw@app_db [4800] ERROR:  duplicate key value violates unique constraint \"customers_email_key\"\n"
+            + C + "app_rw@app_db [4800] DETAIL:  Key (email)=(someone@example.com) already exists.\n"
+            + C + "app_rw@app_db [4800] STATEMENT:  INSERT INTO customers (email) VALUES ('someone@example.com')\n"
+            + C + "@ [2999] LOG:  checkpoint starting: time\n"
+            + C + "app_rw@app_db [4801] FATAL:  password authentication failed for user \"app_rw\"\n";
+
+        var entries = PgLogEntryAssembler.Assemble(log);
+        Assert.Equal([4800, 2999, 4801], entries.Select(e => e.Pid));
+        Assert.Equal(["ERROR", "LOG", "FATAL"], entries.Select(e => e.Severity));
+        Assert.Equal("app_rw", entries[0].UserName);
+        Assert.Equal("app_db", entries[0].DatabaseName);
+        Assert.Equal("UTC", entries[0].ZoneText);
+        Assert.Equal("Key (email)=(someone@example.com) already exists.", entries[0].Detail);
+        Assert.StartsWith("INSERT INTO customers", entries[0].Statement, StringComparison.Ordinal);
+        Assert.Equal(new DateTime(2026, 9, 18, 3, 7, 12, 345, DateTimeKind.Utc), entries[0].OccurredAtUtc);
+
+        /* A background process renders `@` alone: neither half is a name. */
+        Assert.Null(entries[1].UserName);
+        Assert.Null(entries[1].DatabaseName);
+
+        /* And the stored events: the user-visible half of the fix. */
+        var events = Classify(log);
+        Assert.Contains(events, e => e.Family == PgLogFamilies.Error && e.Pid == 4800 && e.UserName == "app_rw" && e.DatabaseName == "app_db");
+        Assert.Contains(events, e => e.Pid == 4801 && e.Severity == "FATAL");
+
+        /* The zone is still read, and still refused whole when it is not UTC. */
+        var refusal = Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgLogEntryAssembler.Assemble(log.Replace(" UTC ", " EST ", StringComparison.Ordinal)));
+        Assert.Equal("EST", refusal.ObservedZone);
+
+        /* A numeric zone with a colon reads through the managed family, up to that colon: same verdicts. */
+        Assert.Equal(3, PgLogEntryAssembler.Assemble(log.Replace(" UTC ", " +00:00 ", StringComparison.Ordinal)).Count);
+        Assert.Equal("-03", Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgLogEntryAssembler.Assemble(log.Replace(" UTC ", " -03:30 ", StringComparison.Ordinal))).ObservedZone);
+    }
+
+    /// <summary>
+    /// #4041, the new gap's rules. It stops at the first bracket, so a forged <c>[pid] LABEL:  </c> behind the
+    /// line's real bracket is never reached, even when the line's own label is one this reader does not know. And
+    /// it holds to #3996's label boundaries, so on a line with no bracket before its label it cannot cross the
+    /// label (English, unpadded, or after a non-ASCII letter) to a bracket inside the text.
+    /// </summary>
+    [Fact]
+    public void UnderACustomPrefix_ABracketOrLabelInsideTheText_OpensNothing()
+    {
+        var events = Classify(
+            C + "app_rw@app_db [4810] ERROR:  x\n"
+            + C + "app_rw@app_db [4810] STATEMENT:  SELECT 'a [1] ERROR:  Leak4041a'\n"
+            + C + "app_rw@app_db [4811] SENTENCIA:  SELECT 'b [2] ERROR:  Leak4041b'\n"
+            + C + "app_rw@app_db [4812] FEHLER:  c [3] FATAL:  Leak4041c\n"
+            + C + "app_rw@app_db LOG:  statement: SELECT 'd [4] ERROR:  Leak4041d'\n"
+            + C + "app_rw@app_db SORGU: e [5] ERROR:  Leak4041e\n"
+            + C + "app_rw@app_db 쿼리:f [6] ERROR:  Leak4041f\n"
+            + C + "app_rw@app_db ANWEISUNG:  g [7] ERROR:  Leak4041g\n"
+            + C + "app_rw@app_db SQL:h [8] ERROR:  Leak4041h\n");
+        var only = Assert.Single(events);
+        Assert.Equal(4810, only.Pid);
+        Assert.Equal("x", only.Message);
+        Assert.DoesNotContain("Leak4041", only.Message + only.Detail + only.Context, StringComparison.Ordinal);
+
+        /* A real bracket followed by a forged one binds the real one, and the forged header stays text. */
+        var bound = Assert.Single(PgLogEntryAssembler.Assemble(C + "app_rw@app_db [4813] ERROR:  real [9] FATAL:  forged\n"));
+        Assert.Equal(4813, bound.Pid);
+        Assert.Equal("ERROR", bound.Severity);
+        Assert.Equal("real [9] FATAL:  forged", bound.Message);
+    }
+
+    /// <summary>
+    /// #4041: the new alternative's zone is colon-free and it is tried after the managed family, so a managed line
+    /// whose database name holds a space is read exactly as before. With a zone that could hold colons, tried first,
+    /// it ran the zone to that space (<c>UTC:192.0.2.10(52345):app_rw@my</c>) and the zone check refused every read
+    /// of the target.
+    /// </summary>
+    [Fact]
+    public void AManagedLineWithASpaceBeforeItsPid_IsStillReadByTheManagedFamily()
+    {
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(
+            "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@my db:[4102]:ERROR:  canceling statement due to user request\n"));
+        Assert.Equal("UTC", entry.ZoneText);
+        Assert.Equal(4102, entry.Pid);
+        Assert.Equal("ERROR", entry.Severity);
+    }
+
     /// <summary>
     /// #3996's round-2 review (3): each deadlock query's buffer was sized to the whole DETAIL, so a 63 KB report of
     /// 880 waiters allocated 107 MB a call, and a CONTEXT's frames were each sized to the 64 KB field cap, 125 MB a
@@ -1223,10 +1335,12 @@ public sealed class PgLogEventsPipelineTests
 
         /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
            candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
-           read. And again in #4046: every row carries the target's log_timezone as a second column, read in the
-           same statement, and the marker arms carry NULL there. The tailer it opens with is still the shared one,
-           byte for byte. */
-        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text,\n    pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ [^ \\n]+ \\[\\d+\\](?:(?!:  )[^\\n])*ERROR:  deadlock detected\\s*\\n(?:(?!:  )[^\\n])*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 500";
+           read. The tailer it opens with is still the shared one, byte for byte. Its prefix clause changed on
+           purpose in #4041: PgDeadlockLogParser's own, so the fraction is optional, fields may sit between the
+           zone and the pid, and the managed family is there beside the space one. And in #4046: every row carries
+           the target's log_timezone as a second column, read in the same statement, and the marker arms carry
+           NULL there. */
+        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text,\n    pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? (?:[^ \\n]+ (?:(?!:  )[^[\\n])*\\[\\d+\\]|[^ :\\n]+:[^[\\n]*\\[\\d+\\])(?:(?!:  )[^\\n])*ERROR:  deadlock detected\\s*\\n(?:(?!:  )[^\\n])*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 500";
 
         /* Line endings normalised on both sides: the repo's `text=auto eol=crlf` checks the sources out as
            CRLF on Windows and this pin's literals are LF, and a verbatim string carries whatever its file
@@ -1958,10 +2072,9 @@ public sealed class PgLogEventsLivePostgresTests
     /// beside the text, in the same statement, and both reads classify under it instead of refusing. A line in the
     /// tail stamped in another zone becomes a count on the run, never a refusal. Gated on
     /// DARLING_TEST_PG_UTC_LOG_TARGET, a connection string to a PostgreSQL started with <c>logging_collector = on</c>,
-    /// <c>log_timezone = 'UTC'</c> and a <c>log_line_prefix</c> carrying <c>%u</c> and <c>%d</c> that this reader
-    /// parses, such as <c>'%m [%p] %u@%d '</c>, whose log the login can read, with the store from DARLING_TEST_PG.
-    /// (<c>'%m %u@%d [%p] '</c> puts the pair before the pid, a shape this reader does not parse until #4047.) The
-    /// rig that ran this on the way in: a second 18.6 cluster beside the store.
+    /// <c>log_timezone = 'UTC'</c> and a <c>log_line_prefix</c> carrying <c>%u</c> and <c>%d</c>, such as
+    /// <c>'%m %u@%d [%p] '</c>, whose log the login can read, with the store from DARLING_TEST_PG. The rig that ran
+    /// this on the way in: a second 18.6 cluster beside the store.
     /// </summary>
     [Fact]
     public async Task AgainstAUtcTarget_TheLogQueriesReadTheSettingWithTheTail_AndStoreWhatTheServerWrote()

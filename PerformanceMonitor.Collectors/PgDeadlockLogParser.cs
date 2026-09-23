@@ -112,8 +112,8 @@ public static class PgDeadlockLogParser
        Not \w+ for either zone: \w matches neither a sign nor a colon, and a prefix the pattern cannot
        match produces no block at all, which reads as a server with no deadlocks.
 
-       PgDeadlocksCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
-       narrower: that one carries the space family only, which PostgreSQL's own default renders.
+       PgDeadlocksCollector holds this pattern's counterpart for the pg_read_file route, as SQL. It carried
+       the space family only, with the fraction required, until #4041 gave it this prefix clause whole.
 
        A CANDIDATE, not a verdict (#4005). `ERROR:  deadlock detected` and `DETAIL:  ` are found anywhere on
        their lines, so a statement's literal holding those words matched as a report, and under a translated
@@ -136,10 +136,19 @@ public static class PgDeadlockLogParser
          line's report; that is the rare side, and it can only hide a report, never forge one.
        - The managed family's gap to the pid bracket excludes '[', as plan capture's does since #4008, so it
          cannot slide past the line's real bracket to one inside the text. The lazy '[^\n]*?' it replaces
-         could, when the rest of the pattern failed at the real one. */
+         could, when the rest of the pattern failed at the real one.
+       - The space family admits fields between the zone and the pid (#4041), as '%m %u@%d [%p] ' renders them,
+         because the assembler does: a report under that prefix matched nothing here and read as a server with no
+         deadlocks. Its gap excludes '[' for the same reason as the managed family's, and may not contain a ":  "
+         either, the assembler's label rule in the form this pattern spells it. Both only ever narrow the
+         candidate toward the assembler's reading, so no report the assembler accepts is missed: on every line it
+         reads, the first bracket after the zone is the pid and no label comes before it.
+
+       PgDeadlocksCollector carries this prefix clause into its SQL as written (#4041), both families and the
+       optional fraction, so the pg_read_file route offers every candidate this one does. */
     private static readonly Regex s_deadlockBlock = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
-        + @"(?:[^ \n]+ \[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"(?:[^ \n]+ (?:(?!:  )[^\[\n])*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
         + @"(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n"
         + @"(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*"
         + @"(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?",

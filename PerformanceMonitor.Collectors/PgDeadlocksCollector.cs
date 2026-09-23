@@ -102,6 +102,15 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        field label's ":  ", so the ERROR: matched is the line's own. Measured on PostgreSQL 18.6: the old
        pattern matched a STATEMENT line echoing a report (the assembler then refused it); this one does not.
 
+       The prefix clause is PgDeadlockLogParser's own (#4041), with '[^[\n]' as ARE's spelling of its '[^\[\n]':
+       the fraction optional, fields allowed between the zone and the pid, and the managed family beside the
+       space one. The pattern
+       carried only '%m [%p] ' with its fraction required, so a self-hosted target logging under '%t' (pgBadger's
+       '%t [%p]: user=%u,db=%d,...'), under '%m %u@%d [%p] ' or under a colon-delimited prefix offered no
+       candidate and read as a server with no deadlocks, while the assembler behind it would have read every one.
+       Its groups are non-capturing, so m[1] is still the whole candidate. PgDeadlockCandidatePatternLiveTests
+       runs it through PostgreSQL's own engine.
+
        The listing is GATED on logging_collector, and the gate carries a marker row out the other side
        (#3410). With the setting off the server writes to stderr and there may be no log directory at all,
        so pg_ls_logdir() raises 58P01 for a directory that legitimately does not exist — an error every
@@ -131,7 +140,7 @@ SELECT
 FROM tail,
      regexp_matches(
          tail.body,
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ [^ \n]+ \[\d+\](?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL

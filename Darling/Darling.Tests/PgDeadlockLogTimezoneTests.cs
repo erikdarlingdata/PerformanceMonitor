@@ -74,8 +74,9 @@ public sealed class PgDeadlockLogTimezoneTests
             System.StringComparison.Ordinal);
 
         /* [^ \n]+ rather than \w+: a numeric-offset zone matched no block at all under \w+, so the
-           server reported no deadlocks instead of reporting a zone this cannot store. */
-        Assert.Contains("[^ \\n]+ \\[\\d+\\]", source, System.StringComparison.Ordinal);
+           server reported no deadlocks instead of reporting a zone this cannot store. Since #4041 the space
+           family's zone is followed by a gap for fields before the pid rather than by the bracket itself. */
+        Assert.Contains("[^ \\n]+ (?:(?!:  )[^[\\n])*\\[\\d+\\]", source, System.StringComparison.Ordinal);
         Assert.DoesNotContain("\\w+ \\[", source, System.StringComparison.Ordinal);
     }
 }
