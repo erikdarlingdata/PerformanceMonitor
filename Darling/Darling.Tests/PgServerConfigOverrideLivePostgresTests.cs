@@ -165,7 +165,7 @@ public sealed class PgServerConfigOverrideLivePostgresTests
             /* The server-wide read the shared reader serves the Overview grid and the MCP page from, and the
                override read beside it, both against the real column set: the pair that could only be checked
                by a server. */
-            var serverWide = await NamesAsync(connection, ct, DarlingPgServerConfigReader.CurrentConfigSql, includeDefaults: true, limit: 50);
+            var serverWide = await NamesAsync(connection, ct, DarlingPgServerConfigReader.CurrentConfigSql, includeDefaults: true, limit: 50, snapshot);
             Assert.Equal(new[] { "max_connections", "shared_buffers", "work_mem" }, serverWide.OrderBy(n => n, StringComparer.Ordinal).ToArray());
             Assert.Equal(serverWide.Count, serverWide.Distinct(StringComparer.Ordinal).Count());
 
@@ -311,12 +311,15 @@ public sealed class PgServerConfigOverrideLivePostgresTests
     }
 
     private static async Task<List<string>> NamesAsync(
-        NpgsqlConnection connection, CancellationToken ct, string sql, bool includeDefaults, int limit)
+        NpgsqlConnection connection, CancellationToken ct, string sql, bool includeDefaults, int limit, DateTime snapshot)
     {
         using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue(ServerId);
         command.Parameters.AddWithValue(includeDefaults);
         command.Parameters.AddWithValue(limit);
+        /* #3974: CurrentConfigSql now binds a $4 lower bound; the planted snapshot is minutes old, so the
+           day bound finds it directly. */
+        command.Parameters.AddWithValue(DarlingPgServerConfigReader.ConfigSnapshotLowerBounds(snapshot.AddMinutes(3))[0]);
         using var reader = await command.ExecuteReaderAsync(ct);
         var names = new List<string>();
         while (await reader.ReadAsync(ct))

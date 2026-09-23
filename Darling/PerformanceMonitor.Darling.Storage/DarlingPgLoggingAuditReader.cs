@@ -74,7 +74,13 @@ public static class DarlingPgLoggingAuditReader
 
     /* The same two-step anchor as CurrentConfigSql: the newest collection_time for the server, then every
        non-session row at that instant. ORDER BY name so the judgment code's lookups and the test fixtures
-       meet the rows in one stable order. */
+       meet the rows in one stable order.
+
+       #3974: bounded from below by DarlingPgServerConfigReader.ConfigSnapshotLowerBounds on both the anchor
+       and the row scan, the same day-first-then-unbounded shape CurrentConfigSql runs (its remark has the
+       measurement) - GetNewestSnapshotAsync runs the day first and falls back only when that found no rows,
+       which for this ALWAYS-non-empty population (a snapshot's server-wide rows never number zero) means
+       only when the day found no snapshot at all. $2 the lower bound. */
     public const string NewestSnapshotSql = """
         SELECT
             c.name,
@@ -87,10 +93,12 @@ public static class DarlingPgLoggingAuditReader
             c.collection_time
         FROM pg_server_config AS c
         WHERE c.server_id = $1
+        AND   c.collection_time >= $2
         AND   c.collection_time = (
                   SELECT MAX(collection_time)
                   FROM pg_server_config
-                  WHERE server_id = $1)
+                  WHERE server_id = $1
+                  AND   collection_time >= $2)
         AND   c.name IS NOT NULL
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
         /* V138 (#3691): server-wide rows only. pg_server_config also holds the per-database and per-role
@@ -111,23 +119,32 @@ public static class DarlingPgLoggingAuditReader
         ArgumentNullException.ThrowIfNull(postgres);
 
         var rows = new List<PgLoggingSettingRow>();
-        await using var command = postgres.CreateCommand(NewestSnapshotSql);
-        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        command.Parameters.AddWithValue(serverId);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        /* #3974: the day first, and every retained snapshot only when that found nothing. */
+        foreach (var lowerBound in DarlingPgServerConfigReader.ConfigSnapshotLowerBounds(DateTime.UtcNow))
         {
-            rows.Add(new PgLoggingSettingRow(
-                Name: reader.GetString(0),
-                Setting: reader.IsDBNull(1) ? null : reader.GetString(1),
-                Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
-                Context: reader.IsDBNull(3) ? null : reader.GetString(3),
-                Source: reader.IsDBNull(4) ? null : reader.GetString(4),
-                BootValue: reader.IsDBNull(5) ? null : reader.GetString(5),
-                PendingRestart: !reader.IsDBNull(6) && reader.GetBoolean(6),
-                /* Stored naive-UTC, read back as UTC — the readiness reader's convention. */
-                CollectionTime: DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)));
+            rows.Clear();
+            await using var command = postgres.CreateCommand(NewestSnapshotSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(lowerBound);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new PgLoggingSettingRow(
+                    Name: reader.GetString(0),
+                    Setting: reader.IsDBNull(1) ? null : reader.GetString(1),
+                    Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Context: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Source: reader.IsDBNull(4) ? null : reader.GetString(4),
+                    BootValue: reader.IsDBNull(5) ? null : reader.GetString(5),
+                    PendingRestart: !reader.IsDBNull(6) && reader.GetBoolean(6),
+                    /* Stored naive-UTC, read back as UTC — the readiness reader's convention. */
+                    CollectionTime: DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)));
+            }
+
+            if (rows.Count > 0) break;
         }
 
         return rows;
