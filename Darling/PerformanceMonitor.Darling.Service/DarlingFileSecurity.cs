@@ -300,6 +300,7 @@ public static class DarlingFileSecurity
         return null;
     }
 
+    private const uint GenericRead = 0x80000000;
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
     private const uint FileReadAttributes = 0x00000080;
@@ -444,6 +445,149 @@ public static class DarlingFileSecurity
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// The accounts beyond SYSTEM, Administrators and the service account that hold ANY Allow entry on
+    /// <paramref name="path"/>, as one line for a refusal, or null when there are none (#4028). An ALLOWLIST, where
+    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the three broad groups, which INTERACTIVE, Domain
+    /// Users or one named user all pass. For the log-hash key, which nothing but the service reads; the credential
+    /// files keep the denylist their existing DACLs were built against, so this cannot newly refuse an install's
+    /// credentials. Unlike the denylist, a DACL that cannot be read is reported, not passed: this is the check a key
+    /// is trusted on.
+    ///
+    /// <para>Any right counts, not only <see cref="FileSystemRights.ReadData"/> (#4044 review). An account holding
+    /// WriteData can put a key of its own in place, one any local user can DPAPI-protect, because the protection is
+    /// LocalMachine and the entropy is in the source; one holding ChangePermissions or TakeOwnership can grant itself
+    /// the read. The service writes only the three trusted entries, so any other is someone else's doing.</para>
+    /// </summary>
+    public static string? AccessBeyondTrusted(string path)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new FileInfo(path).GetAccessControl());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    private static string? AccessBeyondTrusted(FileSystemSecurity security)
+    {
+        var accounts = new List<string>();
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+        {
+            if (rule.AccessControlType != AccessControlType.Allow
+                || rule.IdentityReference is not SecurityIdentifier sid
+                || IsTrusted(sid))
+            {
+                continue;
+            }
+
+            string name;
+            try
+            {
+                name = sid.Translate(typeof(NTAccount)).Value;
+            }
+            catch (IdentityNotMappedException)
+            {
+                name = sid.Value;
+            }
+
+            if (!accounts.Contains(name))
+            {
+                accounts.Add(name);
+            }
+        }
+
+        return accounts.Count == 0 ? null : string.Join(", ", accounts);
+    }
+
+    private static bool IsTrusted(SecurityIdentifier sid) =>
+        sid.Equals(LocalSystem) || sid.Equals(Administrators) || sid.Equals(ServiceAccount);
+
+    /// <summary>
+    /// Opens <paramref name="path"/>, a file only the service reads, and judges it through that one handle (#4044
+    /// review): not a junction, symbolic link or directory, one name only, owned by SYSTEM, Administrators or the
+    /// service account, and no Allow entry for anyone else (<see cref="AccessBeyondTrusted(string)"/>). Checked by
+    /// path and then read by path, the check and the read could each find a different file: whoever can write the
+    /// directory can swap one in between. The handle shares read and nothing else, so while it is held the file
+    /// cannot be renamed, deleted, replaced or written, and what was judged is what the returned stream reads.
+    /// </summary>
+    /// <returns>The stream, unbuffered, at the start of the file; or null, with <paramref name="refusal"/> saying why
+    /// nothing may be read from the path.</returns>
+    public static FileStream? OpenForServiceOnlyRead(string path, out string? refusal)
+    {
+        var handle = CreateFileW(path, GenericRead, FileShare.Read, IntPtr.Zero, FileMode.Open, FileFlagOpenReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            refusal = $"it could not be opened for the service alone to read ({new System.ComponentModel.Win32Exception(error).Message})";
+            return null;
+        }
+
+        FileStream? stream = null;
+        var handedOver = false;
+        try
+        {
+            if ((File.GetAttributes(handle) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+            {
+                refusal = "it is a junction, a symbolic link or a directory";
+                return null;
+            }
+
+            if (!GetFileInformationByHandle(handle, out var information))
+            {
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                refusal = $"it could not be checked for hard links ({new System.ComponentModel.Win32Exception(error).Message})";
+                return null;
+            }
+
+            if (information.NumberOfLinks > 1)
+            {
+                refusal = $"it is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and whoever made another one reaches the same bytes";
+                return null;
+            }
+
+            stream = new FileStream(handle, FileAccess.Read, bufferSize: 0);
+            var security = stream.GetAccessControl();
+            if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !IsTrusted(owner))
+            {
+                refusal = "it is not owned by SYSTEM, Administrators or the service account";
+                return null;
+            }
+
+            if (AccessBeyondTrusted(security) is { } accounts)
+            {
+                refusal = $"accounts beyond SYSTEM, Administrators and the service account have access to it: {accounts}";
+                return null;
+            }
+
+            refusal = null;
+            handedOver = true;
+            return stream;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            refusal = $"it could not be checked through the open file ({ex.Message})";
+            return null;
+        }
+        finally
+        {
+            if (!handedOver)
+            {
+                if (stream is not null)
+                {
+                    stream.Dispose();
+                }
+                else
+                {
+                    handle.Dispose();
+                }
+            }
         }
     }
 
