@@ -561,10 +561,12 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("MAX(coalesce(p.stmt_ms, 0) / c.collection_ms)        AS peak_share", sql, StringComparison.Ordinal);
         Assert.Contains("AVG(coalesce(p.stmt_ms, 0) / c.collection_ms)        AS mean_share", sql, StringComparison.Ordinal);
         Assert.Contains("w.stmt_ms / w.window_ms", sql, StringComparison.Ordinal);
-        /* The same rule as the keyed arm it is compared against. */
+        /* The same rule as the keyed arm it is compared against: a collection is a sample when its statements ran
+           something, and one this statement sat out is a zero (#3901's set form: each member's slot of every busy
+           collection, coalesced). */
         var arm = PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(MetricNames.PgStatementShare)!;
         Assert.Contains("HAVING SUM(delta_total_exec_time_ms) > 0", arm, StringComparison.Ordinal);
-        Assert.Contains("coalesce(stmt_ms, 0) / total_ms", arm, StringComparison.Ordinal);
+        Assert.Contains("coalesce(stmt_ms[mem.member], 0) / total_ms", arm, StringComparison.Ordinal);
 
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Queries.cs");
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
@@ -578,8 +580,14 @@ public sealed class PgTargetQueriesTests
         Assert.Contains("verdicts[OwnNormalMetadataPrefix + key] = 1;", code, StringComparison.Ordinal);
         Assert.Contains("verdicts[OwnNormalMetadataPrefix + key] = 2;", code, StringComparison.Ordinal);
         Assert.DoesNotContain("[\"queryid\"]", code, StringComparison.Ordinal);
-        /* The keyed seam, the trust check ahead of the gate, the unreachable fallback, the pair gate on the measured-routine floor. */
-        Assert.Contains("_baselineProvider.GetBaselineAsync(\r\n                    context.ServerId, MetricNames.PgStatementShare, key, context.TimeRangeStart, context.CancellationToken)", code.Replace("\n", "\r\n", StringComparison.Ordinal).Replace("\r\r\n", "\r\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        /* The keyed seam — every candidate in ONE set read ahead of the loop (#3901), each candidate's bucket looked up
+           by its key inside it — the trust check ahead of the gate, the unreachable fallback, the pair gate on the
+           measured-routine floor. */
+        var crlf = code.Replace("\n", "\r\n", StringComparison.Ordinal).Replace("\r\r\n", "\r\n", StringComparison.Ordinal);
+        Assert.Contains("_baselineProvider.GetBaselinesAsync(\r\n                context.ServerId, MetricNames.PgStatementShare, keys, context.TimeRangeStart, context.CancellationToken)", crlf, StringComparison.Ordinal);
+        Assert.True(code.IndexOf("_baselineProvider.GetBaselinesAsync(", StringComparison.Ordinal) < code.IndexOf("foreach (var candidate in candidates)", StringComparison.Ordinal),
+            "the set read must precede the candidate loop");
+        Assert.Contains("var baseline = baselines[key];", code, StringComparison.Ordinal);
         Assert.Contains("if (baseline.SampleCount == 0 || !baseline.IsTrustworthy || candidate.Samples == 0)", code, StringComparison.Ordinal);
         Assert.Contains("PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, SigmaDisplayCap", code, StringComparison.Ordinal);
         Assert.Contains("ModifiedZThresholdFor(MetricNames.PgStatementShare)", code, StringComparison.Ordinal);

@@ -408,7 +408,12 @@ public sealed class PgTargetAnomalyTests
             var partialCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", file));
             Assert.Contains("private async partial Task " + detector + "(", partialCode, StringComparison.Ordinal);
             Assert.Contains("catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))", partialCode, StringComparison.Ordinal);
-            Assert.Contains("_baselineProvider.GetBaselineAsync(", partialCode, StringComparison.Ordinal);
+            /* Its buckets through the provider: the unkeyed lookup, or — the two keyed detectors, #3901 — ONE set read
+               for the whole candidate list (the per-candidate keyed lookup they replaced is pinned away below). */
+            Assert.True(
+                partialCode.Contains("_baselineProvider.GetBaselineAsync(", StringComparison.Ordinal)
+                || partialCode.Contains("_baselineProvider.GetBaselinesAsync(", StringComparison.Ordinal),
+                $"{file} reads no bucket through the provider");
             Assert.DoesNotContain("DateTime.UtcNow", partialCode, StringComparison.Ordinal);
         }
         /* No exemption remains: both v3 stubs were filled (lane 27 the plan one, lane 28 the kernel one), so no detector
@@ -431,7 +436,10 @@ public sealed class PgTargetAnomalyTests
            old absolute grade silently". */
         var queriesDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Queries.cs"));
         Assert.Contains("baseline, candidate.PeakShare, candidate.MeanShare,", queriesDetector, StringComparison.Ordinal);
-        Assert.Contains("MetricNames.PgStatementShare, key, context.TimeRangeStart, context.CancellationToken", queriesDetector, StringComparison.Ordinal);
+        /* #3901: the keyed seam as ONE set read for the candidate list, ahead of the loop — never a keyed call per
+           candidate, which re-read the 30-day slice once per statement. */
+        Assert.Contains("MetricNames.PgStatementShare, keys, context.TimeRangeStart, context.CancellationToken", queriesDetector, StringComparison.Ordinal);
+        Assert.DoesNotContain("_baselineProvider.GetBaselineAsync(", queriesDetector, StringComparison.Ordinal);
         Assert.Contains("!baseline.IsTrustworthy", queriesDetector, StringComparison.Ordinal);
         Assert.Contains("double.PositiveInfinity", queriesDetector, StringComparison.Ordinal);
         Assert.True(queriesDetector.IndexOf("!baseline.IsTrustworthy", StringComparison.Ordinal) < queriesDetector.IndexOf("AnomalyGate.EvaluateZScore(", StringComparison.Ordinal));

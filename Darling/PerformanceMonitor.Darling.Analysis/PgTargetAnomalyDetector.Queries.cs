@@ -84,8 +84,8 @@ ORDER BY w.stmt_ms DESC";
     /// <summary>
     /// <see cref="PgTargetFactKeys.AnomalyBadActorShare"/> (lane 34, ruled 2026-09-20): ONE statement's share of the
     /// window's execution time against that statement's OWN hour-of-week share baseline — lane 33's keyed
-    /// <c>pg_statement_share</c> arm, read through the five-argument <c>GetBaselineAsync</c> with the <c>queryid</c> as
-    /// the key — the z-score shape on the #3653 PAIR gate, graded by the shared deviation ramp
+    /// <c>pg_statement_share</c> arm, read through the keyed <c>GetBaselinesAsync</c> with the <c>queryid</c>s as
+    /// the keys — the z-score shape on the #3653 PAIR gate, graded by the shared deviation ramp
     /// (<c>PgTargetScorer.IsDeviationScoredAnomalyKey</c>). The ruling this detector implements: <i>the bad actor is
     /// graded as deviation from the statement's own hour-of-week share baseline; the absolute share is context</i> —
     /// because the 2026-09-20 read (§C4) found the absolute bars ROUTINE (given a busy hour, top-1 share ≥ 0.25 on 85 %
@@ -140,8 +140,9 @@ ORDER BY w.stmt_ms DESC";
     ///
     /// <para><b>Silent by design</b> when the window has no statement rows (no <c>pg_stat_statements</c>, a young
     /// store), when no candidate has a trustworthy own-normal, and when none is beyond it. Fenced like every
-    /// detector; the keyed reads are lane 33's cached series (one 30-day scan per (server, statement) per cache
-    /// period, at most <c>TopStatementCount</c> of them per pass).</para>
+    /// detector; the keyed reads are lane 33's cached series, asked for as ONE set (#3901: one 30-day read of
+    /// <c>pg_statement_stats</c> per cache period for all <c>TopStatementCount</c> candidates, not one per
+    /// statement).</para>
     /// </summary>
     private async partial Task DetectBadActorShareAnomalies(AnalysisContext context, List<Fact> anomalies)
     {
@@ -166,6 +167,12 @@ ORDER BY w.stmt_ms DESC";
             }
             if (candidates.Count == 0) return;
 
+            /* #3901: every candidate's own-normal in ONE keyed read — the arm reads the 30-day slice once for the set,
+               where asking per candidate re-read it (and recomputed every collection's total) once per statement. */
+            var keys = candidates.ConvertAll(candidate => candidate.QueryId.ToString(CultureInfo.InvariantCulture));
+            var baselines = await _baselineProvider.GetBaselinesAsync(
+                context.ServerId, MetricNames.PgStatementShare, keys, context.TimeRangeStart, context.CancellationToken);
+
             var verdicts = new Dictionary<string, double>(StringComparer.Ordinal);
             var withoutBaseline = 0;
             var fired = 0;
@@ -174,8 +181,7 @@ ORDER BY w.stmt_ms DESC";
             foreach (var candidate in candidates)
             {
                 var key = candidate.QueryId.ToString(CultureInfo.InvariantCulture);
-                var baseline = await _baselineProvider.GetBaselineAsync(
-                    context.ServerId, MetricNames.PgStatementShare, key, context.TimeRangeStart, context.CancellationToken);
+                var baseline = baselines[key];
 
                 /* No trustworthy own-normal: recorded, never graded — the ruling's "first seen; no own-normal yet". */
                 if (baseline.SampleCount == 0 || !baseline.IsTrustworthy || candidate.Samples == 0)

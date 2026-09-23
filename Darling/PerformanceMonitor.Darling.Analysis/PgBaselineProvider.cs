@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -71,7 +72,9 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// metric, key) — the key a <c>queryid</c> as text for the first consumer, a statement's own hour-of-week share of
 /// the server's execution time — resolved through the THIRD seam, <see cref="ResolveKeyedBaselineQuery"/>, and bound
 /// as <c>$7</c> after the clock parameters. The four-argument overload is the unkeyed series, byte-identical to what
-/// it was, and the base declares no keyed metric: the SQL Server store's arms are all population-wide.
+/// it was, and the base declares no keyed metric: the SQL Server store's arms are all population-wide. Since #3901 a
+/// keyed compute takes a SET of members — <see cref="GetBaselinesAsync"/>, with <c>$7</c> the members' keys as
+/// <c>text[]</c> — so a detector's whole candidate set costs one read of the arm's table, not one per member.
 /// </para>
 ///
 /// <para>
@@ -159,29 +162,31 @@ public class PgBaselineProvider
     /// impossible with one series per (server, metric).
     ///
     /// <para><b>Mechanism.</b> The key is a third segment of the cache key (<see cref="CacheKeyFor"/>), so two keys
-    /// are two independent computes and two cache entries with their own TTL; the SQL is resolved through
+    /// are two cache entries with their own TTL; the SQL is resolved through
     /// <see cref="ResolveKeyedBaselineQuery"/> — a SEPARATE seam from <see cref="ResolveBaselineQuery"/>, so a
     /// provider declares which of its metrics have a keyed shape and which do not (the base declares none: the SQL
     /// Server store has no keyed arm, and a keyed call for any metric there is "no baseline", never a server-wide
-    /// bucket mistaken for a member's) — and the key is bound as <c>$7</c>, AFTER the six the unkeyed compute binds
-    /// (<c>$1</c> server, <c>$2</c>/<c>$3</c> window, <c>$4..$6</c> the Q6 clock), so a keyed arm is an ordinary arm
-    /// ending in <c>clean(collection_time, v)</c> + <see cref="RobustTierScaffold"/> whose own text adds
-    /// <c>queryid = $7::BIGINT</c> (or whatever its dimension is) and inherits the local-clock key, the eight-column
-    /// reader, the timeout classification and the degrade-to-empty posture unchanged. Neither PostgreSQL nor Npgsql
+    /// bucket mistaken for a member's) — and the keys are bound as <c>$7</c>, a <c>text[]</c>, AFTER the six the
+    /// unkeyed compute binds (<c>$1</c> server, <c>$2</c>/<c>$3</c> window, <c>$4..$6</c> the Q6 clock), so a keyed arm
+    /// reads its table once for the set, hands each member's <c>clean(collection_time, v)</c> to
+    /// <see cref="RobustTierScaffold"/> through <see cref="PerMemberScaffold"/> (#3901), casts the array's keys to its
+    /// column's type (<c>($7::BIGINT[])[slot]</c> for a <c>queryid</c>, or whatever its dimension is) and inherits the
+    /// local-clock key, the eight-column reader, the timeout classification and the degrade-to-empty posture unchanged. Neither PostgreSQL nor Npgsql
     /// complains about a bound parameter a statement does not reference (measured in #3749), which is why the
     /// census in <c>LocalClockBucketKeyTests</c> is TWO-ARMED: an unkeyed statement references exactly <c>$1..$6</c>,
     /// a keyed one exactly <c>$1..$7</c> — a keyed arm that forgot the clock would otherwise key on UTC silently, and
     /// an unkeyed arm that named <c>$7</c> would fail at execution on every pass.</para>
     ///
-    /// <para><b>Cardinality, stated honestly.</b> A keyed series is one cache entry per (server, metric, key) and one
-    /// 30-day scan per entry per <see cref="CacheTtl"/>. The provider refuses nothing — it cannot know which keys
-    /// matter — so the CONSUMER bounds the population: a detector or scorer calling this overload asks only for the
-    /// TOP-N members of its window (lane 34 asks for the top-share candidates the bad-actor read already returns,
-    /// never every statement the server ran), and says so in its doc. What the provider does is make a runaway
-    /// consumer visible: when the keyed entries in the cache exceed <see cref="KeyedBaselineCacheWarnCount"/> it
-    /// logs the count once per cache period (<see cref="ShouldWarnKeyedCardinality"/>), which is the closest thing
-    /// this class has to "once per pass" — within one TTL a pass's repeat lookups are cache hits that compute
-    /// nothing.</para>
+    /// <para><b>Cardinality, stated honestly.</b> A keyed series is one cache entry per (server, metric, key), and
+    /// since #3901 one read of the arm's table per keyed COMPUTE, however many members it covers — this overload is
+    /// a set of one (<see cref="GetBaselinesAsync"/>), so a consumer with several members asks for them together and
+    /// pays one scan, not one per member. The provider refuses nothing — it cannot know which keys matter — so the
+    /// CONSUMER bounds the population: a detector or scorer asks only for the TOP-N members of its window (lane 34
+    /// asks for the top-share candidates the bad-actor read already returns, never every statement the server ran),
+    /// and says so in its doc. What the provider does is make a runaway consumer visible: when the keyed entries in
+    /// the cache exceed <see cref="KeyedBaselineCacheWarnCount"/> it logs the count once per cache period
+    /// (<see cref="ShouldWarnKeyedCardinality"/>), which is the closest thing this class has to "once per pass" —
+    /// within one TTL a pass's repeat lookups are cache hits that compute nothing.</para>
     ///
     /// <para><b>What it does not do.</b> No key travels into <c>BaselineBucket</c> or <c>BaselineMath</c> — the
     /// bucket a keyed call returns is the same shape an unkeyed one returns, and the caller that passed the key is the
@@ -191,7 +196,55 @@ public class PgBaselineProvider
     public async Task<BaselineBucket> GetBaselineAsync(
         int serverId, string metricName, string? key, DateTime analysisTime, CancellationToken cancellationToken = default)
     {
-        var cached = await GetOrComputeBaselinesAsync(serverId, metricName, key, analysisTime, cancellationToken);
+        if (key is not null)
+        {
+            /* #3901: one member is a set of one — the keyed arms are set-based, so there is ONE keyed path. */
+            return (await GetBaselinesAsync(serverId, metricName, [key], analysisTime, cancellationToken))[key];
+        }
+
+        return LookUp(await GetOrComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken), analysisTime);
+    }
+
+    /// <summary>
+    /// The KEYED series of a whole member SET in one read (#3901): for every key in <paramref name="keys"/>, exactly
+    /// the bucket the five-argument <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>
+    /// returns for it, keyed by that string (ordinal). The keys still cached for this analysis hour are hits; every
+    /// miss is computed in ONE statement — the keyed arm with <c>$7</c> bound to the misses as <c>text[]</c> — and
+    /// cached as its own entry, so a later call for any one of them is a hit exactly as before.
+    ///
+    /// <para><b>Why a set.</b> The detectors ask for their candidates' series one after another (lane 34's top-share
+    /// statements, lane 39's flipped ones), and a keyed arm cannot narrow its read to one member: the statement
+    /// family's only index is (server_id, collection_time), so each member's compute read the server's whole 30-day
+    /// slice of <c>pg_statement_stats</c>, and the share arm recomputed the identical per-collection total inside
+    /// every one. On the production PostgreSQL store that was about 70 % of a cold <c>analyze_server</c> (#3901: one
+    /// 30-day scan per statement per metric per pass). A set is one scan per metric; each member's buckets come from
+    /// the same rows through the same scaffold (<see cref="PerMemberScaffold"/>), so the answer per key is the
+    /// per-member answer.</para>
+    ///
+    /// <para>Duplicate keys are asked for once. An empty set reads nothing. More misses than
+    /// <see cref="KeyedSetWidth"/> are computed <see cref="KeyedSetWidth"/> at a time, one read each. A failed compute is
+    /// its set's failure: every miss in it caches "no baseline" for the pass, as one failed per-member compute did for
+    /// its member.</para>
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, BaselineBucket>> GetBaselinesAsync(
+        int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+
+        var entries = await GetOrComputeKeyedBaselinesAsync(serverId, metricName, keys, analysisTime, cancellationToken);
+        var buckets = new Dictionary<string, BaselineBucket>(entries.Count, StringComparer.Ordinal);
+        foreach (var (key, cached) in entries)
+        {
+            buckets[key] = LookUp(cached, analysisTime);
+        }
+
+        return buckets;
+    }
+
+    /// <summary>The one lookup body, for both series: the entry's buckets at the analysis time's hour-of-week, or
+    /// <see cref="BaselineBucket.Empty"/> when the compute found nothing (or failed).</summary>
+    private static BaselineBucket LookUp(CachedBaseline cached, DateTime analysisTime)
+    {
         var baselines = cached.Buckets;
         if (baselines == null || baselines.Count == 0)
             return BaselineBucket.Empty;
@@ -228,7 +281,7 @@ public class PgBaselineProvider
     /// <summary>
     /// The keyed-entry count above which the provider logs the cache's size (#3691 lane 33) — a runaway consumer
     /// asking for every statement's series instead of its top-N is visible in the log before it is visible as a
-    /// store that scans 30 days per statement per hour. Chosen, not measured: 500 is ten servers × a fifty-statement
+    /// store computing a month of buckets per statement per hour. Chosen, not measured: 500 is ten servers × a fifty-statement
     /// top-N at the widest consumer the campaign has ruled on (lane 34 asks for the top-1 share candidates), so a
     /// count above it means a consumer is NOT bounding — calibrate against the keyed entry counts a fleet pass
     /// actually reaches before the next release. A ceiling, not a cap: the provider refuses nothing (the lookup's
@@ -250,36 +303,132 @@ public class PgBaselineProvider
            && (lastWarnedAt is null || nowUtc - lastWarnedAt.Value >= CacheTtl);
 
     private async Task<CachedBaseline> GetOrComputeBaselinesAsync(
-        int serverId, string metricName, string? key, DateTime analysisTime, CancellationToken cancellationToken)
+        int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
-        var cacheKey = CacheKeyFor(serverId, metricName, key);
-        var roundedHour = new DateTime(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
+        var cacheKey = CacheKeyFor(serverId, metricName, key: null);
+        var roundedHour = RoundedHour(analysisTime);
 
-        if (_cache.TryGetValue(cacheKey, out var cached) &&
-            cached.ComputedAt == roundedHour &&
-            (DateTime.UtcNow - cached.RealTime) < CacheTtl)
+        if (TryGetFresh(cacheKey, roundedHour, out var cached))
         {
             return cached;
         }
 
-        var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, key, analysisTime, cancellationToken);
+        var (byMember, clock) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
         var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = DateTime.UtcNow,
-            Buckets = buckets,
-            Clock = clock,
-            Key = key
+            Buckets = BucketsOf(byMember, UnkeyedMember),
+            Clock = clock
         };
         _cache[cacheKey] = entry;
 
-        if (key is not null)
+        return entry;
+    }
+
+    /// <summary>
+    /// The most members one keyed compute carries (#3901): every keyed arm has exactly this many member SLOTS — slot
+    /// <c>i</c> aggregates the <c>i</c>-th key of <c>$7</c> in the arm's one read — so the provider packs a set's misses
+    /// into computes of at most this many keys. Eight covers the detectors' candidate sets
+    /// (<c>PgTargetFactCollector.TopStatementCount</c>, five, for both keyed consumers) in one read with room to spare;
+    /// each slot costs every row the read scans one more predicate, and a wider set than this costs one more read per
+    /// eight. Chosen, not measured.
+    /// </summary>
+    internal const int KeyedSetWidth = 8;
+
+    /// <summary>
+    /// The keyed half of the cache (#3901): the fresh entries for <paramref name="keys"/> as they are, and the misses in
+    /// computes of up to <see cref="KeyedSetWidth"/> keys — ONE for any set the detectors ask for — whose rows the arm
+    /// numbers by member, the key's 1-based position in that compute's <c>$7</c>. Each miss is cached as its own entry
+    /// with its compute's clock and time, so the next call for any one key is a hit on its own entry exactly as a
+    /// per-member compute's was.
+    /// </summary>
+    private async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
+        int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, CancellationToken cancellationToken)
+    {
+        var roundedHour = RoundedHour(analysisTime);
+        var entries = new Dictionary<string, CachedBaseline>(StringComparer.Ordinal);
+        var misses = new List<string>();
+        var asked = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var key in keys)
         {
-            NoteKeyedCardinality(serverId, metricName);
+            /* "No key" is the unkeyed overload's null; inside a set it is a caller defect, not a member. */
+            ArgumentNullException.ThrowIfNull(key, nameof(keys));
+            if (!asked.Add(key))
+            {
+                continue;
+            }
+
+            var cacheKey = CacheKeyFor(serverId, metricName, key);
+            if (TryGetFresh(cacheKey, roundedHour, out var cached))
+            {
+                entries[key] = cached;
+            }
+            else
+            {
+                misses.Add(key);
+            }
         }
 
-        return entry;
+        if (misses.Count == 0)
+        {
+            return entries;
+        }
+
+        foreach (var set in misses.Chunk(KeyedSetWidth))
+        {
+            var (byMember, clock) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
+
+            var computedAt = DateTime.UtcNow;
+            for (var member = 1; member <= set.Length; member++)
+            {
+                var key = set[member - 1];
+                var entry = new CachedBaseline
+                {
+                    ComputedAt = roundedHour,
+                    RealTime = computedAt,
+                    Buckets = BucketsOf(byMember, member),
+                    Clock = clock,
+                    Key = key
+                };
+                _cache[CacheKeyFor(serverId, metricName, key)] = entry;
+                entries[key] = entry;
+            }
+        }
+
+        NoteKeyedCardinality(serverId, metricName);
+
+        return entries;
+    }
+
+    private static DateTime RoundedHour(DateTime analysisTime)
+        => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
+
+    private bool TryGetFresh(string cacheKey, DateTime roundedHour, [NotNullWhen(true)] out CachedBaseline? cached)
+        => _cache.TryGetValue(cacheKey, out cached)
+           && cached.ComputedAt == roundedHour
+           && (DateTime.UtcNow - cached.RealTime) < CacheTtl;
+
+    /// <summary>The member an UNKEYED compute's rows are filed under — keyed members are numbered from 1, so it can
+    /// never collide with one.</summary>
+    private const long UnkeyedMember = 0;
+
+    /// <summary>
+    /// One member's buckets out of a compute (#3901): null when the compute failed or the metric has no arm — "no
+    /// baseline" — and an EMPTY map when the compute ran and found no rows for this member, which is exactly what a
+    /// per-member compute returned for a member with no rows, so the lookup and the cache cannot tell the two apart.
+    /// </summary>
+    private static Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? BucketsOf(
+        Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? byMember, long member)
+    {
+        if (byMember is null)
+        {
+            return null;
+        }
+
+        return byMember.TryGetValue(member, out var buckets) ? buckets : new Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>();
     }
 
     /// <summary>The cardinality note itself (#3691 lane 33): Warning, because a consumer over the bar is a defect in
@@ -299,20 +448,20 @@ public class PgBaselineProvider
         }
 
         _logger?.LogWarning(
-            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}) — each is a 30-day scan per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
+            "[PgBaselineProvider] {KeyedEntries} keyed baseline series are cached (bar {WarnCount}; latest server {ServerId}, metric {MetricName}) — each is a month of per-member buckets computed per cache period, so a consumer of the keyed overload is not bounding itself to its window's top-N (#3691 lane 33). Noted once per cache period.",
             keyedEntries, KeyedBaselineCacheWarnCount, serverId, metricName);
     }
 
-    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
-        int serverId, string metricName, string? key, DateTime analysisTime, CancellationToken cancellationToken)
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock)> ComputeBaselinesAsync(
+        int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, CancellationToken cancellationToken)
     {
         /* Two seams, never one: a keyed lookup resolves ONLY through the keyed seam, so a metric with an unkeyed arm
            and no keyed one answers "no baseline" to a keyed call rather than the population's buckets under a member's
            name — and the reverse, so lane 27's server-wide arm keeps answering the unkeyed call it always answered. */
-        var query = key is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);
+        var query = keys is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);
         if (query == null) return (null, LocalClockWindow.Utc(analysisTime));
 
-        return await ComputeBucketsAsync(serverId, metricName, key, analysisTime, query, cancellationToken);
+        return await ComputeBucketsAsync(serverId, metricName, keys, analysisTime, query, cancellationToken);
     }
 
     /// <summary>
@@ -378,14 +527,16 @@ LIMIT 1";
 
     /// <summary>
     /// The third seam (#3691 lane 33, after <see cref="ResolveBaselineQuery"/> and <see cref="ReadServerClockAsync"/>):
-    /// which SQL computes <paramref name="metricName"/>'s buckets for ONE member of a population, when the caller
-    /// passed a key to <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>. The base
+    /// which SQL computes <paramref name="metricName"/>'s buckets for the MEMBERS of a population a caller passed keys
+    /// for (<see cref="GetBaselinesAsync"/>, or one key through
+    /// <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>). The base
     /// declares no keyed metric — the SQL Server store's arms are all population-wide, and a keyed call against this
     /// class is "no baseline for this metric" exactly as an unknown name is; <c>PgBaselineProviderKeyedTests</c> pins
     /// that for every declared metric name. <see cref="PgTargetBaselineProvider"/> overrides it for the statement
-    /// family. The text an override returns is an ordinary arm plus a <c>$7</c> predicate on its member column
-    /// (<c>queryid = $7::BIGINT</c> — the key is bound as text, and an arm casts it to its own column's type), and the
-    /// two-armed census in <c>LocalClockBucketKeyTests</c> holds it to exactly <c>$1..$7</c>.
+    /// family. The text an override returns reads its table once for every key in <c>$7</c> (a <c>text[]</c> of up to
+    /// <see cref="KeyedSetWidth"/> keys the arm casts to its own column's type — <c>($7::BIGINT[])[slot]</c>) and ends in
+    /// <see cref="PerMemberScaffold"/> (#3901), and the two-armed census in <c>LocalClockBucketKeyTests</c> holds it to
+    /// exactly <c>$1..$7</c>.
     /// </summary>
     protected virtual string? ResolveKeyedBaselineQuery(string metricName) => null;
 
@@ -522,8 +673,14 @@ LIMIT 1";
         return await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
     }
 
-    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBucketsAsync(
-        int serverId, string metricName, string? key, DateTime analysisTime, string query, CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs one bucket statement and files its rows by MEMBER: every row of an unkeyed statement under
+    /// <see cref="UnkeyedMember"/>, every row of a keyed one under the <c>member</c> column the arm returns beside the
+    /// eight robust ones — the 1-based position in <paramref name="keys"/> of the key the row belongs to (#3901, see
+    /// <see cref="PerMemberScaffold"/>). Null on failure, through the one classified catch.
+    /// </summary>
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock)> ComputeBucketsAsync(
+        int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
@@ -539,7 +696,7 @@ LIMIT 1";
             /* The successor/legacy supply swap is the SQL Server pair's (#3653) and compares the text against this
                class's own unkeyed successor arm; a keyed arm's text never matches it, so the swap is inert for a keyed
                compute by construction — skipped explicitly so the two probes are not paid for nothing. */
-            if (key is null)
+            if (keys is null)
             {
                 query = await ChooseSupplyAsync(connection, serverId, metricName, query, windowStart, cancellationToken);
             }
@@ -563,17 +720,19 @@ LIMIT 1";
             cmd.Parameters.AddWithValue(AsNaive(clock.TransitionAtUtc));
             cmd.Parameters.AddWithValue(clock.OffsetBeforeMinutes);
             cmd.Parameters.AddWithValue(clock.OffsetAfterMinutes);
-            /* $7 (#3691 lane 33): the member key, bound as text and ONLY on a keyed compute — an unkeyed statement
+            /* $7 (#3691 lane 33): the member keys, bound as text[] and ONLY on a keyed compute — an unkeyed statement
                never sees a seventh parameter, so the SQL Server pass binds exactly what it bound before this seam
-               existed. A keyed arm casts it to its column's type (queryid = $7::BIGINT); the two-armed census in
-               LocalClockBucketKeyTests holds keyed text to $1..$7 and unkeyed text to $1..$6, because the engine
-               accepts a surplus bind and would run a keyed arm that forgot the clock parameters on UTC without a word. */
-            if (key is not null)
+               existed. Since #3901 it is a member SET (up to KeyedSetWidth of the keys the call missed on), so a
+               detector's candidates cost one statement; a keyed arm casts the keys to its column's type
+               (($7::BIGINT[])[slot]) and numbers its rows by position in the array. The two-armed census in
+               LocalClockBucketKeyTests holds keyed text to $1..$7 and unkeyed text to $1..$6, because the engine accepts
+               a surplus bind and would run a keyed arm that forgot the clock parameters on UTC without a word. */
+            if (keys is not null)
             {
-                cmd.Parameters.AddWithValue(key);
+                cmd.Parameters.AddWithValue(keys.ToArray());
             }
 
-            var buckets = new Dictionary<(int, int), BaselineBucket>();
+            var byMember = new Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>();
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
@@ -581,8 +740,18 @@ LIMIT 1";
                keep the six-column classical shape — detected by column count, so their buckets
                read Median=0/Mad=0 and the robust path degrades for them. */
             var hasRobustColumns = reader.FieldCount >= 8;
+            /* #3901: a keyed statement names the member each row belongs to; by name, so the eight ordinals above
+               stay the reader's contract for both kinds of statement. */
+            var memberOrdinal = keys is null ? -1 : reader.GetOrdinal("member");
             while (await reader.ReadAsync(cancellationToken))
             {
+                var member = memberOrdinal < 0 ? UnkeyedMember : Convert.ToInt64(reader.GetValue(memberOrdinal));
+                if (!byMember.TryGetValue(member, out var buckets))
+                {
+                    buckets = new Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>();
+                    byMember[member] = buckets;
+                }
+
                 var hour = Convert.ToInt32(reader.GetValue(0));
                 var dow = Convert.ToInt32(reader.GetValue(1));
                 var mean = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
@@ -613,7 +782,7 @@ LIMIT 1";
                 };
             }
 
-            return (buckets, clock);
+            return (byMember, clock);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
@@ -721,6 +890,38 @@ FROM tier_stats AS t
 JOIN tier_mads AS m
   ON m.hour_of_day = t.hour_of_day
  AND m.day_of_week = t.day_of_week";
+
+    /// <summary>
+    /// The tail of every KEYED arm (#3901): <see cref="RobustTierScaffold"/>, verbatim, run once per MEMBER of the set
+    /// the compute bound as <c>$7</c>. The arm's own CTE list ends with <c>members(member, …)</c> — the keys unnested
+    /// <c>WITH ORDINALITY</c>, so <c>member</c> is a key's 1-based position in <c>$7</c> — and whatever it read ONCE for
+    /// the whole set; <paramref name="clean"/> is one member's <c>clean(collection_time, v)</c> body over those rows,
+    /// naming its member as <c>mem</c>. The statement returns the scaffold's eight columns plus <c>member</c>, which
+    /// <see cref="ComputeBucketsAsync"/> files each row under.
+    ///
+    /// <para><b>Why a LATERAL join and not a member column through the scaffold.</b> The scaffold is text every arm
+    /// shares, and the per-member buckets have to BE the per-member arm's buckets, so the member set runs the same
+    /// text rather than a second copy of the math that would have to be kept in step with the first. Measured, the
+    /// alternative buys nothing to pay for that: on DARLING01's PostgreSQL target (five top statements, 15 days, 444k
+    /// rows) a member-column scaffold over the same read returned identical rows in about the same time, and, blind to
+    /// CTE cardinality, the planner merge-joined its tiers on the member alone and spilled the MAD sort to disk. Each
+    /// member's scaffold here plans exactly as the per-member arm's did; only the read of the arm's table is shared.</para>
+    /// </summary>
+    internal static string PerMemberScaffold(string clean) => PerMemberScaffoldHead + clean + @"
+)," + RobustTierScaffold + PerMemberScaffoldClose;
+
+    /// <summary>The opening of <see cref="PerMemberScaffold"/> — where a keyed arm's own CTEs end and one member's
+    /// <c>clean</c> begins; the census in <c>LocalClockBucketKeyTests</c> finds it in every keyed arm.</summary>
+    internal const string PerMemberScaffoldHead = @"
+SELECT per_member.*, mem.member
+FROM members AS mem
+CROSS JOIN LATERAL (
+WITH clean AS (";
+
+    /// <summary>The close of <see cref="PerMemberScaffold"/>, after the scaffold: every keyed arm ends in
+    /// <see cref="RobustTierScaffold"/> followed by exactly this.</summary>
+    internal const string PerMemberScaffoldClose = @"
+) AS per_member";
 
     /// <summary>
     /// The eleven per-metric baseline queries — Lite's, verbatim, except the QUALIFY
