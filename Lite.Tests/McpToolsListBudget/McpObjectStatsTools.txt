@@ -1,0 +1,9 @@
+# McpObjectStatsTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_index_usage 493
+param get_index_usage.server_name 28
+
+tool get_object_locking 661
+param get_object_locking.server_name 28
+
+tool get_table_index_sizes 794
+param get_table_index_sizes.server_name 28

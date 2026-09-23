@@ -1,0 +1,20 @@
+# McpPlanTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool analyze_plan_xml 880
+param analyze_plan_xml.plan_xml 25
+
+tool analyze_procedure_plan 912
+param analyze_procedure_plan.plan_handle 53
+param analyze_procedure_plan.server_name 28
+
+tool analyze_query_plan 903
+param analyze_query_plan.query_hash 49
+param analyze_query_plan.server_name 28
+
+tool analyze_query_store_plan 210
+param analyze_query_store_plan.database_name 43
+param analyze_query_store_plan.plan_id 37
+param analyze_query_store_plan.server_name 28
+
+tool get_plan_xml 169
+param get_plan_xml.query_hash 49
+param get_plan_xml.server_name 28

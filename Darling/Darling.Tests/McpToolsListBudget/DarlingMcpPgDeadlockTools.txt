@@ -1,0 +1,11 @@
+# DarlingMcpPgDeadlockTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_pg_deadlock_detail 759
+param get_pg_deadlock_detail.deadlock_hash 71
+param get_pg_deadlock_detail.limit 58
+param get_pg_deadlock_detail.server_name 28
+
+tool get_pg_deadlocks 2839
+param get_pg_deadlocks.as_of 167
+param get_pg_deadlocks.hours_back 40
+param get_pg_deadlocks.limit 245
+param get_pg_deadlocks.server_name 28

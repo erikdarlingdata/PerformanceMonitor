@@ -1,0 +1,35 @@
+# DarlingMcpPgServerStateTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_pg_buffer_usage 684
+param get_pg_buffer_usage.as_of 167
+param get_pg_buffer_usage.hours_back 40
+param get_pg_buffer_usage.limit 35
+param get_pg_buffer_usage.server_name 28
+
+tool get_pg_extensions 1727
+param get_pg_extensions.as_of 167
+param get_pg_extensions.database_name 803
+param get_pg_extensions.hours_back 78
+param get_pg_extensions.limit 35
+param get_pg_extensions.server_name 28
+
+tool get_pg_lock_stats 722
+param get_pg_lock_stats.as_of 167
+param get_pg_lock_stats.hours_back 40
+param get_pg_lock_stats.limit 35
+param get_pg_lock_stats.server_name 28
+
+tool get_pg_server_config 2252
+param get_pg_server_config.include_defaults 249
+param get_pg_server_config.limit 198
+param get_pg_server_config.server_name 28
+
+tool get_pg_server_config_changes 1146
+param get_pg_server_config_changes.as_of 167
+param get_pg_server_config_changes.hours_back 52
+param get_pg_server_config_changes.limit 39
+param get_pg_server_config_changes.server_name 28
+
+tool get_pg_write_stats 1509
+param get_pg_write_stats.as_of 167
+param get_pg_write_stats.hours_back 40
+param get_pg_write_stats.server_name 28

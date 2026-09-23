@@ -1,0 +1,7 @@
+# DarlingMcpQueryStoreClutterTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_query_store_clutter 5147
+param get_query_store_clutter.as_of 167
+param get_query_store_clutter.hours_back 200
+param get_query_store_clutter.include_fleet_median 322
+param get_query_store_clutter.limit 170
+param get_query_store_clutter.server_name 28

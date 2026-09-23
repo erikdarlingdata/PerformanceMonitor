@@ -1,0 +1,31 @@
+# DarlingMcpCustomAlertTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool create_custom_alert_rule 447
+param create_custom_alert_rule.definition 137
+param create_custom_alert_rule.description 36
+param create_custom_alert_rule.enabled 98
+param create_custom_alert_rule.name 60
+
+tool delete_custom_alert_rule 499
+param delete_custom_alert_rule.rule_id 60
+
+tool get_custom_alert_rule 308
+param get_custom_alert_rule.rule_id 67
+
+tool list_custom_alert_rules 394
+
+tool list_custom_alert_templates 751
+
+tool test_custom_alert_rule 922
+param test_custom_alert_rule.definition 117
+param test_custom_alert_rule.rule_id 100
+
+tool update_custom_alert_rule 890
+param update_custom_alert_rule.definition 113
+param update_custom_alert_rule.description 106
+param update_custom_alert_rule.enabled 101
+param update_custom_alert_rule.name 74
+param update_custom_alert_rule.rule_id 60
+param update_custom_alert_rule.version 122
+
+tool validate_custom_alert_rule 2078
+param validate_custom_alert_rule.definition 53

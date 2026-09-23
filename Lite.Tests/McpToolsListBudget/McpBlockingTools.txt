@@ -1,0 +1,40 @@
+# McpBlockingTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_blocked_process_reports 1340
+param get_blocked_process_reports.as_of 167
+param get_blocked_process_reports.hours_back 29
+param get_blocked_process_reports.limit 133
+param get_blocked_process_reports.server_name 28
+
+tool get_blocked_process_xml 480
+param get_blocked_process_xml.as_of 167
+param get_blocked_process_xml.hours_back 29
+param get_blocked_process_xml.limit 113
+param get_blocked_process_xml.server_name 28
+
+tool get_blocking_trend 199
+param get_blocking_trend.as_of 167
+param get_blocking_trend.hours_back 29
+param get_blocking_trend.server_name 28
+
+tool get_deadlock_detail 492
+param get_deadlock_detail.as_of 167
+param get_deadlock_detail.hours_back 29
+param get_deadlock_detail.limit 119
+param get_deadlock_detail.server_name 28
+
+tool get_deadlock_trend 157
+param get_deadlock_trend.as_of 167
+param get_deadlock_trend.hours_back 29
+param get_deadlock_trend.server_name 28
+
+tool get_deadlocks 694
+param get_deadlocks.as_of 167
+param get_deadlocks.hours_back 29
+param get_deadlocks.limit 133
+param get_deadlocks.server_name 28
+
+tool get_lock_wait_trend 646
+param get_lock_wait_trend.as_of 167
+param get_lock_wait_trend.bucket_minutes 55
+param get_lock_wait_trend.hours_back 29
+param get_lock_wait_trend.server_name 28
