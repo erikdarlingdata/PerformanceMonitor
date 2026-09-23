@@ -939,13 +939,21 @@ SELECT
     a.context_json,
     a.xmin,
     f.drill_down_json,
-    f.story_text
+    f.story_text,
+    f.severity,
+    f.confidence,
+    f.time_range_start,
+    f.time_range_end
 FROM config_alert_log AS a
 LEFT JOIN LATERAL
 (
     SELECT
         f.drill_down_json,
-        f.story_text
+        f.story_text,
+        f.severity,
+        f.confidence,
+        f.time_range_start,
+        f.time_range_end
     FROM analysis_findings AS f
     WHERE f.server_id = a.server_id
     AND   f.analysis_time <= a.alert_time
@@ -991,8 +999,15 @@ AND   xmin = $3::xid";
     /// same there, the proof it is the same finding. Otherwise the fields that carry SQL (<c>Exemplars</c>,
     /// <c>Note</c>) are withheld (<see cref="WithheldBefore4005"/>). The victim the advice prose names is replaced the
     /// same way: by the normalized fingerprint, or withheld. Pure.
+    /// <para>#4036's round-2 review, finding 5: the section's other fields are counts, usually all 1, and fixed text,
+    /// so another stored run of the same story (an on-demand analysis, or a rerun that queued no page) passes that
+    /// test as the newest one the page finds, and its exemplars would be written over the alert's for good. So the
+    /// alert's Diagnosis must also read what <paramref name="findingDiagnosis"/> says: the same severity, confidence
+    /// and window, as <c>FindingMessageFormatter.BuildContext</c> rendered them; otherwise the finding is not taken
+    /// for the alert's, and the SQL is withheld.</para>
     /// </summary>
-    public static string? RemaskFindingAlert(string contextJson, string? findingDrillDownJson, string? findingStoryText)
+    public static string? RemaskFindingAlert(
+        string contextJson, string? findingDrillDownJson, string? findingStoryText, FindingDiagnosis? findingDiagnosis)
     {
         AlertContextDto? dto;
         try
@@ -1021,7 +1036,7 @@ AND   xmin = $3::xid";
 
         List<FieldDto>? live = null;
         string? victim = null;
-        if (findingDrillDownJson is not null)
+        if (findingDrillDownJson is not null && findingDiagnosis is { } diagnosis && SameDiagnosis(dto, diagnosis))
         {
             var finding = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(findingDrillDownJson), StoryText = findingStoryText ?? string.Empty };
             PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, markNormalized: true);
@@ -1076,6 +1091,37 @@ AND   xmin = $3::xid";
         }
     }
 
+    /// <summary>What a stored finding's alert says about it in its Diagnosis item (#4036's round-2 review, finding 5):
+    /// its <c>severity</c>, <c>confidence</c> and <c>time_range_start</c>/<c>time_range_end</c>.</summary>
+    public readonly record struct FindingDiagnosis(double Severity, double Confidence, DateTime? WindowStart, DateTime? WindowEnd);
+
+    /* Whether the alert's Diagnosis item reads as FindingMessageFormatter.BuildContext rendered it for this finding:
+       Severity and Confidence as F2 (in the service's culture, so a decimal comma is taken too), and the Window as the
+       two 'u' timestamps, or no Window when the finding has no range. Anything else is another finding. */
+    private static bool SameDiagnosis(AlertContextDto dto, FindingDiagnosis finding)
+    {
+        var diagnosis = dto.Details?.FirstOrDefault(item => item is not null && item.Heading == "Diagnosis");
+        if (diagnosis?.Fields is not { } fields)
+        {
+            return false;
+        }
+
+        string? Field(string label) => fields.Where(f => f is not null && f.Label == label).Select(f => f.Value).FirstOrDefault();
+        static bool SameNumber(string? stored, double value)
+        {
+            var invariant = value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            return stored is not null && (stored == invariant || stored == invariant.Replace('.', ','));
+        }
+
+        var window = finding.WindowStart is { } start && finding.WindowEnd is { } end
+            ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{start:u} → {end:u}")
+            : null;
+
+        return SameNumber(Field("Severity"), finding.Severity)
+            && SameNumber(Field("Confidence"), finding.Confidence)
+            && Field("Window") == window;
+    }
+
     private const string ExemplarsLabel = "Exemplars";
     private const string NoteLabel = "Note";
     private const string SqlNormalizedLabel = "Sql Normalized";
@@ -1109,7 +1155,7 @@ AND   xmin = $3::xid";
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        var page = new List<(string Ctid, string Context, uint Xmin, string? DrillDown, string? Story)>();
+        var page = new List<(string Ctid, string Context, uint Xmin, string? DrillDown, string? Story, FindingDiagnosis? Diagnosis)>();
         await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
         {
             await using (var select = new NpgsqlCommand(FindingAlertPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
@@ -1124,7 +1170,12 @@ AND   xmin = $3::xid";
                         reader.GetString(1),
                         reader.GetFieldValue<uint>(2),
                         reader.IsDBNull(3) ? null : reader.GetString(3),
-                        reader.IsDBNull(4) ? null : reader.GetString(4)));
+                        reader.IsDBNull(4) ? null : reader.GetString(4),
+                        reader.IsDBNull(5) ? null : new FindingDiagnosis(
+                            reader.GetDouble(5),
+                            reader.GetDouble(6),
+                            reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                            reader.IsDBNull(8) ? null : reader.GetDateTime(8))));
                 }
             }
 
@@ -1135,7 +1186,7 @@ AND   xmin = $3::xid";
         foreach (var row in page)
         {
             var outcome = RowOutcome.Unchanged;
-            if (RemaskFindingAlert(row.Context, row.DrillDown, row.Story) is { } context)
+            if (RemaskFindingAlert(row.Context, row.DrillDown, row.Story, row.Diagnosis) is { } context)
             {
                 await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
                 await using (var update = new NpgsqlCommand(FindingAlertUpdateSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })

@@ -1224,6 +1224,63 @@ WHERE victim_pid = 10004", ct);
     }
 
     /// <summary>
+    /// #4036's round-2 review, finding 5: another stored run of the same story, newer than the one the alert was sent
+    /// for but before the alert was recorded (an on-demand analysis, a rerun that queued no page), is the finding the
+    /// page finds. Its exemplar section's other fields are counts and fixed text, which match; its Diagnosis does not.
+    /// A different severity or a different window withholds the SQL rather than writing the other run's exemplars
+    /// over the alert's. The same finding, window and all, is still rewritten from it.
+    /// </summary>
+    [Fact]
+    public async Task AFindingAlert_WhoseStoryRanAgain_IsWithheld_NotRewrittenFromTheOtherRun()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var at = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddDays(-1).AddHours(12);
+        var (start, otherStart, end) = (at.AddHours(-2), at.AddHours(-3), at.AddHours(-1));
+        var (legacyDrillDown, legacyStory) = LegacyFinding();
+
+        /* abcd: the other run's severity differs. beef: its window differs. cafe: one run, the alert's own. */
+        await PlantFindingAsync(connection, 1, at, legacyDrillDown, legacyStory, ct, storyPathHash: "4012abcd00000000", windowStart: start, windowEnd: end);
+        await PlantFindingAsync(connection, 2, at.AddMinutes(1), legacyDrillDown, legacyStory, ct, storyPathHash: "4012abcd00000000", severity: 0.7, windowStart: start, windowEnd: end);
+        await PlantFindingAsync(connection, 3, at, legacyDrillDown, legacyStory, ct, storyPathHash: "4012beef00000000", windowStart: start, windowEnd: end);
+        await PlantFindingAsync(connection, 4, at.AddMinutes(1), legacyDrillDown, legacyStory, ct, storyPathHash: "4012beef00000000", windowStart: otherStart, windowEnd: end);
+        await PlantFindingAsync(connection, 5, at, legacyDrillDown, legacyStory, ct, storyPathHash: "4012cafe00000000", windowStart: start, windowEnd: end);
+        foreach (var hash in new[] { "4012abcd00000000", "4012beef00000000", "4012cafe00000000" })
+        {
+            var (metric, context) = LegacyFindingAlert(legacyDrillDown, legacyStory, hash, start, end);
+            await PlantAlertAsync(connection, at.AddMinutes(3), null, context, ct, metric);
+        }
+
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+
+        var byMetric = await DumpAsync(connection, "SELECT metric_name || '|' || context_json FROM config_alert_log ORDER BY metric_name", ct);
+        var rows = byMetric.Split('\n');
+        Assert.Equal(3, rows.Length);
+        foreach (var row in rows)
+        {
+            AssertNoSecret(row);
+            Assert.DoesNotContain(PgDeadlockLogParser.HashOf(LegacyGraph), row, StringComparison.Ordinal);
+        }
+
+        foreach (var withheld in rows.Where(r => r.Contains("[4012abcd]", StringComparison.Ordinal) || r.Contains("[4012beef]", StringComparison.Ordinal)))
+        {
+            Assert.Contains(PgDeadlockRemask.WithheldBefore4005, withheld, StringComparison.Ordinal);
+            Assert.DoesNotContain("Sql Normalized", withheld, StringComparison.Ordinal);
+        }
+
+        var same = Assert.Single(rows, r => r.Contains("[4012cafe]", StringComparison.Ordinal));
+        Assert.Contains("{\"Label\":\"Sql Normalized\",\"Value\":\"true\"}", same, StringComparison.Ordinal);
+        Assert.DoesNotContain(PgDeadlockRemask.WithheldBefore4005, same, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #4012's review, finding 4: the exemplar section is attached when a deadlock fact is anywhere on the chain, not
     /// only at its root, so a finding rooted elsewhere with the deadlock fact behind it is rewritten too.
     /// </summary>
@@ -1256,7 +1313,8 @@ WHERE victim_pid = 10004", ct);
 
     /* A finding alert as the analysis sent it before #4005 for the legacy finding: the live context builder over
        that finding, so the flattened section, its note and the frozen prose carry what they carried then. */
-    private static (string Metric, string ContextJson) LegacyFindingAlert(string drillDown, string story, string storyPathHash)
+    private static (string Metric, string ContextJson) LegacyFindingAlert(
+        string drillDown, string story, string storyPathHash, DateTime? windowStart = null, DateTime? windowEnd = null)
     {
         var finding = new AnalysisFinding
         {
@@ -1266,6 +1324,8 @@ WHERE victim_pid = 10004", ct);
             StoryPath = PgTargetFactKeys.DeadlockRate,
             StoryPathHash = storyPathHash,
             RootFactKey = PgTargetFactKeys.DeadlockRate,
+            TimeRangeStart = windowStart,
+            TimeRangeEnd = windowEnd,
             Severity = 0.9,
             Confidence = 1,
             FactCount = 1,
@@ -1535,12 +1595,15 @@ FROM generate_series(1, $6) AS g", connection);
 
     private static async Task PlantFindingAsync(
         NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct,
-        string storyPath = PgTargetFactKeys.DeadlockRate, string storyPathHash = "h")
+        string storyPath = PgTargetFactKeys.DeadlockRate, string storyPathHash = "h", double severity = 0.9,
+        DateTime? windowStart = null, DateTime? windowEnd = null)
     {
+        /* Severity, confidence and window as LegacyFindingAlert's alert for it reads them, unless a test says
+           otherwise (#4036's round-2 review, finding 5). */
         await using var command = new NpgsqlCommand(@"
 INSERT INTO analysis_findings
-    (finding_id, analysis_time, server_id, server_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, drill_down_json)
-VALUES ($1, $2, $3, $4, 0.6, 1, 'deadlocks', $7, $8, $5, split_part($7, ' → ', 1), 1, $6)", connection);
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, drill_down_json, time_range_start, time_range_end)
+VALUES ($1, $2, $3, $4, $9, 1, 'deadlocks', $7, $8, $5, split_part($7, ' → ', 1), 1, $6, $10, $11)", connection);
         command.Parameters.AddWithValue(findingId);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(analysisTime, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(ServerId);
@@ -1549,6 +1612,9 @@ VALUES ($1, $2, $3, $4, 0.6, 1, 'deadlocks', $7, $8, $5, split_part($7, ' → ',
         command.Parameters.AddWithValue(drillDown);
         command.Parameters.AddWithValue(storyPath);
         command.Parameters.AddWithValue(storyPathHash);
+        command.Parameters.AddWithValue(severity);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)windowStart ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)windowEnd ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
         await command.ExecuteNonQueryAsync(ct);
     }
 
