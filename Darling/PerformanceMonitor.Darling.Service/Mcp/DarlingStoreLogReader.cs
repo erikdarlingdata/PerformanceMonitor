@@ -159,7 +159,9 @@ ORDER BY sum(g.occurrences) DESC, g.event_class";
 
     /// <summary>
     /// The retained entries — one row per distinct message, with the count of times it arrived and ONE
-    /// verbatim entry as the evidence. $1/$2 window (naive UTC), $3 row cap.
+    /// entry as the evidence. <c>message_text</c> is the message's GROUPING key (#3944,
+    /// <see cref="StoreLogClassifier.GroupingKeyOf"/>), so the same error for two values is one row; the tool
+    /// shows the sample's own message. $1/$2 window (naive UTC), $3 row cap.
     ///
     /// <para><c>message_text IS NOT NULL</c> is the whole predicate, and it is a structural test rather than
     /// a class list: the sweep writes text only for the classes the classifier retains, so asking for rows
@@ -256,13 +258,16 @@ LIMIT $3";
         [JsonPropertyName("hours_in_window")] public int HoursInWindow { get; init; }
     }
 
-    /// <summary>One retained message, with one verbatim entry as its evidence.</summary>
+    /// <summary>One retained message, with one entry as its evidence.</summary>
     public sealed class RetainedEvent
     {
         [JsonPropertyName("event_class")] public string EventClass { get; init; } = string.Empty;
 
         [JsonPropertyName("severity")] public string Severity { get; init; } = string.Empty;
 
+        /// <summary>The sample's message as PostgreSQL wrote it (#3944): one instance of the row's message, which
+        /// counts every entry that differs from it only in a quoted value or a number
+        /// (<see cref="StoreLogClassifier.DisplayMessageOf"/>).</summary>
         [JsonPropertyName("message_text")] public string MessageText { get; init; } = string.Empty;
 
         [JsonPropertyName("occurrences")] public long Occurrences { get; init; }
@@ -271,9 +276,9 @@ LIMIT $3";
 
         [JsonPropertyName("last_capture_at")] public string? LastCaptureAt { get; init; }
 
-        /// <summary>The entry as the server wrote it, prefix and continuations included. The classified
-        /// fields are an interpretation; this is the evidence, and it carries the server's own timestamp in
-        /// the server's own <c>log_timezone</c> — uninterpreted, on purpose.</summary>
+        /// <summary>The entry as the server wrote it, prefix and continuations included, with only its SQL
+        /// normalized. The classified fields are an interpretation; this is the evidence, and it carries the
+        /// server's own timestamp in the server's own <c>log_timezone</c> — uninterpreted, on purpose.</summary>
         [JsonPropertyName("sample_line")] public string? SampleLine { get; init; }
     }
 
@@ -539,18 +544,26 @@ LIMIT $3";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* #3915: masked again on the way out, with the classifier's own rules. Rows a newer capture wrote
-               are already masked (the masking is idempotent), and rows an earlier build stored unmasked are
-               re-masked in storage by the sweep's own pass, a bounded slice per hour; this covers the hours
-               before that pass reaches them, so no surface serves an unmasked row in the meantime. */
+            /* #3915, #3944: brought to this build's rules again on the way out, with the classifier's own
+               function. Rows a newer capture wrote come back unchanged (it is idempotent), and rows an earlier
+               build stored with a statement's literals are normalized in storage by the sweep's own pass, a
+               bounded slice per hour; this covers the hours before that pass reaches them. The row SHOWS its
+               sample's own message, because the stored one is the grouping key. */
             var eventClass = reader.GetString(0);
-            var (message, sample) = StoreLogClassifier.MaskStoredEvent(
+            var (key, sample) = StoreLogClassifier.MaskStoredEvent(
                 eventClass, reader.GetString(2), reader.IsDBNull(6) ? null : reader.GetString(6));
+            if (key is null)
+            {
+                /* A row the pass will empty (a fragment an older build filed as an entry): its occurrences are in
+                   the class census, and it has no text to show. */
+                continue;
+            }
+
             rows.Add(new RetainedEvent
             {
                 EventClass = eventClass,
                 Severity = reader.GetString(1),
-                MessageText = message ?? string.Empty,
+                MessageText = StoreLogClassifier.DisplayMessageOf(eventClass, key, sample),
                 Occurrences = reader.GetInt64(3),
                 FirstCaptureAt = reader.IsDBNull(4) ? null : Iso(reader.GetDateTime(4)),
                 LastCaptureAt = reader.IsDBNull(5) ? null : Iso(reader.GetDateTime(5)),

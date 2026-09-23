@@ -361,11 +361,9 @@ public static class DarlingPgLogEventReader
                 ApplicationName: reader.IsDBNull(6) ? null : reader.GetString(6),
                 Pid: reader.IsDBNull(7) ? null : reader.GetInt32(7),
                 Message: reader.IsDBNull(8) ? string.Empty : reader.GetString(8),
-                /* #3920: rows written before this build kept a deadlock's queries and a function's statement
-                   with prose masking only. Both functions are idempotent, so masking on the way out covers
-                   those rows until the 30-day retention ages them out, and changes nothing on a newer row. */
-                Detail: reader.IsDBNull(9) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactDetail(reader.GetString(9)),
-                Context: reader.IsDBNull(10) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactContext(reader.GetString(10)),
+                /* As stored: PgLogEvent.From normalized the SQL in them on the way in (#3920, #3944). */
+                Detail: reader.IsDBNull(9) ? null : reader.GetString(9),
+                Context: reader.IsDBNull(10) ? null : reader.GetString(10),
                 StatementFingerprint: reader.IsDBNull(11) ? null : reader.GetString(11),
                 RawLineHash: reader.GetString(12),
                 TimesSeen: reader.GetInt32(13),

@@ -128,6 +128,17 @@ public class StoreLogSelfMonitoringStoreTests
            truncated-to-the-same-size corner. */
         Assert.DoesNotContain("WHERE", StoreLogSweep.LogDirectoryListSql, StringComparison.Ordinal);
 
+        /* #3944's review: only the stderr-format files are read. A csvlog or jsonlog file beside them has no tab
+           continuations and no field tokens, so one record holding a token would open an entry that took in the
+           records after it, statement columns and all. The listing applies the rule to every row it reads. */
+        Assert.True(StoreLogSweep.IsStderrLogFile("postgresql-Mon.log"));
+        Assert.True(StoreLogSweep.IsStderrLogFile("postgresql-2026-09-22_000000.log"));
+        Assert.False(StoreLogSweep.IsStderrLogFile("postgresql-Mon.csv"));
+        Assert.False(StoreLogSweep.IsStderrLogFile("postgresql-Mon.json"));
+        Assert.False(StoreLogSweep.IsStderrLogFile("POSTGRESQL-MON.CSV"));
+        var sweep = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "StoreLogSweep.cs");
+        Assert.Contains("if (!IsStderrLogFile(reader.GetString(0)))", sweep, StringComparison.Ordinal);
+
         /* pg_read_BINARY_file, not pg_read_file: a byte offset can land between the bytes of one character,
            and the text form would either raise an encoding error or mangle the first character. */
         Assert.Contains("pg_read_binary_file", StoreLogSweep.ReadFileSql, StringComparison.Ordinal);

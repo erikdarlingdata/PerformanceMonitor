@@ -55,9 +55,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <see cref="DarlingManagedPostgres"/> deliberately does not set (its v9 block pins the session
 /// <c>timezone</c> only, asserted by <c>DarlingManagedPostgresTests</c>), so the store's own log stamps are
 /// in the HOST's zone. A census binned on the sweep's own UTC capture instant needs none of them; the raw
-/// line is kept for the retained classes, prefix and stamp as written and only its values masked (#3915), so a
-/// person still reads the server's own stamp, and
-/// nothing here interprets it. That is the same trade <c>PgDeadlockLogParser</c> makes the other way and for
+/// line is kept for the retained classes as PostgreSQL wrote it, prefix and stamp included, with only its SQL
+/// normalized (#3915, #3944), so a person still reads the server's own stamp, and nothing here interprets
+/// it. That is the same trade <c>PgDeadlockLogParser</c> makes the other way and for
 /// the same reason — it needs the instant, so it must refuse a zone it cannot verify; this needs no instant,
 /// so it refuses nothing.</para>
 /// </summary>
@@ -284,13 +284,13 @@ public static class StoreLogClassifier
     /// <summary>One classified entry, before grouping.</summary>
     /// <param name="EventClass">The matched class.</param>
     /// <param name="Severity">What <c>error_severity()</c> wrote.</param>
-    /// <param name="Message">The message, prefix and severity field stripped, capped.</param>
-    /// <param name="RawText">The entry's own lines, continuations included, capped, with every VALUE masked
-    /// (<see cref="MaskEntry"/>, #3915): the prefix, the severity, the field names, identifiers and prose
-    /// numbers stay as the server wrote them, so a person still reads the server's stamp and the shape of the
-    /// complaint, but a quoted value, a key tuple's values or a statement's literals do not survive. The
-    /// store's log is readable by the viewer and mcp roles through <c>get_store_log</c>, and an ERROR's
-    /// STATEMENT line carries whatever the failed statement carried, a password included.</param>
+    /// <param name="Message">For a retained class the message's grouping key (<see cref="GroupingKeyOf"/>; a
+    /// slow statement's is its normalized statement), capped: what entries group by and what the row stores.
+    /// For a counted class the message itself, which nothing stores.</param>
+    /// <param name="RawText">The entry's own lines, continuations included, capped, as PostgreSQL wrote them
+    /// except for the SQL in them, which is normalized (<see cref="MaskEntry"/>, #3915, #3944): the store's log
+    /// is readable by the viewer and mcp roles through <c>get_store_log</c>, and an ERROR's STATEMENT line
+    /// carries whatever the failed statement carried, a password included.</param>
     /// <param name="Retained">Whether the matched rule keeps text.</param>
     public readonly record struct Entry(
         string EventClass,
@@ -300,7 +300,7 @@ public static class StoreLogClassifier
         bool Retained);
 
     /// <summary>One stored row: a class, a severity, how many of them, and — for a retained class — the
-    /// message and one verbatim entry.</summary>
+    /// message's grouping key and the first entry of the group as its sample.</summary>
     public readonly record struct Group(
         string EventClass,
         string Severity,
@@ -519,9 +519,10 @@ public static class StoreLogClassifier
     }
 
     /// <summary>
-    /// Groups classified entries into stored rows: a retained class groups by its exact message text (so
-    /// 1,100 byte-identical cancels would be one row if they were retained, and a novel message is
-    /// immediately its own), and an excluded class groups by class and severity alone with no text at all.
+    /// Groups classified entries into stored rows: a retained class groups by its message's grouping key (so
+    /// 1,100 cancels would be one row if they were retained, the same error for two values is one row, and a
+    /// novel message is immediately its own), and an excluded class groups by class and severity alone with no
+    /// text at all.
     /// </summary>
     private static List<Group> GroupEntries(List<Entry> entries, out int dropped)
     {
@@ -654,7 +655,7 @@ public static class StoreLogClassifier
     }
 
     /// <summary>
-    /// Whether a class keeps its message and one verbatim entry, or is counted only. The two defaults are
+    /// Whether a class keeps its message and one entry, or is counted only. The two defaults are
     /// answered here too: <see cref="UnclassifiedClass"/> is retained (that is what makes the rule table an
     /// aid rather than a filter) and <see cref="RoutineClass"/> is not.
     /// </summary>
@@ -881,10 +882,10 @@ public static class StoreLogClassifier
     }
 
     /// <summary>
-    /// A retained entry as it is KEPT (#3915): <see cref="SlowStatementClass"/>'s own rewrite, or for every
-    /// other retained class the message as prose (<see cref="PgLogTextRedactor.RedactMessage"/>) and the
-    /// entry through <see cref="MaskEntry"/>. A slow-statement entry whose first line names no statement falls
-    /// to <see cref="RoutineClass"/>, counted and keeping no text.
+    /// A retained entry as it is KEPT (#3915, #3944): <see cref="SlowStatementClass"/>'s own rewrite, or for every
+    /// other retained class the message's grouping key (<see cref="GroupingKeyOf"/>) and the entry through
+    /// <see cref="MaskEntry"/>. A slow-statement entry whose first line names no statement falls to
+    /// <see cref="RoutineClass"/>, counted and keeping no text.
     /// </summary>
     internal static (string EventClass, bool Retained, string Message, string RawText) MaskRetained(
         string eventClass, string message, string rawText)
@@ -896,34 +897,71 @@ public static class StoreLogClassifier
                 : (RoutineClass, false, message, rawText);
         }
 
-        /* The message comes from the MASKED entry's first line, not from the raw first line masked alone
-           (#3920's review): a value that runs onto the next line (a literal holding a newline) is masked whole
-           only when its lines are masked together, and the first line alone kept its opening half. */
-        var maskedRaw = MaskEntry(rawText);
-        return (eventClass, true, PrimaryMessageOf(maskedRaw) ?? PgLogTextRedactor.RedactMessage(message) ?? string.Empty, maskedRaw);
+        return (eventClass, true, GroupingKeyOf(message), MaskEntry(rawText));
+    }
+
+    /* The values PostgreSQL's prose carries, as the grouping key sees them (#3944): a single- or double-quoted run
+       (`: "abc"`, `relation "orders"`) or a number not glued to a name (`block 12`, `PID 6100`, `at character
+       15`, but not `f1` or `0xC0000005`). A single quote after a letter is an apostrophe (`can't`, `order's`), not
+       an opening quote, so two of them never pair across the text between them. */
+    private static readonly Regex s_groupingValue = new(
+        @"(?<![A-Za-z])'[^']*'|""[^""]*""|(?<![A-Za-z0-9_])[0-9]+(?:\.[0-9]+)?(?![A-Za-z0-9_])",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The GROUPING key a retained message is stored and counted under (#3944): every quoted run becomes
+    /// <c>"?"</c> or <c>'?'</c> and every number not glued to a name <c>?</c>, so
+    /// <c>invalid input syntax for type integer: "abc"</c> and <c>"def"</c> are one message, and so are
+    /// <c>could not read block 12</c> and <c>block 99</c>. Coarse on purpose, the way a log report's most frequent
+    /// errors are counted: two missing relations are one message with a sample between them, not two messages
+    /// that each spend a place in <see cref="MaxRetainedGroupsPerClass"/>. It decides which entries are one row and
+    /// nothing else: the row still shows one of its entries as PostgreSQL wrote it
+    /// (<see cref="DisplayMessageOf"/>). It is NOT a privacy mechanism, and the sample beside it keeps every value.
+    /// Idempotent.
+    /// </summary>
+    internal static string GroupingKeyOf(string message) =>
+        s_groupingValue.Replace(message, m => m.Value[0] switch
+        {
+            '\'' => "'?'",
+            '"' => "\"?\"",
+            _ => "?",
+        });
+
+    /// <summary>
+    /// The message a retained row SHOWS (#3944): its sample's own message, as PostgreSQL wrote it, because the
+    /// stored message is the row's grouping key (<see cref="GroupingKeyOf"/>). A slow statement shows its key,
+    /// which is already the text it is read as (the normalized statement with no duration); a row whose sample's
+    /// first line carries no message shows its key too.
+    /// </summary>
+    public static string DisplayMessageOf(string eventClass, string? key, string? sample)
+    {
+        if (eventClass == SlowStatementClass || sample is null)
+        {
+            return key ?? string.Empty;
+        }
+
+        return Cap(PrimaryMessageOf(sample) ?? key ?? string.Empty, MaxMessageLength);
     }
 
     /// <summary>The message on an entry's first line: what follows its primary severity, or null when the
-    /// first line carries none.</summary>
+    /// first line carries none. A tab-led line never opens an entry (<see cref="Classify"/>), so it has none.</summary>
     private static string? PrimaryMessageOf(string entry)
     {
         var firstLine = entry.Split('\n', 2)[0];
-        var field = FindField(firstLine);
+        var field = firstLine.StartsWith('\t') ? default : FindField(firstLine);
         return field.Kind == FieldKind.Primary ? firstLine[field.MessageStart..] : null;
     }
 
     /// <summary>
-    /// An entry's lines with every value masked (#3915), field by field: the primary message and HINT as prose
-    /// (<see cref="PgLogTextRedactor.RedactMessage"/>: quoted values, key tuples and failing rows out,
-    /// identifiers after their noun and numbers kept), DETAIL and CONTEXT as prose with the SQL PostgreSQL
-    /// writes into them masked as SQL (<see cref="PgLogTextRedactor.RedactDetail"/>,
-    /// <see cref="PgLogTextRedactor.RedactContext"/>, #3920), a STATEMENT or QUERY field as SQL
-    /// (<see cref="PgLogTextRedactor.RedactStoredStatement"/>, one line, or <see cref="WithheldStatement"/>
-    /// when it cannot be read to its end), and LOCATION's own line as written when it has PostgreSQL's shape
-    /// (<see cref="MaskLocation"/>). Each field's tab-continuation
-    /// lines are masked with it, so a value that spans lines is masked whole. The prefix and field names stay,
-    /// so the sample still reads as the server's entry. Idempotent: masking masked text changes nothing, which
-    /// is what lets rows stored before this build be re-masked by the same function.
+    /// An entry's lines with the SQL in them normalized (#3915, #3944), field by field: a STATEMENT or QUERY field
+    /// is SQL (<see cref="PgLogTextRedactor.RedactStoredStatement"/>, one line, or <see cref="WithheldStatement"/>
+    /// when it cannot be read to its end), and a DETAIL or CONTEXT keeps its prose with the SQL PostgreSQL writes
+    /// into it normalized (<see cref="PgLogTextRedactor.RedactDetail"/>,
+    /// <see cref="PgLogTextRedactor.RedactContext"/>, #3920). Every other line, the prefix, the primary message,
+    /// HINT and LOCATION included, is kept as PostgreSQL wrote it, except an auto_explain plan report's plan
+    /// (<see cref="PgLogTextRedactor.WithholdPlan"/>). Each field's tab-continuation lines go with it, so a statement
+    /// that spans lines is read whole. Idempotent, which is what lets rows stored before this build be brought up by
+    /// the same function.
     /// </summary>
     internal static string MaskEntry(string rawText)
     {
@@ -934,83 +972,102 @@ public static class StoreLogClassifier
         {
             var line = lines[i];
             var field = line.StartsWith('\t') ? default : FindField(line);
-            /* The head as prose too (#3920's review): on a well-formed line it is the log_line_prefix and the
-               field name, which masking leaves as they are, but a line that merely contains a field token (a
-               command's stderr, say) would otherwise keep whatever came before it verbatim. */
-            var head = field.Kind == FieldKind.None ? string.Empty : PgLogTextRedactor.RedactMessage(line[..field.MessageStart]) ?? string.Empty;
-            var block = new StringBuilder(field.Kind == FieldKind.None ? line : line[field.MessageStart..]);
 
             var next = i + 1;
             while (next < lines.Length
                 && (lines[next].StartsWith('\t') || FindField(lines[next]).Kind == FieldKind.None))
             {
-                block.Append('\n').Append(lines[next]);
                 next++;
             }
-
-            var text = block.ToString();
-            var masked = field.Kind != FieldKind.Continuation
-                ? PgLogTextRedactor.RedactMessage(text) ?? string.Empty
-                : field.Name switch
-                {
-                    "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
-                    "DETAIL" => PgLogTextRedactor.RedactDetail(text) ?? string.Empty,
-                    "CONTEXT" => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
-                    "LOCATION" => MaskLocation(text),
-                    _ => PgLogTextRedactor.RedactMessage(text) ?? string.Empty,
-                };
 
             if (result.Length > 0)
             {
                 result.Append('\n');
             }
 
-            result.Append(head).Append(masked);
+            if (field.Kind == FieldKind.Primary)
+            {
+                var message = new StringBuilder(line, field.MessageStart, line.Length - field.MessageStart, rawText.Length);
+                for (var k = i + 1; k < next; k++)
+                {
+                    message.Append('\n').Append(lines[k]);
+                }
+
+                result.Append(line, 0, field.MessageStart).Append(PgLogTextRedactor.WithholdPlan(message.ToString()));
+            }
+            else if (field.Kind == FieldKind.Continuation && field.Name is "STATEMENT" or "QUERY" or "DETAIL" or "CONTEXT")
+            {
+                var block = new StringBuilder(line, field.MessageStart, line.Length - field.MessageStart, rawText.Length);
+                for (var k = i + 1; k < next; k++)
+                {
+                    block.Append('\n').Append(lines[k]);
+                }
+
+                var text = block.ToString();
+                var masked = field.Name switch
+                {
+                    "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
+                    "DETAIL" => PgLogTextRedactor.RedactDetail(text) ?? string.Empty,
+                    _ => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
+                };
+
+                result.Append(line, 0, field.MessageStart).Append(masked);
+            }
+            else
+            {
+                result.Append(line);
+                for (var k = i + 1; k < next; k++)
+                {
+                    result.Append('\n').Append(lines[k]);
+                }
+            }
+
             i = next;
         }
 
         return result.ToString();
     }
 
-    /* The line PostgreSQL writes after LOCATION: the reporting function and its source file and line,
-       "ProcessInterrupts, postgres.c:3383" (elog.c keeps only the file's base name). */
-    private static readonly Regex s_sourceLocation = new(
-        @"^[A-Za-z_][A-Za-z0-9_]*, [A-Za-z0-9_./-]+:[0-9]+$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     /// <summary>
-    /// A LOCATION field: its own line kept as written only when it has the shape PostgreSQL writes there, and
-    /// masked as prose otherwise (#3920's fourth review), like every line after it (a command's stderr under
-    /// <c>log_error_verbosity = verbose</c> lands there, #3920's review).
-    /// </summary>
-    private static string MaskLocation(string text)
-    {
-        var newline = text.IndexOf('\n');
-        var first = newline < 0 ? text : text[..newline];
-        var kept = s_sourceLocation.IsMatch(first) ? first : PgLogTextRedactor.RedactMessage(first) ?? string.Empty;
-        return newline < 0 ? kept : kept + "\n" + (PgLogTextRedactor.RedactMessage(text[(newline + 1)..]) ?? string.Empty);
-    }
-
-    /// <summary>
-    /// A row stored by <see cref="StoreLogSweep"/> re-masked by this build's rules (#3915): rows written
-    /// before it carry the entry as the server wrote it, a failed statement's literals included, for the
-    /// sweep's 400-day retention. Computed from the stored SAMPLE, whose first line carries the message the
-    /// row was grouped on, so the message and the sample come out consistent; idempotent, so a row already
-    /// masked comes back unchanged. A slow-statement row whose first line names no statement keeps no text.
+    /// A row stored by <see cref="StoreLogSweep"/> brought to this build's rules (#3915, #3944). Rows written before
+    /// it carry the entry as the server wrote it, a failed statement's literals included, for the sweep's 400-day
+    /// retention, and a message that is the text rather than its grouping key; this normalizes the sample's SQL and
+    /// re-keys the message. Computed from the stored SAMPLE, whose first line carries the message the row was
+    /// grouped on, so the key and the sample come out consistent. Idempotent, so a row already brought up comes back
+    /// unchanged, with one exception: a sample the <see cref="MaxSampleLength"/> cap cut inside a normalized token
+    /// re-reads with that statement withheld, which the sweep's pass writes back once. Two shapes keep no text: a
+    /// slow-statement row whose first line names no statement, and a row whose sample opens on a tab-led line.
     /// </summary>
     public static (string? Message, string? Sample) MaskStoredEvent(string eventClass, string? message, string? sample)
     {
         if (sample is null)
         {
-            return (message is null ? null : Cap(PgLogTextRedactor.RedactMessage(message) ?? string.Empty, MaxMessageLength), null);
+            return (message is null ? null : Cap(GroupingKeyOf(message), MaxMessageLength), null);
         }
 
-        var firstLine = sample.Split('\n', 2)[0];
-        var field = FindField(firstLine);
-        var lineMessage = field.Kind == FieldKind.Primary ? firstLine[field.MessageStart..] : message ?? firstLine;
-        var (_, retained, maskedMessage, maskedSample) = MaskRetained(eventClass, lineMessage, sample);
-        return retained
-            ? (Cap(maskedMessage, MaxMessageLength), Cap(maskedSample, MaxSampleLength))
-            : (null, null);
+        /* Releases before #3920 opened an entry on ANY line holding a field token, a statement's tab-led
+           continuation included (`\t-- ERROR:  noted`), so a stored row can be a fragment of another entry's SQL
+           (#3944's review). Where a lexer would start reading it is unknowable, so it keeps no text. */
+        if (sample.StartsWith('\t'))
+        {
+            return (null, null);
+        }
+
+        var lineMessage = PrimaryMessageOf(sample) ?? message ?? sample.Split('\n', 2)[0];
+        var (_, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample);
+        if (!retained)
+        {
+            return (null, null);
+        }
+
+        /* A slow statement's stored key is already the lexer's, except on a row the first #3899 build wrote, whose
+           message is the raw duration line: kept, so a sample the cap cut inside a token, which re-reads as
+           withheld, cannot fold every such statement into one withheld key. */
+        if (eventClass == SlowStatementClass && message is not null && !message.StartsWith("duration: ", StringComparison.Ordinal))
+        {
+            key = message;
+        }
+
+        return (Cap(key, MaxMessageLength), Cap(maskedSample, MaxSampleLength));
     }
 }

@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -185,22 +186,21 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
-    /// #3915's review: EVERY retained class keeps its entry with the values masked, not only slow_statement's.
-    /// An ERROR's STATEMENT line carries whatever the failed statement carried (a DBA's failed
-    /// <c>ALTER ROLE ... PASSWORD</c>), a value-quoting message carries the client's input, and a key DETAIL
-    /// carries the row. Identifiers after their noun, prose numbers, field names and the prefix stay, so the
-    /// entry still reads as the server's.
+    /// #3944's ruling, through the store log's own capture: EVERY retained class keeps its entry as PostgreSQL
+    /// wrote it, a value-quoting message and a key DETAIL included, and only its SQL is normalized. An ERROR's
+    /// STATEMENT line carries whatever the failed statement carried (a DBA's failed <c>ALTER ROLE ... PASSWORD</c>,
+    /// #3915's review), and that does not survive. The stored message is the grouping key.
     /// </summary>
     [Fact]
-    public void EveryRetainedClass_KeepsItsEntryWithTheValuesMasked()
+    public void EveryRetainedClass_KeepsItsProseAsWritten_AndNormalizesItsSql()
     {
         var census = StoreLogClassifier.Classify(string.Join("\n",
         [
             DefaultPrefix + "ERROR:  canceling statement due to statement timeout",
             DefaultPrefix + "STATEMENT:  ALTER ROLE admin LOGIN PASSWORD 'Leak3915a'",
-            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Leak3915b\"",
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Kept3944b\"",
             DefaultPrefix + "ERROR:  duplicate key value violates unique constraint \"t_pkey\"",
-            DefaultPrefix + "DETAIL:  Key (id)=(Leak3915c) already exists.",
+            DefaultPrefix + "DETAIL:  Key (id)=(Kept3944c) already exists.",
             DefaultPrefix + "STATEMENT:  INSERT INTO t VALUES ('Leak3915d')",
             DefaultPrefix + "ERROR:  deadlock detected",
             DefaultPrefix + "DETAIL:  Process 5360 waits for ShareLock on transaction 809; blocked by process 5361.",
@@ -217,15 +217,126 @@ public class StoreLogClassifierTests
 
         var timeout = retained.Single(g => g.EventClass == "statement_timeout");
         Assert.Contains("STATEMENT:  ALTER ROLE admin LOGIN PASSWORD '?'", timeout.SampleLine, StringComparison.Ordinal);
-        Assert.Contains(retained, g => g.MessageText == "invalid input syntax for type integer: \"?\"");
+
+        var invalid = retained.Single(g => g.MessageText == "invalid input syntax for type integer: \"?\"");
+        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Kept3944b\"", invalid.SampleLine);
+
         var duplicate = retained.Single(g => g.MessageText!.StartsWith("duplicate key", StringComparison.Ordinal));
-        Assert.Equal("duplicate key value violates unique constraint \"t_pkey\"", duplicate.MessageText);
-        Assert.Contains("DETAIL:  Key (id)=(?) already exists.", duplicate.SampleLine, StringComparison.Ordinal);
+        Assert.Equal("duplicate key value violates unique constraint \"?\"", duplicate.MessageText);
+        Assert.Contains("ERROR:  duplicate key value violates unique constraint \"t_pkey\"", duplicate.SampleLine, StringComparison.Ordinal);
+        Assert.Contains("DETAIL:  Key (id)=(Kept3944c) already exists.", duplicate.SampleLine, StringComparison.Ordinal);
         Assert.Contains("STATEMENT:  INSERT INTO t VALUES ('?')", duplicate.SampleLine, StringComparison.Ordinal);
         Assert.Contains(
             "DETAIL:  Process 5360 waits for ShareLock on transaction 809; blocked by process 5361.",
             retained.Single(g => g.EventClass == "deadlock").SampleLine,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3944: the store groups a retained class's entries by a GROUPING key, so two messages that differ only by a
+    /// value (a quoted run, a number) are one row with both occurrences, and two different messages stay two. The
+    /// row stores the key; what it shows is its sample's own message, as PostgreSQL wrote it.
+    /// </summary>
+    [Fact]
+    public void MessagesThatDifferOnlyByAValue_GroupIntoOneRow()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"abc\"",
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"def\"",
+            DefaultPrefix + "ERROR:  could not read block 12 in file \"base/16384/2619\": read only 0 of 8192 bytes",
+            DefaultPrefix + "ERROR:  could not read block 99 in file \"base/16384/2620\": read only 0 of 8192 bytes",
+            DefaultPrefix + "ERROR:  function f1(integer) does not exist",
+            DefaultPrefix + "ERROR:  function f2(integer) does not exist",
+            "",
+        ]));
+
+        Assert.Equal(6, census.EntriesRead);
+        Assert.Equal(0, census.GroupsDropped);
+
+        var invalid = Assert.Single(census.Groups, g => g.MessageText == "invalid input syntax for type integer: \"?\"");
+        Assert.Equal(2, invalid.Occurrences);
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, invalid.EventClass);
+        Assert.Equal(DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"abc\"", invalid.SampleLine);
+        Assert.Equal(
+            "invalid input syntax for type integer: \"abc\"",
+            StoreLogClassifier.DisplayMessageOf(invalid.EventClass, invalid.MessageText, invalid.SampleLine));
+
+        var block = Assert.Single(census.Groups, g => g.EventClass == "data_integrity");
+        Assert.Equal("could not read block ? in file \"?\": read only ? of ? bytes", block.MessageText);
+        Assert.Equal(2, block.Occurrences);
+
+        /* A digit glued to a name is part of the name: two missing functions are two messages. */
+        Assert.Equal(2, census.Groups.Count(g => g.MessageText!.StartsWith("function f", StringComparison.Ordinal)));
+
+        /* The key is idempotent, which is what lets the re-mask pass and the reader re-derive it from a stored row. */
+        Assert.Equal(invalid.MessageText, StoreLogClassifier.GroupingKeyOf(invalid.MessageText!));
+        Assert.Equal(block.MessageText, StoreLogClassifier.GroupingKeyOf(block.MessageText!));
+
+        /* A slow statement's key IS its text, the normalized statement with no duration, so it shows the key. */
+        Assert.Equal(
+            "statement: SELECT ?",
+            StoreLogClassifier.DisplayMessageOf(StoreLogClassifier.SlowStatementClass, "statement: SELECT ?", DefaultPrefix + "LOG:  duration: 6000.000 ms  statement: SELECT ?"));
+    }
+
+    /// <summary>
+    /// #3944's review, through the store log's own capture: an entry that is not prose keeps no SQL literal either.
+    /// An auto_explain plan logged at WARNING keeps its duration line and withholds the plan (its Query Text is the
+    /// statement), and postgres_fdw's unquoted <c>remote SQL command:</c> CONTEXT frame is normalized like a quoted
+    /// one. The key tells two messages apart by their words, so an apostrophe never pairs across a message.
+    /// </summary>
+    [Fact]
+    public void APlanAndARemoteCommand_KeepNoLiteral_AndAnApostropheIsNotAQuote()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "WARNING:  duration: 7001.250 ms  plan:",
+            "\tQuery Text: SELECT * FROM t WHERE code = 'Leak3944p'",
+            "\tSeq Scan on t  (cost=0.00..1.01 rows=1 width=4)",
+            DefaultPrefix + "ERROR:  canceling statement due to statement timeout",
+            DefaultPrefix + "CONTEXT:  remote SQL command: SELECT id FROM public.t WHERE ((code = 'Leak3944q'::text))",
+            DefaultPrefix + "ERROR:  customer's order 12 wasn't found",
+            DefaultPrefix + "ERROR:  customer's invoice 12 wasn't found",
+            "",
+        ]));
+
+        foreach (var group in census.Groups)
+        {
+            Assert.DoesNotContain("Leak3944", group.MessageText + group.SampleLine, StringComparison.Ordinal);
+        }
+
+        var plan = Assert.Single(census.Groups, g => g.MessageText == "duration: ? ms  plan:");
+        Assert.Equal(
+            DefaultPrefix + "WARNING:  duration: 7001.250 ms  plan:\n\t" + PgLogTextRedactor.WithheldPlan,
+            plan.SampleLine);
+
+        var timeout = Assert.Single(census.Groups, g => g.EventClass == "statement_timeout");
+        Assert.EndsWith("CONTEXT:  remote SQL command: SELECT id FROM public.t WHERE ((code = '?'::text))", timeout.SampleLine, StringComparison.Ordinal);
+
+        Assert.Contains(census.Groups, g => g.MessageText == "customer's order ? wasn't found");
+        Assert.Contains(census.Groups, g => g.MessageText == "customer's invoice ? wasn't found");
+    }
+
+    /// <summary>
+    /// #3944's review: releases through 3.8.0 opened an entry on any line holding a field token, a statement's
+    /// tab-led continuation included, so a stored row can be a fragment of another entry's SQL whose lexer state is
+    /// unknowable. It keeps no text. And a slow statement's stored key survives a sample the cap cut inside a
+    /// normalized token: the sample re-reads withheld, the key does not fold into one withheld key.
+    /// </summary>
+    [Fact]
+    public void AStoredFragment_KeepsNoText_AndACappedSlowStatement_KeepsItsKey()
+    {
+        Assert.Equal(
+            ((string?)null, (string?)null),
+            StoreLogClassifier.MaskStoredEvent(
+                StoreLogClassifier.UnclassifiedClass, "noted", "\t-- ERROR:  noted\n\tFROM creds WHERE pw = 'Leak3944f'"));
+
+        const string key = "statement: SELECT a FROM t WHERE b = '?'";
+        const string capped = DefaultPrefix + "LOG:  duration: 6000.000 ms  statement: SELECT a FROM t WHERE b = '?";
+        var (keptKey, sample) = StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowStatementClass, key, capped);
+        Assert.Equal(key, keptKey);
+        Assert.Equal(DefaultPrefix + "LOG:  duration: 6000.000 ms  statement: " + StoreLogClassifier.WithheldStatement, sample);
+        Assert.Equal((keptKey, sample), StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.SlowStatementClass, keptKey, sample));
     }
 
     /// <summary>
@@ -269,9 +380,10 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
-    /// The re-mask of rows stored before this build (#3915): a raw row comes back masked, a first-#3899-build
-    /// slow-statement row comes back in this build's statement form, and a row already masked comes back
-    /// unchanged, which is what lets the sweep's pass run over the whole table.
+    /// The re-mask of rows stored before this build (#3915, #3944): a raw row comes back with its SQL normalized and
+    /// its message re-keyed, its prose as written, a first-#3899-build slow-statement row comes back in this
+    /// build's statement form, and a row already brought up comes back unchanged, which is what lets the sweep's
+    /// pass run over the whole table.
     /// </summary>
     [Fact]
     public void MaskStoredEvent_RemasksRawRows_AndIsIdempotent()
@@ -283,6 +395,14 @@ public class StoreLogClassifierTests
         Assert.Equal("canceling statement due to statement timeout", timeoutMessage);
         Assert.Contains("STATEMENT:  ALTER ROLE admin PASSWORD '?'", timeoutSample, StringComparison.Ordinal);
         Assert.Equal((timeoutMessage, timeoutSample), StoreLogClassifier.MaskStoredEvent("statement_timeout", timeoutMessage, timeoutSample));
+
+        /* A pre-#3944 row whose message was the text: re-keyed from its sample, the sample's prose kept. */
+        const string rawInvalid = DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Kept3944i\"";
+        var (invalidKey, invalidSample) = StoreLogClassifier.MaskStoredEvent(
+            StoreLogClassifier.UnclassifiedClass, "invalid input syntax for type integer: \"Kept3944i\"", rawInvalid);
+        Assert.Equal("invalid input syntax for type integer: \"?\"", invalidKey);
+        Assert.Equal(rawInvalid, invalidSample);
+        Assert.Equal((invalidKey, invalidSample), StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.UnclassifiedClass, invalidKey, invalidSample));
 
         const string rawSlow = DefaultPrefix + "LOG:  duration: 6120.004 ms  execute <unnamed>: \n\tSELECT a FROM t WHERE b = 'Leak3915j'";
         var (slowMessage, slowSample) = StoreLogClassifier.MaskStoredEvent(
@@ -354,67 +474,34 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
-    /// #3920's review: the stored MESSAGE was masked from the first line alone, so a value that ran onto the next
-    /// line kept its opening half in <c>message_text</c> while the sample was masked whole. The message now comes
-    /// from the masked entry. LOCATION keeps only its own line; a line after it (a command's stderr under
-    /// <c>log_error_verbosity = verbose</c>) is masked. So is the text before a field token on a line that merely
-    /// contains one.
+    /// #3944: a retained entry's prose is kept as PostgreSQL wrote it wherever it sits: a message whose value runs
+    /// onto the next line, a HINT, a LOCATION with a command's stderr after it (<c>log_error_verbosity =
+    /// verbose</c>), and the text before a field token on a line that merely contains one (an archive command's
+    /// stderr). #3920's reviews masked each of these; none is SQL.
     /// </summary>
     [Fact]
-    public void TheMessageLocationTailAndHead_AreMaskedWithTheEntry()
+    public void TheMessageHintLocationAndAForeignHead_AreKeptAsWritten()
     {
-        var census = StoreLogClassifier.Classify(string.Join("\n",
+        string[] entry =
         [
-            DefaultPrefix + "ERROR:  unterminated quoted string at or near \"'Leak3920g",
+            DefaultPrefix + "ERROR:  unterminated quoted string at or near \"'Kept3944g",
             "\t\"",
-            DefaultPrefix + "ERROR:  canceling statement due to statement timeout",
-            DefaultPrefix + "LOCATION:  ProcessInterrupts, postgres.c:3383",
-            "\tcp: cannot stat 'Leak3920h': No such file or directory",
-            "archive stderr 'Leak3920i' ERROR:  canceling statement due to lock timeout",
-            "",
-        ]));
-
-        var retained = census.Groups.Where(g => g.MessageText is not null).ToList();
-        foreach (var group in retained)
-        {
-            Assert.DoesNotContain("Leak3920", group.MessageText + group.SampleLine, StringComparison.Ordinal);
-        }
-
-        Assert.Contains(retained, g => g.MessageText == "unterminated quoted string at or near \"?\"");
-        var location = retained.Single(g => g.SampleLine!.Contains("LOCATION:", StringComparison.Ordinal)).SampleLine!;
-        Assert.Contains("LOCATION:  ProcessInterrupts, postgres.c:3383\n\tcp: cannot stat '?': No such file or directory", location, StringComparison.Ordinal);
-        Assert.Contains(retained, g => g.SampleLine!.StartsWith("archive stderr '?' ERROR:  canceling statement due to lock timeout", StringComparison.Ordinal));
-    }
-
-    /// <summary>
-    /// #3920's fourth review (M4, L1), through the store log's own capture. A value whose closing quote never
-    /// arrived is masked to the end of its field, not kept, in the message and in the sample alike. A LOCATION line
-    /// is kept as written only when it has the shape PostgreSQL writes, a function and a source file and line;
-    /// anything else there (a command's stderr) is masked as prose.
-    /// </summary>
-    [Fact]
-    public void AnUnclosedValueAndAForeignLocation_AreMaskedWithTheEntry()
-    {
-        var census = StoreLogClassifier.Classify(string.Join("\n",
+            DefaultPrefix + "HINT:  Use an escape string such as E'Kept3944h'.",
+        ];
+        string[] location =
         [
-            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"4111111111111111",
             DefaultPrefix + "ERROR:  canceling statement due to statement timeout",
             DefaultPrefix + "LOCATION:  ProcessInterrupts, postgres.c:3383",
-            DefaultPrefix + "ERROR:  canceling statement due to lock timeout",
-            DefaultPrefix + "LOCATION:  cp: cannot stat 'Leak3920w': No such file or directory",
-            "",
-        ]));
+            "\tcp: cannot stat 'Kept3944i': No such file or directory",
+        ];
+        const string foreign = "archive stderr 'Kept3944j' ERROR:  canceling statement due to lock timeout";
 
+        var census = StoreLogClassifier.Classify(string.Join("\n", [.. entry, .. location, foreign, ""]));
         var retained = census.Groups.Where(g => g.MessageText is not null).ToList();
-        foreach (var group in retained)
-        {
-            Assert.DoesNotContain("4111111111111111", group.MessageText + group.SampleLine, StringComparison.Ordinal);
-            Assert.DoesNotContain("Leak3920w", group.MessageText + group.SampleLine, StringComparison.Ordinal);
-        }
 
-        Assert.Contains(retained, g => g.MessageText == "invalid input syntax for type integer: \"?\"");
-        Assert.Contains(retained, g => g.SampleLine!.EndsWith("LOCATION:  ProcessInterrupts, postgres.c:3383", StringComparison.Ordinal));
-        Assert.Contains(retained, g => g.SampleLine!.EndsWith("LOCATION:  cp: cannot stat '?': No such file or directory", StringComparison.Ordinal));
+        Assert.Equal(string.Join("\n", entry), retained.Single(g => g.EventClass == StoreLogClassifier.UnclassifiedClass).SampleLine);
+        Assert.Equal(string.Join("\n", location), retained.Single(g => g.EventClass == "statement_timeout").SampleLine);
+        Assert.Equal(foreign, retained.Single(g => g.EventClass == "lock_timeout").SampleLine);
     }
 
     /// <summary>
@@ -600,7 +687,8 @@ public class StoreLogClassifierTests
         var realGroup = Assert.Single(real.Groups);
         Assert.Equal(StoreLogClassifier.UnclassifiedClass, realGroup.EventClass);
         Assert.True(StoreLogClassifier.IsRetainedClass(realGroup.EventClass));
-        Assert.Equal(Message, realGroup.MessageText);
+        /* Stored under its grouping key (#3944), the entry itself kept as written. */
+        Assert.Equal("could not reserve shared memory region (addr=?) for child 47C: error code ?", realGroup.MessageText);
         Assert.Contains(Message, realGroup.SampleLine!, StringComparison.Ordinal);
     }
 
@@ -803,13 +891,16 @@ public class StoreLogClassifierTests
                same number and hid a real defect: the fold counted every REPEAT of an over-budget message as
                another distinct message, so an operator's one retried typo reported as five hundred. The
                repeat is what separates the two figures, and it is the case the budget exists for. */
+            /* Distinct message SHAPES: `function fa() does not exist` ... `function fy()`. A quoted or numbered
+               variant (`column "c7"`) would be one message under the grouping key (#3944), which is the point of
+               the key, and would test nothing here. */
             var repeats = i == Distinct - 1 ? RepeatsOfTheLast : 1;
             for (var r = 0; r < repeats; r++)
             {
                 slab.Append(DefaultPrefix)
-                    .Append("ERROR:  column \"c")
-                    .Append(i)
-                    .Append("\" does not exist\n");
+                    .Append("ERROR:  function f")
+                    .Append((char)('a' + i))
+                    .Append("() does not exist\n");
             }
         }
 

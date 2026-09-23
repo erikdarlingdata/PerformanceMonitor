@@ -108,11 +108,10 @@ AND   c.name IN ('deadlock_timeout', 'log_lock_waits')";
     /// <para><b>The duration is read off the message, not the <c>duration_ms</c> column.</b> Verified at source
     /// (<c>PgLockWaitEventParser</c>): the lock_wait parser stores the line with NO metrics lifted — <c>duration_ms</c>
     /// and <c>relation_name</c> are NULL on every lock_wait row today (the autovacuum family fills them). The number
-    /// survives in <c>message</c> because <c>PgLogTextRedactor</c> keeps bare numbers in prose ("after 1000.123 ms"
-    /// is PostgreSQL's arithmetic, never a customer's literal), so <c>after ([0-9.]+) ms</c> is the engine's own
-    /// figure; <c>coalesce</c> prefers the column the day a parser fills it. The relation, likewise, comes from the
-    /// stored <c>CONTEXT</c> (<c>while updating tuple (0,7) in relation "orders"</c> — an identifier after a noun,
-    /// which the redactor's allowlist keeps) when the column is NULL.</para>
+    /// is in <c>message</c>, which is stored as PostgreSQL wrote it (#3944), so <c>after ([0-9.]+) ms</c> is the
+    /// engine's own figure; <c>coalesce</c> prefers the column the day a parser fills it. The relation, likewise,
+    /// comes from the stored <c>CONTEXT</c> (<c>while updating tuple (0,7) in relation "orders"</c>) when the column
+    /// is NULL.</para>
     ///
     /// <para><b>The window is on <c>collection_time</c></b> (the indexed column; the log collector runs every five
     /// minutes and stamps the batch), so an event is "in the window" when it was COLLECTED in it — a line written in

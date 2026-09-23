@@ -836,10 +836,10 @@ public sealed class DarlingWorker : BackgroundService
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
     private bool _timescaleAvailable;
 
-    /* #3915: the re-mask pass over store-log rows captured before this build. The cursor is where the last
-       hourly slice stopped; done once a slice reaches the table's end, and then not again this process (new
-       captures are masked on write, and the masking is idempotent, so the next process's pass is a no-op
-       re-read). */
+    /* #3915, #3944: the re-mask pass over store-log rows captured before this build, which normalizes their
+       SQL and re-keys their message. The cursor is where the last hourly slice stopped; done once a slice
+       reaches the table's end, and then not again this process (new captures are written that way, and the
+       pass is idempotent, so the next process's pass is a no-op re-read). */
     private string? _storeLogRemaskCursor;
 
     private bool _storeLogRemaskDone;
@@ -6810,10 +6810,10 @@ LIMIT 1";
                     ex.Message);
             }
 
-            /* #3915: rows stored before this build kept their entries unmasked (an ERROR's STATEMENT line, a
-               DETAIL's key values), for the capture's 400-day retention. Re-masked one bounded slice per tick
-               until the table's end, then not again this process; a new capture is masked on write. Its own
-               catch, like the capture's, and its own time cap (#3920's review): neither a failure nor a slow
+            /* #3915, #3944: rows stored before this build kept their entries whole (an ERROR's STATEMENT line with
+               its literals), for the capture's 400-day retention. Their SQL is normalized one bounded slice per
+               tick until the table's end, then not again this process; a new capture is normalized on write. Its
+               own catch, like the capture's, and its own time cap (#3920's review): neither a failure nor a slow
                slice may cost the collector-cost flush below. */
             if (!_storeLogRemaskDone)
             {
@@ -6828,7 +6828,7 @@ LIMIT 1";
                     if (rewritten > 0)
                     {
                         _logger.LogInformation(
-                            "Store log: re-masked {Rewritten} of {Examined} stored row(s) captured before this build, so their statement literals and quoted values no longer reach get_store_log{Remaining}.",
+                            "Store log: re-masked {Rewritten} of {Examined} stored row(s) captured before this build, so their SQL literals no longer reach get_store_log and their messages group by shape{Remaining}.",
                             rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
                     }
                 }

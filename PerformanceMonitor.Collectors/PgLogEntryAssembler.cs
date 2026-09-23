@@ -135,7 +135,9 @@ public static class PgLogEntryAssembler
             if (!match.Success)
             {
                 /* Not a prefix line and not a continuation: the cut head, or a line the server wrote to
-                   stderr outside its own format (a loader's chatter, a crash dump). Nothing to do with it. */
+                   stderr outside its own format (a loader's chatter, a crash dump). Nothing to do with it, nor
+                   with the tab lines under it. */
+                current?.CloseField();
                 continue;
             }
 
@@ -158,6 +160,13 @@ public static class PgLogEntryAssembler
             if (current is not null && current.Pid == match.Groups["pid"].Value)
             {
                 current.Companion(label, match.Groups["text"].Value, line);
+            }
+            else
+            {
+                /* ...and neither do the tab lines under that backend's line (#3944's review): they are the rest of
+                   ITS field, another session's multi-line statement say, and the field open here would otherwise
+                   take them in, now that the columns keep their prose as written. */
+                current?.CloseField();
             }
         }
 
@@ -226,6 +235,10 @@ public static class PgLogEntryAssembler
             _open?.Append('\n').Append(text);
             _raw.Append('\t').Append(text).Append('\n');
         }
+
+        /// <summary>Stops tab-continuation lines from joining the field last opened: the line they continue was
+        /// not this entry's.</summary>
+        public void CloseField() => _open = null;
 
         public void Companion(string label, string text, string line)
         {

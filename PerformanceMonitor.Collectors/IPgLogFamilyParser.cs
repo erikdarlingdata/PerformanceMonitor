@@ -18,8 +18,8 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>What implementing one costs, and does not.</b> A parser sees a <see cref="PgLogEntry"/> — the
 /// prefix already read, the zone already checked, the companion lines already attached — and returns a
-/// <see cref="PgLogEvent"/> through <see cref="PgLogEvent.From"/>, which redacts. It does not know which
-/// transport the entry came from, does not touch a cursor, and cannot store unredacted text. #3602
+/// <see cref="PgLogEvent"/> through <see cref="PgLogEvent.From"/>, which normalizes the SQL. It does not know
+/// which transport the entry came from, does not touch a cursor, and cannot store a statement's text. #3602
 /// (<c>log_temp_files</c>) and #3603 (<c>log_autovacuum_min_duration</c>) each added ONE class implementing
 /// this and one line in <see cref="PgLogEventClassifier.DefaultParsers"/>, exactly as planned; the
 /// structure they lift rides the same row as nullable columns (<see cref="PgLogEventMetrics"/>, V130)
