@@ -34,6 +34,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFleetTools
 {
     [McpServerTool(Name = "get_fleet_overview"), Description(
+        "One pre-banded card per server (CPU, memory, blocking, deadlocks, threads, collector health) plus a " +
+        "fleet rollup (band counts, cross-server totals, worst-first ranking). Blocking/deadlock counts window " +
+        "hours_back (default 1) ending now; collector-health fields use a separate scan, not hours_back. " +
+        "cpu_source explains a missing total_cpu_percent: NotCollected is a real gap (get_collection_health); " +
+        "NoSourceForEngine (non-Aurora PostgreSQL) is structural, no grant or upgrade fixes it. PostgreSQL " +
+        "memory_mb, buffer_pool_mb and threads are always null (no DMV equivalent), not a gap. <<GUIDE>> " +
         "Gets the whole fleet's health at a glance: one pre-banded card per monitored server (CPU, memory, " +
         "blocking, deadlocks, worker threads, and collector health, each with a Healthy/Warning/Critical band), " +
         "plus a rollup — counts by band, cross-server blocking and deadlock totals, and a worst-first 'needs " +
@@ -54,7 +60,7 @@ public sealed class DarlingMcpFleetTools
         "target's deadlock_count IS measured: it is the server's own pg_stat_database.deadlocks counter, " +
         "differenced per database over the window (a statistics reset clamps to zero, never subtracts) and " +
         "summed, banded through the same deadlock_warn_per_hour / deadlock_critical_per_hour tiers as SQL " +
-        "Server's graph count; deadlock_source reads PostgresTarget for it, which since #3539 means COUNTED " +
+        "Server's graph count; deadlock_source reads PostgresTarget for it, which means COUNTED " +
         "from that counter (deadlock_coverage.postgres_servers is a sub-count of servers_read, not a gap), " +
         "and get_pg_deadlocks has the parsed deadlock reports themselves. Its blocking_severity stays " +
         "Unknown on purpose: PostgreSQL blocking is a once-a-minute SAMPLE of pg_stat_activity, and the " +

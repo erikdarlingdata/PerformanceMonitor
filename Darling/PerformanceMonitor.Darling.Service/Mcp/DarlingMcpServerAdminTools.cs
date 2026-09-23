@@ -86,6 +86,12 @@ public sealed class DarlingMcpServerAdminTools
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
 
     [McpServerTool(Name = "add_servers"), Description(
+        "Adds servers (a JSON ARRAY) to the monitored fleet: each entry is validated, probed live, and written to " +
+        "the shared central store immediately if new and reachable, no confirm step; the running service picks it " +
+        "up within one sweep, visible to every client. Entries process in order; one failed connection or a " +
+        "duplicate does not stop the rest. Returns requested/added/skipped/collided/failed counts that sum to " +
+        "requested; only added servers are monitored, so check skipped/collided/failed before calling a batch " +
+        "done. A password or client secret is encrypted at rest and never returned. <<GUIDE>> " +
         "Adds one or more database servers to the fleet the Darling service monitors — BULK onboarding: pass a JSON " +
         "ARRAY of server objects and each is validated, connection-tested, and (if new and reachable) saved to the " +
         "central monitoring store, which the running service picks up within one collection sweep (no restart). " +
@@ -118,10 +124,14 @@ public sealed class DarlingMcpServerAdminTools
         "\"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
         "the batch as done. An added server's detail reports what the probe found — for a PostgreSQL target that " +
         "includes writer-vs-reader, Aurora-vs-not, and how many of the PostgreSQL collectors apply to it. NOTE: the " +
-        "password travels to this endpoint in the request; on a LAN use the documented TLS reverse proxy.")]
+        "password travels to this endpoint in the request; on a LAN use the documented TLS reverse proxy. " +
+        "servers_json is a JSON ARRAY of server objects to add (see above for the per-object fields), e.g. " +
+        "[{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\"," +
+        "\"trust_server_certificate\":true},{\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":" +
+        "\"postgres\",\"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\",\"trust_server_certificate\":true}].")]
     public static Task<string> AddServers(
         NpgsqlDataSource postgres,
-        [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields), e.g. [{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"...\",\"encrypt_mode\":\"Mandatory\",\"trust_server_certificate\":true},{\"host\":\"aurora.cluster-abc.us-east-1.rds.amazonaws.com\",\"engine\":\"postgres\",\"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"...\",\"trust_server_certificate\":true}].")] string servers_json) =>
+        [Description("A JSON ARRAY of server objects to add (see the tool description for the per-object fields and an example).")] string servers_json) =>
         AddServersAsync(postgres, servers_json, DefaultProbeAsync, CancellationToken.None);
 
     /// <summary>The testable core of <c>add_servers</c>: validates + dedupes + probes (through the injected
@@ -212,6 +222,12 @@ public sealed class DarlingMcpServerAdminTools
     }
 
     [McpServerTool(Name = "remove_server"), Description(
+        "Deletes a monitored server's definition from the shared central store (config_monitored_servers) " +
+        "immediately, no confirm step; the service drops it from collection within one sweep. Already-collected " +
+        "historical data is NOT deleted. Matches by exact name first (display or storage name/address, " +
+        "case-insensitive); a partial match is honored only if exactly one definition contains it, otherwise " +
+        "nothing is deleted and candidates are listed for re-issue. Matches against DEFINITIONS, not the " +
+        "connected registry, so an unconnected server can still be removed. <<GUIDE>> " +
         "Removes a monitored server from the fleet by name (its display name or storage name / address, as " +
         "list_servers reports them). The name is resolved against the monitored-server DEFINITIONS in the central " +
         "store (config_monitored_servers — the table add_servers writes and this tool deletes from), NOT against the " +
@@ -229,10 +245,11 @@ public sealed class DarlingMcpServerAdminTools
         "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
         "not_found whose matched_in is \"servers\" means the name IS a connected server but has no definition in the " +
         "store to delete (it is defined in darling.json, or its definition was already removed); the message otherwise " +
-        "lists the servers that are defined.")]
+        "lists the servers that are defined. " +
+        "server_name is matched as list_servers / get_alert_history report it.")]
     public static async Task<string> RemoveServer(
         NpgsqlDataSource postgres,
-        [Description("The name of the monitored server to remove — its display name or storage name / address (as list_servers / get_alert_history report it). A partial name is accepted only when it matches exactly one server.")] string server_name)
+        [Description("The name of the monitored server to remove — its display name or storage name / address. A partial name is accepted only when it matches exactly one server.")] string server_name)
     {
         try
         {
