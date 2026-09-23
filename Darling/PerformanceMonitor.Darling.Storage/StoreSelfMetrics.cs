@@ -170,11 +170,12 @@ public static class StoreSelfMetrics
     /// <para><b>What this arm cannot see, and why that is not a filter of ours (#3582).</b> Nothing here
     /// restricts the walk to collector tables — it enumerates every row the view returns — but the view
     /// itself excludes two classes of hypertable: the internal compressed hypertables
-    /// (<c>compression_state &lt;&gt; 2</c>) and every continuous aggregate's materialization
+    /// (<c>compression_state &lt;&gt; 2</c>, which exist only before 2.29.0: from then on compression keeps
+    /// no internal hypertable) and every continuous aggregate's materialization
     /// (<c>ca.mat_hypertable_id IS NULL</c>). The first is right — <c>hypertable_detailed_size</c> on a
-    /// user hypertable already includes its compressed chunk relations, byte-exact (verified on 2.28.1
-    /// against <c>pg_total_relation_size</c> over root + chunks + compressed chunks). The second is the gap
-    /// <see cref="ContinuousAggregateInsertSql"/> closes: a materialization is a hypertable that holds
+    /// user hypertable already includes its compressed chunk relations, byte-exact (verified on 2.28.1 and
+    /// 2.30.1 against <c>pg_total_relation_size</c> over root + chunks + compressed relations). The second
+    /// is the gap <see cref="ContinuousAggregateInsertSql"/> closes: a materialization is a hypertable that holds
     /// real bytes and is enumerated by this view under NO name, internal or otherwise.</para>
     /// </summary>
     public const string HypertableInsertSql = $@"
@@ -631,12 +632,13 @@ AND   NOT c.relisshared";
     /// Which side of the user/system line a relation falls on, as a fragment over <c>n.nspname</c> (#3582).
     /// System: PostgreSQL's own two schemas, and every schema TimescaleDB creates — the <c>_timescaledb_</c>
     /// family (<c>_catalog</c>, <c>_config</c>, <c>_cache</c>, <c>_internal</c>, <c>_functions</c>) plus
-    /// its two information schemas. <c>_timescaledb_internal</c> is where chunks live, but chunks are
-    /// removed from the census before this predicate is applied (<see cref="UnenumeratedInsertSql"/>), so
-    /// what remains of it here is TimescaleDB's bookkeeping: <c>bgw_job_stat_history</c> (the
-    /// <c>job_history</c> table itself), the compressed hypertables' empty roots, and any chunk relation
-    /// whose catalog row is gone — which is exactly the class of residue a reconciliation should count
-    /// rather than lose. <c>pg_toast</c> is not named because TOAST relations are <c>relkind = 't'</c> and
+    /// its two information schemas. <c>_timescaledb_internal</c> is where chunks live, but chunks and their
+    /// compressed relations are removed from the census before this predicate is applied
+    /// (<see cref="TimescaleInventoriedPredicateSql"/>), so what remains of it here is TimescaleDB's
+    /// bookkeeping: <c>bgw_job_stat_history</c> (the <c>job_history</c> table itself), the compressed
+    /// hypertables' empty roots (before 2.29.0 only), and any chunk relation whose catalog row is gone —
+    /// which is exactly the class of residue a reconciliation should count rather than lose. <c>pg_toast</c>
+    /// is not named because TOAST relations are <c>relkind = 't'</c> and
     /// already excluded by <see cref="CensusRelationPredicateSql"/>; their bytes arrive through their
     /// parents. <c>starts_with</c> rather than <c>LIKE</c> so the underscore is a character and not a
     /// wildcard, with no escape-string dialect to get wrong.
@@ -666,18 +668,62 @@ AND   NOT c.relisshared";
         '{AlertLogTable}')";
 
     /// <summary>
-    /// The relations the TimescaleDB rows already size, as a fragment (#3582): every hypertable root the
-    /// <c>hypertables</c> view lists (its chunks and compressed chunks are inside that row's
-    /// <c>hypertable_detailed_size</c>), every materialization root the <c>continuous_aggregates</c> view
-    /// names (same), and every chunk relation the chunk catalog knows — which is what keeps the census from
-    /// re-summing the ~40,000 chunk relations a production store holds and lets the catch-all statement
-    /// cost a hash anti-join over <c>pg_class</c> rather than a <c>pg_total_relation_size</c> per chunk.
-    /// Joined by <c>(schema_name, table_name)</c> rather than by casting the catalog's names to
-    /// <c>regclass</c>: a catalog row whose relation is gone would make the cast RAISE and fail the sweep,
-    /// where a name join simply matches nothing. The internal compressed hypertables' roots
-    /// (<c>compression_state = 2</c>, <c>_compressed_hypertable_N</c>) are deliberately NOT excluded here:
-    /// no named row sizes them, so they fall to the <see cref="SystemObjectKind"/> row, which is where an
-    /// unattributed byte belongs. TimescaleDB-only; the plain-PostgreSQL variant omits it.
+    /// The relations the TimescaleDB rows already size, as a fragment (#3582, reshaped by #3918): every
+    /// hypertable root the <c>hypertables</c> view lists, every materialization root the
+    /// <c>continuous_aggregates</c> view names, every chunk the <c>chunks</c> view lists, and every relation
+    /// holding a chunk's COMPRESSED data. That is exactly the population <c>hypertable_detailed_size</c> adds
+    /// up for the hypertable and aggregate rows: the root, each catalog chunk, and
+    /// <c>relation_size(compress_relid)</c> through each chunk's <c>compression_settings</c> row (TimescaleDB's
+    /// own <c>_timescaledb_internal.hypertable_chunk_local_size</c>, whose compressed-size join is identical on
+    /// 2.28.1 and 2.30.1). So a relation matched here is inside a named row, and one that is not falls to a
+    /// catch-all. It is also what
+    /// keeps the census from re-summing the ~40,000 chunk relations a production store holds: the catch-all
+    /// statement costs hash anti-joins over <c>pg_class</c> rather than a <c>pg_total_relation_size</c> per
+    /// chunk. The root and chunk arms join on <c>(schema, name)</c> rather than casting a catalog value to
+    /// <c>regclass</c>: a row whose relation is gone would make the cast RAISE and fail the sweep, where a
+    /// name join simply matches nothing.
+    ///
+    /// <para><b>Why the public <c>chunks</c> view and not <c>_timescaledb_catalog.chunk</c> (#3918).</b>
+    /// TimescaleDB 2.29.0 rebuilt the chunk catalog: its update script drops <c>chunk.schema_name</c>,
+    /// <c>table_name</c> and <c>compressed_chunk_id</c> and adds <c>relid regclass</c>. The first cut of this
+    /// fragment joined the catalog on the two dropped columns, and PostgreSQL resolves column names at
+    /// analysis, so on 2.29+ the whole catch-all statement failed with 42703 before it read a row. The sweep
+    /// threw after its earlier statements had committed their rows, so the run had no catch-all or store row
+    /// to reconcile them against, and the store-log census and collector-cost flush riding the same tick
+    /// stopped with it. Joining on <c>relid</c> instead fails the same way on 2.28.1, which has no such
+    /// column, and one build meets both shapes: the bundled runtime, a bring-your-own store on any version,
+    /// a store whose extension update did not complete. The <c>chunks</c> view is rebuilt by every
+    /// version's own update script and keeps <c>chunk_schema</c> and <c>chunk_name</c> across the rewrite
+    /// (taken from the catalog's names on 2.28.1, from <c>pg_class</c> through <c>relid</c> on 2.30.1), so
+    /// one statement serves both shapes with no version probe and no second copy of the census. Its cost,
+    /// measured on a 20,000-chunk store with 10,000 of them compressed (30,093 relations), is about 240 to
+    /// 260 ms warm against the old catalog join's 200 ms on 2.28.1, and 230 to 240 ms on 2.30.1, with the
+    /// same survivors and bytes as the old join on 2.28.1.</para>
+    ///
+    /// <para><b>Why compressed data is a fourth arm, keyed on <c>compression_settings.compress_relid</c>.</b>
+    /// On 2.28.1 a chunk's compressed data lives in <c>compress_hyper_N_M_chunk</c>, itself a chunk of an
+    /// internal compressed hypertable, which the old catalog join removed as a chunk. From 2.29.0 compression
+    /// keeps no internal hypertable: the update deletes those chunk rows and drops the
+    /// <c>_compressed_hypertable_N</c> roots, and the compressed relation (<c>_hyper_N_M_chunk_compressed</c>
+    /// on a fresh 2.30.1 store, the old <c>compress_hyper_N_M_chunk</c> name kept on an upgraded one) is in no
+    /// chunk catalog row at all. The one catalog that names it on every version is
+    /// <c>compression_settings.compress_relid</c>, the column <c>hypertable_detailed_size</c> sizes it
+    /// through, so this arm is what stops the <see cref="SystemObjectKind"/> row counting those bytes a
+    /// second time. Measured on a seeded store (72 hypertables, 24 aggregates, 850 of 1,118 chunks
+    /// compressed): 850 compressed relations holding 34,816,000 bytes on 2.28.1, a fresh 2.30.1 and an
+    /// upgraded 2.30.1 alike, every one a <c>compress_relid</c> and none an inheritance child of anything.
+    /// On 2.28.1 the <c>chunks</c> view hides compressed chunks (<c>compression_state != 2</c>) and this arm
+    /// removes them instead: the two arms together exclude exactly the 1,968 relations the old catalog join
+    /// did. TimescaleDB keeps the column honest in both directions (measured on both versions): decompressing
+    /// a chunk clears its <c>compress_relid</c> and dropping a chunk deletes the settings row, so the arm can
+    /// neither miss a live compressed relation nor exclude a stray one. The comparison is on the OID the
+    /// <c>regclass</c> column stores, which resolves no name and so cannot raise.</para>
+    ///
+    /// <para>The internal compressed hypertables' roots on 2.28.1 (<c>_compressed_hypertable_N</c>, zero
+    /// bytes) are deliberately NOT excluded: no named row sizes them, so they fall to the
+    /// <see cref="SystemObjectKind"/> row, which is where an unattributed byte belongs. From 2.29.0 there are
+    /// none. TimescaleDB-only; the plain-PostgreSQL variant omits it. Aliases <c>c</c> and <c>n</c> as on
+    /// <see cref="CensusRelationPredicateSql"/>.</para>
     /// </summary>
     public const string TimescaleInventoriedPredicateSql = @"NOT EXISTS (
         SELECT 1 FROM timescaledb_information.hypertables h
@@ -686,8 +732,11 @@ AND   NOT EXISTS (
         SELECT 1 FROM timescaledb_information.continuous_aggregates ca
         WHERE ca.materialization_hypertable_schema = n.nspname AND ca.materialization_hypertable_name = c.relname)
 AND   NOT EXISTS (
-        SELECT 1 FROM _timescaledb_catalog.chunk ch
-        WHERE ch.schema_name = n.nspname AND ch.table_name = c.relname)";
+        SELECT 1 FROM timescaledb_information.chunks ch
+        WHERE ch.chunk_schema = n.nspname AND ch.chunk_name = c.relname)
+AND   NOT EXISTS (
+        SELECT 1 FROM _timescaledb_catalog.compression_settings cs
+        WHERE cs.compress_relid = c.oid)";
 
     /// <summary>
     /// The two catch-all rows (#3582), TimescaleDB variant: one <c>INSERT ... SELECT</c> over a census CTE
@@ -1093,9 +1142,9 @@ WHERE metric_time < $1";
         }
 
         /* #3582: everything else, attributed to a row so the total reconciles. The TimescaleDB variant
-           removes chunk relations and the roots the hypertable/aggregate rows already size; the plain
-           variant cannot name those catalogs and has nothing to remove. Last of the sizing statements on
-           purpose — see the summary. */
+           removes chunk relations, their compressed relations (#3918) and the roots the hypertable/aggregate
+           rows already size; the plain variant cannot name those catalogs and has nothing to remove. Last of
+           the sizing statements on purpose — see the summary. */
         using (var unenumerated = new NpgsqlCommand(
             timescaleAvailable ? UnenumeratedInsertSql : UnenumeratedPlainInsertSql, connection)
             { CommandTimeout = SweepTimeoutSeconds })

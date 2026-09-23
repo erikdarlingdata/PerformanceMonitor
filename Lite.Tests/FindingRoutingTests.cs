@@ -296,13 +296,22 @@ public class FindingRoutingTests
         public List<FindingAlert> Sent { get; } = new();
         public Dictionary<string, DateTime> Seeds { get; } = new(StringComparer.Ordinal);
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName) =>
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
             Task.FromResult(Seeds.TryGetValue($"{serverId}:{metricName}", out var t) ? (DateTime?)t : null);
 
-        public Task SendFindingAlertAsync(FindingAlert alert)
+        /// <summary>#3916: what the fake reports the row recorded. Null = not delivered.</summary>
+        public AlertDelivery? Delivery { get; set; }
+        public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
-            return Task.CompletedTask;
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
+            return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }
 
@@ -334,6 +343,7 @@ public class FindingRoutingTests
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity { get; init; } = 1.5;
         public int AnalysisNotifyCooldownMinutes { get; init; } = 360;
+        public int AnalysisPageCap { get; init; } = 10;
         public string TriageBaseUrl => "";
         public FindingRoute UncorroboratedFindingRoute { get; init; } = FindingRoute.Digest;
     }
@@ -378,6 +388,7 @@ public class FindingRoutingTests
         var (notifier, sender, toasts) = Build();
 
         await notifier.NotifyAsync(new[] { Finding("aaaaaaaa00000001", severity: 1.8, factCount: 1, matched: 0) });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(FindingRoute.Digest, alert.Route);
@@ -397,6 +408,7 @@ public class FindingRoutingTests
         var (notifier, sender, toasts) = Build();
 
         await notifier.NotifyAsync(new[] { Finding("bbbbbbbb00000001", severity: 1.8, factCount: 2, matched: 0) });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(FindingRoute.Page, alert.Route);
@@ -410,6 +422,7 @@ public class FindingRoutingTests
     {
         var (notifier, sender, _) = Build();
         await notifier.NotifyAsync(new[] { Finding("cccccccc00000001", severity: 1.2, factCount: 1, matched: 0) });
+        await notifier.FlushPendingAsync();
         Assert.Empty(sender.Sent);
     }
 
@@ -419,6 +432,7 @@ public class FindingRoutingTests
         var (notifier, sender, toasts) = Build(new Settings { UncorroboratedFindingRoute = FindingRoute.Page });
 
         await notifier.NotifyAsync(new[] { Finding("dddddddd00000001", severity: 1.8, factCount: 1, matched: 0) });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(FindingRoute.Page, alert.Route);
@@ -440,6 +454,7 @@ public class FindingRoutingTests
         var chain = Finding("eeeeeeee00000002", severity: 1.6, factCount: 2, matched: 0, rootKey: "CPU_SQL_PERCENT", category: "cpu", incidentId: "inc-1");
 
         await notifier.NotifyAsync(new[] { single, chain });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(FindingRoute.Page, alert.Route);
@@ -456,6 +471,7 @@ public class FindingRoutingTests
         var b = Finding("ffffffff00000002", severity: 1.6, factCount: 1, matched: 0, incidentId: "inc-2");
 
         await notifier.NotifyAsync(new[] { b, a });
+        await notifier.FlushPendingAsync();
 
         var alert = Assert.Single(sender.Sent);
         Assert.Equal(FindingRoute.Digest, alert.Route);
@@ -474,15 +490,18 @@ public class FindingRoutingTests
         var (notifier, sender, toasts) = Build();
 
         await notifier.NotifyAsync(new[] { Finding("abcdef0100000001", severity: 1.8, factCount: 1, matched: 0) });
+        await notifier.FlushPendingAsync();
         Assert.Equal(FindingRoute.Digest, Assert.Single(sender.Sent).Route);
         Assert.Empty(toasts);
 
         /* Same cycle again: the digest entry holds (fresh-or-worsening), no second row. */
         await notifier.NotifyAsync(new[] { Finding("abcdef0100000001", severity: 1.8, factCount: 1, matched: 0) });
+        await notifier.FlushPendingAsync();
         Assert.Single(sender.Sent);
 
         /* The corroboration arrives. Same hash, same severity. */
         await notifier.NotifyAsync(new[] { Finding("abcdef0100000001", severity: 1.8, factCount: 1, matched: 1) });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(2, sender.Sent.Count);
         Assert.Equal(FindingRoute.Page, sender.Sent[1].Route);
@@ -503,6 +522,7 @@ public class FindingRoutingTests
         sender.Seeds[$"7:{FindingMessageFormatter.MetricName(finding)}"] = DateTime.UtcNow.AddMinutes(-10);
 
         await notifier.NotifyAsync(new[] { finding });
+        await notifier.FlushPendingAsync();
 
         Assert.Empty(sender.Sent);
     }
@@ -517,6 +537,7 @@ public class FindingRoutingTests
         sender.Seeds[$"7:{FindingMessageFormatter.MetricName(finding)}"] = DateTime.UtcNow.AddMinutes(-10);
 
         await notifier.NotifyAsync(new[] { finding });
+        await notifier.FlushPendingAsync();
 
         Assert.Equal(FindingRoute.Digest, Assert.Single(sender.Sent).Route);
     }

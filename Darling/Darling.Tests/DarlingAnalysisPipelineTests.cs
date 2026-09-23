@@ -440,6 +440,7 @@ public sealed class DarlingAnalysisPipelineTests
                 f => f.ServerId.ToString(),
                 NullLogger<AnalysisNotificationService>.Instance);
             await notifier.NotifyAsync(findings);
+            await notifier.FlushPendingAsync();
 
             var expectedNotified = findings.Where(f => f.Severity >= 0.3).ToList();
             Assert.NotEmpty(expectedNotified);
@@ -473,6 +474,7 @@ public sealed class DarlingAnalysisPipelineTests
 
             /* Inside the cooldown, an identical batch does not re-notify. */
             await notifier.NotifyAsync(findings);
+            await notifier.FlushPendingAsync();
             Assert.Equal(expectedNotified.Count, sender.Sent.Count);
 
             /* ---- mute: the second run re-detects the same story and the mute filter drops
@@ -543,13 +545,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
     {
         public List<FindingAlert> Sent { get; } = new();
 
-        public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName)
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName)
             => Task.FromResult<DateTime?>(null);
 
-        public Task SendFindingAlertAsync(FindingAlert alert)
+        /// <summary>#3916: what the fake reports the row recorded. Null = not delivered.</summary>
+        public AlertDelivery? Delivery { get; set; }
+        public Task<AlertDelivery?> SendFindingAlertAsync(FindingAlert alert)
         {
             Sent.Add(alert);
-            return Task.CompletedTask;
+            return Task.FromResult<AlertDelivery?>(Delivery);
+        }
+        /// <summary>#3916: each over-the-cap summary, as the list of pages it named; returns <see cref="Delivery"/>.</summary>
+        public List<IReadOnlyList<FindingAlert>> Summaries { get; } = new();
+        public Task<AlertDelivery?> SendFindingSummaryAsync(IReadOnlyList<FindingAlert> named)
+        {
+            Summaries.Add(named);
+            return Task.FromResult<AlertDelivery?>(Delivery);
         }
     }
 
@@ -582,6 +593,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity { get; init; } = 1.5;
         public int AnalysisNotifyCooldownMinutes { get; init; } = 360;
+        public int AnalysisPageCap { get; init; } = 5;
         public string TriageBaseUrl { get; init; } = "";
     }
 }

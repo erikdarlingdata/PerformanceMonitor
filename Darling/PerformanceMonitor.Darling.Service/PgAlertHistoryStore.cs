@@ -144,13 +144,21 @@ AND   send_error IS NULL", "EmailAlert");
 AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
 
     public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
-        /* Any channel/result (the analysis cooldown is stamped unconditionally) EXCEPT a row the #3712
-           corroboration gate routed to the digest: that row is not a page and must not seed a page bucket,
-           or the escalation that arrives when the story gains corroboration is held as a repeat. Spelled as
-           a parameter rather than inlined so the constant the writer uses is the constant the reader
-           excludes. #2716 reuses the dedupKey filter to seed Postgres Tier-0-predictor cooldowns across a
-           restart; none of those rows carry the digest disposition, so the exclusion is inert there. */
+        /* The #2716 Tier-0 seed: any channel/result, muted or not, because those live cooldowns are stamped
+           unconditionally (a muted alert still consumes its cooldown), so the seed and the stamp agree on
+           "any result". #3916 moved the ANALYSIS seed off this read to GetLastDeliveredPageUtcAsync below —
+           do not add alert_sent here. The #3712 digest exclusion stays: a digest row is not a page, and none
+           of the Tier-0 rows carry that disposition, so it is inert for them. Spelled as a parameter rather
+           than inlined so the constant the writer uses is the constant the reader excludes. */
         ReadMaxAlertTimeAsync(serverId, metricName, dedupKey, DigestExclusionFilter, logScope: "AnalysisNotify");
+
+    public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) =>
+        /* #3916: the analysis #2054 hold is earned by a delivery, so its restart seed reads only rows that
+           reached someone (alert_sent true = email and/or webhook delivered). A row that reached no one —
+           the month-old undelivered row that held one production story silent for 35 days — seeds nothing.
+           The digest exclusion is redundant by construction (a digest row is never Sent) and kept so the
+           exclusion stays one symbol and pinned. */
+        ReadMaxAlertTimeAsync(serverId, metricName, dedupKey: null, DeliveredPageFilter, logScope: "AnalysisNotify");
 
     /// <summary>The #3712 seed exclusion, as SQL text. A literal rather than a parameter for the reason the
     /// email/webhook filters above are: <see cref="AlertDelivery.ChannelDigest"/> is a compile-time constant
@@ -158,6 +166,10 @@ AND   notification_type IN ('webhook', 'email+webhook')", "WebhookAlert");
     /// reader's exclusion one symbol. <c>internal</c> so the test can pin that the filter names the
     /// constant.</summary>
     internal const string DigestExclusionFilter = "\nAND   notification_type <> '" + AlertDelivery.ChannelDigest + "'";
+
+    /// <summary>The #3916 delivered-page predicate: a delivered row, with the #3712 digest exclusion
+    /// composed from its one symbol. <c>internal</c> so the test can pin its shape.</summary>
+    internal const string DeliveredPageFilter = "\nAND   alert_sent" + DigestExclusionFilter;
 
     private async Task<DateTime?> ReadMaxAlertTimeAsync(
         string serverId, string metricName, string? dedupKey, string extraFilter, string logScope)

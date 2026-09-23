@@ -539,15 +539,22 @@ LIMIT $3";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            /* #3915: masked again on the way out, with the classifier's own rules. Rows a newer capture wrote
+               are already masked (the masking is idempotent), and rows an earlier build stored unmasked are
+               re-masked in storage by the sweep's own pass, a bounded slice per hour; this covers the hours
+               before that pass reaches them, so no surface serves an unmasked row in the meantime. */
+            var eventClass = reader.GetString(0);
+            var (message, sample) = StoreLogClassifier.MaskStoredEvent(
+                eventClass, reader.GetString(2), reader.IsDBNull(6) ? null : reader.GetString(6));
             rows.Add(new RetainedEvent
             {
-                EventClass = reader.GetString(0),
+                EventClass = eventClass,
                 Severity = reader.GetString(1),
-                MessageText = reader.GetString(2),
+                MessageText = message ?? string.Empty,
                 Occurrences = reader.GetInt64(3),
                 FirstCaptureAt = reader.IsDBNull(4) ? null : Iso(reader.GetDateTime(4)),
                 LastCaptureAt = reader.IsDBNull(5) ? null : Iso(reader.GetDateTime(5)),
-                SampleLine = reader.IsDBNull(6) ? null : reader.GetString(6),
+                SampleLine = sample,
             });
         }
 

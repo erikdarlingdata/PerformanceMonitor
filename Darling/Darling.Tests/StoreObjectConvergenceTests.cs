@@ -45,7 +45,7 @@ public sealed class StoreObjectConvergenceTests
 {
     private const string ListDeclaration = "private static readonly StoreObjectConvergenceStep[] s_storeObjectConvergence =";
     private const string HourlyCall = "await ConvergeStoreObjectsAsync(stoppingToken);";
-    private const string HourlySignature = "private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken)";
+    private const string HourlySignature = "private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken, bool timescaleAvailable = true)";
     private const string SegmentSignature = "private async Task RunStoreObjectConvergenceSegmentAsync(";
     private const string StepSignature = "internal static async Task RunStoreObjectConvergenceStepAsync(";
     private const string SummarySignature = "private void LogStoreObjectConvergence(StoreObjectConvergenceTally tally, long elapsedMs, bool startup)";
@@ -69,11 +69,19 @@ public sealed class StoreObjectConvergenceTests
         /* One list, declared once. */
         Assert.Equal(1, CountOf(code, ListDeclaration));
 
-        /* The hourly pass iterates the WHOLE list — no stage filter, no second sequence. */
+        /* The hourly pass iterates the WHOLE list — no second sequence, and ONE filter: the TimescaleDB one,
+           applied only on a store without it (#3913), which skips exactly the stages the start path runs
+           inside its own TimescaleDB gate. A second stage test here would be a step one cadence runs and the
+           other does not. */
         var hourly = MethodBody(code, HourlySignature);
         Assert.False(string.IsNullOrEmpty(hourly), "could not locate ConvergeStoreObjectsAsync — this pin cannot silently pass on a parse miss");
         Assert.Contains("foreach (var step in s_storeObjectConvergence)", hourly, StringComparison.Ordinal);
-        Assert.DoesNotContain("Stage", hourly, StringComparison.Ordinal);
+        Assert.Contains("if (!timescaleAvailable && NeedsTimescale(step.Stage))", hourly, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(hourly, "Stage"));
+        Assert.True(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Timescale));
+        Assert.True(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.TimescaleAfterRepairLaunch));
+        Assert.False(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Ungated));
+        Assert.False(DarlingWorker.NeedsTimescale(DarlingWorker.StoreObjectConvergenceStage.Tuning));
 
         /* The start path reaches the list ONLY through the segment walk, and the segment walk is the only
            other iteration of it. Two iterations in the product: the hourly one above and the segment one. */

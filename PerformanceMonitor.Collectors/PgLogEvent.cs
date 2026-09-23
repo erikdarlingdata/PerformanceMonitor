@@ -99,12 +99,13 @@ public readonly record struct PgLogEvent(
             ApplicationName: applicationName,
             Pid: entry.Pid,
             Message: PgLogTextRedactor.RedactMessage(entry.Message) ?? string.Empty,
-            Detail: PgLogTextRedactor.RedactMessage(entry.Detail),
-            /* Prose-strength redaction, like Detail: a CONTEXT can carry an inner statement — `SQL statement
-               "UPDATE … WHERE id = 42"` — and that double-quoted run follows no identifier noun, so the
-               allowlist takes it whole. The HINT companion is deliberately NOT stored: it is advice text,
-               never evidence, and nothing here claims otherwise. */
-            Context: PgLogTextRedactor.RedactMessage(entry.Context),
+            /* #3920: a DETAIL can carry other sessions' SQL (a deadlock's `Process N: query` lines, a crash's
+               `Failed process was running: query`), and a CONTEXT the statement a function was running (`SQL
+               statement "UPDATE ... WHERE id = 42"`). Both are masked as SQL, so a bare number or a
+               dollar-quoted string in them goes too, which prose masking kept. The HINT companion is
+               deliberately NOT stored: it is advice text, never evidence, and nothing here claims otherwise. */
+            Detail: PgLogTextRedactor.RedactDetail(entry.Detail),
+            Context: PgLogTextRedactor.RedactContext(entry.Context),
             StatementFingerprint: PgLogTextRedactor.Fingerprint(redactedStatement),
             RawLineHash: PgLogTextRedactor.RawLineHash(entry.RawText),
             Metrics: metrics);

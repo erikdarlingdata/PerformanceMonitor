@@ -126,6 +126,8 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingStoreUpgrade.cs", "ListConnectableDatabasesAsync", 1, 0, 0, 0),
         ("DarlingStoreUpgrade.cs", "VerifySentinelReadAsync", 2, 0, 0, 0),
         ("DarlingManagedRoles.cs", "EnsureProvisionedAsync", 1, 0, 0, 0),
+        /* #3910: the stored-verifier read that decides which role passwords are re-asserted. */
+        ("DarlingManagedRoles.cs", "ReadStoredRoleSecretsAsync", 1, 0, 0, 0),
         ("DarlingManagedRoles.cs", "ReadComposeStatementTimeoutAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedWaitStatsAsync", 1, 0, 0, 0),
         ("DarlingDeltaCalculator.cs", "SeedFileIoStatsAsync", 1, 0, 0, 0),
@@ -172,7 +174,7 @@ public sealed class StartupCommandTimeoutTests
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedBootstrapSites = 31;
+    private const int ExpectedBootstrapSites = 32;
 
     private const int ExpectedConnectProbeSites = 2;
 

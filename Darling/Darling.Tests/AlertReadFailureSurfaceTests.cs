@@ -943,7 +943,7 @@ public sealed class AlertReadFailureSurfaceTests
     };
 
     private const int WorkerCountedSites = 10;
-    private const int WorkerExemptSites = 7;
+    private const int WorkerExemptSites = 8;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1014,6 +1014,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["could not read the recorded store size"] = "context for the alert text, not the evidence the alert is judged on",
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
         ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
+        ["Store log: re-masking rows captured before this build failed"] = "a maintenance rewrite of stored store-log text (#3915); no alert is judged on it, it is idempotent and resumes next hour, and until it finishes the store-log reader masks every row on the way out",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
@@ -1187,8 +1188,10 @@ public sealed class AlertReadFailureSurfaceTests
            since #3514: the web-dashboard TLS certificate self-alert's catch, whose evidence is the in-memory
            WebTlsCertificateState report the web host publishes - there is no store read to swallow. 25th
            since #3580: the daily documents' delivery-stamp WRITE, a write whose loss costs one
-           re-announcement at the next restart and never a delivery. */
-        Assert.Equal(25, totalExempt);
+           re-announcement at the next restart and never a delivery. 26th since #3915: the store-log re-mask
+           pass, a maintenance rewrite of stored text that resumes next hour, with the reader masking in the
+           meantime. */
+        Assert.Equal(26, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

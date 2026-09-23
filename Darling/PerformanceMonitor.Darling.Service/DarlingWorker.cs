@@ -193,6 +193,11 @@ public sealed class DarlingWorker : BackgroundService
         Tuning,
     }
 
+    /// <summary>Whether a convergence stage needs TimescaleDB: the two the start path runs inside its
+    /// TimescaleDB gate. The hourly pass on a plain-PostgreSQL store skips exactly these (#3913).</summary>
+    internal static bool NeedsTimescale(StoreObjectConvergenceStage stage) =>
+        stage is StoreObjectConvergenceStage.Timescale or StoreObjectConvergenceStage.TimescaleAfterRepairLaunch;
+
     /// <summary>
     /// Whether a step's return value counts CHANGES it made or OBJECTS it found in place — the difference
     /// between a number the summary line may report as "changed" and one it must not.
@@ -368,9 +373,8 @@ public sealed class DarlingWorker : BackgroundService
            block), the SECURITY DEFINER readers get_store_query_stats calls, their grants to the reader roles,
            and the scrub of statements whose text can carry a credential. Ungated: nothing in it depends on
            TimescaleDB. After provisioning on the start path (this segment follows it), so the grantees exist.
-           The hourly pass runs on a TimescaleDB store only (the tick's gate), where an extension a DBA creates
-           by hand, or a function or grant that was dropped, heals within the hour; a plain-PostgreSQL store
-           re-runs this at its next start. The PRELOAD is restart-only and lives in the conf, so this step cannot
+           On the hourly pass, on every store shape since #3913, an extension a DBA creates by hand, or a
+           function or grant that was dropped, heals within the hour. The PRELOAD is restart-only and lives in the conf, so this step cannot
            load the library, only report that it is not loaded. Counted in place: 1 when the reader is ready, 0
            in any of the named states that are not a failure. */
         new("statement statistics", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.InPlace,
@@ -834,6 +838,14 @@ public sealed class DarlingWorker : BackgroundService
        purge's drop_chunks branch, the self-metrics sweep's hypertable arm, the two provider delegates — so a
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
     private bool _timescaleAvailable;
+
+    /* #3915: the re-mask pass over store-log rows captured before this build. The cursor is where the last
+       hourly slice stopped; done once a slice reaches the table's end, and then not again this process (new
+       captures are masked on write, and the masking is idempotent, so the next process's pass is a no-op
+       re-read). */
+    private string? _storeLogRemaskCursor;
+
+    private bool _storeLogRemaskDone;
 
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
        once in RunCollectionLoopAsync over the SAME deliverer/history the shared engine uses, so the
@@ -2159,11 +2171,17 @@ public sealed class DarlingWorker : BackgroundService
                 }
             },
             _logger);
+        /* #3916 PR B: pages wait out a hold-back window, so the flush re-reads the mute registry — a mute
+           written inside the window drops the queued page. The read fails OPEN (logged, "not muted"): the
+           finding already passed the queue-time mute filter in PgFindingStore. */
+        var muteReadStore = new PgFindingStore(postgres, _logger);
         var notificationService = new AnalysisNotificationService(
             new DarlingFindingAlertSender(alertSettings, historyStore, webhookAlertService, _logger),
             alertSettings,
             finding => finding.ServerId.ToString(CultureInfo.InvariantCulture),
-            _loggerFactory.CreateLogger<AnalysisNotificationService>());
+            _loggerFactory.CreateLogger<AnalysisNotificationService>(),
+            isStoryMuted: async (serverId, storyPathHash) =>
+                (await muteReadStore.GetMutedStoryHashesAsync(serverId)).Contains(storyPathHash));
 
         /* #2138 phase 1: the auto force-plan bot, hooked onto the SCHEDULED analysis pass only (the
            interactive analyze_now command deliberately does not trigger it — an operator poking a
@@ -2640,9 +2658,9 @@ public sealed class DarlingWorker : BackgroundService
 
                    The cost on a store that is genuinely plain PostgreSQL, a fully supported configuration
                    that must not be punished for it: one CREATE EXTENSION IF NOT EXISTS that fails, once an
-                   hour, on a pooled connection, saying nothing above Debug. Nothing else on this tick runs
-                   for such a store at all, which is what lets the probe carry the whole of the ungated
-                   half. */
+                   hour, on a pooled connection, saying nothing above Debug. The only other thing this tick
+                   runs for such a store is the store-object convergence pass's non-TimescaleDB steps (#3913,
+                   the else branch below). */
                 if (!_timescaleAvailable)
                 {
                     await ReprobeTimescaleAvailabilityAsync(stoppingToken);
@@ -2701,6 +2719,17 @@ public sealed class DarlingWorker : BackgroundService
                        hourly path is wired on THIS store, in the same log window an operator reads after a
                        restart. On a converged store that pass costs catalog reads and two metadata ALTERs. */
                     await ConvergeStoreObjectsAsync(stoppingToken);
+                }
+                else
+                {
+                    /* #3913: the same convergence pass on a store WITHOUT TimescaleDB, walking only the steps
+                       that run on every store shape (the Ungated and Tuning stages the start path already
+                       runs there): the baseline relations, the store's statement statistics, the composer's
+                       covering indexes. Before this, nothing re-ran on such a store between restarts, so a
+                       dropped fallback view, or an extension a DBA created by hand, waited for the next
+                       start. None of the compression-phase reasoning above applies, since a store without
+                       TimescaleDB has no policy jobs to sample. */
+                    await ConvergeStoreObjectsAsync(stoppingToken, timescaleAvailable: false);
                 }
             }
 
@@ -2858,6 +2887,11 @@ public sealed class DarlingWorker : BackgroundService
         {
             /* Expected on shutdown. */
         }
+
+        /* #3916 PR B: once the sweeps and the command loop (analyze_now) have drained, nothing enqueues a
+           page any more; drop the analysis hold-back queue unstamped. A page queued at stop is not a
+           delivery, so nothing holds its story and the next start re-attempts it. */
+        notificationService.Dispose();
 
         /* Drain the Query Store backfill loop the same way (#2022): a slice abandoned mid-shutdown is
            fine — its boundary is derived (or hole-recorded) from what actually landed, so the next
@@ -6585,7 +6619,7 @@ LIMIT 1";
     /// counter: this is a maintenance ACTION, not an alert read whose failure would leave a condition
     /// unjudged.</para>
     /// </summary>
-    private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken)
+    private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken, bool timescaleAvailable = true)
     {
         var passClock = Stopwatch.StartNew();
         var tally = new StoreObjectConvergenceTally();
@@ -6597,6 +6631,13 @@ LIMIT 1";
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
             foreach (var step in s_storeObjectConvergence)
             {
+                /* #3913: the ONE filter the hourly pass has. On a store without TimescaleDB, a step that needs
+                   it is skipped rather than run to fail; every other step runs, as it does at start. */
+                if (!timescaleAvailable && NeedsTimescale(step.Stage))
+                {
+                    continue;
+                }
+
                 await RunStoreObjectConvergenceStepAsync(connection, step, tally, _logger, budget.Token);
             }
 
@@ -6792,6 +6833,37 @@ LIMIT 1";
                     + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
                     + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
                     ex.Message);
+            }
+
+            /* #3915: rows stored before this build kept their entries unmasked (an ERROR's STATEMENT line, a
+               DETAIL's key values), for the capture's 400-day retention. Re-masked one bounded slice per tick
+               until the table's end, then not again this process; a new capture is masked on write. Its own
+               catch, like the capture's, and its own time cap (#3920's review): neither a failure nor a slow
+               slice may cost the collector-cost flush below. */
+            if (!_storeLogRemaskDone)
+            {
+                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                remaskBudget.CancelAfter(StoreLogSweep.RemaskSliceBudget);
+                try
+                {
+                    var (next, examined, rewritten) = await StoreLogSweep.RemaskStoredEventsAsync(
+                        connection, _storeLogRemaskCursor, remaskBudget.Token);
+                    _storeLogRemaskCursor = next;
+                    _storeLogRemaskDone = next is null;
+                    if (rewritten > 0)
+                    {
+                        _logger.LogInformation(
+                            "Store log: re-masked {Rewritten} of {Examined} stored row(s) captured before this build, so their statement literals and quoted values no longer reach get_store_log{Remaining}.",
+                            rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                {
+                    _logger.LogWarning(
+                        "Store log: re-masking rows captured before this build failed, and is retried next hour: {Message}",
+                        ex.Message);
+                }
             }
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)

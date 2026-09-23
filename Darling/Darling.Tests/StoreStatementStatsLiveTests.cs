@@ -164,9 +164,19 @@ public sealed class StoreStatementStatsLiveTests
                 Assert.Equal(1L, await CountRecordedAsync(c, ScrubPassword, ct));
             }
 
-            /* The reader refuses it, through the tool and to a caller that turns standard_conforming_strings off
-               first: the first version's backslash pattern degraded to letters under that one SET and returned the
-               password (#3904's review). */
+            /* The reader keeps the row, so its timings still rank, and withholds its text: role DDL is not
+               normalized DML (#3915's allowlist). */
+            await using (var r = await reader.OpenConnectionAsync(ct))
+            {
+                await using var withheld = new NpgsqlCommand(
+                    $"SELECT pg_catalog.count(*) FROM config.{StoreStatementStats.FunctionName}() AS f WHERE f.query = $1", r);
+                withheld.Parameters.AddWithValue(StoreStatementStats.WithheldText);
+                Assert.True((long)(await withheld.ExecuteScalarAsync(ct))! >= 1, "the force-recorded role DDL was dropped instead of withheld");
+            }
+
+            /* The reader refuses its text, through the tool and to a caller that turns standard_conforming_strings
+               off first: the first version's backslash pattern degraded to letters under that one SET and returned
+               the password (#3904's review). */
             Assert.DoesNotContain(
                 ScrubPassword,
                 await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(reader, top: 1000, full_text: true),
@@ -344,6 +354,91 @@ public sealed class StoreStatementStatsLiveTests
         await ExecAsync(c, "ALTER EXTENSION pg_stat_statements UPDATE", ct);
         Assert.Equal(loadedOutcome, await StoreStatementStats.EnsureAsync(c, "config", [], NullLogger.Instance, ct));
         Assert.Contains("pg_stat_statements_info", await InfoDefinitionAsync(c, ct), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The two patterns as PostgreSQL's own regex engine judges them (#3915): C# cannot evaluate an ARE, so the
+    /// claims about what each matches are asserted where they run. Readable: normalized DML after leading
+    /// whitespace and parentheses, never after a comment (#3920's review: a DML keyword inside the comment opened
+    /// the gate). Sensitive: credential-bearing statements, comment-split and nested-comment ones and libpq and
+    /// URI forms included, and never a normalized parameter or a column merely ending in <c>password</c>. And
+    /// the SELECT ... INTO pattern the reader withholds before PostgreSQL 16.
+    /// </summary>
+    [Fact]
+    public async Task ThePatternsMatchWhatTheyClaim_InPostgresOwnRegexEngine_AgainstScratchPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(baseConnectionString),
+            "Set DARLING_TEST_PG to a connection string to judge the #3915 patterns in PostgreSQL's regex engine.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var c = await OpenAsync(scratch.ConnectionString, ct);
+
+        var cases = new (string Text, bool Readable, bool Sensitive)[]
+        {
+            ("SELECT $1", true, false),
+            ("  select $1 AS x", true, false),
+            ("/* leading */ SELECT $1", false, false),
+            ("-- line comment\nSELECT $1", false, false),
+            ("-- nightly: update settings\nALTER SYSTEM SET ssl_passphrase_command = 'echo s3cr3t'", false, false),
+            ("--with\nSET app.api_key = 'sk_live_123'", false, false),
+            ("-- note\tupdate x\nALTER SYSTEM SET a = 'x'", false, false),
+            ("-- table maintenance\nCOPY t FROM PROGRAM 'curl -H x-api-key:abc123'", false, false),
+            ("/* a /* b */ select */ SET app.api_key = 'x'", false, false),
+            ("ALTER /* a /* b */ c */ ROLE app PASSWORD 'x'", false, true),
+            ("CREATE TABLE t (owner_role text, user_id int)", false, false),
+            ("(SELECT $1) UNION (SELECT $2)", true, false),
+            ("WITH a AS (SELECT $1) SELECT * FROM a", true, false),
+            ("INSERT INTO t VALUES ($1)", true, false),
+            ("UPDATE config.config_notification SET smtp_password = $1", true, false),
+            ("DELETE FROM t WHERE password = $1", true, false),
+            ("MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", true, false),
+            ("VALUES ($1)", true, false),
+            ("TABLE t", true, false),
+            ("SELECT $1 /* password 'hunter2' */", true, true),
+            ("SELECTED $1", false, false),
+            ("EXPLAIN SELECT $1", false, false),
+            ("COPY t FROM STDIN", false, false),
+            ("ALTER ROLE app PASSWORD 'x'", false, true),
+            ("ALTER/**/ROLE app PASSWORD/**/'x'", false, true),
+            ("CREATE -- x\nUSER u ENCRYPTED PASSWORD /* c */ 'x'", false, true),
+            ("ALTER/**/USER/**/MAPPING FOR u SERVER s OPTIONS (SET password 'x')", false, true),
+            ("DO $$ BEGIN PERFORM dblink_connect('host=x password=hunter2'); END $$", false, true),
+            ("COPY t FROM PROGRAM 'PGPASSWORD=hunter2 psql -c x'", false, true),
+            ("ALTER SYSTEM SET primary_conninfo = 'host=x password=hunter2'", false, true),
+            ("SELECT dblink('postgresql://app:hunter2@db/x', $1)", true, true),
+            ("ALTER ROLE app PASSWORD $$x$$", false, true),
+            ("ALTER ROLE app PASSWORD E'x'", false, true),
+        };
+
+        foreach (var (text, readable, sensitive) in cases)
+        {
+            await using var command = new NpgsqlCommand("SELECT $1 ~* $2, $1 ~* $3", c);
+            command.Parameters.AddWithValue(text);
+            command.Parameters.AddWithValue(StoreStatementStats.ReadableStatementPattern);
+            command.Parameters.AddWithValue(StoreStatementStats.SensitiveStatementPattern);
+            await using var result = await command.ExecuteReaderAsync(ct);
+            await result.ReadAsync(ct);
+            Assert.True(readable == result.GetBoolean(0), $"readable({text}) should be {readable}");
+            Assert.True(sensitive == result.GetBoolean(1), $"sensitive({text}) should be {sensitive}");
+        }
+
+        foreach (var (text, selectInto) in new (string Text, bool SelectInto)[]
+        {
+            ("SELECT $1 AS pw INTO TEMP t", true),
+            ("select	$1 into t", true),
+            ("WITH a AS (SELECT $1) SELECT * INTO t FROM a", true),
+            ("SELECT $1", false),
+            ("SELECT intox FROM t", false),
+            ("INSERT INTO t VALUES ($1)", false),
+        })
+        {
+            await using var command = new NpgsqlCommand("SELECT $1 ~* $2", c);
+            command.Parameters.AddWithValue(text);
+            command.Parameters.AddWithValue(StoreStatementStats.SelectIntoPattern);
+            Assert.True(selectInto == (bool)(await command.ExecuteScalarAsync(ct))!, $"selectInto({text}) should be {selectInto}");
+        }
     }
 
     private static string QueryOf(JsonElement statement) => statement.GetProperty("query").GetString() ?? "";

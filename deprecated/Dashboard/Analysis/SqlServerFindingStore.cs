@@ -454,6 +454,28 @@ WHERE server_id = @serverId OR server_id IS NULL OR server_id = 0;";
     public const string CleanupOldFindingsSql = "DELETE FROM config.analysis_findings WHERE analysis_time < @cutoff;";
 
     /// <summary>
+    /// #3916 PR B: the muted story hashes for one server on a connection of its own — the read the shared
+    /// <c>AnalysisNotificationService</c> re-checks at its hold-back flush, so a mute applied inside the
+    /// window drops the queued page. Fails OPEN (an empty set, logged): the finding already passed the
+    /// queue-time mute filter, so an unreadable registry means "not muted".
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetMutedStoryHashesAsync(int serverId)
+    {
+        try
+        {
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+            await EnsureTablesExistAsync(connection);
+            return await GetMutedHashesAsync(connection, serverId);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"[SqlServerFindingStore] GetMutedStoryHashesAsync failed (treated as not muted): {ex.Message}");
+            return new HashSet<string>();
+        }
+    }
+
+    /// <summary>
     /// Reads muted story hashes for a server on an already-open connection. The caller
     /// owns the connection and is responsible for EnsureTablesExistAsync. Used by
     /// FilterMutedFindingsAsync so the mute-filter read reuses its connection.

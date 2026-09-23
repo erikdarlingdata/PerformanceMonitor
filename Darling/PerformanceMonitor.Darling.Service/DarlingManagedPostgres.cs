@@ -460,12 +460,13 @@ public sealed class DarlingManagedPostgres
     /// The block re-states the EFFECTIVE list read from the file at append time plus
     /// <see cref="StatementStatisticsLibrary"/>; see <see cref="MergePreloadLibraries"/>.</para>
     ///
-    /// <para><b><c>track_utility = off</c> is a security setting, not tuning.</b> Role provisioning
-    /// interpolates each generated password into an <c>ALTER ROLE ... PASSWORD '...'</c> literal on every
-    /// start (<see cref="DarlingManagedRoles"/>), and pg_stat_statements records a utility statement's text
-    /// without normalizing that literal. Off keeps utility statements out of the view entirely, so the reader
-    /// surface can never show a password; the reader function also refuses every statement whose text can
-    /// carry a credential, as a second guard.</para>
+    /// <para><b><c>track_utility = off</c> is a security setting, not tuning.</b> pg_stat_statements records a
+    /// utility statement's text without normalizing its literals, so any <c>ALTER ROLE ... PASSWORD '...'</c>
+    /// run against the store (an operator's, or a bring-your-own provisioning script's) would be kept verbatim.
+    /// The service's own provisioning sends SCRAM-SHA-256 verifiers, never a password, and only when one
+    /// changes (#3910), so it no longer depends on this; the setting keeps every other utility statement out
+    /// of the view too, and the reader function shows the text of normalized DML only, as a second
+    /// guard.</para>
     ///
     /// <para><b>Restart semantics.</b> <c>shared_preload_libraries</c> is postmaster-context. This append runs
     /// before <c>pg_ctl start</c>, so a service-owned start loads the library on the very start that writes the
@@ -1326,7 +1327,7 @@ public sealed class DarlingManagedPostgres
         builder.Append('\n');
         builder.Append(ConfMarkerV13).Append('\n');
         builder.Append(PreloadSetting).Append(" = '")
-            .Append(MergePreloadLibraries(effectivePreloadList).Replace("'", "''", StringComparison.Ordinal))
+            .Append(EscapeConfValue(MergePreloadLibraries(effectivePreloadList)))
             .Append("'\n");
         builder.Append(StatementStatisticsLibrary).Append(".track_utility = off\n");
         return builder.ToString();
@@ -1439,6 +1440,101 @@ public sealed class DarlingManagedPostgres
         return libraries;
     }
 
+    /// <summary>
+    /// A value as the inside of a postgresql.conf single-quoted string: a backslash and a quote each escaped,
+    /// the two characters the conf file's own string syntax treats specially (<c>DeescapeQuotedString</c>
+    /// reads <c>\\</c> as one backslash). A library path such as <c>C:\libs\x</c> would otherwise come back as
+    /// <c>C:libsx</c> (#3915's review).
+    /// </summary>
+    internal static string EscapeConfValue(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "''", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Whether PostgreSQL itself accepts <paramref name="preloadList"/> as a list, by <c>SplitDirectoriesString</c>'s
+    /// rules: empty is a valid list of nothing; otherwise every element is a non-empty unquoted name or a
+    /// closed double-quoted one, separated by commas, with nothing else between. PostgreSQL loads NOTHING from
+    /// a list it rejects (it logs "invalid list syntax" at LOG and carries on), TimescaleDB included, which is
+    /// why the coverage check reports it (#3915's review: a trailing comma read as fine here).
+    /// </summary>
+    internal static bool IsValidPreloadList(string? preloadList)
+    {
+        if (string.IsNullOrWhiteSpace(preloadList))
+        {
+            return true;
+        }
+
+        var i = 0;
+        while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+        {
+            i++;
+        }
+
+        while (true)
+        {
+            if (i < preloadList.Length && preloadList[i] == '"')
+            {
+                i++;
+                while (true)
+                {
+                    var close = preloadList.IndexOf('"', i);
+                    if (close < 0)
+                    {
+                        return false;
+                    }
+
+                    if (close + 1 < preloadList.Length && preloadList[close + 1] == '"')
+                    {
+                        i = close + 2;
+                        continue;
+                    }
+
+                    i = close + 1;
+                    break;
+                }
+            }
+            else
+            {
+                var start = i;
+                var nameEnd = i;
+                while (i < preloadList.Length && preloadList[i] != ',')
+                {
+                    if (!char.IsWhiteSpace(preloadList[i]))
+                    {
+                        nameEnd = i + 1;
+                    }
+
+                    i++;
+                }
+
+                if (nameEnd == start)
+                {
+                    return false;
+                }
+            }
+
+            while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+            {
+                i++;
+            }
+
+            if (i >= preloadList.Length)
+            {
+                return true;
+            }
+
+            if (preloadList[i] != ',')
+            {
+                return false;
+            }
+
+            i++;
+            while (i < preloadList.Length && char.IsWhiteSpace(preloadList[i]))
+            {
+                i++;
+            }
+        }
+    }
+
     /// <summary>Library names as a conf-file list value: comma-joined, a name double-quoted only when it has to
     /// be (a comma, a double quote, or edge whitespace in it), which <see cref="ParsePreloadList"/> reads back
     /// whole.</summary>
@@ -1458,31 +1554,28 @@ public sealed class DarlingManagedPostgres
         string.Join(", ", libraries.Select(library => "'" + library.Replace("'", "''", StringComparison.Ordinal) + "'"));
 
     /// <summary>
-    /// The value of the LAST active assignment of <paramref name="name"/> in postgresql.conf-format text, the
-    /// one PostgreSQL honours within that text, or null when there is none. Commented lines are skipped, the
-    /// <c>=</c> is optional (PostgreSQL accepts <c>name value</c>), a quoted value is unquoted (<c>''</c> and
-    /// <c>\'</c> both escape a quote) and an unquoted one ends at whitespace or a trailing comment. A line naming
-    /// a longer setting that merely starts with <paramref name="name"/> is not a match. Reads the text alone;
-    /// <see cref="ReadConfAssignments"/> is the form that follows include directives.
+    /// Every assignment line in postgresql.conf-format text, in order, as PostgreSQL reads it: its 1-based line,
+    /// its name and its value. Commented and blank lines are skipped, the <c>=</c> is optional (PostgreSQL
+    /// accepts <c>name value</c>), a quoted value is de-escaped the server's way (<see cref="ParseConfValue"/>)
+    /// and an unquoted one ends at whitespace or a trailing comment. Include directives come back as ordinary
+    /// assignments; <see cref="ReadConfAssignments"/> is what follows them.
     /// </summary>
-    internal static string? FindLastConfAssignment(string? confText, string name)
+    internal static IEnumerable<(int Line, string Name, string Value)> ParseConfText(string? confText)
     {
         if (string.IsNullOrEmpty(confText))
         {
-            return null;
+            yield break;
         }
 
-        string? value = null;
+        var lineNumber = 0;
         foreach (var raw in confText.Split('\n'))
         {
-            if (TryParseConfLine(raw, out var key, out var parsed)
-                && key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            lineNumber++;
+            if (TryParseConfLine(raw, out var key, out var value))
             {
-                value = parsed;
+                yield return (lineNumber, key, value);
             }
         }
-
-        return value;
     }
 
     /// <summary>One active assignment of a setting: the file it is in (a full path), its 1-based line, and its
@@ -1506,17 +1599,25 @@ public sealed class DarlingManagedPostgres
     internal static List<ConfAssignment> ReadConfAssignments(string confPath, string name)
     {
         var found = new List<ConfAssignment>();
-        CollectConfAssignments(Path.GetFullPath(confPath), name, found, depth: 0);
+        var filesRead = 0;
+        CollectConfAssignments(Path.GetFullPath(confPath), name, found, depth: 0, ref filesRead);
         return found;
     }
 
-    private static void CollectConfAssignments(string path, string name, List<ConfAssignment> found, int depth)
+    /// <summary>The most files one read of the conf chain opens. PostgreSQL refuses an include cycle once it
+    /// nests past <see cref="MaxConfIncludeDepth"/>, but a cycle that fans out (a directory including itself
+    /// twice) would be re-read exponentially before that depth; this runs on the start path, so it stops at a
+    /// budget no real configuration comes near (#3915's review).</summary>
+    internal const int MaxConfFilesRead = 64;
+
+    private static void CollectConfAssignments(string path, string name, List<ConfAssignment> found, int depth, ref int filesRead)
     {
-        if (depth > MaxConfIncludeDepth)
+        if (depth > MaxConfIncludeDepth || filesRead >= MaxConfFilesRead)
         {
             return;
         }
 
+        filesRead++;
         string text;
         try
         {
@@ -1528,21 +1629,14 @@ public sealed class DarlingManagedPostgres
         }
 
         var directory = Path.GetDirectoryName(path) ?? string.Empty;
-        var lineNumber = 0;
-        foreach (var raw in text.Split('\n'))
+        foreach (var (lineNumber, key, value) in ParseConfText(text))
         {
-            lineNumber++;
-            if (!TryParseConfLine(raw, out var key, out var value))
-            {
-                continue;
-            }
-
             if (key.Equals("include", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("include_if_exists", StringComparison.OrdinalIgnoreCase))
             {
                 if (TryResolveConfPath(directory, value, out var included))
                 {
-                    CollectConfAssignments(included, name, found, depth + 1);
+                    CollectConfAssignments(included, name, found, depth + 1, ref filesRead);
                 }
             }
             else if (key.Equals("include_dir", StringComparison.OrdinalIgnoreCase))
@@ -1566,7 +1660,7 @@ public sealed class DarlingManagedPostgres
                     .Where(f => Path.GetFileName(f) is { } n && n.EndsWith(".conf", StringComparison.Ordinal) && !n.StartsWith('.'))
                     .OrderBy(f => Path.GetFileName(f), StringComparer.Ordinal))
                 {
-                    CollectConfAssignments(file, name, found, depth + 1);
+                    CollectConfAssignments(file, name, found, depth + 1, ref filesRead);
                 }
             }
             else if (key.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -1577,8 +1671,9 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>An include directive's path, resolved against the including file's directory the way the
-    /// server resolves it; false for an empty value or one that is not a path this platform can resolve, which
-    /// contributes nothing rather than throwing on the start path.</summary>
+    /// server resolves it; false for an empty value, one that is not a path this platform can resolve, or a UNC
+    /// path (the service would reach out to a network share as its own identity on the start path), each of
+    /// which contributes nothing rather than throwing or leaving the machine.</summary>
     private static bool TryResolveConfPath(string directory, string value, out string fullPath)
     {
         fullPath = string.Empty;
@@ -1590,7 +1685,7 @@ public sealed class DarlingManagedPostgres
         try
         {
             fullPath = Path.GetFullPath(Path.Combine(directory, value));
-            return true;
+            return !fullPath.StartsWith(@"\\", StringComparison.Ordinal);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
@@ -1634,6 +1729,13 @@ public sealed class DarlingManagedPostgres
         return true;
     }
 
+    /// <summary>
+    /// One value as the conf file's lexer and <c>DeescapeQuotedString</c> read it: an unquoted value ends at
+    /// whitespace or a comment; a quoted one ends at its closing quote, with <c>''</c> a quote and a backslash
+    /// escaping the next character (<c>\b \f \n \r \t</c>, up to three octal digits, and anything else, a
+    /// backslash and a quote included, as itself). The first version read <c>\\'</c> as an escaped quote and ran
+    /// a value ending in a backslash, such as an include directory, on to the end of the line (#3915's review).
+    /// </summary>
     private static string ParseConfValue(string text)
     {
         if (!text.StartsWith('\''))
@@ -1651,10 +1753,39 @@ public sealed class DarlingManagedPostgres
         for (var i = 1; i < text.Length; i++)
         {
             var c = text[i];
-            if (c == '\\' && i + 1 < text.Length && text[i + 1] == '\'')
+            if (c == '\\' && i + 1 < text.Length)
             {
-                builder.Append('\'');
-                i++;
+                var escaped = text[++i];
+                switch (escaped)
+                {
+                    case 'b':
+                        builder.Append('\b');
+                        break;
+                    case 'f':
+                        builder.Append('\f');
+                        break;
+                    case 'n':
+                        builder.Append('\n');
+                        break;
+                    case 'r':
+                        builder.Append('\r');
+                        break;
+                    case 't':
+                        builder.Append('\t');
+                        break;
+                    case >= '0' and <= '7':
+                        var octal = escaped - '0';
+                        for (var digits = 1; digits < 3 && i + 1 < text.Length && text[i + 1] is >= '0' and <= '7'; digits++)
+                        {
+                            octal = (octal * 8) + (text[++i] - '0');
+                        }
+
+                        builder.Append((char)(octal & 0xFF));
+                        break;
+                    default:
+                        builder.Append(escaped);
+                        break;
+                }
             }
             else if (c == '\'')
             {
@@ -1681,8 +1812,10 @@ public sealed class DarlingManagedPostgres
     /// The v13 every-start check (#3899): which <c>shared_preload_libraries</c> assignment is IN FORCE, across
     /// postgresql.conf with its includes and then <c>postgresql.auto.conf</c> (read last, so an
     /// <c>ALTER SYSTEM</c> override wins), and whether it still loads what it should. Changes nothing, the v12
-    /// precedent: neither file is edited here. Three outcomes are logged, each with its exact fix:
+    /// precedent: neither file is edited here. Four outcomes are logged, each with its exact fix:
     /// <list type="bullet">
+    /// <item><description>The list in force is not a list PostgreSQL accepts (<see cref="IsValidPreloadList"/>,
+    /// a trailing comma say): the server loads nothing from it, TimescaleDB included. An Error.</description></item>
     /// <item><description>The list in force names a library holding a comma: the one-literal <c>ALTER SYSTEM</c>
     /// mistake, stored as ONE name PostgreSQL cannot load, so the store will not start. An Error, and a remedy
     /// that works on a store that is down.</description></item>
@@ -1710,6 +1843,18 @@ public sealed class DarlingManagedPostgres
         var inForceLibraries = ParsePreloadList(inForce.Value);
         var inAutoConf = string.Equals(inForce.File, autoConfPath, StringComparison.OrdinalIgnoreCase);
 
+        if (!IsValidPreloadList(inForce.Value))
+        {
+            var repaired = MergePreloadLibraryNames(inForce.Value);
+            _logger.LogError(
+                "{File} line {Line} sets shared_preload_libraries = '{Value}', which is not a list PostgreSQL accepts (an empty element, an unclosed double quote, or text after a closing one): the server logs 'invalid list syntax' and loads NO library from it, TimescaleDB included. {Fix}",
+                inForce.File, inForce.Line, inForce.Value,
+                inAutoConf
+                    ? $"Run ALTER SYSTEM SET shared_preload_libraries = {FormatAlterSystemPreloadList(repaired)} (one quoted literal per library) and restart the store."
+                    : $"Edit that line to shared_preload_libraries = '{EscapeConfValue(FormatPreloadList(repaired))}' and restart the store.");
+            return;
+        }
+
         if (inForceLibraries.Any(library => library.Contains(',', StringComparison.Ordinal)))
         {
             var split = MergePreloadLibraryNames(string.Join(",", inForceLibraries));
@@ -1718,7 +1863,7 @@ public sealed class DarlingManagedPostgres
                 inForce.File, inForce.Line, inForce.Value,
                 inAutoConf
                     ? $"The store cannot start to run ALTER SYSTEM, so delete that line from postgresql.auto.conf by hand and start the store; then, to keep the list, run ALTER SYSTEM SET shared_preload_libraries = {FormatAlterSystemPreloadList(split)} (one quoted literal per library) and restart it again."
-                    : $"Edit that line to shared_preload_libraries = '{FormatPreloadList(split).Replace("'", "''", StringComparison.Ordinal)}' and start the store.");
+                    : $"Edit that line to shared_preload_libraries = '{EscapeConfValue(FormatPreloadList(split))}' and start the store.");
             return;
         }
 
@@ -1736,7 +1881,7 @@ public sealed class DarlingManagedPostgres
                 _logger.LogWarning(
                     "{File} line {Line} sets shared_preload_libraries = '{Value}' without {Library}, and it is the assignment in force: it is read after the v13 block, and a later assignment replaces the whole list, so the store records no statement statistics until it names the library. Change that line to shared_preload_libraries = '{Suggested}' and restart the store.",
                     inForce.File, inForce.Line, inForce.Value, StatementStatisticsLibrary,
-                    FormatPreloadList(suggested).Replace("'", "''", StringComparison.Ordinal));
+                    EscapeConfValue(FormatPreloadList(suggested)));
             }
 
             return;
@@ -2730,6 +2875,16 @@ public sealed class DarlingManagedPostgres
         {
             var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
             var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
+            if (!IsValidPreloadList(effectivePreload))
+            {
+                /* The list in force is one PostgreSQL rejects, so it has been loading nothing from it; the block
+                   below restates it as a valid list, which changes what loads at the next start. Said, not done
+                   silently. */
+                _logger.LogWarning(
+                    "{File} line {Line} set shared_preload_libraries = '{Value}', which is not a list PostgreSQL accepts, so the store has been loading no library from it. The v13 block below restates it as '{Corrected}', which loads from the next start.",
+                    preloadChain[^1].File, preloadChain[^1].Line, effectivePreload, MergePreloadLibraries(effectivePreload));
+            }
+
             File.AppendAllText(confPath, BuildStatementStatisticsConfAppend(effectivePreload));
             _logger.LogInformation(
                 "Appended v13 statement statistics to postgresql.conf (shared_preload_libraries = '{Libraries}', {Library}.track_utility = off): the store keeps per-statement timings, so a slow web-viewer or MCP read can be named by get_store_query_stats instead of guessed at. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",

@@ -45,7 +45,7 @@ public sealed class ComposeStatementTimeoutReloadTests
     {
         var shared = DarlingManagedRoles.BuildComposeStatementTimeoutSql(seconds);
         var batch = DarlingManagedRoles.BuildProvisioningSql(
-            "AdminPassword01", "ViewerPassword02", "McpPassword03", seconds);
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, seconds);
 
         Assert.Contains(shared, batch, StringComparison.Ordinal);
 

@@ -32,26 +32,29 @@ namespace PerformanceMonitor.Darling.Storage;
 /// must work with or without the module, so nothing here bumps the schema version or gates a viewer. The
 /// managed store preloads the library through the conf's v13 block. <see cref="EnsureAsync"/> is a step of the
 /// store-object convergence list (#3817), so it runs at every start and again on the hourly store-maintenance
-/// tick of a TimescaleDB store (that tick is gated on TimescaleDB, so a plain-PostgreSQL store re-runs it at its
-/// next start). It is idempotent, and it leaves any store that cannot have the module in a named state that
+/// tick, on every store shape (#3913). It is idempotent, and it leaves any store that cannot have the module in a named state that
 /// <c>get_store_query_stats</c> reports with its remedy.</para>
 ///
 /// <para><b>Why a SECURITY DEFINER function.</b> The view shows every role's statement statistics to anyone,
 /// but the TEXT only to superusers, members of <c>pg_read_all_stats</c>, or the role that ran it. Granting
 /// <c>pg_read_all_stats</c> to the reader roles would also hand them every live session's query text in
 /// <c>pg_stat_activity</c>. The function returns only this database's statements, normalized (constants are
-/// replaced with <c>$n</c> in the text the view stores), and refuses every statement whose text can carry a
-/// credential, so the one thing the reader roles gain is the ranking this exists for. The definer needs the
+/// replaced with <c>$n</c> in the text the view stores), and shows the text only of normalized DML
+/// (<see cref="ReadableStatementPattern"/>, #3915) that <see cref="SensitiveStatementPattern"/> does not name,
+/// so the one thing the reader roles gain is the ranking this exists for. The definer needs the
 /// text itself: a store owner that is neither a superuser nor a <c>pg_read_all_stats</c> member reads other
 /// roles' rows as <c>&lt;insufficient privilege&gt;</c>, which <c>get_store_query_stats</c> reports. The #3334
 /// resolve function is the precedent for the shape.</para>
 ///
-/// <para><b>Secrets never reach the reader.</b> Provisioning puts each role's password in an
-/// <c>ALTER ROLE ... PASSWORD '...'</c> literal on every start, and the module records a utility statement's
-/// text without normalizing that literal (measured on the bundled 18.4 / 1.12). The conf's v13 block sets
+/// <para><b>Secrets never reach the reader.</b> The module records a utility statement's text without
+/// normalizing its literals (measured on the bundled 18.4 / 1.12), so an <c>ALTER ROLE ... PASSWORD '...'</c>
+/// is kept verbatim. The service's own provisioning sends SCRAM-SHA-256 verifiers rather than passwords
+/// (#3910), but an operator's role DDL, or a bring-your-own store's provisioning script, can still carry
+/// one. The conf's v13 block sets
 /// <c>pg_stat_statements.track_utility = off</c>, so a managed store records no utility statement at all. Two
-/// guards stand behind it, for a store that tracks utility statements anyway: the reader refuses every statement
-/// <see cref="SensitiveStatementPattern"/> names, and every pass that may reset entries removes them from the
+/// guards stand behind it, for a store that tracks utility statements anyway: the reader shows the text of
+/// normalized DML only (every other statement keeps its timings and reads as <see cref="WithheldText"/>), and
+/// every pass that may reset entries removes the ones <see cref="SensitiveStatementPattern"/> names from the
 /// view. The pattern holds no backslash and both functions pin <c>standard_conforming_strings</c>, because a
 /// string-body SQL function is parsed when it is CALLED, under the caller's settings: #3904's review showed a
 /// backslash pattern switched off by one <c>SET standard_conforming_strings = off</c> from any grantee.</para>
@@ -80,20 +83,66 @@ public static class StoreStatementStats
     public static readonly Version InfoViewVersion = new(1, 9);
 
     /// <summary>
-    /// The statements whose text can carry a credential when utility statements are tracked, as a
-    /// case-insensitive PostgreSQL regular expression: role, user and group DDL (their <c>PASSWORD</c> clause,
-    /// and <c>CREATE/ALTER USER MAPPING</c>'s password option), subscription DDL (a connection string), foreign
-    /// server DDL (its options), and any <c>PASSWORD</c> keyword followed by a literal. Shared by the scrub and
-    /// the reader function, so what the scrub removes and what the function refuses are the same set.
+    /// What may separate two SQL tokens: whitespace, a block comment or a line comment, in the regex dialect
+    /// below. Used only by <see cref="SensitiveStatementPattern"/>, a blocklist, where reading a comment short
+    /// (a line comment ends at the first control character, a block comment at its first <c>*/</c>) can only
+    /// add matches. The allowlist does not use it (#3920's review).
+    /// </summary>
+    private const string TokenGap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
+
+    /// <summary>
+    /// The only statements whose TEXT the reader returns (#3915): normalized DML. After any leading whitespace
+    /// and parentheses, the statement is a SELECT, INSERT, UPDATE, DELETE, MERGE, WITH, VALUES or TABLE, and
+    /// pg_stat_statements has replaced every constant in it with <c>$n</c>, so its text carries no value. A
+    /// statement that OPENS with a comment is not shown (#3920's review): a comment-aware pattern read a DML
+    /// keyword inside the comment (<c>-- update settings</c> then <c>ALTER SYSTEM ...</c>) and could not follow
+    /// PostgreSQL's nested block comments, and no statement the service sends opens with one. Every other statement (a utility statement, recorded only while <c>track_utility</c> is on, whose
+    /// literals are kept as typed) keeps its timings in the ranking and reads as <see cref="WithheldText"/>.
+    /// An ALLOWLIST since #3915's review: the blocklist before it missed comment-split role DDL
+    /// (<c>ALTER/**/ROLE</c>), connection strings in a DO body, and secret settings that are not called
+    /// "password". A case-insensitive PostgreSQL regular expression with no backslash, so it means the same
+    /// under either <c>standard_conforming_strings</c> setting.
+    /// </summary>
+    public const string ReadableStatementPattern =
+        "^[[:space:](]*(select|insert|update|delete|merge|with|values|table)[[:>:]]";
+
+    /// <summary>
+    /// A SELECT ... INTO, which is <c>CREATE TABLE AS</c>: a utility statement that pg_stat_statements before
+    /// PostgreSQL 16 records with its constants as typed (measured on 18: <c>SELECT $1 AS pw INTO TEMP t</c>).
+    /// The reader withholds a SELECT- or WITH-led statement naming <c>INTO</c> on a server older than 16, which
+    /// also withholds a <c>WITH ... INSERT INTO</c> there; its timings still rank.
+    /// </summary>
+    public const string SelectIntoPattern =
+        "^[[:space:](]*(select|with)[[:>:]].*[[:<:]]into[[:>:]]";
+
+    /// <summary>What the reader returns in place of a statement it does not show.</summary>
+    public const string WithheldText = "<text withheld: not a normalized SELECT, INSERT, UPDATE, DELETE or MERGE>";
+
+    /// <summary>What pg_stat_statements itself shows in place of a statement's text when the reader's definer
+    /// may not read it. Passed through as it is, never as <see cref="WithheldText"/>, so the tool can count those
+    /// rows and name the grant that shows them.</summary>
+    public const string InsufficientPrivilegeText = "<insufficient privilege>";
+
+    /// <summary>
+    /// The statements whose text can carry a credential, as a case-insensitive PostgreSQL regular expression:
+    /// role, user and group DDL (their <c>PASSWORD</c> clause, and <c>CREATE/ALTER USER MAPPING</c>'s password
+    /// option), subscription DDL (a connection string), foreign server DDL (its options), a <c>PASSWORD</c>
+    /// keyword followed by a literal, a libpq <c>password=</c> or <c>PGPASSWORD=</c> setting, and a URI's
+    /// <c>user:secret@</c>, with comments allowed wherever the grammar allows whitespace. The SCRUB removes
+    /// these from the view, for every other reader of it on the cluster; the reader function uses
+    /// <see cref="ReadableStatementPattern"/>, an allowlist, and this as a second guard on DML whose comments
+    /// carry one (pg_stat_statements keeps comments verbatim).
     ///
-    /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c> and
-    /// <c>[$]</c> spell the word boundaries, whitespace and dollar sign the first version wrote as <c>\m</c>,
-    /// <c>\M</c> and <c>\s</c>, so the literal means the same under either <c>standard_conforming_strings</c>
-    /// setting. A normalized DML parameter (<c>password = $1</c>) is not a hit: it carries no value.</para>
+    /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
+    /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes, so the literal means
+    /// the same under either <c>standard_conforming_strings</c> setting. A normalized DML parameter
+    /// (<c>password = $1</c>) is not a hit: it carries no value.</para>
     /// </summary>
     public const string SensitiveStatementPattern =
-        "[[:<:]](create|alter)[[:space:]]+(role|user|group|subscription|server)[[:>:]]"
-        + "|[[:<:]]password[[:>:]][[:space:]]*(=|to)?[[:space:]]*(e?'|[$][^0-9])";
+        "[[:<:]](create|alter)" + TokenGap + "+(role|user|group|subscription|server)[[:>:]]"
+        + "|[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
+        + "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]"
+        + "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
 
     /// <summary>What <see cref="EnsureAsync"/> found and did. An unexpected failure is not an outcome: it
     /// throws, and the store-object convergence runner that calls this tallies and logs it (#3817).</summary>
@@ -181,9 +230,12 @@ WHERE e.extname = 'pg_stat_statements'";
     /// construction: owned by whoever runs it (the store owner), <c>search_path</c> pinned to
     /// <c>pg_catalog, pg_temp</c> with every other reference schema-qualified, <c>standard_conforming_strings</c>
     /// pinned on (the body is parsed at call time under the caller's settings otherwise), no dynamic SQL, and no
-    /// parameters. Scoped to the current database, and refusing <see cref="SensitiveStatementPattern"/>. A row
-    /// whose text is NULL (the module could not read its text file) is kept, so its timings still rank; a row
-    /// whose role has since been dropped is kept under the role's oid.
+    /// parameters. Scoped to the current database. EVERY row is returned, so every statement's timings rank;
+    /// the TEXT is returned only for normalized DML (<see cref="ReadableStatementPattern"/>) that
+    /// <see cref="SensitiveStatementPattern"/> does not name, and reads as <see cref="WithheldText"/> otherwise.
+    /// A row whose text is NULL (the module could not read its text file) stays NULL; a row whose role has
+    /// since been dropped is kept under the role's oid. The dollar-quote tags are chosen so no schema name can
+    /// close a body early.
     ///
     /// <para><paramref name="withInfoView"/> is false on extension 1.8, which has no
     /// <c>pg_stat_statements_info</c>: the info reader then answers nulls rather than failing the batch, and
@@ -203,6 +255,37 @@ WHERE e.extname = 'pg_stat_statements'";
             : @"    SELECT
         NULL::timestamp with time zone,
         NULL::bigint;";
+        var readerBody = $@"    SELECT
+        COALESCE(r.rolname::text, s.userid::text),
+        s.queryid,
+        s.calls,
+        s.total_exec_time,
+        s.mean_exec_time,
+        s.max_exec_time,
+        s.total_plan_time,
+        s.rows,
+        s.shared_blks_hit,
+        s.shared_blks_read,
+        s.temp_blks_written,
+        CASE
+            WHEN s.query IS NULL THEN NULL
+            WHEN s.query = {QuoteLiteral(InsufficientPrivilegeText)} THEN s.query
+            WHEN s.query ~* {QuoteLiteral(ReadableStatementPattern)}
+             AND s.query !~* {QuoteLiteral(SensitiveStatementPattern)}
+             AND NOT (pg_catalog.current_setting('server_version_num')::integer < 160000
+                      AND s.query ~* {QuoteLiteral(SelectIntoPattern)}) THEN s.query
+            ELSE {QuoteLiteral(WithheldText)}
+        END
+    FROM {extension}.pg_stat_statements AS s
+    LEFT JOIN pg_catalog.pg_roles AS r
+      ON r.oid = s.userid
+    WHERE s.dbid =
+    (
+        SELECT d.oid
+        FROM pg_catalog.pg_database AS d
+        WHERE d.datname = pg_catalog.current_database()
+    );";
+        var tag = DollarTag("fn", readerBody, infoBody);
 
         return $@"
 CREATE OR REPLACE FUNCTION {config}.{FunctionName}()
@@ -225,35 +308,9 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 SET standard_conforming_strings = on
-AS $fn$
-    SELECT
-        COALESCE(r.rolname::text, s.userid::text),
-        s.queryid,
-        s.calls,
-        s.total_exec_time,
-        s.mean_exec_time,
-        s.max_exec_time,
-        s.total_plan_time,
-        s.rows,
-        s.shared_blks_hit,
-        s.shared_blks_read,
-        s.temp_blks_written,
-        s.query
-    FROM {extension}.pg_stat_statements AS s
-    LEFT JOIN pg_catalog.pg_roles AS r
-      ON r.oid = s.userid
-    WHERE s.dbid =
-    (
-        SELECT d.oid
-        FROM pg_catalog.pg_database AS d
-        WHERE d.datname = pg_catalog.current_database()
-    )
-    AND
-    (
-         s.query IS NULL
-      OR s.query !~* {QuoteLiteral(SensitiveStatementPattern)}
-    );
-$fn$;
+AS {tag}
+{readerBody}
+{tag};
 REVOKE ALL ON FUNCTION {config}.{FunctionName}() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION {config}.{InfoFunctionName}()
@@ -266,9 +323,9 @@ LANGUAGE sql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 SET standard_conforming_strings = on
-AS $fn$
+AS {tag}
 {infoBody}
-$fn$;
+{tag};
 REVOKE ALL ON FUNCTION {config}.{InfoFunctionName}() FROM PUBLIC;";
     }
 
@@ -285,8 +342,7 @@ REVOKE ALL ON FUNCTION {config}.{InfoFunctionName}() FROM PUBLIC;";
         }
 
         var array = string.Join(", ", roles.Select(QuoteLiteral));
-        return $@"
-DO $do$
+        var body = $@"
 DECLARE
     grantee text;
 BEGIN
@@ -298,7 +354,10 @@ BEGIN
         END IF;
     END LOOP;
 END
-$do$;";
+";
+        var tag = DollarTag("do", body);
+        return $@"
+DO {tag}{body}{tag};";
     }
 
     /// <summary>
@@ -450,7 +509,7 @@ FROM
         }
 
         /* Only a superuser may call pg_stat_statements_reset by default. Skipping it for anyone else loses no
-           protection on the read path, because the reader function refuses those statements on its own. */
+           protection on the read path, because the reader function withholds their text on its own. */
         if (superuser)
         {
             await using var scrub = new NpgsqlCommand(BuildScrubSql(extensionSchema), connection) { CommandTimeout = SetupTimeoutSeconds };
@@ -466,7 +525,7 @@ FROM
         if (!superuser && !readsAllStats)
         {
             logger?.LogDebug(
-                "Statement statistics: the reader functions run as this role, which is neither a superuser nor a member of pg_read_all_stats, so other roles' statement text reads <insufficient privilege>. GRANT pg_read_all_stats to it to show that text.");
+                "Statement statistics: the reader functions run as this role, which is neither a superuser nor a member of pg_read_all_stats, so other roles' statement text reads <insufficient privilege>. Granting pg_read_all_stats to it shows that text, and also lets this login read every session's query text on the cluster.");
         }
 
         logger?.LogDebug("Statement statistics ready: {Extension} is loaded and {Schema}.{Function}() is granted to the reader roles.", ExtensionName, configSchema, FunctionName);
@@ -589,6 +648,23 @@ FROM
         logger?.LogWarning(
             "Statement statistics: pg_stat_statements.track_utility is on for this store, so utility statements are recorded with their literals as typed, role DDL's PASSWORD literal among them. The store's reader refuses those statements{Scrub}, but any other role that can read pg_stat_statements on this cluster sees them. Set pg_stat_statements.track_utility = off in postgresql.conf (a managed store's v13 block does) and reload; this is logged once per service start.",
             superuser ? " and this service removes them on each pass" : "");
+    }
+
+    /// <summary>
+    /// A dollar-quote tag (<c>$fn$</c>, then <c>$fn1$</c>, ...) that occurs in none of <paramref name="bodies"/>,
+    /// so a schema or role name interpolated into a body can never close it early and run the rest as the
+    /// definer (#3915's review). Quoting an identifier protects its double quotes, not a dollar sequence.
+    /// </summary>
+    private static string DollarTag(string stem, params string[] bodies)
+    {
+        for (var n = 0; ; n++)
+        {
+            var tag = n == 0 ? $"${stem}$" : $"${stem}{n.ToString(CultureInfo.InvariantCulture)}$";
+            if (!bodies.Any(body => body.Contains(tag, StringComparison.Ordinal)))
+            {
+                return tag;
+            }
+        }
     }
 
     private static string QuoteIdentifier(string identifier)

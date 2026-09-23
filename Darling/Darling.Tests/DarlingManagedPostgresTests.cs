@@ -464,8 +464,8 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(
             new[] { "pg_stat_statements.track_utility", "shared_preload_libraries" },
             SettingNames(block).OrderBy(n => n, StringComparer.Ordinal).ToArray());
-        Assert.Equal("timescaledb,auto_explain,pg_stat_statements", DarlingManagedPostgres.FindLastConfAssignment(block, "shared_preload_libraries"));
-        Assert.Equal("off", DarlingManagedPostgres.FindLastConfAssignment(block, "pg_stat_statements.track_utility"));
+        Assert.Equal("timescaledb,auto_explain,pg_stat_statements", LastConfAssignment(block, "shared_preload_libraries"));
+        Assert.Equal("off", LastConfAssignment(block, "pg_stat_statements.track_utility"));
     }
 
     /// <summary>The merge adds the library once and keeps every other name, spelling and order; an empty or
@@ -495,8 +495,8 @@ public sealed class DarlingManagedPostgresTests
     [InlineData("shared_preload_libraries = 'a\\'b'\n", "a'b")]
     [InlineData("  SHARED_PRELOAD_LIBRARIES='x'\r\n", "x")]
     [InlineData("", null)]
-    public void FindLastConfAssignment_ReadsTheLastLiveAssignment(string conf, string? expected)
-        => Assert.Equal(expected, DarlingManagedPostgres.FindLastConfAssignment(conf, "shared_preload_libraries"));
+    public void ParseConfText_ReadsTheLastLiveAssignment(string conf, string? expected)
+        => Assert.Equal(expected, LastConfAssignment(conf, "shared_preload_libraries"));
 
     /// <summary>
     /// THE fresh-cluster hazard (#3899), through the real heal. On a new cluster the only live preload assignment
@@ -521,13 +521,13 @@ public sealed class DarlingManagedPostgresTests
             pg.EnsureConfAppended(dataDirectory);
             var first = File.ReadAllText(confPath);
             Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV13));
-            Assert.Equal("timescaledb,pg_stat_statements", DarlingManagedPostgres.FindLastConfAssignment(first, "shared_preload_libraries"));
-            Assert.Equal("off", DarlingManagedPostgres.FindLastConfAssignment(first, "pg_stat_statements.track_utility"));
+            Assert.Equal("timescaledb,pg_stat_statements", LastConfAssignment(first, "shared_preload_libraries"));
+            Assert.Equal("off", LastConfAssignment(first, "pg_stat_statements.track_utility"));
 
             pg.EnsureConfAppended(dataDirectory);
             var second = File.ReadAllText(confPath);
             Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV13));
-            Assert.Equal("timescaledb,pg_stat_statements", DarlingManagedPostgres.FindLastConfAssignment(second, "shared_preload_libraries"));
+            Assert.Equal("timescaledb,pg_stat_statements", LastConfAssignment(second, "shared_preload_libraries"));
         }
         finally
         {
@@ -562,7 +562,7 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV13));
             Assert.Equal(
                 "timescaledb,auto_explain,pg_stat_statements",
-                DarlingManagedPostgres.FindLastConfAssignment(healed, "shared_preload_libraries"));
+                LastConfAssignment(healed, "shared_preload_libraries"));
         }
         finally
         {
@@ -767,6 +767,143 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal("'timescaledb', 'pg_stat_statements'", DarlingManagedPostgres.FormatAlterSystemPreloadList(["timescaledb", "pg_stat_statements"]));
         Assert.Equal("'it''s'", DarlingManagedPostgres.FormatAlterSystemPreloadList(["it's"]));
     }
+
+    /// <summary>
+    /// A quoted conf value is de-escaped the way PostgreSQL's own <c>DeescapeQuotedString</c> does it (#3915's
+    /// review): <c>\\</c> is one backslash, so an include directory ending in one is read whole instead of running
+    /// on to the end of the line; <c>\t</c> and octal escapes are characters; and a value written through
+    /// <see cref="DarlingManagedPostgres.EscapeConfValue"/> reads back exactly, a Windows library path included.
+    /// </summary>
+    [Fact]
+    public void ConfValues_AreDeescapedThePostgresWay_AndEscapedValuesRoundTrip()
+    {
+        Assert.Equal(@"C:\pg\conf.d\", LastConfAssignment("include_dir = 'C:\\\\pg\\\\conf.d\\\\'   # the operator's\n", "include_dir"));
+        Assert.Equal("tab\there", LastConfAssignment("x = 'tab\\there'\n", "x"));
+        Assert.Equal("A", LastConfAssignment("x = '\\101'\n", "x"));
+        Assert.Equal("it's", LastConfAssignment("x = 'it\\'s'\n", "x"));
+
+        foreach (var value in new[] { @"C:\libs\x", "it's", @"a\'b", "plain" })
+        {
+            Assert.Equal(value, LastConfAssignment($"x = '{DarlingManagedPostgres.EscapeConfValue(value)}'\n", "x"));
+        }
+
+        /* The v13 block writes through the same escaping, so a library path survives the heal. */
+        var block = DarlingManagedPostgres.BuildStatementStatisticsConfAppend(@"timescaledb,C:\libs\auto_explain");
+        Assert.Equal(@"timescaledb,C:\libs\auto_explain,pg_stat_statements", LastConfAssignment(block, "shared_preload_libraries"));
+    }
+
+    /// <summary>
+    /// A preload list is judged by PostgreSQL's own <c>SplitDirectoriesString</c> rules (#3915's review): a list
+    /// the server rejects loads NOTHING, TimescaleDB included, so "it names pg_stat_statements" is not enough.
+    /// </summary>
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("   ", true)]
+    [InlineData("timescaledb", true)]
+    [InlineData(" timescaledb , pg_stat_statements ", true)]
+    [InlineData("\"timescaledb,pg_stat_statements\"", true)]
+    [InlineData("\"q\"\"t\", x", true)]
+    [InlineData("timescaledb,pg_stat_statements,", false)]
+    [InlineData(",timescaledb", false)]
+    [InlineData("a,,b", false)]
+    [InlineData("\"unclosed", false)]
+    [InlineData("\"a\"b", false)]
+    [InlineData("a, \"b\" c", false)]
+    public void PreloadLists_AreValidExactlyWhenPostgresAcceptsThem(string? list, bool valid)
+        => Assert.Equal(valid, DarlingManagedPostgres.IsValidPreloadList(list));
+
+    /// <summary>An in-force list PostgreSQL rejects is reported as an Error with a repaired list, in the form the
+    /// file it lives in takes; the file is not edited.</summary>
+    [Fact]
+    public void AnInvalidPreloadListInForce_IsAnError_WithTheRepairedList()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v13invalid-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            const string AutoConf = "shared_preload_libraries = 'timescaledb, pg_stat_statements,'\n";
+            File.WriteAllText(Path.Combine(dataDirectory, "postgresql.auto.conf"), AutoConf);
+
+            var logger = new CapturingTestLogger();
+            new DarlingManagedPostgres(new PostgresConfig { Managed = true, Port = 5993, DataDirectory = dataDirectory }, logger)
+                .LogStatementStatisticsPreloadCoverage(dataDirectory);
+
+            var line = Assert.Single(logger.Joined.Split(" | "));
+            Assert.StartsWith("Error: ", line, StringComparison.Ordinal);
+            Assert.Contains("not a list PostgreSQL accepts", line, StringComparison.Ordinal);
+            Assert.Contains("ALTER SYSTEM SET shared_preload_libraries = 'timescaledb', 'pg_stat_statements'", line, StringComparison.Ordinal);
+            Assert.Equal(AutoConf, File.ReadAllText(Path.Combine(dataDirectory, "postgresql.auto.conf")));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The v13 heal over an invalid list says so, and writes the list corrected, since the server has
+    /// been loading nothing from it.</summary>
+    [Fact]
+    public void TheV13Heal_OverAnInvalidList_SaysSo_AndWritesItCorrected()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v13heal-invalid-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath,
+                DarlingManagedPostgres.BuildConfAppend(5992) + "shared_preload_libraries = 'timescaledb,auto_explain,'\n");
+
+            var logger = new CapturingTestLogger();
+            new DarlingManagedPostgres(new PostgresConfig { Managed = true, Port = 5992, DataDirectory = dataDirectory }, logger)
+                .EnsureConfAppended(dataDirectory);
+
+            Assert.Contains("which is not a list PostgreSQL accepts, so the store has been loading no library from it", logger.Joined, StringComparison.Ordinal);
+            Assert.Equal("timescaledb,auto_explain,pg_stat_statements", LastConfAssignment(File.ReadAllText(confPath), "shared_preload_libraries"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// An include cycle that fans out (two files in a directory that each include the directory again) is
+    /// refused by PostgreSQL once it nests past ten levels, but read naively it is 2^10 file reads on the start
+    /// path before that; the walk stops at its file budget instead (#3915's review).
+    /// </summary>
+    [Fact]
+    public void AFanningIncludeCycle_StopsAtTheFileBudget()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v13cycle-");
+        try
+        {
+            var confDirectory = Path.Combine(root.FullName, "conf.d");
+            Directory.CreateDirectory(confDirectory);
+            File.WriteAllText(Path.Combine(confDirectory, "a.conf"), "include_dir '.'\nshared_preload_libraries = 'a'\n");
+            File.WriteAllText(Path.Combine(confDirectory, "b.conf"), "include_dir '.'\nshared_preload_libraries = 'b'\n");
+            var confPath = Path.Combine(root.FullName, "postgresql.conf");
+            File.WriteAllText(confPath, "include_dir 'conf.d'\n");
+
+            var assignments = DarlingManagedPostgres.ReadConfAssignments(confPath, "shared_preload_libraries");
+
+            Assert.InRange(assignments.Count, 1, DarlingManagedPostgres.MaxConfFilesRead);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The value of the last assignment of <paramref name="name"/> in conf text, through the product's
+    /// own parser.</summary>
+    private static string? LastConfAssignment(string? conf, string name) =>
+        DarlingManagedPostgres.ParseConfText(conf)
+            .Where(a => a.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            .Select(a => a.Value)
+            .LastOrDefault();
 
     /// <summary>
     /// The assignment names in a conf fragment — the left side of every non-comment <c>=</c> line. Derived
@@ -2457,7 +2594,7 @@ public sealed class DarlingManagedPostgresTests
                 Assert.Equal(2, CountAssignments(healedConf, "shared_preload_libraries"));
                 Assert.Equal(
                     "timescaledb,pg_stat_statements",
-                    DarlingManagedPostgres.FindLastConfAssignment(healedConf, "shared_preload_libraries"));
+                    LastConfAssignment(healedConf, "shared_preload_libraries"));
 
                 /* A PRECONDITION of the reading below, not part of what the heal is judged on — and the trap
                    in this whole area. `timescaledb` in shared_preload_libraries loads the LOADER, and the

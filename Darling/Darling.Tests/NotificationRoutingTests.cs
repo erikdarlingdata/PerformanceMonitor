@@ -570,6 +570,7 @@ public sealed class NotificationRoutingTests
 
         public Task<DateTime?> GetLastAlertTimeAsync(string serverId, string metricName, string? dedupKey = null) =>
             Task.FromResult<DateTime?>(null);
+        public Task<DateTime?> GetLastDeliveredPageUtcAsync(string serverId, string metricName) => Task.FromResult<DateTime?>(null);
     }
 
     /// <summary>An <see cref="IAlertSettings"/> whose every member is a plain settable default — the routes
@@ -602,6 +603,7 @@ public sealed class NotificationRoutingTests
         public string PagerDutyProxyAddress => "";
         public double AnalysisNotifySeverity => 1.5;
         public int AnalysisNotifyCooldownMinutes => 360;
+        public int AnalysisPageCap => 5;
         public string TriageBaseUrl => "";
     }
 }
