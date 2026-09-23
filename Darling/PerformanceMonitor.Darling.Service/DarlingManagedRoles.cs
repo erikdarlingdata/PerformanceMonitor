@@ -276,18 +276,23 @@ public static class DarlingManagedRoles
     /// caller runs it for a service in a container on a non-managed store, and this decides from the store itself.
     ///
     /// <para><b>Which store counts as the service's own.</b> One whose login is the cluster's BOOTSTRAP superuser
-    /// (oid 10, the role <c>initdb</c> created). The compose file's store image runs <c>initdb --username
-    /// $POSTGRES_USER</c> with the service's login, so that is exactly the compose store, and a superuser granted on
-    /// a cluster somebody else initialized never is. Anything else is refused with a reason and nothing is
-    /// written, so the surfaces keep the bring-your-own rules (<see cref="DarlingStoreLogins"/>). A same-named role
-    /// without <see cref="ComposeStoreRoleMarker"/> is refused the same way: re-keying it would break whoever
-    /// uses it.</para>
+    /// (oid 10, the role <c>initdb</c> created) on a cluster that holds no database but the store's own,
+    /// <c>postgres</c> and the templates. The compose file's store image runs <c>initdb --username
+    /// $POSTGRES_USER</c> with the service's login and creates the one database, so that is exactly the compose
+    /// store; a superuser granted on a cluster somebody else initialized never is, and neither is an operator's
+    /// multi-database cluster the service reaches as its bootstrap superuser. Anything else is refused with a
+    /// reason and nothing is written, so the surfaces keep the bring-your-own rules (<see cref="DarlingStoreLogins"/>).
+    /// A same-named role without <see cref="ComposeStoreRoleMarker"/> is refused the same way: re-keying it would
+    /// break whoever uses it.</para>
     ///
     /// <para><b>The credentials</b> are the <c>file:</c> secret shape (#1804): one plaintext password per file in
     /// <paramref name="credentialDirectory"/> (<see cref="ComposeStoreCredentialFileName"/>), created owner-only.
     /// Read when present and trusted, generated otherwise, and written only AFTER the batch has committed, so a
     /// file on disk is always a password its role accepts. A lost file (a container recreated without the
-    /// credentials volume) regenerates and is re-asserted on the next start, which the marker makes safe.</para>
+    /// credentials volume) regenerates and is re-asserted on the next start, which the marker makes safe. The
+    /// directory is set owner-only again before any file is read, and one that cannot be trusted
+    /// (<see cref="PrepareComposeCredentialDirectory"/>) has none of its files read: every role gets a new
+    /// password this start.</para>
     ///
     /// <para>The same batch as managed mode, with three differences carried by <see cref="ProvisioningTarget"/>:
     /// the owner and database are the login's own names (the compose file can rename them), the marker is
@@ -318,9 +323,20 @@ public static class DarlingManagedRoles
             return ComposeStoreProvisioning.Refused(refusal);
         }
 
-        var admin = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.AdminRoleName, logger);
-        var viewer = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.ViewerRoleName, logger);
-        var mcp = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.McpRoleName, logger);
+        /* One warning for the directory, not one per file it holds. */
+        var directory = PrepareComposeCredentialDirectory(credentialDirectory, create: true, logger);
+        if (directory.Distrust is { } distrust)
+        {
+            logger.LogWarning(
+                "The compose store's credentials directory {Directory} is not trusted ({Reason}), so no credential file in it is read this start: every role gets a new password, re-asserted on the role{Written}.",
+                credentialDirectory, distrust,
+                directory.MayWrite ? ", and the new files replace the old" : ", and none is written there, so every start does the same until the directory is fixed");
+        }
+
+        var readFiles = directory.Distrust is null;
+        var admin = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.AdminRoleName, readFiles, logger);
+        var viewer = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.ViewerRoleName, readFiles, logger);
+        var mcp = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.McpRoleName, readFiles, logger);
 
         var applied = await ProvisionRolesAsync(
             dataSource, admin.Password, viewer.Password, mcp.Password,
@@ -328,7 +344,7 @@ public static class DarlingManagedRoles
 
         foreach (var credential in new[] { admin, viewer, mcp })
         {
-            if (credential.Generated)
+            if (credential.Generated && directory.MayWrite)
             {
                 PersistComposeCredential(credentialDirectory, credential, logger);
             }
@@ -1201,9 +1217,12 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
     public static string ComposeStoreCredentialFileName(string role) => $"pg-{role}-credential";
 
     /// <summary>
-    /// What the store says about the login the service connects with and about the three role names, read in one
-    /// statement before anything is written (#3914). oid 10 is <c>BOOTSTRAP_SUPERUSERID</c>, the role
-    /// <c>initdb</c> creates, fixed in every PostgreSQL version.
+    /// What the store says about the login the service connects with, about the three role names, and about the
+    /// cluster's other databases, read in one statement before anything is written (#3914). oid 10 is
+    /// <c>BOOTSTRAP_SUPERUSERID</c>, the role <c>initdb</c> creates, fixed in every PostgreSQL version. The other
+    /// databases are every one but the store's own, <c>postgres</c> and the templates (<c>datistemplate</c>, and
+    /// <c>template0</c>/<c>template1</c> by name in case either lost the flag): the compose store's cluster holds
+    /// nothing else, and roles are cluster-wide.
     /// </summary>
     internal const string ComposeStoreFactsSql = @"
 SELECT
@@ -1211,7 +1230,14 @@ SELECT
     pg_catalog.current_database()::text,
     (u.oid = 10 AND u.rolsuper),
     c.rolname::text,
-    pg_catalog.shobj_description(c.oid, 'pg_authid')
+    pg_catalog.shobj_description(c.oid, 'pg_authid'),
+    (
+        SELECT
+            pg_catalog.array_agg(d.datname::text ORDER BY d.datname)
+        FROM pg_catalog.pg_database AS d
+        WHERE d.datname NOT IN (pg_catalog.current_database(), 'postgres', 'template0', 'template1')
+        AND   NOT d.datistemplate
+    )
 FROM pg_catalog.pg_roles AS u
 LEFT JOIN pg_catalog.pg_roles AS c
     ON c.rolname = ANY ($1)
@@ -1227,6 +1253,7 @@ WHERE u.rolname = current_user";
         string? database = null;
         var bootstrapSuperuser = false;
         var markers = new Dictionary<string, string?>(StringComparer.Ordinal);
+        IReadOnlyList<string> otherDatabases = Array.Empty<string>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1237,6 +1264,9 @@ WHERE u.rolname = current_user";
             {
                 markers[reader.GetString(3)] = reader.IsDBNull(4) ? null : reader.GetString(4);
             }
+
+            /* array_agg over no rows is NULL, not an empty array. */
+            otherDatabases = reader.IsDBNull(5) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(5);
         }
 
         if (login is null || database is null)
@@ -1244,7 +1274,7 @@ WHERE u.rolname = current_user";
             throw new InvalidOperationException("The store did not report the login this service connects as.");
         }
 
-        return new ComposeStoreFacts(login, database, bootstrapSuperuser, markers);
+        return new ComposeStoreFacts(login, database, bootstrapSuperuser, markers, otherDatabases);
     }
 
     /// <summary>
@@ -1259,6 +1289,16 @@ WHERE u.rolname = current_user";
         if (!facts.BootstrapSuperuser)
         {
             return $"The service logs in to this store as '{facts.Login}', which is not the store's bootstrap superuser (the role initdb created, POSTGRES_USER in the compose file), so the store is not treated as the service's own and no roles were created on it.";
+        }
+
+        /* The bootstrap superuser alone does not make a cluster the compose store: a container that logs in to an
+           operator's own cluster as its bootstrap superuser (postgres, say) passes that test too. The compose store's
+           image creates one database and the service owns the cluster, so any other database means someone else's
+           cluster, and roles are cluster-wide: provisioning there would put admin/viewer/mcp on everything it
+           serves. */
+        if (facts.OtherDatabases.Count > 0)
+        {
+            return $"This cluster also holds {DescribeOtherDatabases(facts.OtherDatabases)} that the service does not own, so it is not treated as the service's own and no roles were created on it.";
         }
 
         /* The two names reach the batch as quoted identifiers; a control character is legal inside one but has
@@ -1290,42 +1330,149 @@ WHERE u.rolname = current_user";
         _ => $"comment '{marker}'",
     };
 
+    /// <summary>How many of the cluster's other databases a refusal names before it counts the rest.</summary>
+    internal const int OtherDatabasesNamed = 3;
+
+    /// <summary>"the database 'a'", "the databases 'a' and 'b'", "the databases 'a', 'b', 'c' and 2 more". A
+    /// control character in a name is shown as '?', so a name cannot forge a line in the log it is written to.</summary>
+    private static string DescribeOtherDatabases(IReadOnlyList<string> names)
+    {
+        var shown = names
+            .Take(OtherDatabasesNamed)
+            .Select(name => "'" + new string(name.Select(c => char.IsControl(c) ? '?' : c).ToArray()) + "'")
+            .ToList();
+        var more = names.Count - shown.Count;
+        var list = more > 0
+            ? $"{string.Join(", ", shown)} and {more.ToString(CultureInfo.InvariantCulture)} more"
+            : shown.Count == 1
+                ? shown[0]
+                : $"{string.Join(", ", shown.Take(shown.Count - 1))} and {shown[^1]}";
+
+        return (names.Count == 1 ? "the database " : "the databases ") + list;
+    }
+
     /// <summary>
     /// The compose store's credential for <paramref name="role"/>: the trusted file's password, or a freshly
     /// generated one that <see cref="PersistComposeCredential"/> writes once the batch has committed (#3914).
     /// An untrusted file is discarded rather than read — the Unix equivalent of <see cref="EnsureRoleCredential"/>'s
-    /// pre-plant check. A symbolic link, a file other users can read, and on Windows a file owned by anyone but a
-    /// trusted principal may have been planted or read, and a new password costs only its re-assert.
+    /// pre-plant check (<see cref="UntrustedComposeCredentialReason"/>): a password someone else could have written
+    /// would be re-asserted on the role, and a new password costs only its re-assert. With
+    /// <paramref name="readFile"/> false (a directory that cannot be trusted) the file is not looked at.
     /// </summary>
-    private static ComposeCredential ReadOrGenerateComposeCredential(string directory, string role, ILogger logger)
+    private static ComposeCredential ReadOrGenerateComposeCredential(string directory, string role, bool readFile, ILogger logger)
     {
-        var path = Path.Combine(directory, ComposeStoreCredentialFileName(role));
-
-        /* LinkTarget before Exists: File.Exists follows a link, so a dangling one reads as "no file". */
-        var info = new FileInfo(path);
-        if (info.LinkTarget is not null || info.Exists)
+        if (readFile)
         {
-            var untrusted = UntrustedComposeCredentialReason(info);
-            if (untrusted is null)
+            var path = Path.Combine(directory, ComposeStoreCredentialFileName(role));
+            if (ReadTrustedComposeCredentialFile(path, out var untrusted) is { } password)
             {
-                var password = File.ReadAllText(path).Trim();
-                if (password.Length > 0)
-                {
-                    return new ComposeCredential(role, password, generated: false);
-                }
-
-                untrusted = "it is empty";
+                return new ComposeCredential(role, password, generated: false);
             }
 
-            logger.LogWarning(
-                "The compose store's '{Role}' credential {File} is not trusted ({Reason}) — discarding it; a new password is generated and re-asserted on the role.",
-                role, path, untrusted);
-            TryDelete(path, logger);
+            if (untrusted is not null)
+            {
+                logger.LogWarning(
+                    "The compose store's '{Role}' credential {File} is not trusted ({Reason}) — discarding it; a new password is generated and re-asserted on the role.",
+                    role, path, untrusted);
+                TryDelete(path, logger);
+            }
         }
 
         return new ComposeCredential(role, DarlingManagedPostgres.GeneratePassword(), generated: true);
     }
 
+    /// <summary>
+    /// The password a web or MCP host connects with when this start did NOT provision the compose store's roles
+    /// (#3914): refused, failed, or a collector that stood down before it got there. The roles still hold what an
+    /// earlier start gave them. A credential file is written only after the batch that set its password committed,
+    /// for a role carrying <see cref="ComposeStoreRoleMarker"/>, so a trusted file is a login its role accepted when
+    /// it was written, and the surface stays on its least-privilege role instead of the owner. Trusted by the
+    /// worker's own checks: the directory set owner-only again first (<see cref="PrepareComposeCredentialDirectory"/>),
+    /// then the file (<see cref="UntrustedComposeCredentialReason"/>). Never deletes, generates or writes anything:
+    /// replacing a distrusted file is the next provisioning's job, and only the worker's batch ever sets a role's
+    /// password from a file, so the worst a planted file can do here is a login the store refuses.
+    /// </summary>
+    /// <returns>The password, or why there is none this surface can use.</returns>
+    internal static EarlierComposeCredential ReadEarlierComposeCredential(string directory, string role, ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+
+        var file = ComposeStoreCredentialFileName(role);
+        try
+        {
+            if (!Directory.Exists(directory) && new DirectoryInfo(directory).LinkTarget is null)
+            {
+                return EarlierComposeCredential.None($"{directory} does not exist");
+            }
+
+            var trust = PrepareComposeCredentialDirectory(directory, create: false, logger);
+            if (trust.Distrust is { } distrust)
+            {
+                return EarlierComposeCredential.None($"the credentials directory {directory} is not trusted ({distrust})");
+            }
+
+            var path = Path.Combine(directory, file);
+            if (ReadTrustedComposeCredentialFile(path, out var untrusted) is { } password)
+            {
+                return EarlierComposeCredential.Trusted(password);
+            }
+
+            return EarlierComposeCredential.None(untrusted is null
+                ? $"{path} does not exist"
+                : $"{path} is not trusted ({untrusted})");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return EarlierComposeCredential.None($"{file} could not be read ({ex.Message})");
+        }
+    }
+
+    /// <summary>
+    /// A trusted credential file's password (#3914), or null: <paramref name="untrusted"/> then says why the file
+    /// is not trusted, or is null when there is no file at all. Opens nothing it has not judged first, and deletes
+    /// nothing.
+    /// </summary>
+    private static string? ReadTrustedComposeCredentialFile(string path, out string? untrusted)
+    {
+        /* LinkTarget before Exists: File.Exists follows a link, so a dangling one reads as "no file"; and a
+           directory at the path is not a FileInfo that exists. */
+        var info = new FileInfo(path);
+        if (info.LinkTarget is null && !info.Exists && !Directory.Exists(path))
+        {
+            untrusted = null;
+            return null;
+        }
+
+        untrusted = UntrustedComposeCredentialReason(info);
+        if (untrusted is not null)
+        {
+            return null;
+        }
+
+        var password = File.ReadAllText(path).Trim();
+        if (password.Length > 0)
+        {
+            return password;
+        }
+
+        untrusted = "it holds no password";
+        return null;
+    }
+
+    /// <summary>
+    /// Why a compose-store credential file cannot be trusted, or null (#3914). It must be a regular file (not a
+    /// symbolic link, a directory, a device, a pipe or a socket) that no one else can reach: no group or other bits
+    /// on Unix; on Windows, owned by a trusted principal (<see cref="DarlingFileSecurity.IsTrustedOwner"/>) and not
+    /// readable by ordinary users (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). A plaintext password
+    /// others could read may already be theirs, so such a file is distrusted and regenerated, not re-hardened.
+    ///
+    /// <para><b>What this cannot see.</b> Managed .NET cannot read a Unix file's owner, and this adds no native
+    /// interop to get it, so a file another user created with mode 0600 passes the mode check. What keeps anyone
+    /// else from creating one is the directory: the shipped <c>darling-credentials</c> named volume is seeded
+    /// root:root 0700 by the Dockerfile, and the service sets the directory owner-only again every start and
+    /// distrusts it when it cannot (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host
+    /// directory another host user owns or can write to is outside what either check can see.</para>
+    /// </summary>
     private static string? UntrustedComposeCredentialReason(FileInfo info)
     {
         if (info.LinkTarget is not null)
@@ -1333,25 +1480,156 @@ WHERE u.rolname = current_user";
             return "it is a symbolic link";
         }
 
-        if (OperatingSystem.IsWindows())
+        if (Directory.Exists(info.FullName))
         {
-            return DarlingFileSecurity.IsTrustedOwner(info.FullName)
-                ? null
-                : "it is not owned by SYSTEM, Administrators or the service account";
+            return "it is a directory";
         }
 
-        const UnixFileMode othersMayRead =
-            UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
-            | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+        /* A device, a pipe and a socket all stat at size 0, so the size turns them away before anything opens
+           them: reading a pipe that has no writer would block the start forever. */
+        if (info.Length == 0)
+        {
+            return "it is empty, or not a regular file";
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            if (!DarlingFileSecurity.IsTrustedOwner(info.FullName))
+            {
+                return "it is not owned by SYSTEM, Administrators or the service account";
+            }
+
+            return DarlingFileSecurity.IsReadableByOrdinaryUsers(info.FullName)
+                ? "ordinary local users can read it"
+                : null;
+        }
+
         var mode = File.GetUnixFileMode(info.FullName);
-        return (mode & othersMayRead) == 0 ? null : $"its mode {mode} gives other users access";
+        return (mode & GroupOrOtherAccess) == 0 ? null : $"its mode {Octal(mode)} gives other users access";
     }
 
     /// <summary>
+    /// Sets the compose store's credentials directory owner-only again before any file in it is read, and says what
+    /// the service may do with it this start (#3914). A symbolic link is never followed: nothing in it is read or
+    /// written. Unix: 0700 is re-applied every start and the result read back
+    /// (<see cref="JudgeComposeCredentialDirectory"/>). Windows (the live tests' runtime): a directory the service
+    /// creates is hardened as it is created, and each file's owner and readability carry the rest.
+    /// <paramref name="create"/> makes a missing directory; only the worker passes it. Never throws: a directory
+    /// that cannot be created or checked (a read-only mount, say) is one nothing is read from or written to, and
+    /// the roles are still provisioned with this start's passwords, as they were when only the write could fail.
+    /// </summary>
+    private static ComposeCredentialDirectoryTrust PrepareComposeCredentialDirectory(string directory, bool create, ILogger logger)
+    {
+        try
+        {
+            var info = new DirectoryInfo(directory);
+            if (info.LinkTarget is not null)
+            {
+                return new ComposeCredentialDirectoryTrust("it is a symbolic link", MayWrite: false);
+            }
+
+            if (!info.Exists && !create)
+            {
+                return new ComposeCredentialDirectoryTrust(null, MayWrite: false);
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                if (!info.Exists)
+                {
+                    Directory.CreateDirectory(directory);
+                    try
+                    {
+                        DarlingFileSecurity.HardenDirectory(directory, allowInteractiveTraverse: false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        return new ComposeCredentialDirectoryTrust(
+                            $"it could not be restricted to SYSTEM, Administrators and the service account ({ex.Message})", MayWrite: false);
+                    }
+                }
+
+                return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+            }
+
+            if (!info.Exists)
+            {
+                Directory.CreateDirectory(directory, OwnerOnlyDirectory);
+            }
+
+            var before = File.GetUnixFileMode(directory);
+            try
+            {
+                File.SetUnixFileMode(directory, OwnerOnlyDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* Neither its owner nor root: a rootless container on someone else's bind mount. The mode read back
+                   below decides. */
+                logger.LogDebug("Could not set {Directory} to owner-only: {Message}", directory, ex.Message);
+            }
+
+            return JudgeComposeCredentialDirectory(before, File.GetUnixFileMode(directory));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ComposeCredentialDirectoryTrust($"it could not be created or checked ({ex.Message})", MayWrite: false);
+        }
+    }
+
+    /// <summary>
+    /// The Unix credentials-directory verdict, pure so each arm is pinned without a Linux box (#3914).
+    /// <paramref name="before"/> is the mode the directory was found with, <paramref name="after"/> its mode once the
+    /// service set it to 0700.
+    /// <list type="bullet">
+    /// <item><description>Still reachable by other users afterwards (a filesystem that ignores Unix modes): none of
+    /// its files is read, and none is written there either, because a new one would be as reachable as the
+    /// old.</description></item>
+    /// <item><description>Writable by other users BEFORE: anyone could have put a file in it until now, and a planted
+    /// 0600 file passes the file check (<see cref="UntrustedComposeCredentialReason"/> cannot see its owner), so none
+    /// of its files is read this start. The new ones are written, since only the service can reach the directory
+    /// now, and they replace whatever was planted.</description></item>
+    /// </list>
+    /// </summary>
+    internal static ComposeCredentialDirectoryTrust JudgeComposeCredentialDirectory(UnixFileMode before, UnixFileMode after)
+    {
+        if ((after & GroupOrOtherAccess) != 0)
+        {
+            return new ComposeCredentialDirectoryTrust(
+                $"its mode is still {Octal(after)} after the service set it to owner-only, which a filesystem that ignores Unix modes does",
+                MayWrite: false);
+        }
+
+        if ((before & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+        {
+            return new ComposeCredentialDirectoryTrust(
+                $"its mode was {Octal(before)}, which let other users put files in it until the service set it to owner-only this start",
+                MayWrite: true);
+        }
+
+        return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+    }
+
+    private const UnixFileMode GroupOrOtherAccess =
+        UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
+        | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+
+    private const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+    /// <summary>A mode the way an operator types it, <c>0700</c>, rather than the enum's flag names.</summary>
+    internal static string Octal(UnixFileMode mode) => "0" + Convert.ToString((int)mode, 8);
+
+    /// <summary>
     /// Writes a generated compose-store credential (#3914), owner-only from the moment it exists: created 0600 on
-    /// Unix (the <c>UnixCreateMode</c> applies at creation, so there is no window at the umask's mode) and
-    /// ACL-hardened on Windows, then renamed over the old file so a reader never sees half of one. Best-effort:
-    /// the role already has this start's password, so a failure costs a re-assert on the next start and is logged.
+    /// Unix (the <c>UnixCreateMode</c> applies at creation, so there is no window at the umask's mode), and created
+    /// with its ACL already applied on Windows (<see cref="DarlingFileSecurity.CreateHardenedFile"/>, so the folder's
+    /// inherited access never reaches it), then renamed over the old file so a reader never sees half of one. On
+    /// Windows the result is checked before it replaces anything, the managed files' verify-don't-assume rule: a file
+    /// ordinary users can still read after one more harden is not put in place. Best-effort: the role already has
+    /// this start's password, so a failure costs a re-assert on the next start and is logged. The directory is the
+    /// caller's (<see cref="PrepareComposeCredentialDirectory"/>).
     /// </summary>
     private static void PersistComposeCredential(string directory, ComposeCredential credential, ILogger logger)
     {
@@ -1359,23 +1637,33 @@ WHERE u.rolname = current_user";
         var temporary = path + ".tmp";
         try
         {
+            File.Delete(temporary);
             if (OperatingSystem.IsWindows())
             {
-                Directory.CreateDirectory(directory);
-                File.Delete(temporary);
-                File.WriteAllText(temporary, credential.Password);
-                DarlingFileSecurity.HardenFile(temporary, allowInteractiveRead: false);
+                using (var stream = DarlingFileSecurity.CreateHardenedFile(temporary, allowInteractiveRead: false))
+                using (var writer = new StreamWriter(stream))
+                {
+                    writer.Write(credential.Password);
+                }
+
+                if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                {
+                    DarlingFileSecurity.HardenFile(temporary, allowInteractiveRead: false);
+                    if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                    {
+                        throw new InvalidOperationException(
+                            "ordinary local users can read it even after it was created owner-only and hardened again"
+                            + DarlingFileSecurity.DescribeOwnerAndExposure(temporary));
+                    }
+                }
             }
             else
             {
-                const UnixFileMode ownerOnly = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-                Directory.CreateDirectory(directory, ownerOnly | UnixFileMode.UserExecute);
-                File.Delete(temporary);
                 using var stream = new FileStream(temporary, new FileStreamOptions
                 {
                     Mode = FileMode.CreateNew,
                     Access = FileAccess.Write,
-                    UnixCreateMode = ownerOnly,
+                    UnixCreateMode = OwnerOnlyFile,
                 });
                 using var writer = new StreamWriter(stream);
                 writer.Write(credential.Password);
@@ -1498,8 +1786,11 @@ public sealed class ProvisioningTarget
 /// <param name="Database">The database it is connected to.</param>
 /// <param name="BootstrapSuperuser">Whether that role is the cluster's bootstrap superuser (oid 10).</param>
 /// <param name="ExistingRoleMarkers">Each of admin/viewer/mcp that already exists, with its role comment.</param>
+/// <param name="OtherDatabases">The cluster's databases other than the store's own, <c>postgres</c> and the
+/// templates, by name.</param>
 internal sealed record ComposeStoreFacts(
-    string Login, string Database, bool BootstrapSuperuser, IReadOnlyDictionary<string, string?> ExistingRoleMarkers);
+    string Login, string Database, bool BootstrapSuperuser, IReadOnlyDictionary<string, string?> ExistingRoleMarkers,
+    IReadOnlyList<string> OtherDatabases);
 
 /// <summary>
 /// What <see cref="DarlingManagedRoles.EnsureComposeStoreProvisionedAsync"/> did (#3914). A class, not a record, so
@@ -1537,3 +1828,34 @@ public sealed class ComposeStoreProvisioning
     internal static ComposeStoreProvisioning Refused(string reason) =>
         new(false, DarlingManagedRoles.ComposeStatementTimeoutUnknown, null, null, reason);
 }
+
+/// <summary>
+/// What the service holds from an earlier start for one of the compose store's roles (#3914,
+/// <see cref="DarlingManagedRoles.ReadEarlierComposeCredential"/>): a trusted credential file's password, or why
+/// there is none. A class, not a record, so no generated <c>ToString</c> can print the password.
+/// </summary>
+internal sealed class EarlierComposeCredential
+{
+    private EarlierComposeCredential(string? password, string? missingReason)
+    {
+        Password = password;
+        MissingReason = missingReason;
+    }
+
+    /// <summary>The role's password; null when there is none to use.</summary>
+    internal string? Password { get; }
+
+    /// <summary>Why there is none, for the owner-fallback warning; null when there is.</summary>
+    internal string? MissingReason { get; }
+
+    internal static EarlierComposeCredential Trusted(string password) =>
+        new(password ?? throw new ArgumentNullException(nameof(password)), null);
+
+    internal static EarlierComposeCredential None(string reason) =>
+        new(null, reason ?? throw new ArgumentNullException(nameof(reason)));
+}
+
+/// <summary>What the service may do with the compose store's credentials directory this start (#3914).</summary>
+/// <param name="Distrust">Why none of its files is read this start; null when they are.</param>
+/// <param name="MayWrite">Whether a credential generated this start is written there.</param>
+internal sealed record ComposeCredentialDirectoryTrust(string? Distrust, bool MayWrite);

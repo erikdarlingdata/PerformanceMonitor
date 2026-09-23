@@ -1751,7 +1751,8 @@ public sealed class DarlingWorker : BackgroundService
             /* #3914: the Linux compose distribution's store is the service's own, so it provisions the same roles
                there and the web and MCP hosts connect as viewer and mcp. It decides from the store whether this
                IS that store, publishes the verdict the hosts wait on, and never throws: a refusal or failure
-               leaves the hosts on the owner with the reason. Same reload baseline as managed. */
+               leaves each host on its role's credential from an earlier start, or on the owner when there is none,
+               with the reason. Same reload baseline as managed, and only from a start that provisioned. */
             var verdict = await DarlingStoreLogins.ProvisionComposeStoreAsync(
                 postgres, config.Postgres.ConnectionString, _logger, stoppingToken);
             if (verdict.Provisioned)

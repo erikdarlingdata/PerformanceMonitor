@@ -8,8 +8,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -24,8 +30,9 @@ namespace Darling.Tests;
 /// any other store gets <c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>, and a surface
 /// left on the owner says at startup what that gives up.
 ///
-/// <para>Pins the pure decision (<see cref="DarlingStoreLogins.Resolve"/>), the warning text, the derived role
-/// login, the compose-store refusals, the batch the compose store gets, the reload gate, the two settings, and —
+/// <para>Pins the pure decision (<see cref="DarlingStoreLogins.Resolve"/>), including a start that did not provision
+/// the roles, the warning text, the derived role login, the credential an earlier start left and the checks it has
+/// to pass, the compose-store refusals, the batch the compose store gets, the reload gate, the two settings, and —
 /// by source, because a behavioural test of a pure function cannot see it — the wiring: that each host's
 /// unmanaged pool is built from the resolver and its managed pool exactly as before, and that the worker
 /// provisions the compose store and seeds the reload baseline from what it wrote. The live half is
@@ -97,6 +104,112 @@ public sealed class DarlingStoreLoginsTests
         Assert.NotNull(login.Warning);
         Assert.StartsWith(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Mcp, null), login.Warning, StringComparison.Ordinal);
         Assert.EndsWith(reason, login.Warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The decision table for a start that did NOT provision the compose store's roles (#3914 review, F1). Every such
+    /// outcome — a refusal, a failure, a collector that stood down first — keeps each surface on its role when the
+    /// service holds a trusted credential from an earlier start: the role still carries that password, and one bad
+    /// start must not hand the web dashboard and the MCP server the owner for the rest of the process. The login is
+    /// the same derived one a provisioned start builds, and the warning says it is an earlier start's.
+    /// </summary>
+    [Theory]
+    [InlineData("refusal", "Web", "viewer")]
+    [InlineData("refusal", "Mcp", "mcp")]
+    [InlineData("failure", "Web", "viewer")]
+    [InlineData("failure", "Mcp", "mcp")]
+    [InlineData("stand-down", "Web", "viewer")]
+    [InlineData("stand-down", "Mcp", "mcp")]
+    public void ANotProvisionedStart_WithATrustedEarlierCredential_KeepsTheSurfaceOnItsRole(string outcome, string surfaceName, string role)
+    {
+        var surface = Enum.Parse<DarlingStoreLogins.Surface>(surfaceName);
+        var verdict = NotProvisioned(outcome);
+
+        var login = DarlingStoreLogins.Resolve(
+            surface, Owner, null, inContainer: true, verdict, EarlierComposeCredential.Trusted("Earlier3914"));
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRoleFromEarlierStart, login.Source);
+        Assert.Equal(DarlingStoreLogins.BuildComposeStoreRoleConnectionString(Owner, role, "Earlier3914"), login.ConnectionString);
+        Assert.Equal(role, new NpgsqlConnectionStringBuilder(login.ConnectionString).Username);
+        Assert.DoesNotContain("OwnerSecret1", login.ConnectionString, StringComparison.Ordinal);
+
+        Assert.Equal(DarlingStoreLogins.EarlierCredentialWarning(surface, verdict.NotProvisionedReason), login.Warning);
+        Assert.Contains(verdict.NotProvisionedReason!, login.Warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same starts with no trusted credential from an earlier one — none written yet, or one the checks turned
+    /// away — are the only ones that fall back to the owner, and the warning gives both reasons: why this start did
+    /// not provision, and why no earlier credential could stand in.
+    /// </summary>
+    [Theory]
+    [InlineData("refusal")]
+    [InlineData("failure")]
+    [InlineData("stand-down")]
+    public void ANotProvisionedStart_WithNoTrustedEarlierCredential_FallsBackToTheOwner_WithBothReasons(string outcome)
+    {
+        var verdict = NotProvisioned(outcome);
+        const string missing = "/var/lib/darling/credentials/pg-viewer-credential is not trusted (its mode 0644 gives other users access)";
+
+        var login = DarlingStoreLogins.Resolve(
+            DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, verdict, EarlierComposeCredential.None(missing));
+
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, login.Source);
+        Assert.Equal(Owner, login.ConnectionString);
+        Assert.StartsWith(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Web, null), login.Warning, StringComparison.Ordinal);
+        Assert.Contains(verdict.NotProvisionedReason!, login.Warning, StringComparison.Ordinal);
+        Assert.EndsWith($" No viewer credential from an earlier start can stand in: {missing}.", login.Warning, StringComparison.Ordinal);
+    }
+
+    /// <summary>An earlier start's credential is the fallback of a start that did not provision, and nothing more: a
+    /// configured login and this start's own provisioning both outrank it, and outside a container it is never
+    /// consulted.</summary>
+    [Fact]
+    public void AnEarlierCredential_NeverOutranksAConfiguredLogin_ThisStartsProvisioning_OrTheOutsideOfAContainer()
+    {
+        var earlier = EarlierComposeCredential.Trusted("Earlier3914");
+
+        var configured = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, ViewerLogin, inContainer: true, NotProvisioned("refusal"), earlier);
+        Assert.Equal(DarlingStoreLogins.LoginSource.Configured, configured.Source);
+        Assert.Equal(ViewerLogin, configured.ConnectionString);
+
+        var provisioned = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: true, Provisioned(), earlier);
+        Assert.Equal(DarlingStoreLogins.LoginSource.ComposeStoreRole, provisioned.Source);
+        Assert.Equal(ViewerLogin, provisioned.ConnectionString);
+
+        var outside = DarlingStoreLogins.Resolve(DarlingStoreLogins.Surface.Web, Owner, null, inContainer: false, NotProvisioned("refusal"), earlier);
+        Assert.Equal(DarlingStoreLogins.LoginSource.Owner, outside.Source);
+        Assert.Equal(DarlingStoreLogins.OwnerFallbackWarning(DarlingStoreLogins.Surface.Web, null), outside.Warning);
+    }
+
+    /// <summary>
+    /// An operator reading the log can tell the three cases apart (#3914 review, F1): provisioned this start (no
+    /// warning from the surface; the worker says it provisioned), an earlier start's credential, and the owner.
+    /// </summary>
+    [Theory]
+    [InlineData("Web", "The web dashboard", "viewer")]
+    [InlineData("Mcp", "The MCP server", "mcp")]
+    public void TheThreeCases_ReadDifferently(string surfaceName, string what, string role)
+    {
+        var surface = Enum.Parse<DarlingStoreLogins.Surface>(surfaceName);
+        const string reason = "The collector stopped before it could provision the store's roles (Store: connection refused).";
+
+        Assert.Null(DarlingStoreLogins.Resolve(surface, Owner, null, inContainer: true, Provisioned()).Warning);
+
+        var earlier = DarlingStoreLogins.EarlierCredentialWarning(surface, reason);
+        Assert.StartsWith(
+            $"{what} connects to the store as the {role} role with the credential an earlier start provisioned, not as the owner: "
+            + "the store's least-privilege roles were not provisioned this start. " + reason,
+            earlier, StringComparison.Ordinal);
+        Assert.EndsWith(
+            $"If the store refuses that login (the {role} role was dropped, or its password changed by hand), {char.ToLowerInvariant(what[0])}{what[1..]} "
+            + "stays down with the store's error until a start provisions the roles again; it never falls back to the owner login.",
+            earlier, StringComparison.Ordinal);
+
+        var owner = DarlingStoreLogins.OwnerFallbackWarning(surface, reason);
+        Assert.StartsWith($"{what} connects to the store as the owner login (postgres.connectionString)", owner, StringComparison.Ordinal);
+        Assert.DoesNotContain("earlier start", owner, StringComparison.Ordinal);
+        Assert.DoesNotContain("owner login (postgres.connectionString)", earlier, StringComparison.Ordinal);
     }
 
     /// <summary>The ruling's warning: the surface, why, and the three things the owner login gives up.</summary>
@@ -184,6 +297,40 @@ public sealed class DarlingStoreLoginsTests
         Assert.DoesNotContain("OwnerSecret1", derived, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The derived login keeps every connection setting of the owner's that can only make a connection stricter
+    /// (#3914 review, F7): channel binding, the authentication methods it will accept, certificate revocation
+    /// checking and the TLS negotiation. An owner that requires channel binding or SCRAM must not hand its roles a
+    /// connection that settles for less. An owner that sets none of them hands the role Npgsql's defaults.
+    /// </summary>
+    [Fact]
+    public void TheComposeStoreRoleLogin_KeepsTheOwnersStricterConnectionSettings()
+    {
+        var owner = new NpgsqlConnectionStringBuilder(Owner)
+        {
+            SslMode = SslMode.VerifyFull,
+            ChannelBinding = ChannelBinding.Require,
+            RequireAuth = "ScramSHA256",
+            CheckCertificateRevocation = true,
+            SslNegotiation = SslNegotiation.Direct,
+        }.ConnectionString;
+
+        var derived = new NpgsqlConnectionStringBuilder(DarlingStoreLogins.BuildComposeStoreRoleConnectionString(owner, "mcp", "McpSecret3"));
+
+        Assert.Equal(ChannelBinding.Require, derived.ChannelBinding);
+        Assert.Equal("ScramSHA256", derived.RequireAuth);
+        Assert.True(derived.CheckCertificateRevocation);
+        Assert.Equal(SslNegotiation.Direct, derived.SslNegotiation);
+        Assert.Equal("mcp", derived.Username);
+
+        var plain = new NpgsqlConnectionStringBuilder(DarlingStoreLogins.BuildComposeStoreRoleConnectionString(Owner, "mcp", "McpSecret3"));
+        var defaults = new NpgsqlConnectionStringBuilder();
+        Assert.Equal(defaults.ChannelBinding, plain.ChannelBinding);
+        Assert.Equal(defaults.RequireAuth, plain.RequireAuth);
+        Assert.Equal(defaults.CheckCertificateRevocation, plain.CheckCertificateRevocation);
+        Assert.Equal(defaults.SslNegotiation, plain.SslNegotiation);
+    }
+
     /* ─────────────────────────── the verdict seam ─────────────────────────── */
 
     [Fact]
@@ -199,6 +346,10 @@ public sealed class DarlingStoreLoginsTests
             Assert.False(settled.Provisioned);
             Assert.Contains("The collector stopped before it could provision the store's roles (Store: the store is gone)", settled.NotProvisionedReason, StringComparison.Ordinal);
 
+            /* A stand-down never reached the worker's directory argument, so the hosts look for an earlier start's
+               credential where the shipped image keeps them. */
+            Assert.Equal(DarlingManagedRoles.ComposeStoreCredentialDirectory, settled.CredentialDirectory);
+
             /* And a published verdict wins over a later stand-down's settle. */
             DarlingStoreLogins.ResetComposeStoreVerdictForTests();
             DarlingStoreLogins.PublishComposeStoreVerdict(Provisioned());
@@ -209,6 +360,18 @@ public sealed class DarlingStoreLoginsTests
         {
             DarlingStoreLogins.ResetComposeStoreVerdictForTests();
         }
+    }
+
+    /// <summary>A refused or failed start carries the directory the worker provisions from, so the hosts read the
+    /// earlier credentials from the same place; a provisioned verdict carries none, since nothing reads it.</summary>
+    [Fact]
+    public void ANotProvisionedVerdict_CarriesWhereTheEarlierCredentialsAre()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "darling-3914-verdict");
+
+        Assert.Equal(directory, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no", directory).CredentialDirectory);
+        Assert.Equal(DarlingManagedRoles.ComposeStoreCredentialDirectory, DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("no").CredentialDirectory);
+        Assert.Null(Provisioned().CredentialDirectory);
     }
 
     [Fact]
@@ -223,6 +386,137 @@ public sealed class DarlingStoreLoginsTests
         Assert.DoesNotContain(typeof(DarlingStoreLogins.ComposeStoreVerdict).GetMethods(), m => m.Name == "<Clone>$");
         Assert.DoesNotContain(typeof(ComposeStoreProvisioning).GetMethods(), m => m.Name == "<Clone>$");
         Assert.DoesNotContain(typeof(DarlingStoreLogins.StoreLogin).GetMethods(), m => m.Name == "<Clone>$");
+
+        /* Nor the credential an earlier start left. */
+        Assert.DoesNotContain("ViewerSecret2", EarlierComposeCredential.Trusted("ViewerSecret2").ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(typeof(EarlierComposeCredential).GetMethods(), m => m.Name == "<Clone>$");
+    }
+
+    /* ─────────────────────────── the credential an earlier start left ─────────────────────────── */
+
+    /// <summary>
+    /// What a host reads when this start did not provision (#3914 review, F1): a credential file the worker's own
+    /// checks trust, and nothing else. Real files in a temp directory, since the checks are the file system's; the
+    /// Unix mode arms are pinned purely below. It never deletes, generates or writes — a distrusted file is the next
+    /// provisioning's to replace.
+    /// </summary>
+    [Fact]
+    public void AnEarlierCredential_IsReadOnlyFromATrustedFile_AndNothingIsDeletedOrWritten()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The file checks here are the Windows ones; the Unix arms are pinned purely.");
+
+        var root = Directory.CreateTempSubdirectory("darling-3914-earlier-");
+        try
+        {
+            var directory = Path.Combine(root.FullName, "credentials");
+            var viewerFile = Path.Combine(directory, DarlingManagedRoles.ComposeStoreCredentialFileName("viewer"));
+
+            /* No directory yet: nothing to use, and nothing created. */
+            var none = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance);
+            Assert.Null(none.Password);
+            Assert.Equal($"{directory} does not exist", none.MissingReason);
+            Assert.False(Directory.Exists(directory));
+
+            /* No file: nothing to use. */
+            Directory.CreateDirectory(directory);
+            Assert.Equal($"{viewerFile} does not exist", DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance).MissingReason);
+
+            /* A trusted file: its password, trimmed. */
+            File.WriteAllText(viewerFile, "Earlier3914\n");
+            var trusted = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance);
+            Assert.Equal("Earlier3914", trusted.Password);
+            Assert.Null(trusted.MissingReason);
+
+            /* One ordinary users can read is distrusted — a plaintext password they could read may be theirs — and
+               left where it is. */
+            var exposed = new FileInfo(viewerFile).GetAccessControl();
+            exposed.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Read, AccessControlType.Allow));
+            new FileInfo(viewerFile).SetAccessControl(exposed);
+            var readable = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance);
+            Assert.Null(readable.Password);
+            Assert.Equal($"{viewerFile} is not trusted (ordinary local users can read it)", readable.MissingReason);
+            Assert.True(File.Exists(viewerFile));
+
+            /* Empty, blank, or a directory where the file should be: none is a credential. */
+            File.Delete(viewerFile);
+            File.WriteAllText(viewerFile, "");
+            Assert.Equal($"{viewerFile} is not trusted (it is empty, or not a regular file)", DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance).MissingReason);
+            File.WriteAllText(viewerFile, " \r\n ");
+            Assert.Equal($"{viewerFile} is not trusted (it holds no password)", DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance).MissingReason);
+            File.Delete(viewerFile);
+            Directory.CreateDirectory(viewerFile);
+            Assert.Equal($"{viewerFile} is not trusted (it is a directory)", DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance).MissingReason);
+            Assert.True(Directory.Exists(viewerFile));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The Unix credentials-directory verdict (#3914 review, F4), pure because the test host is Windows. The service
+    /// sets the directory to 0700 every start and reads the mode back: still reachable by others afterwards means
+    /// nothing in it is read or written; writable by others BEFORE means a 0600 file could have been planted by
+    /// someone the mode check cannot tell from the service, so nothing is read this start and the new files replace
+    /// the old; group or other read without write planted nothing, and owner-only is trusted.
+    /// </summary>
+    [Theory]
+    [InlineData("700", "700", null, true)]
+    [InlineData("755", "700", null, true)]
+    [InlineData("750", "700", null, true)]
+    [InlineData("777", "700", "its mode was 0777, which let other users put files in it until the service set it to owner-only this start", true)]
+    [InlineData("770", "700", "its mode was 0770, which let other users put files in it until the service set it to owner-only this start", true)]
+    [InlineData("702", "700", "its mode was 0702, which let other users put files in it until the service set it to owner-only this start", true)]
+    [InlineData("777", "777", "its mode is still 0777 after the service set it to owner-only, which a filesystem that ignores Unix modes does", false)]
+    [InlineData("700", "750", "its mode is still 0750 after the service set it to owner-only, which a filesystem that ignores Unix modes does", false)]
+    public void TheCredentialsDirectory_IsTrustedOnlyWhenNoOneElseCouldReachIt(string before, string after, string? distrust, bool mayWrite)
+    {
+        var verdict = DarlingManagedRoles.JudgeComposeCredentialDirectory(
+            (UnixFileMode)Convert.ToInt32(before, 8), (UnixFileMode)Convert.ToInt32(after, 8));
+
+        Assert.Equal(distrust, verdict.Distrust);
+        Assert.Equal(mayWrite, verdict.MayWrite);
+    }
+
+    [Fact]
+    public void AMode_IsWrittenTheWayAnOperatorTypesIt()
+    {
+        Assert.Equal("0700", DarlingManagedRoles.Octal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute));
+        Assert.Equal("0644", DarlingManagedRoles.Octal((UnixFileMode)Convert.ToInt32("644", 8)));
+    }
+
+    /// <summary>
+    /// A setting that is there but resolves to whitespace keeps its surface down (#3914 review, F3). It used to come
+    /// back as the whitespace, which the decision read as "not set": no verdict wait, and the owner login the setting
+    /// exists to avoid. Outside a container, so no verdict is involved at all.
+    /// </summary>
+    [Fact]
+    public async Task ASettingThatResolvesToWhitespace_KeepsTheSurfaceDown_NeverTheOwner()
+    {
+        var name = "DARLING_TEST_3914_BLANK_" + Guid.NewGuid().ToString("N");
+        var previousContainer = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
+        try
+        {
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", null);
+            Environment.SetEnvironmentVariable(name, "   ");
+            var log = new CapturingTestLogger();
+
+            var login = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                DarlingStoreLogins.Surface.Web,
+                new PostgresConfig { ConnectionString = Owner, WebConnectionString = "env:" + name },
+                log, CancellationToken.None);
+
+            Assert.Null(login);
+            Assert.Contains("Error: The web dashboard not started this attempt: postgres.webConnectionString", log.Joined, StringComparison.Ordinal);
+            Assert.Contains(name, log.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, null);
+            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previousContainer);
+        }
     }
 
     /* ─────────────────────────── which store is the service's own ─────────────────────────── */
@@ -263,11 +557,58 @@ public sealed class DarlingStoreLoginsTests
             ("mcp", DarlingManagedRoles.ComposeStoreRoleMarker))));
     }
 
+    /// <summary>
+    /// A cluster that holds any database but the store's own, <c>postgres</c> and the templates is not the compose
+    /// store (#3914 review, F2): an operator's own multi-database cluster that the container reaches as its bootstrap
+    /// superuser passes the superuser test, and roles are cluster-wide. The refusal names a few of the databases and
+    /// counts the rest.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "operator_app" }, "the database 'operator_app'")]
+    [InlineData(new[] { "a", "b" }, "the databases 'a' and 'b'")]
+    [InlineData(new[] { "a", "b", "c" }, "the databases 'a', 'b' and 'c'")]
+    [InlineData(new[] { "a", "b", "c", "d", "e" }, "the databases 'a', 'b', 'c' and 2 more")]
+    public void AClusterThatAlsoHoldsAnotherDatabase_IsNotTheServicesOwn(string[] others, string named)
+    {
+        var refusal = DarlingManagedRoles.RefuseComposeStore(Facts(true, others));
+
+        Assert.Equal(
+            $"This cluster also holds {named} that the service does not own, so it is not treated as the service's own and no roles were created on it.",
+            refusal);
+    }
+
+    [Fact]
+    public void TheOtherDatabasesRefusal_ComesAfterTheBootstrapOne_AndCannotForgeALogLine()
+    {
+        Assert.Contains(
+            "not the store's bootstrap superuser",
+            DarlingManagedRoles.RefuseComposeStore(Facts(false, new[] { "operator_app" })),
+            StringComparison.Ordinal);
+
+        var refusal = DarlingManagedRoles.RefuseComposeStore(Facts(true, new[] { "app\nERROR: forged" }));
+        Assert.NotNull(refusal);
+        Assert.Contains("'app?ERROR: forged'", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>What the facts read counts as another database: everything but the store's own, <c>postgres</c> and
+    /// the templates, by flag and by name.</summary>
+    [Fact]
+    public void TheFactsRead_CountsEveryDatabaseButTheStoresOwnPostgresAndTheTemplates()
+    {
+        var sql = Regex.Replace(DarlingManagedRoles.ComposeStoreFactsSql, @"\s+", " ");
+
+        Assert.Contains("FROM pg_catalog.pg_database AS d", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "WHERE d.datname NOT IN (pg_catalog.current_database(), 'postgres', 'template0', 'template1') AND NOT d.datistemplate",
+            sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ANameWithAControlCharacter_IsRefused()
     {
         var refusal = DarlingManagedRoles.RefuseComposeStore(
-            new ComposeStoreFacts("dar\nling", "darling", true, new Dictionary<string, string?>()));
+            new ComposeStoreFacts("dar\nling", "darling", true, new Dictionary<string, string?>(), Array.Empty<string>()));
 
         Assert.NotNull(refusal);
         Assert.Contains("control character", refusal, StringComparison.Ordinal);
@@ -470,6 +811,21 @@ public sealed class DarlingStoreLoginsTests
     private static DarlingStoreLogins.ComposeStoreVerdict Provisioned() =>
         DarlingStoreLogins.ComposeStoreVerdict.ProvisionedWith(ViewerLogin, McpLogin, 15);
 
+    /// <summary>A not-provisioned verdict worded as each outcome's really is.</summary>
+    private static DarlingStoreLogins.ComposeStoreVerdict NotProvisioned(string outcome) => outcome switch
+    {
+        "refusal" => DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(
+            DarlingManagedRoles.RefuseComposeStore(Facts(true, new[] { "operator_app" }))!),
+        "failure" => DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(
+            "Provisioning the store's least-privilege roles failed: 40P01: deadlock detected"),
+        "stand-down" => DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned(
+            "The collector stopped before it could provision the store's roles (Store: connection refused)."),
+        _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null),
+    };
+
     private static ComposeStoreFacts Facts(bool bootstrapSuperuser, params (string Role, string? Marker)[] roles) =>
-        new("darling", "darling", bootstrapSuperuser, roles.ToDictionary(r => r.Role, r => r.Marker, StringComparer.Ordinal));
+        new("darling", "darling", bootstrapSuperuser, roles.ToDictionary(r => r.Role, r => r.Marker, StringComparer.Ordinal), Array.Empty<string>());
+
+    private static ComposeStoreFacts Facts(bool bootstrapSuperuser, string[] otherDatabases) =>
+        new("darling", "darling", bootstrapSuperuser, new Dictionary<string, string?>(StringComparer.Ordinal), otherDatabases);
 }

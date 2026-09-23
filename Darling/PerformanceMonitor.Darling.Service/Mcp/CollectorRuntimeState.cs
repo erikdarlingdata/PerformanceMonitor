@@ -138,7 +138,8 @@ public sealed class CollectorRuntimeState
 
         /* #3914: every one of these stand-downs comes before role provisioning, so a web or MCP host in a
            container waiting to hear whether the compose store's roles were provisioned would otherwise wait for
-           a verdict that never comes. It connects as the owner instead, and its warning says why. */
+           a verdict that never comes. It connects with its role's credential from an earlier start instead, or as
+           the owner when the service holds none, and its warning says which and why. */
         DarlingStoreLogins.SettleComposeStoreVerdict(
             $"The collector stopped before it could provision the store's roles ({step}: {FirstLineOf(detail)}).");
     }

@@ -33,10 +33,16 @@ namespace PerformanceMonitor.Darling.Service;
 /// provisioned there itself (<see cref="DarlingManagedRoles.EnsureComposeStoreProvisionedAsync"/>). The worker
 /// publishes that verdict once the batch has committed, so a host never starts on a login the store does not
 /// accept yet; a host in a container waits for it.</description></item>
+/// <item><description>On that store, when this start did NOT provision the roles (refused, failed, or a collector
+/// that stood down before it got there), the role's credential from an earlier start, when the service holds a
+/// trusted one (<see cref="DarlingManagedRoles.ReadEarlierComposeCredential"/>): the role still has that password,
+/// so one bad start does not hand a surface the owner for the whole process. A login the store refuses keeps the
+/// surface down with the store's error; it never becomes the owner. A warning says which start's credential it
+/// is (<see cref="EarlierCredentialWarning"/>).</description></item>
 /// <item><description>Otherwise the owner, with a startup warning that names what the owner login gives up
 /// (<see cref="OwnerFallbackWarning"/>). That is the ruling's fallback, and it keeps a dashboard that works today
-/// working: a refused or failed compose provisioning lands here too, with its reason, rather than taking the
-/// only Linux UI down.</description></item>
+/// working: a compose store with no provisioning this start and no trusted credential from an earlier one lands
+/// here too, with the reasons, rather than taking the only Linux UI down.</description></item>
 /// </list>
 /// </summary>
 internal static class DarlingStoreLogins
@@ -57,8 +63,12 @@ internal static class DarlingStoreLogins
         /// <summary><c>postgres.webConnectionString</c> / <c>postgres.mcpConnectionString</c>.</summary>
         Configured,
 
-        /// <summary>The role the service provisioned on the compose store.</summary>
+        /// <summary>The role the service provisioned on the compose store this start.</summary>
         ComposeStoreRole,
+
+        /// <summary>The same role, with the credential an earlier start gave it: this start did not provision the
+        /// roles.</summary>
+        ComposeStoreRoleFromEarlierStart,
 
         /// <summary><c>postgres.connectionString</c>: the owner.</summary>
         Owner,
@@ -85,12 +95,15 @@ internal static class DarlingStoreLogins
     /// </summary>
     internal sealed class ComposeStoreVerdict
     {
-        private ComposeStoreVerdict(string? viewerConnectionString, string? mcpConnectionString, string? notProvisionedReason, int appliedSeconds)
+        private ComposeStoreVerdict(
+            string? viewerConnectionString, string? mcpConnectionString, string? notProvisionedReason, int appliedSeconds,
+            string? credentialDirectory)
         {
             ViewerConnectionString = viewerConnectionString;
             McpConnectionString = mcpConnectionString;
             NotProvisionedReason = notProvisionedReason;
             AppliedComposeStatementTimeoutSeconds = appliedSeconds;
+            CredentialDirectory = credentialDirectory;
         }
 
         /// <summary>The roles are the service's and accept the logins below.</summary>
@@ -100,8 +113,13 @@ internal static class DarlingStoreLogins
 
         internal string? McpConnectionString { get; }
 
-        /// <summary>Why the surfaces fall back to the owner; null when provisioned.</summary>
+        /// <summary>Why this start did not provision the roles; null when it did.</summary>
         internal string? NotProvisionedReason { get; }
+
+        /// <summary>Where the credential files from earlier starts are, for a surface this start did not provision:
+        /// the directory the worker provisions from, or the shipped one for a collector that stood down first.
+        /// Null when provisioned.</summary>
+        internal string? CredentialDirectory { get; }
 
         /// <summary>What provisioning wrote onto the roles, for the worker's #2918 reload baseline.</summary>
         internal int AppliedComposeStatementTimeoutSeconds { get; }
@@ -110,10 +128,11 @@ internal static class DarlingStoreLogins
             surface == Surface.Web ? ViewerConnectionString : McpConnectionString;
 
         internal static ComposeStoreVerdict ProvisionedWith(string viewerConnectionString, string mcpConnectionString, int appliedSeconds) =>
-            new(viewerConnectionString, mcpConnectionString, null, appliedSeconds);
+            new(viewerConnectionString, mcpConnectionString, null, appliedSeconds, null);
 
-        internal static ComposeStoreVerdict NotProvisioned(string reason) =>
-            new(null, null, reason, DarlingManagedRoles.ComposeStatementTimeoutUnknown);
+        internal static ComposeStoreVerdict NotProvisioned(string reason, string? credentialDirectory = null) =>
+            new(null, null, reason, DarlingManagedRoles.ComposeStatementTimeoutUnknown,
+                credentialDirectory ?? DarlingManagedRoles.ComposeStoreCredentialDirectory);
     }
 
     /// <summary>One surface's resolved login. A class so its <c>ToString</c> cannot leak the password.</summary>
@@ -140,7 +159,8 @@ internal static class DarlingStoreLogins
     /// <summary>
     /// Settles the verdict as not provisioned unless the worker already published one. Called from every
     /// collection-blocking stand-down (<c>CollectorRuntimeState.PublishStopped</c>), all of which come before
-    /// provisioning, so a host waiting in a container learns that no verdict is coming instead of waiting for one.
+    /// provisioning, so a host waiting in a container learns that no verdict is coming instead of waiting for one,
+    /// and connects with its role's credential from an earlier start when the service holds one.
     /// </summary>
     internal static void SettleComposeStoreVerdict(string reason) =>
         Interlocked.CompareExchange(ref s_composeStoreVerdict, ComposeStoreVerdict.NotProvisioned(reason), null);
@@ -154,8 +174,9 @@ internal static class DarlingStoreLogins
     /// <summary>
     /// The worker's half (#3914): provisions the compose store's roles, builds the viewer and mcp logins on
     /// success, and publishes the verdict either way. Non-throwing apart from cancellation — the same posture as
-    /// managed provisioning, whose failure never kills collection — so a refused or failed provisioning degrades
-    /// the two surfaces to the owner with the reason, and collection carries on.
+    /// managed provisioning, whose failure never kills collection — so a refused or failed provisioning leaves each
+    /// surface on its role's credential from an earlier start, or on the owner when there is none, with the
+    /// reason, and collection carries on.
     /// </summary>
     internal static async Task<ComposeStoreVerdict> ProvisionComposeStoreAsync(
         NpgsqlDataSource postgres, string ownerConnectionString, ILogger logger, CancellationToken cancellationToken,
@@ -164,11 +185,12 @@ internal static class DarlingStoreLogins
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(logger);
 
+        credentialDirectory ??= DarlingManagedRoles.ComposeStoreCredentialDirectory;
         ComposeStoreVerdict verdict;
         try
         {
             var result = await DarlingManagedRoles.EnsureComposeStoreProvisionedAsync(
-                postgres, credentialDirectory ?? DarlingManagedRoles.ComposeStoreCredentialDirectory, logger, cancellationToken);
+                postgres, credentialDirectory, logger, cancellationToken);
 
             if (result.Provisioned)
             {
@@ -181,15 +203,20 @@ internal static class DarlingStoreLogins
             }
             else
             {
-                verdict = ComposeStoreVerdict.NotProvisioned(result.RefusalReason!);
-                logger.LogWarning("Compose store roles were not provisioned: {Reason}", result.RefusalReason);
+                verdict = ComposeStoreVerdict.NotProvisioned(result.RefusalReason!, credentialDirectory);
+                logger.LogWarning(
+                    "Compose store roles were not provisioned this start (the web dashboard and the MCP server each log which login they use instead): {Reason}",
+                    result.RefusalReason);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError("Provisioning the compose store's least-privilege roles failed: {Message}", ex.Message);
+            logger.LogError(
+                "Provisioning the compose store's least-privilege roles failed this start (the web dashboard and the MCP server each log which login they use instead): {Message}",
+                ex.Message);
             verdict = ComposeStoreVerdict.NotProvisioned(
-                $"Provisioning the store's least-privilege roles failed: {ex.Message.Split('\n')[0].TrimEnd('\r')}");
+                $"Provisioning the store's least-privilege roles failed: {ex.Message.Split('\n')[0].TrimEnd('\r')}",
+                credentialDirectory);
         }
 
         PublishComposeStoreVerdict(verdict);
@@ -198,10 +225,13 @@ internal static class DarlingStoreLogins
 
     /// <summary>
     /// A role's login on the compose store, derived from the owner's connection string (#3914). It inherits only
-    /// WHERE the store is and how to trust it — host, port, database, TLS mode, root certificate, connect timeout —
-    /// and nothing that is the owner's own: not its password or passfile, not a client certificate, and not
-    /// <c>Options</c>, where a <c>-c statement_timeout=0</c> would switch off the very backstop the role carries.
-    /// The search path and pool bound are the managed role logins'.
+    /// WHERE the store is and how to trust it — host, port, database, TLS mode and negotiation, root certificate,
+    /// revocation checking, channel binding, the authentication methods it accepts, connect timeout — and nothing
+    /// that is the owner's own: not its password or passfile, not a client certificate, and not <c>Options</c>,
+    /// where a <c>-c statement_timeout=0</c> would switch off the very backstop the role carries. Every setting it
+    /// does inherit can only make the role's connection stricter than the defaults, never looser, so an owner that
+    /// requires channel binding or SCRAM does not hand its roles a connection that would settle for less. The search
+    /// path and pool bound are the managed role logins'.
     /// </summary>
     internal static string BuildComposeStoreRoleConnectionString(string ownerConnectionString, string role, string password)
     {
@@ -212,7 +242,11 @@ internal static class DarlingStoreLogins
             Port = owner.Port,
             Database = owner.Database,
             SslMode = owner.SslMode,
+            SslNegotiation = owner.SslNegotiation,
             RootCertificate = owner.RootCertificate,
+            CheckCertificateRevocation = owner.CheckCertificateRevocation,
+            ChannelBinding = owner.ChannelBinding,
+            RequireAuth = owner.RequireAuth,
             Timeout = owner.Timeout,
             Username = role,
             Password = password,
@@ -225,8 +259,10 @@ internal static class DarlingStoreLogins
     /// <summary>
     /// The non-managed branch of both hosts' start (#3914): the connection string the host's store pool is
     /// created from, or null when the host must not start this attempt — a configured reference that cannot
-    /// resolve (fail-closed: the operator asked for a login, so the owner is not a silent substitute), or a
-    /// container host still waiting for the worker's compose-store verdict.
+    /// resolve, or that resolves to nothing (fail-closed: the operator asked for a login, so the owner is not a
+    /// silent substitute); a container host still waiting for the worker's compose-store verdict; or a role's
+    /// credential from an earlier start that the store refuses (the role was dropped or re-keyed by hand), which
+    /// keeps the surface down with the store's error rather than let it become the owner.
     /// </summary>
     internal static async Task<string?> ResolveUnmanagedAsync(
         Surface surface, PostgresConfig postgres, ILogger logger, CancellationToken cancellationToken)
@@ -234,7 +270,7 @@ internal static class DarlingStoreLogins
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(logger);
 
-        var (what, setting, _) = Describe(surface);
+        var (what, setting, role) = Describe(surface);
         var raw = surface == Surface.Web ? postgres.WebConnectionString : postgres.McpConnectionString;
         string? configured = null;
         if (!string.IsNullOrWhiteSpace(raw))
@@ -246,6 +282,17 @@ internal static class DarlingStoreLogins
             catch (InvalidOperationException ex)
             {
                 logger.LogError("{What} not started this attempt: {Message}", what, ex.Message);
+                return null;
+            }
+
+            /* The setting is there, so a blank result is no reason to treat it as unset: that would skip the verdict
+               wait and land the surface on the owner, the one login the operator set it to avoid. Whatever branch
+               produced it, the surface stays down. */
+            if (string.IsNullOrWhiteSpace(configured))
+            {
+                logger.LogError(
+                    "{What} not started this attempt: {Setting} is set but resolves to a blank connection string, and the owner login is never used in its place",
+                    what, setting);
                 return null;
             }
         }
@@ -261,21 +308,36 @@ internal static class DarlingStoreLogins
             }
         }
 
-        var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict);
+        EarlierComposeCredential? earlier = null;
+        if (configured is null && inContainer && verdict is { Provisioned: false, CredentialDirectory: { } directory })
+        {
+            earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, role, logger);
+        }
+
+        var login = Resolve(surface, postgres.ConnectionString, configured, inContainer, verdict, earlier);
         if (login.Warning is { } warning)
         {
             WarnOnce(surface, warning, logger);
+        }
+
+        if (login.Source == LoginSource.ComposeStoreRoleFromEarlierStart
+            && !await AcceptsLoginAsync(login.ConnectionString, what, role, logger, cancellationToken))
+        {
+            return null;
         }
 
         return login.ConnectionString;
     }
 
     /// <summary>
-    /// The decision, pure (#3914): a configured login wins; then, in a container, the compose store's
-    /// provisioned role; then the owner. <paramref name="configuredConnectionString"/> is already resolved.
+    /// The decision, pure (#3914): a configured login wins; then, in a container, the compose store's role — with
+    /// the login this start provisioned, or, when this start did not provision the roles, with the trusted
+    /// credential an earlier start left (<paramref name="earlier"/>); then the owner.
+    /// <paramref name="configuredConnectionString"/> is already resolved.
     /// </summary>
     internal static StoreLogin Resolve(
-        Surface surface, string ownerConnectionString, string? configuredConnectionString, bool inContainer, ComposeStoreVerdict? verdict)
+        Surface surface, string ownerConnectionString, string? configuredConnectionString, bool inContainer,
+        ComposeStoreVerdict? verdict, EarlierComposeCredential? earlier = null)
     {
         if (!string.IsNullOrWhiteSpace(configuredConnectionString))
         {
@@ -284,14 +346,82 @@ internal static class DarlingStoreLogins
                 ConfiguredLoginWarning(surface, configuredConnectionString, ownerConnectionString, inContainer ? verdict : null));
         }
 
-        if (inContainer && verdict?.ConnectionStringFor(surface) is { } roleLogin)
+        if (inContainer && verdict is not null)
         {
-            return new StoreLogin(roleLogin, LoginSource.ComposeStoreRole, null);
+            if (verdict.ConnectionStringFor(surface) is { } roleLogin)
+            {
+                return new StoreLogin(roleLogin, LoginSource.ComposeStoreRole, null);
+            }
+
+            if (earlier?.Password is { } password)
+            {
+                return new StoreLogin(
+                    BuildComposeStoreRoleConnectionString(ownerConnectionString, Describe(surface).Role, password),
+                    LoginSource.ComposeStoreRoleFromEarlierStart,
+                    EarlierCredentialWarning(surface, verdict.NotProvisionedReason));
+            }
         }
 
-        return new StoreLogin(
-            ownerConnectionString, LoginSource.Owner,
-            OwnerFallbackWarning(surface, inContainer ? verdict?.NotProvisionedReason : null));
+        var reason = inContainer ? verdict?.NotProvisionedReason : null;
+        if (reason is not null && earlier?.MissingReason is { } missing)
+        {
+            reason += $" No {Describe(surface).Role} credential from an earlier start can stand in: {missing}.";
+        }
+
+        return new StoreLogin(ownerConnectionString, LoginSource.Owner, OwnerFallbackWarning(surface, reason));
+    }
+
+    /// <summary>
+    /// The startup warning for a surface on its role's credential from an earlier start (#3914): this start did not
+    /// provision the store's roles — <paramref name="reason"/> says why — so the surface keeps the login an earlier
+    /// start gave its role, and a login the store refuses keeps it down rather than handing it the owner. Worded so
+    /// it cannot be mistaken for the other two cases: the roles provisioned this start (no warning), and the owner
+    /// (<see cref="OwnerFallbackWarning"/>).
+    /// </summary>
+    internal static string EarlierCredentialWarning(Surface surface, string? reason)
+    {
+        var (what, _, role) = Describe(surface);
+        var warning =
+            $"{what} connects to the store as the {role} role with the credential an earlier start provisioned, not as the owner: "
+            + "the store's least-privilege roles were not provisioned this start.";
+        if (reason is not null)
+        {
+            warning += " " + reason;
+        }
+
+        return warning
+            + $" If the store refuses that login (the {role} role was dropped, or its password changed by hand), {char.ToLowerInvariant(what[0])}{what[1..]} "
+            + "stays down with the store's error until a start provisions the roles again; it never falls back to the owner login.";
+    }
+
+    /// <summary>
+    /// Whether the store accepts a role's credential from an earlier start (#3914). The only login this class
+    /// checks before a host uses it, because it is the only one that can be stale: the password was set by an
+    /// earlier start, and anyone with the owner's rights could have dropped or re-keyed the role since. A refusal,
+    /// or any other failure to connect, keeps the surface down this attempt with the store's error, and the
+    /// supervisor's retry tries again — never the owner in its place.
+    /// </summary>
+    private static async Task<bool> AcceptsLoginAsync(
+        string connectionString, string what, string role, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = new NpgsqlConnection(
+                new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                "{What} not started this attempt: the store did not accept the {Role} login an earlier start provisioned ({Message}). It stays down rather than connect as the owner, until a start provisions the roles again.",
+                what, role, ex.Message);
+            return false;
+        }
     }
 
     /// <summary>

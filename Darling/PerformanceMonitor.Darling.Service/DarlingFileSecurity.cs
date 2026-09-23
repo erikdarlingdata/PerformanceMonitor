@@ -222,9 +222,24 @@ public static class DarlingFileSecurity
     /// <paramref name="allowInteractiveRead"/> is set (the admin/viewer credentials the Viewer reads),
     /// INTERACTIVE gets read. The superuser credential and the transient init pwfile pass false.
     /// </summary>
-    public static void HardenFile(string path, bool allowInteractiveRead)
+    public static void HardenFile(string path, bool allowInteractiveRead) =>
+        new FileInfo(path).SetAccessControl(HardenedFileSecurity(allowInteractiveRead));
+
+    /// <summary>
+    /// Creates <paramref name="path"/>, which must not exist yet, with <see cref="HardenFile"/>'s ACL applied AT
+    /// creation (#3914): the file never carries the access its folder would otherwise let it inherit, not even for
+    /// the moment between a create and a harden, so a secret written through the returned stream is never readable
+    /// by anyone the harden excludes. <see cref="FileMode.CreateNew"/>, so anything that appears at the path first
+    /// makes the create fail rather than be written through.
+    /// </summary>
+    public static FileStream CreateHardenedFile(string path, bool allowInteractiveRead) =>
+        new FileInfo(path).Create(
+            FileMode.CreateNew, FileSystemRights.Write, FileShare.None, bufferSize: 4096, FileOptions.None,
+            HardenedFileSecurity(allowInteractiveRead));
+
+    /// <summary>The one ACL <see cref="HardenFile"/> and <see cref="CreateHardenedFile"/> both apply.</summary>
+    private static FileSecurity HardenedFileSecurity(bool allowInteractiveRead)
     {
-        var info = new FileInfo(path);
         var security = new FileSecurity();
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
 
@@ -237,7 +252,7 @@ public static class DarlingFileSecurity
             AddFile(security, Interactive, FileSystemRights.Read | FileSystemRights.Synchronize);
         }
 
-        info.SetAccessControl(security);
+        return security;
     }
 
     /// <summary>
