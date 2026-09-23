@@ -457,7 +457,9 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("ALL / AUTO / CUSTOM / NONE", description, StringComparison.Ordinal);
         Assert.Contains("capture_mode_known", description, StringComparison.Ordinal);
         Assert.Contains("never NONE", description, StringComparison.Ordinal);
-        Assert.Contains("#3796", description, StringComparison.Ordinal);
+        /* #3898 re-point: the "(#3796)" issue reference came off the wire (D4); the rung-naming rule it sat
+           beside ("predates the V137 rung that added the column") stays, verbatim, in the guide tail. */
+        Assert.Contains("V137", description, StringComparison.Ordinal);
 
         /* the page dialect and the window floor's shared clause */
         Assert.Contains("truncated is the page cut", description, StringComparison.Ordinal);
