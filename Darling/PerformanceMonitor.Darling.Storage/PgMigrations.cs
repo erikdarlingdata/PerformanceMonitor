@@ -880,13 +880,15 @@ DROP VIEW IF EXISTS collect.v_query_stats;";
     /// is stored once per cycle for as long as it stays inside the window; every read dedupes on it as the
     /// deadlock reads do on <c>deadlock_hash</c>. Over the RAW entry text rather than the stored columns,
     /// because two events that store alike — the same error from one statement shape run with two values, same
-    /// millisecond, same pid — are two events, and the hash must keep them apart. A hash of the raw text
-    /// discloses nothing about it.</para>
+    /// millisecond, same pid — are two events, and the hash must keep them apart. It is NOT secret-safe (#3996's
+    /// review): an unkeyed hash of text a reader can mostly rebuild is an offline guessing oracle for the rest, a
+    /// failed UPDATE's four-digit PIN included, so no read surface returns it (#4004).</para>
     ///
     /// <para><b>The statement itself is never stored, and the SQL the other columns quote is normalized.</b>
     /// <c>statement_fingerprint</c> is a hash of the REDACTED <c>STATEMENT</c> companion, the plan parser's own
-    /// patterns applied to SQL, so one statement shape recurs to one fingerprint and the statement's literals
-    /// exist nowhere in the store. <c>message</c>, <c>detail</c> and <c>context</c> are PostgreSQL's prose as
+    /// patterns applied to SQL, so one statement shape recurs to one fingerprint and the statement's quoted
+    /// literals and numbers exist nowhere in the store (a dollar-quoted body is hashed as written, #3996's
+    /// review). <c>message</c>, <c>detail</c> and <c>context</c> are PostgreSQL's prose as
     /// written (#3944), except the SQL PostgreSQL writes into a DETAIL or CONTEXT (a deadlock's queries, a
     /// function's statement), which <c>PgLogTextRedactor</c> normalizes with every literal replaced by
     /// <c>?</c> (#3920). Both are enforced at the row constructor rather than by convention.</para>

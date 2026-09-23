@@ -152,7 +152,10 @@ public sealed class DarlingMcpPgLogEventTools
                     detail = r.Detail,
                     context = r.Context,
                     statement_fingerprint = r.StatementFingerprint,
-                    raw_line_hash = r.RawLineHash,
+                    /* raw_line_hash is deliberately not returned (#3996's review): it is an unkeyed hash of the raw
+                       entry, literals included, so a reader who can rebuild the rest of the line can test guesses
+                       at a value against it offline (#4004). The reads dedupe on it inside the store; times_seen is
+                       what that dedupe says. */
                     times_seen = r.TimesSeen,
                     /* V130 (#3602, #3603): the family's numbers, PRESENT only where the line carried them —
                        a nested object rather than thirteen nullable members, because a connection event

@@ -679,8 +679,10 @@ public static class PgLogTextRedactor
 
     /// <summary>
     /// Identity of a statement SHAPE: SHA-256 over the REDACTED text, 32 hex characters, the plan hash's
-    /// width. Two executions of one statement with different literals fingerprint alike; the raw text
-    /// never reaches the hash, so the fingerprint cannot be reversed into a value either.
+    /// width. Two executions of one statement with different literals fingerprint alike. Only what
+    /// <see cref="RedactStatement"/> masks stays out of the hash: a dollar-quoted body (a <c>DO</c> block, a
+    /// <c>$$...$$</c> literal) is hashed as written, so for such a statement the fingerprint is an offline guessing
+    /// oracle like <see cref="RawLineHash"/> (#3996's review, #4004).
     /// </summary>
     public static string? Fingerprint(string? redactedStatement)
     {
@@ -703,7 +705,13 @@ public static class PgLogTextRedactor
     /// cycle it stays inside the window; the reads dedupe on this the way the deadlock reads dedupe on
     /// <c>deadlock_hash</c>. Over the RAW text on purpose — two entries that store alike (the same error from
     /// one statement shape run with two different values, in the same millisecond, from the same pid) are two
-    /// events, and the hash has to keep them apart. A hash of raw text discloses nothing about the text.
+    /// events, and the hash has to keep them apart.
+    ///
+    /// <para><b>It is not a secret-safe digest</b> (#3996's review). An unkeyed hash of text a reader can mostly
+    /// reconstruct (the stored prose, the normalized statement, the prefix) is an offline guessing oracle for the
+    /// part the reader cannot: a four-digit PIN in a failed UPDATE came back from the stored hash in 6 ms. So no
+    /// read surface returns it; it stays a column the reads dedupe on inside the store, and a keyed replacement is
+    /// #4004.</para>
     /// </summary>
     public static string RawLineHash(string rawText)
     {

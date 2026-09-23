@@ -1025,6 +1025,11 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains("total_events = page.WindowTotal", body, StringComparison.Ordinal);
         Assert.DoesNotContain(">= limit", body, StringComparison.Ordinal);
 
+        /* #3996's review (4): raw_line_hash is an unkeyed hash of the raw entry, literals included, so a reader who
+           can rebuild the rest of the line can test guesses at a value against it offline. No row returns it. */
+        Assert.DoesNotContain("r.RawLineHash", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw_line_hash =", body, StringComparison.Ordinal);
+
         /* The instructions' census moved with the tool. */
         var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
         Assert.Contains("thirty-five are the PostgreSQL reads", instructions, StringComparison.Ordinal);
