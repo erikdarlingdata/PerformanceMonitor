@@ -69,6 +69,9 @@ services:
       # been planted, so it removes them all and logs an error); keep the volume owner-only. Without the volume a
       # recreated container generates a new one. A new key gives every log event stored after it a new identity
       # (one repeat of each entry still in the log tail, and new fingerprints).
+      # Run ONE darling service per credentials volume: no `--scale`, and on Kubernetes one replica with
+      # `strategy: Recreate`. The start's check of this directory is not locked across processes, so a second
+      # service starting beside the first could read planted files between the first one's chmod and its removal.
       - darling-credentials:/var/lib/darling/credentials
     secrets:
       # One file per secret; darling.json references them as file:/run/secrets/<name> (#1804) —

@@ -352,6 +352,117 @@ public class DarlingHardenFilesJunctionTests
         }
     }
 
+    /// <summary>
+    /// #4004's review, round 3: a hard link is not a reparse point, and the handle's final path is the name it was
+    /// opened by, so a <c>darling.json.bak-x</c> planted as a hard link to someone else's file passed both checks and
+    /// would have had the hardened DACL applied to that file. A file with more than one name is refused, by the handle
+    /// harden and by the verb (exit 1), and the file's DACL is untouched.
+    /// </summary>
+    [Fact]
+    public void AHardLinkedBackup_IsRefused_AndTheFileItNamesKeepsItsAcl()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Hard links through CreateHardLinkW, and DACLs, are Windows'.");
+            return;
+        }
+
+        /* A registered service makes the verb harden for that account, process-wide. */
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+
+        var scratch = Directory.CreateTempSubdirectory("darling-4004-hardlink-");
+        var install = Path.Combine(scratch.FullName, "install");
+        var victim = Path.Combine(scratch.FullName, "victim");
+        try
+        {
+            Directory.CreateDirectory(install);
+            Directory.CreateDirectory(victim);
+            var victimFile = Path.Combine(victim, "someones.txt");
+            File.WriteAllText(victimFile, "someone else's");
+            var victimFileAcl = Sddl(victimFile);
+            var backup = Path.Combine(install, "darling.json.bak-x");
+            Assert.True(CreateHardLinkW(backup, victimFile, IntPtr.Zero), "the hard link was not created");
+
+            var refusal = DarlingFileSecurity.HardenWithoutFollowingLinks(backup, isDirectory: false, allowInteractive: false, install);
+
+            Assert.Equal($"{backup} is a hard link: the file has 2 names, and its ACL is the same under every one of them", refusal);
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+
+            /* The verb finds it as a config backup beside darling.json. The store directory is a scratch path that does
+               not exist, so nothing outside the scratch directory is touched. */
+            var config = Path.Combine(install, "darling.json");
+            File.WriteAllText(config, "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\",\"dataDirectory\":"
+                + System.Text.Json.JsonSerializer.Serialize(Path.Combine(scratch.FullName, "store", "pg")) + "}}");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(1, exit);
+            Assert.Contains($"REFUSED  {backup} (a config backup): {backup} is a hard link", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"SECURED  {config} (the live config)", output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #4004's review, round 3: a config directory at a volume root contained nothing, because <c>C:\</c> plus a
+    /// separator is <c>C:\\</c>. Its targets then took the path-based harden, and the link walk checked only the target
+    /// itself, so a junction in the middle of the path was followed. A volume root now contains what is on it, and the
+    /// walk from a target up to it finds that junction.
+    /// </summary>
+    [Fact]
+    public void AConfigDirectoryAtAVolumeRoot_ContainsWhatIsOnIt()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var separator = Path.DirectorySeparatorChar.ToString();
+
+        Assert.True(DarlingCliCommands.IsBelow(root, Path.Combine(root, "darling.json")));
+        Assert.True(DarlingCliCommands.IsBelow(root, Path.Combine(root, DarlingLogHashKeyFile.BringYourOwnDirectoryName, DarlingLogHashKeyFile.WindowsFileName)));
+        Assert.False(DarlingCliCommands.IsBelow(root, root));
+        Assert.True(DarlingCliCommands.IsBelow(Path.Combine(root, "cfg") + separator, Path.Combine(root, "cfg", "darling.json")));
+        Assert.False(DarlingCliCommands.IsBelow(Path.Combine(root, "cfg"), Path.Combine(root, "cfgx", "darling.json")));
+        Assert.False(DarlingCliCommands.IsBelow(Path.Combine(root, "cfg"), Path.Combine(root, "cfg")));
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-4004-root-");
+        var junction = Path.Combine(scratch.FullName, "through");
+        var victim = Path.Combine(scratch.FullName, "victim");
+        try
+        {
+            Directory.CreateDirectory(victim);
+            File.WriteAllText(Path.Combine(victim, "darling.json.bak-x"), "someone else's");
+            MakeJunction(junction, victim);
+            Assert.True((File.GetAttributes(junction) & FileAttributes.ReparsePoint) != 0, "the junction was not created");
+
+            Assert.Equal(
+                $"{junction} is a junction or symbolic link",
+                DarlingCliCommands.ReparsePointOnPath(root, Path.Combine(junction, "darling.json.bak-x")));
+        }
+        finally
+        {
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction);
+            }
+
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static string Sddl(string path) =>
         Directory.Exists(path)

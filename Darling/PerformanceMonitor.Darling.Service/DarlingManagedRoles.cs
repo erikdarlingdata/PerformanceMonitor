@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -330,7 +331,7 @@ public static class DarlingManagedRoles
             logger.LogWarning(
                 "The compose store's credentials directory {Directory} is not trusted ({Reason}), so no credential file in it is read this start: every role gets a new password, re-asserted on the role{Written}.",
                 credentialDirectory, distrust,
-                directory.MayWrite ? ", and the new files replace the old" : ", and none is written there, so every start does the same until the directory is fixed");
+                directory.MayWrite ? ", and the new files replace the old" : ", and none is written there this start");
         }
 
         var readFiles = directory.Distrust is null;
@@ -1568,10 +1569,16 @@ WHERE u.rolname = current_user";
                     var verdict = JudgeComposeCredentialDirectory(before, modes.Get(directory));
                     if (verdict.Distrust is not { } wasOpen || !verdict.MayWrite)
                     {
-                        return verdict;
+                        /* #4004 review, round 3: a directory this process found open and could not empty stays refused
+                           to every later caller this start, though it now reads owner-only, so "nothing in it is used this
+                           start" holds for all of them. The next start trusts it: only a directory can be left, and no
+                           reader takes one for a credential. */
+                        return verdict.Distrust is null && guard.LeftBehind(directory) is { } leftBehind
+                            ? new ComposeCredentialDirectoryTrust(leftBehind, MayWrite: false)
+                            : verdict;
                     }
 
-                    return DiscardWhatOthersCouldHavePut(directory, before, wasOpen, modes, logger);
+                    return DiscardWhatOthersCouldHavePut(directory, wasOpen, guard, logger);
                 }
             }
 
@@ -1658,65 +1665,87 @@ WHERE u.rolname = current_user";
 
     /// <summary>
     /// The directory was open to other users until this call set it owner-only (#4004 review, round 2), so any file
-    /// in it could have been planted, and the file check cannot tell (it cannot see a Unix owner). Every file the
-    /// service reads from it is removed NOW, before anything reads it, so the discard does not depend on this start
+    /// in it could have been planted, and the file check cannot tell (it cannot see a Unix owner). Every entry at a
+    /// name the service reads is removed NOW, before anything reads it, so the discard does not depend on this start
     /// living long enough to reach whichever step would have replaced that file: the chmod is permanent, and the
     /// next start, finding the directory owner-only, trusts what is left. Removed, the directory holds only what the
-    /// service writes from here on, so it is trusted. When anything cannot be removed (a directory at a file's path,
-    /// say), the directory is set back to the mode it was found with, so the next start finds it open again and
-    /// repeats this rather than trusting what is still there, and nothing is read or written there this start.
+    /// service writes from here on, so it is trusted.
+    ///
+    /// <para><b>Every name is tried, and the directory stays owner-only whatever is left</b> (#4004 review, round 3).
+    /// Round 2 stopped at the first entry it could not remove and set the directory back to the mode it was found
+    /// with, so a directory planted at the first name shielded 0600 files planted at the later ones: an operator who
+    /// did what the refusal said (set the directory 0700, remove the entry it named) got a next start that trusted the
+    /// rest. Now a file or a link at any name is removed, and so is an empty directory. Only a directory with
+    /// something in it can be left, a tree that is someone else's and is never removed recursively: in a directory
+    /// this call has just set owner-only (the chmod took, so the service owns it or is root), unlinking a file or a
+    /// link fails only for someone who can set an immutable attribute or mount over a file, which is more than
+    /// writing to the directory gives. Every reader refuses a directory at a credential's name, so what is left is
+    /// never read as one, and the next start, finding the directory owner-only, trusts only what the service writes
+    /// there. Reopening it instead would let anyone put files in it again until an operator closed it. When anything
+    /// is left, nothing in the directory is read or written this start, by this caller or any later one in the process
+    /// (<see cref="ComposeCredentialDirectoryGuard.LeftBehind"/>), and the reason names every path to remove.</para>
+    ///
+    /// <para>A key removed here is recorded on <paramref name="guard"/>, so the key's load can say the key it
+    /// generates replaced one (<see cref="ComposeCredentialDirectoryGuard.TakeDiscardedKey"/>).</para>
     /// </summary>
     private static ComposeCredentialDirectoryTrust DiscardWhatOthersCouldHavePut(
-        string directory, UnixFileMode before, string wasOpen, IUnixDirectoryModes modes, ILogger logger)
+        string directory, string wasOpen, ComposeCredentialDirectoryGuard guard, ILogger logger)
     {
         var removed = new List<string>();
+        var left = new List<string>();
         foreach (var name in CredentialDirectoryFileNames)
         {
             var path = Path.Combine(directory, name);
             var info = new FileInfo(path);
-            if (info.LinkTarget is null && !info.Exists && !Directory.Exists(path))
+            var isDirectory = info.LinkTarget is null && Directory.Exists(path);
+            if (info.LinkTarget is null && !info.Exists && !isDirectory)
             {
                 continue;
             }
 
             try
             {
-                /* A symbolic link is removed itself, never followed. A directory is not removed: its tree is
-                   someone else's, and nothing ever reads a directory as a credential. */
-                if (info.LinkTarget is null && Directory.Exists(path))
+                /* A symbolic link is removed itself, never followed. A directory only when it is empty: the delete is
+                   not recursive, so nothing in someone else's tree is touched. */
+                if (isDirectory)
                 {
-                    throw new IOException("it is a directory");
+                    Directory.Delete(path, recursive: false);
+                }
+                else
+                {
+                    File.Delete(path);
                 }
 
-                File.Delete(path);
                 removed.Add(name);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                try
-                {
-                    modes.Set(directory, before);
-                }
-                catch (Exception restore) when (restore is IOException or UnauthorizedAccessException)
-                {
-                    logger.LogDebug("Could not set {Directory} back to {Mode}: {Message}", directory, Octal(before), restore.Message);
-                }
-
-                var reason = $"{wasOpen}, and {path} could not be removed ({ex.Message})";
-                logger.LogError(
-                    "The credentials directory {Directory} is not trusted ({Reason}). Nothing in it is read or written until that is removed; the directory is left at its old mode so the next start checks it again.",
-                    directory, reason);
-                return new ComposeCredentialDirectoryTrust(reason, MayWrite: false);
+                left.Add($"{path} ({ex.Message})");
             }
+        }
+
+        if (removed.Contains(DarlingLogHashKeyFile.FileName, StringComparer.Ordinal))
+        {
+            guard.RecordDiscardedKey(directory, wasOpen);
         }
 
         if (removed.Count > 0)
         {
             logger.LogError(
-                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded (#4004). Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat.",
+                "The credentials directory {Directory} was open to other users until now ({Reason}), so its files could have been planted: {Files} discarded (#4004). Every role password removed is generated again and re-asserted on its role, and a removed log-hash key is generated again, which gives every log event stored from now on a new identity. Keep the directory owner-only (on Kubernetes, an fsGroup re-applied on every mount opens it again) so this does not repeat, and run one service per credentials volume (on Kubernetes, one replica with strategy: Recreate): a second one starting beside this one could read the directory between this start's chmod and this removal.",
                 directory, wasOpen, string.Join(", ", removed));
         }
 
+        if (left.Count > 0)
+        {
+            var reason = $"{wasOpen}, and {(left.Count == 1 ? "this entry at a credential's name" : "these entries at credentials' names")} could not be removed, so nothing in it is used this start: "
+                + $"{string.Join("; ", left)}. Every other credential file there is removed and the directory stays owner-only, so remove {(left.Count == 1 ? "it" : "each of them")} and restart";
+            logger.LogError("The credentials directory {Directory} is not trusted ({Reason}) (#4004).", directory, reason);
+            guard.RecordLeftBehind(directory, reason);
+            return new ComposeCredentialDirectoryTrust(reason, MayWrite: false);
+        }
+
+        guard.RecordLeftBehind(directory, null);
         return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
     }
 
@@ -1997,6 +2026,15 @@ internal sealed record ComposeCredentialDirectoryTrust(string? Distrust, bool Ma
 /// caller could find the directory owner-only between the first caller's chmod and its discard, and read a planted
 /// file before it went.</para>
 ///
+/// <para><b>One process per volume.</b> The lock is the process's: the shipped compose runs the worker, MCP and web in
+/// one process, so it covers every caller there. Two services on one credentials volume (a Kubernetes rolling update,
+/// a second replica) are not covered, and one could find the directory owner-only between the other's chmod and its
+/// discard. That is documented as unsupported (one replica, <c>strategy: Recreate</c>) rather than locked across
+/// processes (#4004 review, round 3): the only place both could lock is a file in this directory, which is the one
+/// place the check exists to distrust. While the directory is open, whoever else can write to it can put a symbolic
+/// link at the lock's name, which the service, running as root, would open through (.NET cannot open without
+/// following one), or hold the lock forever.</para>
+///
 /// A test stands in its own Unix mode calls (<see cref="BeginForTest"/>).
 /// </summary>
 internal sealed class ComposeCredentialDirectoryGuard
@@ -2025,6 +2063,45 @@ internal sealed class ComposeCredentialDirectoryGuard
 
     /// <summary>Held across the look, the chmod and the discard.</summary>
     internal Lock Gate { get; } = new();
+
+    /* Both keyed by the directory's full path with trailing separators trimmed, so every caller's spelling of it meets. */
+    private readonly ConcurrentDictionary<string, string> _discardedKeys = new(StringComparer.Ordinal);
+
+    private readonly ConcurrentDictionary<string, string> _leftBehind = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Records why the discard left entries in <paramref name="directory"/> this start, or clears that with null
+    /// (#4004 review, round 3), so every later caller in this process gets the same refusal.
+    /// </summary>
+    internal void RecordLeftBehind(string directory, string? reason)
+    {
+        if (reason is null)
+        {
+            _leftBehind.TryRemove(Key(directory), out _);
+        }
+        else
+        {
+            _leftBehind[Key(directory)] = reason;
+        }
+    }
+
+    /// <summary>Why the discard left entries in <paramref name="directory"/> in this process; null when it did not.</summary>
+    internal string? LeftBehind(string directory) => _leftBehind.TryGetValue(Key(directory), out var reason) ? reason : null;
+
+    /// <summary>
+    /// Records that the discard removed the log-hash key from <paramref name="directory"/> because
+    /// <paramref name="reason"/> (#4004 review, round 3): the look that removes it can be any caller's, and only the
+    /// key's own load knows whether it then generates the replacement.
+    /// </summary>
+    internal void RecordDiscardedKey(string directory, string reason) => _discardedKeys[Key(directory)] = reason;
+
+    /// <summary>
+    /// Why the discard removed the log-hash key from <paramref name="directory"/> in this process, once: null when it
+    /// did not, or when this was already taken.
+    /// </summary>
+    internal string? TakeDiscardedKey(string directory) => _discardedKeys.TryRemove(Key(directory), out var reason) ? reason : null;
+
+    private static string Key(string directory) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
 
     /// <summary>
     /// Stands in <paramref name="unixModes"/> for the calling test's flow only, so the Unix verdict and the discard are

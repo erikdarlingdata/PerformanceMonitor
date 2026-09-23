@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Security.Cryptography;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
 
@@ -53,7 +54,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// and this load then generates a new one. Refusing the key instead would hold for one start only: the next finds the
 /// directory owner-only, because the check set it so, and would trust the planted file. The removal is logged as an
 /// error, since a directory that keeps being opened (a Kubernetes fsGroup re-applied on every mount) rotates the key
-/// on every start.</para>
+/// on every start, and the replacement is noted on the collection-log row of the first <c>pg_log_events</c> run after
+/// it (<see cref="RotationNote"/>, #4004 review, round 3).</para>
 /// </summary>
 public static class DarlingLogHashKeyFile
 {
@@ -95,10 +97,12 @@ public static class DarlingLogHashKeyFile
     }
 
     /// <summary>
-    /// The worker's one call at start: the key for this distribution, or null when it cannot be used, in which case the
-    /// reason is logged as an error naming the file and what to do. Never throws; never logs key material.
+    /// The worker's one call at start: the key for this distribution, with <see cref="DarlingLogHashKeyLoad.Key"/> null
+    /// when it cannot be used, in which case the reason is logged as an error naming the file and what to do, and
+    /// <see cref="DarlingLogHashKeyLoad.Replaced"/> set when the key replaced one the directory check discarded. Never
+    /// throws; never logs key material.
     /// </summary>
-    public static PgLogHashKey? LoadForService(DarlingConfig config, string configPath, ILogger logger)
+    public static DarlingLogHashKeyLoad LoadForService(DarlingConfig config, string configPath, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(logger);
 
@@ -112,7 +116,7 @@ public static class DarlingLogHashKeyFile
             logger.LogError(
                 "PostgreSQL log events will not be collected: the directory for the store's log-hash key could not be resolved ({Message}) (#4004).",
                 ex.Message);
-            return null;
+            return new DarlingLogHashKeyLoad(null, string.Empty, Generated: false, Refusal: $"the directory for the store's log-hash key could not be resolved ({ex.Message})");
         }
 
         var load = Load(directory, logger);
@@ -121,7 +125,20 @@ public static class DarlingLogHashKeyFile
             logger.LogError("{Refusal}", load.Refusal);
         }
 
-        return load.Key;
+        return load;
+    }
+
+    /// <summary>
+    /// The note the first <c>pg_log_events</c> run after a start that replaced a discarded key carries on its
+    /// collection-log row (#4004 review, round 3), so the point where stored events changed identity can be found beside
+    /// the rows it affects rather than only in the service log. Null when <paramref name="load"/> replaced nothing.
+    /// </summary>
+    public static string? RotationNote(DarlingLogHashKeyLoad load)
+    {
+        ArgumentNullException.ThrowIfNull(load);
+        return load.Replaced is { } reason
+            ? $"the store's log-hash key was replaced at service start ({load.Path} was discarded because {reason}): log events stored from this run on have new identities, so an entry still in the log tail is stored once more and statement fingerprints change (#4004)"
+            : null;
     }
 
     /// <summary>
@@ -140,6 +157,10 @@ public static class DarlingLogHashKeyFile
             var trust = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, create: true, logger);
             var exists = AnythingAt(path);
 
+            /* Taken whichever way this load goes, so it describes this process's discard only once (#4004 review,
+               round 3): the check that removed the key may have been another caller's, earlier this start. */
+            var discarded = ComposeCredentialDirectoryGuard.Current.TakeDiscardedKey(directory);
+
             /* A directory other users could write to until now has already lost every file the service reads from it,
                this key included, inside the check itself (#4004 review): whichever caller found it open (role
                provisioning, a host's earlier-credential read, or this load) removed them before returning. So a key
@@ -147,7 +168,7 @@ public static class DarlingLogHashKeyFile
                that is not trusted is one nothing is read from or written to. */
             if (trust.Distrust is { } distrust)
             {
-                return Refuse(path, $"its directory {directory} is not trusted ({distrust})");
+                return RefuseForDirectory(path, directory, distrust);
             }
 
             if (exists)
@@ -161,7 +182,8 @@ public static class DarlingLogHashKeyFile
                 return Read(path, logger);
             }
 
-            return Generate(path, logger);
+            var generated = Generate(path, logger);
+            return generated.Key is not null && discarded is not null ? generated with { Replaced = discarded } : generated;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -336,6 +358,19 @@ public static class DarlingLogHashKeyFile
         Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because {reason} (#4004). "
             + "The service does not replace this key on its own, because a new key gives every stored log event a new identity. "
             + "If only this service could have written or read it, restrict it to the service account (on Windows, --harden-files run elevated does that) and restart; otherwise, or to start a new key, delete it and restart, and the service generates a new one.");
+
+    /// <summary>
+    /// The refusal when the DIRECTORY is what cannot be trusted (#4004 review, round 3). The key file's own remedies
+    /// (restrict it, or delete it) do not apply: nothing in the directory was read, and the reason says what to fix.
+    /// Round 2 gave this case the file's text, whose "restrict it" read as "set the directory 0700" to the operator
+    /// the round-3 attack walks through.
+    /// </summary>
+    private static DarlingLogHashKeyLoad RefuseForDirectory(string path, string directory, string distrust) => new(
+        Key: null,
+        Path: path,
+        Generated: false,
+        Refusal: $"PostgreSQL log events will not be collected: the store's log-hash key {path} cannot be used because its directory {directory} is not trusted ({distrust}) (#4004). "
+            + "Nothing in that directory is read or written while it is not trusted; fix what the reason names and restart.");
 }
 
 /// <summary>What <see cref="DarlingLogHashKeyFile.Load"/> found (#4004): the key, or why there is none. Its
@@ -344,4 +379,48 @@ public static class DarlingLogHashKeyFile
 /// <param name="Path">The key file's path.</param>
 /// <param name="Generated">True when this load wrote a new key because none existed.</param>
 /// <param name="Refusal">Why there is no key, written for the operator; null when there is one.</param>
-public sealed record DarlingLogHashKeyLoad(PgLogHashKey? Key, string Path, bool Generated, string? Refusal);
+/// <param name="Replaced">Why the key this load generated replaced one: the reason the directory check discarded the
+/// old key this start (<see cref="ComposeCredentialDirectoryGuard.TakeDiscardedKey"/>). Null when it replaced nothing,
+/// including a key generated because none had ever existed.</param>
+public sealed record DarlingLogHashKeyLoad(PgLogHashKey? Key, string Path, bool Generated, string? Refusal, string? Replaced = null);
+
+/// <summary>
+/// "The store's log-hash key was replaced at start", held for the process until the first <c>pg_log_events</c> run
+/// takes it (#4004 review, round 3): that run's collection-log row carries it as the run's note, and no later run's
+/// does, so the point where stored events changed identity sits beside the rows it affects. A run that fails before it
+/// returns a result does not take it, so it lands on the first row with a run note to carry it, whichever server that
+/// run was for. The worker arms it from the key's load (<see cref="DarlingLogHashKeyFile.RotationNote"/>) and applies
+/// it to every run it records.
+/// </summary>
+internal sealed class LogHashKeyRotationNote
+{
+    private string? _note;
+
+    /// <summary>Holds <paramref name="note"/> for the next <c>pg_log_events</c> run. Null holds nothing and clears
+    /// nothing, so a later load that replaced no key cannot drop a note no run has taken yet.</summary>
+    internal void Arm(string? note)
+    {
+        if (note is not null)
+        {
+            Volatile.Write(ref _note, note);
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with the held note merged into its host note when this is a <c>pg_log_events</c> run
+    /// and no run has taken the note yet; otherwise <paramref name="result"/> unchanged. Taking it clears it
+    /// atomically, so two servers' runs finishing together cannot both carry it. Host note, not the composed
+    /// <see cref="CollectorRunResult.Note"/>, which would lose the definition's measurements.
+    /// </summary>
+    internal CollectorRunResult ApplyTo(string collectorName, CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        if (!string.Equals(collectorName, PgLogEventsCollector.Instance.Name, StringComparison.OrdinalIgnoreCase)
+            || Interlocked.Exchange(ref _note, null) is not { } note)
+        {
+            return result;
+        }
+
+        return result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, note) };
+    }
+}

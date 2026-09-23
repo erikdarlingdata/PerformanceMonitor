@@ -229,13 +229,18 @@ public static class DarlingFileSecurity
     /// (<c>FILE_FLAG_OPEN_REPARSE_POINT</c>) and kept open while it is checked and changed, so what is checked is what
     /// is changed: it must not be a link itself, and its final path must be <paramref name="anchorDirectory"/>'s own
     /// final path followed by the same names, which a link anywhere between the two would change.
+    ///
+    /// <para>A hard link passes both of those (#4004 review, round 3): it is not a reparse point, and the final path is
+    /// the name it was opened by. But the DACL belongs to the file, not the name, so hardening a planted
+    /// <c>darling.json.bak-x</c> hard-linked to someone else's file would rewrite that file's access. A file with more
+    /// than one name is refused.</para>
     /// </summary>
     /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
     public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
         var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-        if (!full.StartsWith(anchor + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        if (!DarlingPathContainment.IsStrictlyBelow(anchor, full))
         {
             throw new ArgumentException($"{full} is not below {anchor}.", nameof(path));
         }
@@ -252,7 +257,20 @@ public static class DarlingFileSecurity
             return $"{full} is a junction or symbolic link";
         }
 
-        var expected = anchorFinal + full[anchor.Length..];
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError(), $"{full} could not be checked for hard links");
+        }
+
+        if (information.NumberOfLinks > 1)
+        {
+            return $"{full} is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+        }
+
+        /* Joined rather than concatenated: a volume root keeps its separator (C:\), and its final path can come back
+           without one (a SUBST drive's root is a folder on another volume). */
+        var relative = full[(Path.EndsInDirectorySeparator(anchor) ? anchor.Length : anchor.Length + 1)..];
+        var expected = Path.Join(anchorFinal, relative);
         var actual = FinalPath(handle);
         if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
         {
@@ -343,6 +361,32 @@ public static class DarlingFileSecurity
     private static extern uint SetSecurityInfo(
         Microsoft.Win32.SafeHandles.SafeFileHandle handle, int objectType, uint securityInfo,
         IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile, out ByHandleFileInformation lpFileInformation);
+
+    /// <summary><c>BY_HANDLE_FILE_INFORMATION</c>: each <c>FILETIME</c> as its two <c>DWORD</c> halves, so nothing
+    /// realigns the struct to 8 bytes.</summary>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow;
+        public uint CreationTimeHigh;
+        public uint LastAccessTimeLow;
+        public uint LastAccessTimeHigh;
+        public uint LastWriteTimeLow;
+        public uint LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
 
     /// <summary>
     /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access. When
@@ -545,4 +589,23 @@ public static class DarlingFileSecurity
 
     private static void AddFile(FileSecurity security, SecurityIdentifier sid, FileSystemRights rights) =>
         security.AddAccessRule(new FileSystemAccessRule(sid, rights, AccessControlType.Allow));
+}
+
+/// <summary>Path containment for the file-security checks, on every platform (the class above is Windows-only).</summary>
+internal static class DarlingPathContainment
+{
+    /// <summary>
+    /// Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, by full path, case-insensitively
+    /// (#4004 review, round 3). A volume root keeps its separator through
+    /// <see cref="Path.TrimEndingDirectorySeparator(string)"/> (<c>C:\</c>), so the prefix gains one only when it lacks
+    /// one: appending it regardless made <c>C:\\</c>, which nothing is below, and sent the targets of a config directory
+    /// at a volume root to the path-based harden, which follows a junction anywhere on the path.
+    /// </summary>
+    internal static bool IsStrictlyBelow(string directory, string path)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        return full.Length > prefix.Length && full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
 }

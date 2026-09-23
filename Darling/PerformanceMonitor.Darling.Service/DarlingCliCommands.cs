@@ -3511,7 +3511,7 @@ public static class DarlingCliCommands
 
         if (refused > 0)
         {
-            error.WriteLine($"{refused} of {touched} item(s) were REFUSED: a junction or symbolic link is on the path, and nothing is changed through one.");
+            error.WriteLine($"{refused} of {touched} item(s) were REFUSED: a junction or symbolic link is on the path, or the file has another name (a hard link), and nothing is changed through one.");
         }
 
         if (exposed > 0)
@@ -3574,10 +3574,9 @@ public static class DarlingCliCommands
         return null;
     }
 
-    /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>.</summary>
-    private static bool IsBelow(string directory, string path) =>
-        Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)).StartsWith(
-            Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, a volume root included
+    /// (<see cref="DarlingPathContainment.IsStrictlyBelow"/>, #4004 review, round 3).</summary>
+    internal static bool IsBelow(string directory, string path) => DarlingPathContainment.IsStrictlyBelow(directory, path);
 
     /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
     /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>
