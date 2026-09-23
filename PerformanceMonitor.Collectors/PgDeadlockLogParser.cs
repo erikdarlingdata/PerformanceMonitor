@@ -39,15 +39,20 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class PgDeadlockLogParser
 {
-    /// <param name="GraphText">The DETAIL block verbatim, tabs stripped. Stored losslessly because the
-    /// parsed fields are an interpretation and the raw block is the evidence: a shape this parser does not
-    /// recognise today is still readable by a person.</param>
+    /// <param name="GraphText">The DETAIL block as PostgreSQL wrote it, its tab indenting stripped and each
+    /// participant's query normalized (#4005): every literal is <c>?</c>, and a query that cannot be read to its
+    /// end is withheld (<see cref="PgLogTextRedactor.RedactDetail"/>, the same reading #3944 gave the DETAIL of a
+    /// stored log event). The wait-for lines are prose and are kept as written, because the parsed fields are an
+    /// interpretation and the block is the evidence: a shape this parser does not recognise today is still
+    /// readable by a person.</param>
+    /// <param name="VictimStatement">The victim's query as <paramref name="GraphText"/> holds it, so normalized
+    /// or withheld the same way.</param>
     /// <param name="DeadlockHash">Identity across repeated log reads, needed on both transports but for
     /// different reasons. The <c>pg_read_file</c> route re-reads a bounded TAIL every cycle, so the same
     /// deadlock arrives on every cycle it stays inside the window. The RDS route is consume-once and does
     /// NOT re-offer it cycle to cycle — its repeats come from a restart discarding the in-process resume
     /// marker, or from #3008 leaving that marker in place after a write that did not land. Either way the
-    /// report must not be stored twice.</param>
+    /// report must not be stored twice. See <see cref="IdentityOf"/> for what it is computed over.</param>
     public readonly record struct ParsedDeadlock(
         DateTime OccurredAtUtc,
         int VictimPid,
@@ -97,23 +102,35 @@ public static class PgDeadlockLogParser
        itself contain newlines, and each continuation arrives tab-indented, so a line-count rule or a
        blank-line rule would truncate multi-line SQL silently.
 
-       The zone is captured and READ (#2993). PostgreSQL renders the stamp in log_timezone and prints that
-       zone's abbreviation beside it, so this token is the setting's own rendered value for THIS line, and
-       it is what decides whether the naive timestamp next to it is already UTC. See IsZeroOffsetLogZone
-       for why that question is answerable from an abbreviation when "which zone is this" is not. Both
-       families name the group `zone` and the group `pid`, which .NET allows across alternatives and which
-       keeps the reads below indifferent to which family matched.
+       The zone is READ (#2993), by the assembler FromReport hands the candidate to, which splits the same
+       two families the same way. PostgreSQL renders the stamp in log_timezone and prints that zone's
+       abbreviation beside it, so this token is the setting's own rendered value for THIS line, and it is
+       what decides whether the naive timestamp next to it is already UTC. See IsZeroOffsetLogZone for why
+       that question is answerable from an abbreviation when "which zone is this" is not.
 
        Not \w+ for either zone: \w matches neither a sign nor a colon, and a prefix the pattern cannot
        match produces no block at all, which reads as a server with no deadlocks.
 
        PgDeadlocksCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
-       narrower: that one carries the space family only, which PostgreSQL's own default renders. */
+       narrower: that one carries the space family only, which PostgreSQL's own default renders.
+
+       A CANDIDATE, not a verdict (#4005). `ERROR:  deadlock detected` and `DETAIL:  ` are found anywhere on
+       their lines, so a statement's literal holding those words matched as a report, and under a translated
+       lc_messages it is the only thing that can. What a candidate is, is decided by PgLogEntryAssembler, the
+       reader #3996 hardened for exactly that (FromReport): its label is the line's own, never one inside the
+       text, and its DETAIL is the same backend's. The pattern only has to never miss a report the assembler
+       would accept.
+
+       The candidate runs one line past the DETAIL, when that line carries a prefix: DeadLockReport always
+       writes a HINT after the DETAIL, and that line is the proof the DETAIL arrived whole, which
+       PgLogTextRedactor.RedactDetail needs to trust a query after one that does not read to its end. Never a
+       line that opens another report, so a candidate cannot take the next report's first line from it. */
     private static readonly Regex s_deadlockBlock = new(
-        @"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
-        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):[^\n]*?\[(?<pid>\d+)\])"
+        @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
+        + @"(?:[^ \n]+ \[\d+\]|[^ :\n]+:[^\n]*?\[\d+\])"
         + @"[^\n]*ERROR:  deadlock detected\s*\n"
-        + @"[^\n]*DETAIL:  (?<detail>(?:[^\n]*\n)(?:\t[^\n]*\n)*)",
+        + @"[^\n]*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*"
+        + @"(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
     /* `Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.`
@@ -161,7 +178,7 @@ public static class PgDeadlockLogParser
     /// <para><b>Two shapes on that route, and the second is the dangerous one.</b> A chunk ending before
     /// <c>DETAIL:</c> matches nothing, because the pattern requires that group, and the report is lost
     /// whole. A chunk ending mid-DETAIL still MATCHES — <c>(?:\t[^\n]*\n)*</c> takes however many
-    /// continuation lines arrived, including none — so <see cref="FromBlock"/> finds a wait edge and
+    /// continuation lines arrived, including none — so <see cref="FromReport"/> finds a wait edge and
     /// stores a row carrying only the participants, resources and statements that were inside the chunk.
     /// That row is indistinguishable from a genuinely smaller deadlock, which is worse than the absence.
     /// It cannot be checked against its own graph either: <c>ParticipantCount</c> is derived from the same
@@ -170,7 +187,7 @@ public static class PgDeadlockLogParser
     /// count EXCEEDING the edge count is a shape the server never writes.</para>
     ///
     /// <para>The one exception is a log stamped in a non-UTC zone, which throws
-    /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromBlock"/>.</para>
+    /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromReport"/>.</para>
     ///
     /// <para><b>That throw abandons the WHOLE read, siblings included.</b> One log has one
     /// <c>log_timezone</c> at any instant, so a window holding both a non-UTC and a UTC stamp only
@@ -204,11 +221,7 @@ public static class PgDeadlockLogParser
 
         foreach (Match match in s_deadlockBlock.Matches(logBody))
         {
-            var parsed = FromBlock(
-                match.Groups[1].Value,
-                match.Groups["zone"].Value,
-                match.Groups["pid"].Value,
-                match.Groups["detail"].Value);
+            var parsed = FromReport(match.Value);
 
             if (parsed is not null)
             {
@@ -220,17 +233,23 @@ public static class PgDeadlockLogParser
     }
 
     /// <summary>
-    /// One report, from its log-prefix timestamp and zone, its victim pid and its DETAIL block. Null when
-    /// the block carries no wait edge, which is the one thing that makes it a deadlock report rather than
-    /// some other DETAIL.
+    /// One report, from the log text of a candidate block: its <c>ERROR:  deadlock detected</c> line, the
+    /// DETAIL block, and the line after it when there is one. Null when the text holds no deadlock report or
+    /// the report carries no wait edge, which is the one thing that makes it a deadlock report rather than some
+    /// other DETAIL.
+    ///
+    /// <para><b>Read by <see cref="PgLogEntryAssembler"/></b> (#4005), the reader every other log family shares,
+    /// and not by a pattern of its own. That is what makes the line's label its own rather than a phrase inside
+    /// a statement, the DETAIL the same backend's, each continuation line lose exactly the tab PostgreSQL added
+    /// (a query's own tabs stay, so lexing it reads the tokens PostgreSQL ran), and a HINT after the DETAIL the
+    /// proof it is whole (<see cref="PgLogEntry.DetailComplete"/>).</para>
     /// </summary>
-    /// <param name="zoneText">The zone token from the log prefix, which is <c>log_timezone</c> as the
-    /// server rendered it for this line. Required, and required to mean an offset of zero.</param>
     /// <exception cref="PgLogTimezoneUnsupportedException">The prefix zone is not a zero-offset one, so the
-    /// timestamp beside it is local rather than UTC and the report cannot be stored (#2993).</exception>
-    public static ParsedDeadlock? FromBlock(string timestampText, string zoneText, string victimPidText, string? detail)
+    /// timestamp beside it is local rather than UTC and the report cannot be stored (#2993). Thrown by the
+    /// assembler, whose zone check is this parser's own <see cref="IsZeroOffsetLogZone"/>.</exception>
+    public static ParsedDeadlock? FromReport(string? reportText)
     {
-        if (string.IsNullOrWhiteSpace(detail))
+        if (string.IsNullOrEmpty(reportText))
         {
             return null;
         }
@@ -249,29 +268,27 @@ public static class PgDeadlockLogParser
            Per BLOCK, so it abandons the whole read from inside Extract's loop and the collector's row
            loop alike. See Extract's remarks for why losing the readable siblings is preferred to storing
            a partial history nothing marks as partial — and for why that trade is cheap on the
-           re-reading transport and NOT cheap on the consume-once one. */
-        if (!IsZeroOffsetLogZone(zoneText))
+           re-reading transport and NOT cheap on the consume-once one. The check is the assembler's, per
+           primary line, through IsZeroOffsetLogZone. */
+        foreach (var entry in PgLogEntryAssembler.Assemble(reportText))
         {
-            throw new PgLogTimezoneUnsupportedException(zoneText);
+            if (entry.Severity == "ERROR"
+                && entry.Message.TrimEnd() == "deadlock detected"
+                && !string.IsNullOrWhiteSpace(entry.Detail))
+            {
+                return FromEntry(entry);
+            }
         }
 
-        if (!DateTime.TryParse(
-                timestampText,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
-                out var occurredAt))
-        {
-            return null;
-        }
+        return null;
+    }
 
-        if (!int.TryParse(victimPidText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var victimPid))
-        {
-            return null;
-        }
-
-        /* Tabs out, so the stored block reads as text rather than as log formatting. Newlines stay: they
+    private static ParsedDeadlock? FromEntry(PgLogEntry entry)
+    {
+        /* The queries normalized before anything is read out of the block (#4005): the victim's statement is
+           then the graph's own, and the identity is over text a reader of the row can see. Newlines stay: they
            separate the edges from the statements and are inside the statements too. */
-        var graph = detail.Replace("\t", string.Empty, StringComparison.Ordinal).TrimEnd('\n');
+        var graph = NormalizeGraph(entry.Detail, entry.DetailComplete)!.TrimEnd('\n');
 
         var edges = s_edge.Matches(graph);
 
@@ -303,13 +320,13 @@ public static class PgDeadlockLogParser
             .Count();
 
         var statements = ParseStatements(graph);
-        statements.TryGetValue(victimPid, out var victimStatement);
+        statements.TryGetValue(entry.Pid, out var victimStatement);
 
         return new ParsedDeadlock(
-            OccurredAtUtc: occurredAt,
-            VictimPid: victimPid,
+            OccurredAtUtc: entry.OccurredAtUtc,
+            VictimPid: entry.Pid,
             ParticipantCount: participants,
-            DeadlockHash: HashOf(graph),
+            DeadlockHash: IdentityOf(entry.OccurredAtUtc, graph),
             LockModes: modes.Count > 0 ? string.Join(", ", modes) : null,
             Resources: resources.Count > 0 ? string.Join(", ", resources) : null,
             VictimStatement: victimStatement,
@@ -400,19 +417,97 @@ public static class PgDeadlockLogParser
     }
 
     /// <summary>
-    /// Identity for a report, over the graph text. The same report reaches this more than once on either
-    /// transport and must be stored once, though not for the same reason: the <c>pg_read_file</c> route
-    /// re-reads a bounded TAIL on a schedule, so a report inside the window arrives every cycle, while the
-    /// consume-once RDS route re-offers only a window whose write did not land (#3008) or whose
-    /// in-process marker a restart discarded. See the <c>DeadlockHash</c> parameter above.
+    /// Identity for a report (#4005): <see cref="HashOf"/> over its timestamp and its NORMALIZED graph, which is
+    /// what a reader of the stored row sees. The same report reaches this more than once on either transport
+    /// and must be stored once, though not for the same reason: the <c>pg_read_file</c> route re-reads a
+    /// bounded TAIL on a schedule, so a report inside the window arrives every cycle, while the consume-once
+    /// RDS route re-offers only a window whose write did not land (#3008) or whose in-process marker a restart
+    /// discarded. See the <c>DeadlockHash</c> parameter above.
     ///
-    /// <para>Over the graph rather than over (timestamp, pid): two deadlocks in the same millisecond with
-    /// the same victim pid are vanishingly unlikely, but the graph is what actually distinguishes them, and
-    /// hashing the thing itself needs no argument about how unlikely a collision is.</para>
+    /// <para><b>Over the normalized graph, never the raw one.</b> An unkeyed hash of text holding a literal is
+    /// a test for that literal (#4004): a reader who sees the normalized graph can rebuild everything else the
+    /// hash covered, enumerate the values a <c>?</c> could have been, and check each offline. Over what the
+    /// reader already sees, the hash tells them nothing more.</para>
+    ///
+    /// <para><b>With the timestamp</b>, because normalizing makes two different deadlocks read alike when only
+    /// their literals differ, the same pids included under a connection pool. Two sightings of one report
+    /// carry the same timestamp, written once on its log line. It also keeps this hash from ever equalling
+    /// <see cref="HashOf"/> over the graph alone, which is how a row stored before #4005, whose hash is over its
+    /// raw graph, is told apart in the store (<see cref="RawGraphHashSql"/>).</para>
     /// </summary>
-    public static string HashOf(string graph)
+    public static string IdentityOf(DateTime occurredAtUtc, string graph) =>
+        HashOf(occurredAtUtc.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + "\n" + graph);
+
+    /// <summary>
+    /// SHA-256 over <paramref name="text"/>, the first 16 bytes as upper-case hex. Before #4005 a report's
+    /// identity was this over its raw graph.
+    /// </summary>
+    public static string HashOf(string text)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(graph));
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(text));
         return Convert.ToHexString(bytes)[..32];
     }
+
+    /// <summary>
+    /// A SQL predicate, true for a stored row whose <c>deadlock_hash</c> is <see cref="HashOf"/> over its
+    /// <c>graph_text</c>: a row stored before #4005, when the graph was stored raw and hashed raw. That hash is
+    /// a test for the literals a read normalizes away (#4004), so a read never returns it and never finds a row
+    /// by it; <see cref="ReportIdentity"/> names such a row instead. A row stored since carries
+    /// <see cref="IdentityOf"/>, which covers the timestamp as well and so never satisfies this.
+    /// </summary>
+    public static string RawGraphHashSql(string hashColumn, string graphColumn) =>
+        $"(upper(left(encode(sha256(convert_to({graphColumn}, 'UTF8')), 'hex'), 32)) = {hashColumn})";
+
+    /// <summary>A report named by its timestamp and victim pid, which every read already shows (#4005): what a
+    /// read returns in place of the hash of a row <see cref="RawGraphHashSql"/> is true for, and what an analysis
+    /// finding stored before #4005 names its exemplar by, since its stored hash may be one. The detail read finds
+    /// the report by it whichever build stored the row.</summary>
+    public static string ReportIdentity(DateTime occurredAt, int victimPid) =>
+        ReportIdentityPrefix + occurredAt.ToString("yyyyMMdd'T'HHmmss.ffffff", CultureInfo.InvariantCulture)
+        + "-" + victimPid.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>The report a <see cref="ReportIdentity"/> names.</summary>
+    public static bool TryParseReportIdentity(string? identity, out DateTime occurredAt, out int victimPid)
+    {
+        occurredAt = default;
+        victimPid = 0;
+        var match = identity is null ? Match.Empty : s_reportIdentity.Match(identity.Trim());
+
+        return match.Success
+            && DateTime.TryParseExact(match.Groups["at"].Value, "yyyyMMdd'T'HHmmss.ffffff", CultureInfo.InvariantCulture, DateTimeStyles.None, out occurredAt)
+            && int.TryParse(match.Groups["pid"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out victimPid);
+    }
+
+    private const string ReportIdentityPrefix = "at-";
+
+    private static readonly Regex s_reportIdentity = new(
+        "^" + ReportIdentityPrefix + @"(?<at>[0-9]{8}T[0-9]{6}\.[0-9]{6})-(?<pid>[0-9]{1,10})$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// A deadlock report's DETAIL with each participant's query normalized (#4005), as
+    /// <see cref="PgLogTextRedactor.RedactDetail"/> reads it for a stored log event (#3944): every literal a
+    /// <c>?</c>, a query that cannot be read to its end withheld, the wait-for lines kept as written.
+    /// <paramref name="complete"/> is the entry's proof the DETAIL is whole; a stored graph carries none and is
+    /// read the fail-closed way, which a graph this build wrote reads the same under, because its withheld
+    /// queries read to their end. Null in, null out; idempotent.
+    /// </summary>
+    public static string? NormalizeGraph(string? graph, bool complete = false) =>
+        PgLogTextRedactor.RedactDetail(graph, complete);
+
+    /// <summary>
+    /// How much of a stored statement or graph a read needs to normalize it (#4005): one character past the
+    /// longest SQL-bearing field the lexer reads at all. A longer one is withheld whole, so reading more serves
+    /// nothing, and a read that cuts first and normalizes after withholds a statement whose cut landed inside a
+    /// literal.
+    /// </summary>
+    public const int NormalizeReadCap = PgLogTextRedactor.MaxSqlFieldLength + 1;
+
+    /// <summary>
+    /// A stored victim statement normalized the way <see cref="NormalizeGraph"/> normalizes it inside the graph
+    /// (#4005): withheld when it cannot be read to its end or is too long to read. Null in, null out;
+    /// idempotent.
+    /// </summary>
+    public static string? NormalizeStatement(string? statement) =>
+        string.IsNullOrEmpty(statement) ? statement : PgLogTextRedactor.MaskQuery(statement);
 }

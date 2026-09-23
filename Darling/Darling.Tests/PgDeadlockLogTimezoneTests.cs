@@ -55,18 +55,20 @@ public sealed class PgDeadlockLogTimezoneTests
     /// <summary>
     /// The <c>pg_read_file</c> route's own half: the query has to RETURN the prefix zone, or the parser has
     /// nothing to check and the refusal is unreachable on the transport that has a database connection.
-    /// The zone was matched and discarded here before #2993.
+    /// The zone was matched and discarded here before #2993. Since #4005 the query returns each candidate
+    /// report's text whole, prefix included, and the log reader the RDS route shares reads the zone out of it.
     /// </summary>
     [Fact]
     public void The_Collector_Query_Returns_The_Prefix_Zone()
     {
         var source = ReadRepoFile(Path.Combine("PerformanceMonitor.Collectors", "PgDeadlocksCollector.cs"));
 
-        Assert.Contains("AS log_zone_text", source, System.StringComparison.Ordinal);
+        Assert.Contains("AS report_text", source, System.StringComparison.Ordinal);
+        Assert.Contains("PgDeadlockLogParser.FromReport(firstColumn)", source, System.StringComparison.Ordinal);
 
         /* [^ \n]+ rather than \w+: a numeric-offset zone matched no block at all under \w+, so the
            server reported no deadlocks instead of reporting a zone this cannot store. */
-        Assert.Contains("([^ \\n]+) \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
-        Assert.DoesNotContain("\\w+ \\[(\\d+)\\]", source, System.StringComparison.Ordinal);
+        Assert.Contains("[^ \\n]+ \\[\\d+\\]", source, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("\\w+ \\[", source, System.StringComparison.Ordinal);
     }
 }

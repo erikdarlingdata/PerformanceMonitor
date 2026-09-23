@@ -420,9 +420,13 @@ public sealed class RdsDeadlockIngestorTests
         Assert.Equal(1549, managed.VictimPid);
         Assert.Equal(2, managed.ParticipantCount);
 
-        /* One report, one identity, whichever prefix rendered it - the prefix is not part of the graph.
-           A target that moved between the two transports would otherwise store its history twice. */
-        Assert.Equal(selfHosted.DeadlockHash, managed.DeadlockHash);
+        /* One report, one graph, whichever prefix rendered it - the prefix is not part of the graph. The
+           identity covers the report's own timestamp as well since #4005, because normalizing the queries can
+           make two different reports' graphs alike, and %t renders that timestamp without the fraction %m
+           writes; a report is written once, under one prefix, so every sighting of it carries the same one. */
+        Assert.Equal(selfHosted.GraphText, managed.GraphText);
+        Assert.Equal(PgDeadlockLogParser.IdentityOf(managed.OccurredAtUtc, managed.GraphText), managed.DeadlockHash);
+        Assert.Equal(PgDeadlockLogParser.IdentityOf(selfHosted.OccurredAtUtc, selfHosted.GraphText), selfHosted.DeadlockHash);
     }
 
     /// <summary>

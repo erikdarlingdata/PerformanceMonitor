@@ -1213,7 +1213,10 @@ public sealed class PgLogEventsPipelineTests
 
         const string plansBefore = tail + "\nSELECT\n    (m[1])::bigint                                   AS query_id,\n    (m[2])::double precision                         AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ \\n]+ \\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 2000";
 
-        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS occurred_at_text,\n    m[2]    AS log_zone_text,\n    m[3]    AS victim_pid_text,\n    m[4]    AS detail_body\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+) ([^ \\n]+) \\[(\\d+)\\][^\\n]*ERROR:  deadlock detected\\s*\\n[^\\n]*DETAIL:  ((?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off', NULL, NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 500";
+        /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
+           candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
+           read. The tailer it opens with is still the shared one, byte for byte. */
+        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ [^ \\n]+ \\[\\d+\\][^\\n]*ERROR:  deadlock detected\\s*\\n[^\\n]*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 500";
 
         /* Line endings normalised on both sides: the repo's `text=auto eol=crlf` checks the sources out as
            CRLF on Windows and this pin's literals are LF, and a verbatim string carries whatever its file

@@ -123,22 +123,21 @@ public sealed class PgLoggingCollectorGateTests
     /// <summary>
     /// The control for both refusals: an ordinary row still parses, so the marker check discriminates
     /// rather than tripping on real data. The deadlock row is the shape the query's regexp produces from
-    /// the captured report <c>PgDeadlockLogParserTests</c> pins.
+    /// the captured report <c>PgDeadlockLogParserTests</c> pins: since #4005, the candidate report's text whole.
     /// </summary>
     [Fact]
     public async Task AnOrdinaryDeadlockRowStillParses()
     {
         var reader = new FakeCollectorDataReader(new object[]
         {
-            "2026-08-26 22:25:24.100",
-            "UTC",
-            "1549",
-            "Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
+            "2026-08-26 22:25:24.100 UTC [1549] ERROR:  deadlock detected\n"
+            + "2026-08-26 22:25:24.100 UTC [1549] DETAIL:  Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
             + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
             + "\tProcess 1549: \n"
             + "\tBEGIN; UPDATE dl SET v=v+1 WHERE id=1; COMMIT;\n"
             + "\tProcess 1556: \n"
-            + "\tBEGIN; UPDATE dl SET v=v+1 WHERE id=2; COMMIT;\n",
+            + "\tBEGIN; UPDATE dl SET v=v+1 WHERE id=2; COMMIT;\n"
+            + "2026-08-26 22:25:24.100 UTC [1549] HINT:  See server log for query details.\n",
         });
 
         var rows = await PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
