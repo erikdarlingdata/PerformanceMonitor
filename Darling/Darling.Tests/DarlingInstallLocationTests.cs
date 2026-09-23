@@ -626,6 +626,210 @@ function Get-CimInstance {
     }
 
     /// <summary>
+    /// #4043 round-1 review: the check must be silent on the ACEs a REAL install location actually carries,
+    /// not only on the fully-trusted synthetic ACL the test above builds by hand. The coordinator ran the
+    /// shipped (unfixed) function against real folders on this machine and found it refused
+    /// <c>C:\Program Files</c> and <c>C:\Program Files\dotnet</c> - the very location the refusal message
+    /// itself recommends - because both carry CREATOR OWNER in their default DACL, and CREATOR OWNER,
+    /// CREATOR GROUP and their two SERVER twins are inherit-only templates: they grant nothing on an object
+    /// that already exists, only rights a CHILD inherits when someone later creates one, and creating that
+    /// child needs write/create rights on THIS path - already covered by every other principal this check
+    /// tests.
+    ///
+    /// <para><b>Red-watch built into the pin.</b> A second, pre-round-1 copy of the function (no exclusion,
+    /// no owner check) is reproduced inline - not read from git history - and run over the SAME captured
+    /// DACL. It must still flag Program Files, proving this test would have failed before the fix and is
+    /// not a tautology.</para>
+    ///
+    /// <para>Case (b) is the contrasting REFUSE, built the identical way (a captured DACL applied to a fresh
+    /// temp folder) so the PASS and the REFUSE are apples to apples: <c>C:\</c>'s own DACL carries
+    /// Authenticated Users: Modify, a real broad grant that must still be caught. Case (c) pins the exclusion
+    /// to exactly the four documented SIDs, regardless of what this box's Program Files happens to carry.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_IsSilentOnRealInheritOnlyTemplates_ButStillCatchesARealBroadGrant()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+
+            # The pre-round-1 shape: no inherit-only exclusion, no owner check. Reproduced inline purely to
+            # prove this test would have failed before the fix (#4043 round-1 review).
+            function Get-UntrustedWriteGrantees-Old([string]$path, [array]$trusted) {
+                $rights = [System.Security.AccessControl.FileSystemRights]
+                $allow = [System.Security.AccessControl.AccessControlType]::Allow
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+                $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+                @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
+                    $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+            }
+
+            function New-TempAclFolder([string]$sourcePath) {
+                $sourceAcl = Get-Acl -LiteralPath $sourcePath
+                $sddl = $sourceAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+                $dir = Join-Path $env:TEMP ('pm4043-r1-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $sec = Get-Acl -LiteralPath $dir
+                $sec.SetSecurityDescriptorSddlForm($sddl, [System.Security.AccessControl.AccessControlSections]::Access)
+                Set-Acl -LiteralPath $dir -AclObject $sec
+                return $dir
+            }
+
+            $trusted = Get-DarlingPreLockTrustedSids
+
+            # (a) A NEW folder carrying C:\Program Files' own DACL - the shape a fresh subfolder inherits.
+            $pf = New-TempAclFolder 'C:\Program Files'
+            try {
+                'caseA_fixedCount=' + @(Get-UntrustedWriteGrantees $pf $trusted).Count
+                'caseA_oldCount=' + @(Get-UntrustedWriteGrantees-Old $pf $trusted).Count
+            }
+            finally {
+                icacls.exe $pf /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $pf -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # (b) A NEW folder carrying C:\'s own DACL - Authenticated Users: Modify, the documented hole a
+            # folder made directly under the drive root inherits. Must still be caught.
+            $cRoot = New-TempAclFolder 'C:\'
+            try {
+                'caseB_fixedCount=' + @(Get-UntrustedWriteGrantees $cRoot $trusted).Count
+            }
+            finally {
+                icacls.exe $cRoot /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $cRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # (c) All four inherit-only templates, explicitly, regardless of what this box's Program Files
+            # happens to carry - pins the exclusion to exactly those four SIDs, not "whatever this test found".
+            $wk = [System.Security.Principal.WellKnownSidType]
+            $templates = @($wk::CreatorOwnerSid, $wk::CreatorGroupSid, $wk::CreatorOwnerServerSid, $wk::CreatorGroupServerSid)
+            $tRoot = Join-Path $env:TEMP ('pm4043-r1-tmpl-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $tRoot -Force | Out-Null
+            try {
+                $sec = New-Object System.Security.AccessControl.DirectorySecurity
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                foreach ($t in $templates) {
+                    $sid = New-Object System.Security.Principal.SecurityIdentifier($t, $null)
+                    $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'InheritOnly', 'Allow')))
+                }
+                Set-Acl -LiteralPath $tRoot -AclObject $sec
+                'caseC_count=' + @(Get-UntrustedWriteGrantees $tRoot $trusted).Count
+            }
+            finally {
+                icacls.exe $tRoot /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $tRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("caseA_fixedCount=0", answers);
+        var oldCount = int.Parse(answers.Find(a => a.StartsWith("caseA_oldCount=", StringComparison.Ordinal))!.Substring("caseA_oldCount=".Length));
+        Assert.True(oldCount > 0, "red-watch failed: the pre-round-1 shape must still flag C:\\Program Files' CREATOR OWNER ACE, or this test proves nothing about the fix: " + string.Join(" | ", answers));
+
+        var caseB = int.Parse(answers.Find(a => a.StartsWith("caseB_fixedCount=", StringComparison.Ordinal))!.Substring("caseB_fixedCount=".Length));
+        Assert.True(caseB > 0, "a folder carrying C:\\'s own DACL must still be refused for Authenticated Users: Modify - if this box's C:\\ no longer grants it, this test has nothing to prove: " + string.Join(" | ", answers));
+
+        Assert.Contains("caseC_count=0", answers);
+    }
+
+    /// <summary>
+    /// #4043 round-1 review: a re-run of install-darling.ps1 over a tree #4038 already locked - a repair, or
+    /// this script used as its own upgrade path - is not a fresh extraction. #4038's lock itself grants the
+    /// service account Modify on the root, and the UNFIXED check had no way to tell that grant apart from a
+    /// stranger's: every single re-run or repair over an already-locked install would have refused itself
+    /// over the grant #4038 itself made. <c>Get-DarlingPreLockTrustedSids</c> now takes the CURRENT service's
+    /// logon account and trusts exactly what the lock granted - nothing more.
+    ///
+    /// <para><c>NT AUTHORITY\LOCAL SERVICE</c> stands in for the service account precisely because it is NOT
+    /// one of the four SIDs the base trusted set already carries (SYSTEM, Administrators, TrustedInstaller,
+    /// the running admin) - using TrustedInstaller itself here would pass by accident and prove nothing about
+    /// the new parameter.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_TrustsTheAccountTheLockItselfGranted_OnAnAlreadyLockedTree()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4043-r1-lock-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                $null = Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE'
+
+                $withoutAccount = Get-DarlingPreLockTrustedSids
+                'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount).Count
+
+                $withAccount = Get-DarlingPreLockTrustedSids 'NT AUTHORITY\LOCAL SERVICE'
+                'withAccountCount=' + @(Get-UntrustedWriteGrantees $root $withAccount).Count
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        var without = int.Parse(answers.Find(a => a.StartsWith("withoutAccountCount=", StringComparison.Ordinal))!.Substring("withoutAccountCount=".Length));
+        Assert.True(without > 0, "a freshly locked tree must still name the service account as untrusted when the caller does not say who it is - otherwise this test proves nothing about the new parameter: " + string.Join(" | ", answers));
+        Assert.Contains("withAccountCount=0", answers);
+    }
+
+    /// <summary>
+    /// #4043 round-1 review: OWNER RIGHTS is deliberately not one of the four SIDs excluded above - unlike
+    /// CREATOR OWNER, it can redefine what the owner may do instead of naming a risk itself, so what matters
+    /// is WHO the owner is. An owner outside the trusted set holds WRITE_DAC and WRITE_OWNER implicitly and
+    /// can grant itself anything regardless of the current DACL - the same fact
+    /// <c>Lock-DarlingInstallTree</c>'s own post-lock walk already acts on ("owned by").
+    ///
+    /// <para>A real filesystem object cannot be given an untrusted owner without elevation this suite does
+    /// not assume - Windows only lets WRITE_OWNER retarget to yourself or a group your token marks
+    /// owner-capable, confirmed against this exact scenario while writing this test. So <c>Get-Acl</c> is
+    /// shadowed instead, the same idiom
+    /// <see cref="NetworkPathKind_WhenWmiIsUnavailable_FallsBackToPSDriveDisplayRoot"/> already uses, to hand
+    /// back a fully-trusted DACL with only the OWNER outside the trusted set.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            function Get-Acl {
+                [CmdletBinding()]
+                param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+                $sec = New-Object System.Security.AccessControl.DirectorySecurity
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($s in (Get-DarlingPreLockTrustedSids)) { $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)))
+                return $sec
+            }
+            """);
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine("""
+            $trusted = Get-DarlingPreLockTrustedSids
+            $found = @(Get-UntrustedWriteGrantees 'C:\does-not-need-to-exist-for-this-probe' $trusted)
+            'count=' + $found.Count
+            'text=' + ($found -join ';')
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("count=1", answers);
+        Assert.Contains(answers, a => a.StartsWith("text=", StringComparison.Ordinal) && a.Contains("owned by BUILTIN\\Users", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// #4034, executed as shipped against a real tree. A folder created directly under the system drive root
     /// inherits "Authenticated Users: Modify" from it (the documented install location's hole). After the lock the
     /// root must be protected and grant ordinary users read and execute only, the service account Modify (it

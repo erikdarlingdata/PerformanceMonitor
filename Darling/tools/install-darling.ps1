@@ -111,19 +111,47 @@ function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor 
 # of the specific ones. The return is principal NAMES, not SIDs: this fires as a refusal an operator has to
 # act on, and 'S-1-5-11' means nothing to most of them, so each is translated back to an account or group
 # name where Windows can, and left as the raw SID only when it can't (an orphaned SID from a deleted account).
+#
+# CREATOR OWNER, CREATOR GROUP and their two SERVER twins (S-1-3-0..3) are excluded by SID, not by leaving
+# them out of $trusted: they are inherit-only templates that grant nothing on an object that already
+# exists, only rights a CHILD inherits when someone later CREATES one under this path - and creating that
+# child needs write/create rights on THIS path, which the rest of this check already tests for every other
+# principal. Flagging the template ACE itself refused C:\Program Files and C:\Program Files\dotnet on this
+# machine (round-1 review, #4043) - the very fix the refusal below recommends, both carrying CREATOR OWNER
+# by default.
+#
+# OWNER RIGHTS (S-1-3-4) is different and is NOT in that exclusion list: unlike the four above it can
+# redefine what the OWNER may do instead of the implicit full control an owner otherwise gets, so the ACE
+# itself never names the real risk either way - what matters is WHO the owner is. An owner outside $trusted
+# holds WRITE_DAC and WRITE_OWNER implicitly and can grant itself anything regardless of what the DACL
+# currently says, the same fact Lock-DarlingInstallTree's own post-lock walk already acts on ("owned by").
+# So the owner is checked directly here too, on both $root and the service exe, rather than trying to read
+# that ACE.
 function Get-UntrustedWriteGrantees([string]$path, [array]$trusted) {
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $sidType = [System.Security.Principal.SecurityIdentifier]
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $inheritOnlyTemplates = @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerServerSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupServerSid, $null)))
     $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
     try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
     catch { return @("$path (its permissions could not be read: $($_.Exception.Message))") }
     $bad = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
-        $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
-    return @($bad | ForEach-Object {
+        $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
+    $result = @($bad | ForEach-Object {
         $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
         "$name on $path"
     })
+    $owner = $acl.GetOwner($sidType)
+    if ($trusted -notcontains $owner) {
+        $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
+        $result += "$path (owned by $name)"
+    }
+    return @($result)
 }
 
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
@@ -131,14 +159,30 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted) {
 # folder the installing admin's own account owns and can write to is exactly what a normal extraction
 # looks like, not a finding. Kept as its own function because install-darling.ps1 and upgrade-darling.ps1
 # both need it and must agree on it.
-function Get-DarlingPreLockTrustedSids() {
+#
+# $existingServiceAccount adds one more, when the caller has one: the CURRENT logon account of an
+# ALREADY-REGISTERED Darling service (round-1 review, #4043). A re-run of install-darling.ps1 over a tree
+# #4038 already locked - a repair, or this script used as its own upgrade path - is not a fresh extraction:
+# the lock already granted that account Modify on $root, and without this, the very first re-run or repair
+# over an already-locked install would refuse itself over the grant #4038 itself made. Normalized the same
+# way Lock-DarlingInstallTree normalizes it (LocalSystem spelled out, a leading .\ read as this computer),
+# since neither spelling translates to a SID as written. A name that will not translate (a stale or
+# unreachable account) is left out rather than thrown on - the base four SIDs still apply either way.
+function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
-    return @(
+    $trusted = @(
         (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
         (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)),
         (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType),
         [Security.Principal.WindowsIdentity]::GetCurrent().User)
+    if ($existingServiceAccount) {
+        if ($existingServiceAccount -eq 'LocalSystem') { $existingServiceAccount = 'NT AUTHORITY\SYSTEM' }
+        $existingServiceAccount = $existingServiceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
+        try { $trusted += (New-Object System.Security.Principal.NTAccount($existingServiceAccount)).Translate($sidType) }
+        catch { }
+    }
+    return $trusted
 }
 
 # True when $candidate IS $parent or sits underneath it.
@@ -522,6 +566,11 @@ if (-not (Test-Path $serviceExe)) {
     Fail "PerformanceMonitor.Darling.Service.exe not found beside this script. Extract the full Darling zip and run install-darling.ps1 from the extracted folder."
 }
 
+# Resolved here, ahead of both 1a and 1b, rather than only down at 1b where the fresh/upgrade split first
+# needed it: 1a's pre-lock check (below) must also know fresh-versus-upgrade, so a re-run over a tree #4038
+# already locked does not read that lock's own grant back as a stranger's (round-1 review, #4043).
+$existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+
 # -- 1a. Refuse an install tree an ordinary user can ALREADY write to (#4043) -----------------------
 # #4038's lock at 1b2 closes the tree against writes from here on. It cannot undo one made before it ran:
 # a folder created directly under C:\ - the documented location - inherits "Authenticated Users: Modify"
@@ -541,7 +590,10 @@ if (-not (Test-Path $serviceExe)) {
 # having left anything else untouched. The service exe is checked as well as the root: an inherited grant is
 # not the only way in, and #4038's own review flagged checking only the root as incomplete.
 if (-not $AcceptWritableExtraction) {
-    $preLockTrusted = Get-DarlingPreLockTrustedSids
+    # $existing (resolved above, before this step) makes a re-run over an already-locked tree trust exactly
+    # what that lock granted, rather than refusing the service account's own Modify grant as a stranger's.
+    $existingAccount = if ($existing) { Get-DarlingServiceLogonName $serviceName } else { $null }
+    $preLockTrusted = Get-DarlingPreLockTrustedSids $existingAccount
     $writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted) + @(Get-UntrustedWriteGrantees $serviceExe $preLockTrusted)
     $writable = @($writable | Select-Object -Unique)
     if ($writable.Count -gt 0) {
@@ -598,12 +650,12 @@ else {
 #
 # This runs BEFORE the pre-flight, the Event Log source, and service creation, so a doomed location costs
 # nothing and leaves nothing behind.
-$existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 
-# The same fact as a boolean, for the post-start firewall reconcile at 5a (#2436). Captured here with
-# $existing because it stops being observable the moment sc.exe create runs, and named rather than reusing
-# $existing at the far end of the script because what 5a actually depends on is not "a service object was
-# found" but "a STORE already exists to be asked" - which is what an existing service implies.
+# The same fact as a boolean, for the post-start firewall reconcile at 5a (#2436). $existing itself was
+# already resolved at 1a, before this point and before sc.exe create ever runs, because the pre-lock check
+# there needs fresh-versus-upgrade too. Named rather than reusing $existing at the far end of the script
+# because what 5a actually depends on is not "a service object was found" but "a STORE already exists to be
+# asked" - which is what an existing service implies.
 $isUpgrade = $null -ne $existing
 # Classify the NORMALIZED spelling, but keep installing to $root exactly as given (#2348). The \\?\ prefix
 # instructs the path parser and is not part of where the install lives, so stripping it for the decision
