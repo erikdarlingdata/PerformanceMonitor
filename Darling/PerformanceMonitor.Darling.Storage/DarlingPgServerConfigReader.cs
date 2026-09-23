@@ -72,6 +72,14 @@ public static class DarlingPgServerConfigReader
     /// </summary>
     public sealed record PgConfigPage(List<PgConfigRow> Rows, int SnapshotNonDefaultCount);
 
+    /// <summary>
+    /// One row of the change feed. A server-wide row has <see cref="DatabaseName"/> and <see cref="RoleName"/>
+    /// both NULL and <see cref="ChangeKind"/> <c>changed</c> - the only kind the server-wide read can observe,
+    /// since a setting appearing is not reported and a pg_settings row never disappears. An override row
+    /// (#3937) carries at least one of the two scope names and one of <c>changed</c>, <c>set</c>
+    /// (<see cref="OldValue"/> NULL: nothing was there before) or <c>reset</c> (<see cref="NewValue"/> NULL:
+    /// nothing is there now), and no unit, context or description, which the catalog does not hold.
+    /// </summary>
     public readonly record struct PgConfigChangeRow(
         DateTime ChangedAtUtc,
         string Name,
@@ -80,7 +88,19 @@ public static class DarlingPgServerConfigReader
         string? Unit,
         string? Context,
         string? Source,
-        string? ShortDescription);
+        string? ShortDescription,
+        string? DatabaseName = null,
+        string? RoleName = null,
+        string ChangeKind = PgConfigChangeKind.Changed);
+
+    /// <summary>The three <see cref="PgConfigChangeRow.ChangeKind"/> spellings, as <see cref="ScopedConfigChangesSql"/>
+    /// projects them (#3937).</summary>
+    public static class PgConfigChangeKind
+    {
+        public const string Changed = "changed";
+        public const string Set = "set";
+        public const string Reset = "reset";
+    }
 
     /// <summary>
     /// The newest snapshot, session-scoped rows removed. Anchored on <c>MAX(collection_time)</c> for the
@@ -196,8 +216,10 @@ public static class DarlingPgServerConfigReader
                dictionary. LAG partitions by name alone, so an override row for the same setting would land
                in the server-wide row's partition and the ordering between two rows sharing a
                collection_time is arbitrary - every snapshot would then manufacture a change from the
-               server value to the override's and back. A per-scope change feed (partition by name,
-               database_name, role_name) is a later brief; this read answers what the SERVER's value did. */
+               server value to the override's and back. This read answers what the SERVER's value did; the
+               overrides' own changes - a value moving, and also an override being SET or RESET, which no
+               per-key LAG can see - are ScopedConfigChangesSql's (#3937), a separate statement so this one's
+               rows and their order stay exactly what they were. */
             AND   c.database_name IS NULL
             AND   c.role_name IS NULL
         )
@@ -214,6 +236,127 @@ public static class DarlingPgServerConfigReader
         WHERE prev_time IS NOT NULL
         AND   setting IS DISTINCT FROM prev_setting
         ORDER BY collection_time DESC, name
+        LIMIT $4
+        """;
+
+    /// <summary>
+    /// The per-database and per-role overrides' changes (#3937, from #3691/V138): an override's value moving
+    /// (<c>changed</c>), an override being SET where the previous snapshot had none (<c>set</c>), and one being
+    /// RESET so the next snapshot has none (<c>reset</c>). Newest first, capped at <c>$4</c>, the same window
+    /// parameters as <see cref="ConfigChangesSql"/>; <see cref="GetConfigChangesAsync"/> runs both and
+    /// interleaves them by <c>collection_time</c>.
+    ///
+    /// <para><b>Why a second statement rather than a UNION ALL in the first.</b> The server-wide read's rows and
+    /// their order are a published contract and its text is pinned (the LAG partition, the <c>prev_time</c>
+    /// guard, both scope columns <c>IS NULL</c>, and the scope census's assertion that it never carries the
+    /// positive arm). Folding the overrides into it would change all four; beside it, the server-wide read is
+    /// the same bytes and this one is the reader census's second override-SELECTING read, carrying the positive
+    /// arm on its own <c>FROM</c>.</para>
+    ///
+    /// <para><b>Why not LAG per scope.</b> Partitioning the server-wide LAG by <c>(name, database_name,
+    /// role_name)</c> would see a value change on an override that exists in both snapshots and nothing else:
+    /// an override appearing is a first row, which <c>prev_time IS NOT NULL</c> hides (and must hide for
+    /// server-wide settings, where a first row is an upgrade or an extension load), and an override removed is
+    /// an ABSENT row, which a window over the rows that exist never visits. So this read walks the SERVER's
+    /// snapshot sequence instead of the key's: <c>snapshots</c> pairs each snapshot instant in the window with
+    /// the one before it, and each override is compared across that pair — present in both with a different
+    /// <c>setting</c> is <c>changed</c>, present only in the later one is <c>set</c> (<c>prev_setting</c>
+    /// NULL), present only in the earlier one is <c>reset</c> (<c>setting</c> NULL). A snapshot with no
+    /// override rows at all still has its server-wide rows, which is why the instant sequence is read off the
+    /// whole table: RESETting the last override leaves a snapshot that holds none, and the pair must still
+    /// exist for the reset to be seen.</para>
+    ///
+    /// <para><b>Overrides present when the collector began reading them are baseline, not SETs.</b> Snapshots
+    /// taken before V138 carry no override rows because the collector was not reading
+    /// <c>pg_db_role_setting</c>, so the first snapshot after the upgrade would report every override the
+    /// cluster already had as "set" - the same fabricated-history defect the server-wide read's first-row
+    /// guard exists to prevent. The cut is <c>darling_schema_version.applied_at</c> for version 138: a SET
+    /// is reported only when the snapshot it is compared against was itself taken at or after V138 was
+    /// applied, i.e. it could have held the override and did not. A store with no V138 stamp compares
+    /// against NULL and reports no SETs, which is the conservative failure. RESET and value changes need no
+    /// cut: neither can be manufactured by a snapshot that predates the rows.</para>
+    ///
+    /// <para><b>Bounded like the server-wide read.</b> Both snapshots of every pair are inside
+    /// <c>[$2, $3]</c> (the pairing is over the windowed instants, so the window's first snapshot has no
+    /// predecessor and reports nothing, exactly as the LAG read does), both <c>FROM</c>s are
+    /// <c>server_id = $1</c> plus the window and ride <c>idx_pg_server_config_time</c>, and no index is
+    /// added. The session-scoped <c>source</c> filter the server-wide read carries is not repeated: an override
+    /// row's <c>source</c> is the collector's own <c>database</c> / <c>role</c> / <c>database+role</c>
+    /// stamp, never a pg_settings session source. An override has no unit, context or description in the
+    /// catalog, so none is projected.</para>
+    /// </summary>
+    public const string ScopedConfigChangesSql = """
+        WITH snapshots AS (
+            SELECT
+                s.collection_time,
+                LAG(s.collection_time) OVER (ORDER BY s.collection_time) AS prev_time
+            FROM (
+                SELECT DISTINCT c.collection_time
+                FROM pg_server_config AS c
+                WHERE c.server_id = $1
+                AND   c.collection_time >= $2
+                AND   c.collection_time <= $3
+            ) AS s
+        ),
+        overrides AS (
+            SELECT
+                c.collection_time,
+                c.name,
+                c.database_name,
+                c.role_name,
+                c.setting,
+                c.source
+            FROM pg_server_config AS c
+            WHERE c.server_id = $1
+            AND   c.collection_time >= $2
+            AND   c.collection_time <= $3
+            AND   (c.database_name IS NOT NULL OR c.role_name IS NOT NULL)
+            AND   c.name IS NOT NULL
+        )
+        SELECT
+            cur.collection_time,
+            cur.name,
+            cur.database_name,
+            cur.role_name,
+            prev.setting AS prev_setting,
+            cur.setting,
+            cur.source,
+            CASE WHEN prev.name IS NULL THEN 'set' ELSE 'changed' END AS change_kind
+        FROM overrides AS cur
+        JOIN snapshots AS s
+          ON s.collection_time = cur.collection_time
+        LEFT JOIN overrides AS prev
+          ON prev.collection_time = s.prev_time
+         AND prev.name = cur.name
+         AND prev.database_name IS NOT DISTINCT FROM cur.database_name
+         AND prev.role_name IS NOT DISTINCT FROM cur.role_name
+        WHERE s.prev_time IS NOT NULL
+        AND   (   (prev.name IS NOT NULL AND prev.setting IS DISTINCT FROM cur.setting)
+               OR (prev.name IS NULL
+                   AND s.prev_time >= (SELECT v.applied_at
+                                       FROM darling_schema_version AS v
+                                       WHERE v.version = 138)))
+        UNION ALL
+        SELECT
+            s.collection_time,
+            prev.name,
+            prev.database_name,
+            prev.role_name,
+            prev.setting AS prev_setting,
+            NULL::text AS setting,
+            prev.source,
+            'reset' AS change_kind
+        FROM overrides AS prev
+        JOIN snapshots AS s
+          ON s.prev_time = prev.collection_time
+        WHERE NOT EXISTS (
+                  SELECT 1
+                  FROM overrides AS cur
+                  WHERE cur.collection_time = s.collection_time
+                  AND   cur.name = prev.name
+                  AND   cur.database_name IS NOT DISTINCT FROM prev.database_name
+                  AND   cur.role_name IS NOT DISTINCT FROM prev.role_name)
+        ORDER BY collection_time DESC, name, database_name NULLS FIRST, role_name NULLS FIRST
         LIMIT $4
         """;
 
@@ -364,12 +507,44 @@ public static class DarlingPgServerConfigReader
         return rows;
     }
 
+    /// <summary>
+    /// The change feed (#3937): the server-wide read and the scoped read, each capped at
+    /// <paramref name="limit"/>, merged newest first. At one <c>collection_time</c> the server-wide rows come
+    /// first (by name, their order unchanged) and the override rows after them (by name, then database, then
+    /// role). Each statement is asked for the full <paramref name="limit"/> because the merged first
+    /// <paramref name="limit"/> can come entirely from either one - so the tool's <c>limit + 1</c> over-fetch
+    /// still observes truncation over the union rather than over one half of it. On a store with no override
+    /// rows the scoped read returns nothing and the result is the server-wide read's rows exactly.
+    /// </summary>
     public static async Task<List<PgConfigChangeRow>> GetConfigChangesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
+        var serverWide = await ReadChangesAsync(postgres, ConfigChangesSql, scoped: false, serverId, startUtc, endUtc, limit, cancellationToken);
+        var scoped = await ReadChangesAsync(postgres, ScopedConfigChangesSql, scoped: true, serverId, startUtc, endUtc, limit, cancellationToken);
+        if (scoped.Count == 0)
+        {
+            return serverWide;
+        }
+
+        var merged = new List<PgConfigChangeRow>(Math.Min(limit, serverWide.Count + scoped.Count));
+        int w = 0, s = 0;
+        while (merged.Count < limit && (w < serverWide.Count || s < scoped.Count))
+        {
+            var takeServerWide = s >= scoped.Count
+                || (w < serverWide.Count && serverWide[w].ChangedAtUtc >= scoped[s].ChangedAtUtc);
+            merged.Add(takeServerWide ? serverWide[w++] : scoped[s++]);
+        }
+
+        return merged;
+    }
+
+    private static async Task<List<PgConfigChangeRow>> ReadChangesAsync(
+        NpgsqlDataSource postgres, string sql, bool scoped, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken)
+    {
         var rows = new List<PgConfigChangeRow>();
-        await using var command = postgres.CreateCommand(ConfigChangesSql);
+        await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
@@ -381,15 +556,30 @@ public static class DarlingPgServerConfigReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new PgConfigChangeRow(
-                reader.GetDateTime(0),
-                reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7)));
+            rows.Add(scoped
+                /* ScopedConfigChangesSql: collection_time, name, database_name, role_name, prev_setting,
+                   setting, source, change_kind. */
+                ? new PgConfigChangeRow(
+                    reader.GetDateTime(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    Unit: null,
+                    Context: null,
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    ShortDescription: null,
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.GetString(7))
+                : new PgConfigChangeRow(
+                    reader.GetDateTime(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
 
         return rows;

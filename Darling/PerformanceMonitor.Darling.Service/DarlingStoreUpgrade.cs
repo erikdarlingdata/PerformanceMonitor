@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
@@ -65,8 +66,29 @@ namespace PerformanceMonitor.Darling.Service;
 [SupportedOSPlatform("windows")]
 internal sealed class DarlingStoreUpgrade
 {
-    /// <summary>Records the SHA256 of the zip the extracted runtime came from — the change detector.</summary>
-    public const string RuntimeStampFileName = "pg-runtime.stamp";
+    /// <summary>
+    /// Records the SHA256 of the zip the extracted runtime came from: the change detector. Since #3908 it has
+    /// its own name, because the name it used to have belongs to <see cref="LegacyRuntimeStampFileName"/>.
+    /// </summary>
+    public const string RuntimeStampFileName = "pg-runtime.sha256";
+
+    /// <summary>
+    /// The stamp file releases 3.3.0 through 3.8.x read (#3908). This release keeps it pinned to
+    /// <see cref="LegacyRuntimePackageHash"/> on every start and never records its own package in it.
+    ///
+    /// <para>The reason is a rollback. After this release moves a store's TimescaleDB to its own version, an
+    /// operator who re-installs 3.3 to 3.8 gets that release's runtime-update code, which swaps in its own
+    /// runtime whenever this file disagrees with its package. That runtime cannot load the newer extension,
+    /// so the store would stop opening, and no alert can fire at that point. Every one of those releases
+    /// shipped the byte-identical pg-runtime.zip whose hash is <see cref="LegacyRuntimePackageHash"/> (verified
+    /// against 3.3.0, 3.4.0, 3.5.0, 3.6.0, 3.7.0, 3.7.1 and 3.8.0), and each returns early, keeping the
+    /// runtime it finds, when this file holds its own package's hash (verified by running 3.8.0's code
+    /// against the tree this release leaves). Releases before 3.3 never swap an extracted runtime.</para>
+    /// </summary>
+    public const string LegacyRuntimeStampFileName = "pg-runtime.stamp";
+
+    /// <summary>The SHA256 of the pg-runtime.zip shipped by every release from 3.3.0 through 3.8.x.</summary>
+    public const string LegacyRuntimePackageHash = "b8d8bcb54a0f57e941e417708e8eb06e7bbc3c07d01d6a7fcf0b93e9f4d38640";
 
     /// <summary>
     /// Records the SHA256 of a zip whose upgrade FAILED. A start that sees the same hash skips the swap
@@ -144,11 +166,12 @@ internal sealed class DarlingStoreUpgrade
         /// <summary>The data directory was upgraded to the bundled major and verified.</summary>
         Succeeded,
 
-        /// <summary>A step failed; the store reverted to its previous runtime + data directory and keeps running.</summary>
+        /// <summary>
+        /// A step failed before the commit point. <see cref="StoreUpgradeOutcome.PreUpgradeData"/> and
+        /// <see cref="StoreUpgradeOutcome.RuntimeReverted"/> say how much was put back; only the clean shape keeps the
+        /// store running on its previous major (#3927).
+        /// </summary>
         Failed,
-
-        /// <summary>Only the TimescaleDB extension moved (same PostgreSQL major) — the #1705 case.</summary>
-        ExtensionUpdated,
     }
 
     /// <summary>
@@ -858,7 +881,10 @@ internal sealed class DarlingStoreUpgrade
         var blockedPath = Path.Combine(runtimeRoot, RuntimeBlockedFileName);
 
         var zipHash = await Task.Run(() => ComputeFileHash(runtimeZipPath), cancellationToken);
-        var stamp = ReadTrimmedOrNull(stampPath);
+        /* A host's first start of this release has only the legacy stamp, which is its real package hash
+           (every 3.3-3.8 host's is LegacyRuntimePackageHash). After that the legacy file is pinned and this
+           release reads only its own. */
+        var stamp = ReadTrimmedOrNull(stampPath) ?? ReadTrimmedOrNull(Path.Combine(runtimeRoot, LegacyRuntimeStampFileName));
 
         if (string.Equals(stamp, zipHash, StringComparison.OrdinalIgnoreCase))
         {
@@ -955,6 +981,13 @@ internal sealed class DarlingStoreUpgrade
             return new RuntimeAdvance(false, null, zipHash);
         }
 
+        /* #3908: the same refusal for the extension. A package that cannot load the store's recorded TimescaleDB
+           is a rollback past what it carries, and the runtime on disk is the one that can open the store. */
+        if (PackageCannotLoadStore(dataDirectory, runtimeZipPath))
+        {
+            return new RuntimeAdvance(false, null, zipHash);
+        }
+
         var previousRoot = PreviousRuntimeRootFor(runtimeRoot);
         var previousPgsql = Path.Combine(previousRoot, "pgsql");
 
@@ -1036,6 +1069,7 @@ internal sealed class DarlingStoreUpgrade
         }
 
         File.WriteAllText(stampPath, zipHash);
+        PinLegacyRuntimeStamp(runtimeRoot, _logger);
         return new RuntimeAdvance(true, Path.Combine(previousPgsql, "bin"), zipHash);
     }
 
@@ -1270,37 +1304,84 @@ internal sealed class DarlingStoreUpgrade
         return version.Length > 0 && char.IsDigit(version[0]) ? version : null;
     }
 
-    /// <summary>The TimescaleDB version the EXTRACTED runtime carries, from its versioned library filename.</summary>
-    private static string? TryReadInstalledTimescaleVersion(string binDirectory)
+    /// <summary>
+    /// The TimescaleDB version the EXTRACTED runtime installs and updates to: its <c>timescaledb.control</c>
+    /// <c>default_version</c>. NOT the name of "the" versioned library: since #3908 a runtime also carries the
+    /// libraries of older releases (fetch-pg-runtime.ps1's <c>$tsCarried</c>), and whichever
+    /// <c>timescaledb-*.dll</c> a directory listing returns first is then an accident of name order.
+    /// </summary>
+    internal static string? TryReadInstalledTimescaleVersion(string binDirectory)
     {
         try
         {
             var pgsql = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(binDirectory));
-            if (pgsql is null)
+            var control = pgsql is null ? null : Path.Combine(pgsql, "share", "extension", "timescaledb.control");
+            return control is not null && File.Exists(control)
+                ? ParseTimescaleDefaultVersion(File.ReadAllText(control))
+                : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Unreadable control file answers "unknown", which the caller treats as a difference. */
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The TimescaleDB version a runtime ZIP installs and updates to, from its control file entry, read without
+    /// extracting. See <see cref="TryReadInstalledTimescaleVersion"/> for why this is not a library name.
+    /// </summary>
+    internal static string? TryReadZipTimescaleVersion(string zipPath)
+    {
+        try
+        {
+            using var archive = System.IO.Compression.ZipFile.OpenRead(zipPath);
+            var control = archive.GetEntry("pgsql/share/extension/timescaledb.control")
+                ?? archive.GetEntry("pgsql\\share\\extension\\timescaledb.control");
+            if (control is null)
             {
                 return null;
             }
 
-            foreach (var file in Directory.EnumerateFiles(Path.Combine(pgsql, "lib"), "timescaledb-*.dll"))
+            using var reader = new StreamReader(control.Open());
+            return ParseTimescaleDefaultVersion(reader.ReadToEnd());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            /* Unreadable archive answers "unknown". */
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Every TimescaleDB version the extracted runtime has both versioned libraries for: its own default plus the
+    /// carried builds of older releases (#3908). These are the versions a store's extension can be at and
+    /// still load, and the ones pg_upgrade can restore a store at. Empty when the directory cannot be read.
+    /// </summary>
+    internal static IReadOnlyList<string> TryReadTimescaleLibraryVersions(string pgsqlDirectory)
+    {
+        var names = new List<string>();
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(Path.Combine(pgsqlDirectory, "lib"), "timescaledb-*.dll"))
             {
-                var version = ParseTimescaleLibraryVersion(file);
-                if (version is not null)
-                {
-                    return version;
-                }
+                names.Add(file);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* Unreadable lib directory answers "unknown", which the caller treats as a difference. */
+            /* An unreadable lib directory carries nothing anyone can rely on. */
         }
 
-        return null;
+        return CompleteTimescaleLibraryVersions(names);
     }
 
-    /// <summary>The TimescaleDB version a runtime ZIP carries, read from its entry names alone — no extract.</summary>
-    internal static string? TryReadZipTimescaleVersion(string zipPath)
+    /// <summary>
+    /// <see cref="TryReadTimescaleLibraryVersions"/> for a runtime ZIP, from its entry names alone.
+    /// </summary>
+    internal static IReadOnlyList<string> TryReadZipTimescaleLibraryVersions(string zipPath)
     {
+        var names = new List<string>();
         try
         {
             using var archive = System.IO.Compression.ZipFile.OpenRead(zipPath);
@@ -1308,20 +1389,816 @@ internal sealed class DarlingStoreUpgrade
             {
                 if (entry.FullName.Replace('\\', '/').StartsWith("pgsql/lib/", StringComparison.OrdinalIgnoreCase))
                 {
-                    var version = ParseTimescaleLibraryVersion(entry.Name);
-                    if (version is not null)
-                    {
-                        return version;
-                    }
+                    names.Add(entry.Name);
                 }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
         {
-            /* Unreadable archive answers "unknown". */
+            /* Unreadable archive carries nothing anyone can rely on. */
         }
 
-        return null;
+        return CompleteTimescaleLibraryVersions(names);
+    }
+
+    /// <summary>
+    /// The versions with BOTH versioned libraries among <paramref name="fileNames"/> (#3908):
+    /// <c>timescaledb-V.dll</c> and <c>timescaledb-tsl-V.dll</c>. A version with only the first is not one a store
+    /// can run on: compression and continuous aggregates, which every Darling store uses, live in the TSL library.
+    /// </summary>
+    internal static IReadOnlyList<string> CompleteTimescaleLibraryVersions(IEnumerable<string> fileNames)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var fileName in fileNames)
+        {
+            names.Add(Path.GetFileName(fileName));
+        }
+
+        var versions = new List<string>();
+        foreach (var name in names)
+        {
+            if (ParseTimescaleLibraryVersion(name) is { } version
+                && names.Contains(string.Concat("timescaledb-tsl-", version, ".dll")))
+            {
+                versions.Add(version);
+            }
+        }
+
+        versions.Sort(StringComparer.Ordinal);
+        return versions;
+    }
+
+    /// <summary>
+    /// A TimescaleDB release version ("2.30.1"), or null for anything else, prerelease tags included. Strict,
+    /// because the bridge interpolates a version into <c>ALTER EXTENSION ... UPDATE TO</c> and the data
+    /// directory's record is parsed with it.
+    /// </summary>
+    internal static Version? ParseTimescaleVersion(string? text)
+    {
+        var parts = text?.Split('.');
+        if (parts is not { Length: 3 })
+        {
+            return null;
+        }
+
+        foreach (var part in parts)
+        {
+            if (part.Length is 0 or > 4)
+            {
+                return null;
+            }
+
+            foreach (var character in part)
+            {
+                if (!char.IsAsciiDigit(character))
+                {
+                    return null;
+                }
+            }
+        }
+
+        return new Version(text!);
+    }
+
+    /* ============================ the store's TimescaleDB extension (#3908) ============================ */
+
+    /// <summary>
+    /// <c>ALTER EXTENSION timescaledb UPDATE</c> as the FIRST and ONLY statement of a fresh session (#3908). That
+    /// is the only form TimescaleDB accepts. Its loader loads the versioned library for the installed version on
+    /// the first statement of any session in the database, so every other shape fails, each measured:
+    /// <list type="bullet">
+    /// <item>any statement first, when that library is absent, fails with 58P01 "could not access file";</item>
+    /// <item>when the library is present, TimescaleDB refuses the later ALTER ("cannot be updated after the old
+    /// version has already been loaded");</item>
+    /// <item>Npgsql's own type-loading query is a first statement, which is why the data source disables it;
+    /// the connection-string form of that switch is obsolete in Npgsql 9 and later.</item>
+    /// </list>
+    /// With <paramref name="toVersion"/> null the target is the runtime control file's default_version;
+    /// otherwise it is that version, which must parse as one because it is interpolated. The method decides
+    /// nothing: the caller has already read, on a separate session, that the extension is installed and not at
+    /// the target, and it verifies the result on another. Every failure throws, and a database without the
+    /// extension is one (42704), because the update script raises that same code for a catalog object it
+    /// expected and did not find (measured), so it cannot mean "absent" here. Only the CONNECTION is retried, on a
+    /// transport fault; the ALTER is sent once, because a statement that may have run for most of an hour is not
+    /// a transient to repeat.
+    /// </summary>
+    internal static async Task UpdateTimescaleAsFirstStatementAsync(
+        string ownerConnectionString, string database, CancellationToken cancellationToken, string? toVersion = null)
+    {
+        if (toVersion is not null && ParseTimescaleVersion(toVersion) is null)
+        {
+            throw new ArgumentException($"'{toVersion}' is not a TimescaleDB release version.", nameof(toVersion));
+        }
+
+        var connectionString = new NpgsqlConnectionStringBuilder(ownerConnectionString)
+        {
+            Database = database,
+            Pooling = false,
+            SearchPath = null,
+        }.ConnectionString;
+
+        var sourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
+        sourceBuilder.ConfigureTypeLoading(typeLoading => typeLoading.EnableTypeLoading(false));
+        await using var source = sourceBuilder.Build();
+        await using var connection = await WithTransportRetryAsync(
+            () => source.OpenConnectionAsync(cancellationToken).AsTask(), cancellationToken);
+        await using var update = new NpgsqlCommand(
+            toVersion is null ? "ALTER EXTENSION timescaledb UPDATE" : $"ALTER EXTENSION timescaledb UPDATE TO '{toVersion}'",
+            connection) { CommandTimeout = (int)s_bridgeTimeout.TotalSeconds };
+        await update.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// A database's installed TimescaleDB version, read on a session that tells the loader not to load any
+    /// versioned library (<c>timescaledb.disable_load</c>, measured on 2.28.1 and 2.30.1). The read works
+    /// whether or not this runtime carries the installed version's library, and it loads nothing, so a probe can
+    /// never be the session that pins the old library. Null when the extension is absent. Any failure throws,
+    /// because "unreadable" is not "absent".
+    /// </summary>
+    internal static async Task<string?> ReadTimescaleVersionUnloadedAsync(
+        string ownerConnectionString, string database, CancellationToken cancellationToken)
+    {
+        var connectionString = new NpgsqlConnectionStringBuilder(ownerConnectionString)
+        {
+            Database = database,
+            Pooling = false,
+            SearchPath = null,
+            Options = "-c timescaledb.disable_load=on",
+        }.ConnectionString;
+
+        await using var connection = await OpenWithTransportRetryAsync(connectionString, cancellationToken);
+        return await ReadExtversionAsync(connection, cancellationToken);
+    }
+
+    /// <summary>
+    /// The same read on an ORDINARY session, whose first statement loads the installed version's library. A
+    /// successful read therefore also proves the database opens on this runtime, which is the claim a verify has
+    /// to make.
+    /// </summary>
+    internal static async Task<string?> ReadTimescaleVersionLoadedAsync(
+        string ownerConnectionString, string database, CancellationToken cancellationToken)
+    {
+        var connectionString = new NpgsqlConnectionStringBuilder(ownerConnectionString)
+        {
+            Database = database,
+            Pooling = false,
+            SearchPath = null,
+        }.ConnectionString;
+
+        await using var connection = await OpenWithTransportRetryAsync(connectionString, cancellationToken);
+        return await ReadExtversionAsync(connection, cancellationToken);
+    }
+
+    private static async Task<string?> ReadExtversionAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    private static Task<NpgsqlConnection> OpenWithTransportRetryAsync(string connectionString, CancellationToken cancellationToken)
+        => WithTransportRetryAsync(
+            async () =>
+            {
+                var connection = new NpgsqlConnection(connectionString);
+                try
+                {
+                    await connection.OpenAsync(cancellationToken);
+                    return connection;
+                }
+                catch
+                {
+                    await connection.DisposeAsync();
+                    throw;
+                }
+            },
+            cancellationToken);
+
+    /* ---- the data directory's record of it ---- */
+
+    /// <summary>
+    /// The file in the data directory recording the store database's TimescaleDB version as last READ (#3908). In
+    /// the data directory rather than the runtime because it describes the data: it moves with a restored or
+    /// copied store, and a cluster pg_upgrade produces starts without one, which is right, because nothing has
+    /// read that cluster's extension yet.
+    ///
+    /// <para>An ABSENT extension is recorded together with the runtime version it was read under, and means
+    /// "nothing to move" only while that runtime is the one shipping. The first start of a new store reads it
+    /// before the worker creates the extension, at the runtime's own version, so the next start on the same
+    /// runtime has nothing to move either. An unqualified "absent" skipped the update after a runtime change,
+    /// which the gated tests caught.</para>
+    /// </summary>
+    internal const string TimescaleRecordFileName = "darling-timescaledb.version";
+
+    internal enum TimescaleRecordState
+    {
+        /// <summary>The store database's extension was read at <see cref="TimescaleRecord.Version"/>.</summary>
+        Current,
+
+        /// <summary>
+        /// An update from <see cref="TimescaleRecord.Version"/> to <see cref="TimescaleRecord.PendingTo"/> started
+        /// and nothing has read the result, so the store is at one of the two.
+        /// </summary>
+        Pending,
+
+        /// <summary>
+        /// The store database had no timescaledb extension when read under the runtime whose TimescaleDB is
+        /// <see cref="TimescaleRecord.Version"/>. It carries no library requirement.
+        /// </summary>
+        Absent,
+    }
+
+    internal sealed record TimescaleRecord(TimescaleRecordState State, string? Version = null, string? PendingTo = null)
+    {
+        /// <summary>The versions the store database can be at: what a runtime must carry libraries for to open it.</summary>
+        public IReadOnlyList<string> StoreVersions => State switch
+        {
+            TimescaleRecordState.Current => [Version!],
+            TimescaleRecordState.Pending => [Version!, PendingTo!],
+            _ => [],
+        };
+
+        public string Format() => State switch
+        {
+            TimescaleRecordState.Current => Version!,
+            TimescaleRecordState.Pending => $"pending {Version} {PendingTo}",
+            _ => $"absent {Version}",
+        };
+    }
+
+    /// <summary>The record's one line, parsed. Null for anything malformed, which every caller treats as no record.</summary>
+    internal static TimescaleRecord? ParseTimescaleRecord(string? text)
+    {
+        var parts = text?.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? Array.Empty<string>();
+        return parts switch
+        {
+            [var version] when ParseTimescaleVersion(version) is not null
+                => new TimescaleRecord(TimescaleRecordState.Current, version),
+            ["pending", var from, var to] when ParseTimescaleVersion(from) is not null && ParseTimescaleVersion(to) is not null
+                => new TimescaleRecord(TimescaleRecordState.Pending, from, to),
+            ["absent", var runtime] when ParseTimescaleVersion(runtime) is not null
+                => new TimescaleRecord(TimescaleRecordState.Absent, runtime),
+            _ => null,
+        };
+    }
+
+    internal static TimescaleRecord? ReadTimescaleRecord(string dataDirectory)
+        => ParseTimescaleRecord(ReadTrimmedOrNull(Path.Combine(dataDirectory, TimescaleRecordFileName)));
+
+    /// <summary>Writes the record. Bookkeeping, so never a failure: one that will not write is logged and the start goes on.</summary>
+    internal static void WriteTimescaleRecord(string dataDirectory, TimescaleRecord record, ILogger logger)
+    {
+        var path = Path.Combine(dataDirectory, TimescaleRecordFileName);
+        try
+        {
+            File.WriteAllText(path, record.Format());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(
+                "Could not record the store's TimescaleDB state in {Path} ({Message}). The next start reads it again, at the cost of one extra start and stop of the store.",
+                path, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Whether this start runs the quiesced update (#3908), PURE so the gate is pinned without a cluster. It runs
+    /// unless the record says the store is already at the runtime's version, or had no extension under this same
+    /// runtime. No record (a store this release has not read yet, a cluster pg_upgrade just produced) and a
+    /// pending one (a start that stopped mid-update) both run it, and on a store that turns out current it moves
+    /// nothing.
+    /// </summary>
+    internal static bool NeedsQuiescedTimescaleUpdate(TimescaleRecord? record, string? bundledTimescaleVersion)
+    {
+        if (string.IsNullOrEmpty(bundledTimescaleVersion))
+        {
+            return false;
+        }
+
+        return record is not { State: TimescaleRecordState.Current or TimescaleRecordState.Absent }
+            || !string.Equals(record.Version, bundledTimescaleVersion, StringComparison.Ordinal);
+    }
+
+    /* ---- what a start did to it ---- */
+
+    internal enum TimescaleUpdateStatus
+    {
+        /// <summary>Nothing to report: already current, no extension, or nothing ran and nothing needed to.</summary>
+        None,
+
+        /// <summary>The extension moved to the runtime's version before the store opened.</summary>
+        Updated,
+
+        /// <summary>
+        /// The update ran and did not reach the runtime's version. The store opens on the version it had, whose
+        /// library the runtime carries.
+        /// </summary>
+        Failed,
+
+        /// <summary>After start, the extension is not the runtime's version, and no update ran this start.</summary>
+        Behind,
+    }
+
+    /// <summary>
+    /// What this start did to the store database's TimescaleDB extension (#3908), carried out of the bootstrap
+    /// like <see cref="StoreUpgradeOutcome"/> and alerted separately from it: a start that upgrades the PostgreSQL
+    /// major and then cannot move the extension has two things to say, and one alert would have to drop one.
+    /// </summary>
+    internal sealed record TimescaleUpdateOutcome(TimescaleUpdateStatus Status, string? From, string? To, string? Message)
+    {
+        public static TimescaleUpdateOutcome None { get; } = new(TimescaleUpdateStatus.None, null, null, null);
+    }
+
+    /* ---- the quiesced update ---- */
+
+    /// <summary>
+    /// The file that exists while <see cref="UpdateTimescaleQuiescedAsync"/> may have a server running on its
+    /// private port, holding that port. See <see cref="StopQuiescedUpdateOrphanAsync"/>.
+    /// </summary>
+    internal const string QuiescedUpdateMarkerFileName = "darling-timescaledb-update.port";
+
+    /// <summary>
+    /// The quiesced start's server options, after the loopback listen <see cref="StartClusterAsync"/> sets.
+    /// TimescaleDB's background workers off, so the scheduler cannot load the old library or run a job
+    /// mid-update. Autovacuum off, because with its one-second naptime it otherwise ran sixteen times inside the
+    /// window (measured), for nothing.
+    /// </summary>
+    private const string QuiescedUpdateServerOptions = " -c timescaledb.max_background_workers=0 -c autovacuum=off";
+
+    /// <summary>
+    /// How long the quiesced start may take to accept connections. Generous, because crash recovery lands here
+    /// now: this is the first start after whatever stopped the store last.
+    /// </summary>
+    private const int QuiescedStartWaitSeconds = 900;
+
+    /// <summary>
+    /// Moves the store's TimescaleDB extension to the runtime's own version while nothing else can reach the
+    /// store (#3908). The cluster is started with <paramref name="binDirectory"/> on a private loopback port, with
+    /// TimescaleDB's background workers and autovacuum off. No service component, Viewer seat or scheduled job can
+    /// reach it, so the only sessions are this method's. In every database that allows connections, the version is
+    /// read on a session that loads nothing (<see cref="ReadTimescaleVersionUnloadedAsync"/>); a database behind
+    /// the runtime gets <see cref="UpdateTimescaleAsFirstStatementAsync"/> and then an ordinary session that both
+    /// reads the result and proves the new library loads. Then the cluster is stopped, confirmed, and the normal
+    /// start brings the scheduler up on the new version.
+    ///
+    /// <para>Why not after the normal start, where the update used to run: measured, every session that had
+    /// touched the old library died on its next statement once the extension moved ("already loaded with a
+    /// different version"), parallel queries failed, and the update's own pre-update step killed running jobs,
+    /// which the scheduler then held in crash backoff for up to an hour. The web host, MCP host, Viewer seats and
+    /// the scheduler are all connected by then.</para>
+    ///
+    /// <para>The STORE database (<see cref="DarlingManagedPostgres.DatabaseName"/>) decides the outcome. Another
+    /// database's failure is logged and ignored, because the only outage here is a store that cannot open. A
+    /// failure never reverts anything: the runtime carries the library of every TimescaleDB version this service
+    /// has shipped, so a store whose update failed opens on its own version, and the returned outcome says so.
+    /// Never throws except on cancellation, and the cluster is stopped whatever happened. The record is written
+    /// "pending" before the store's ALTER, so a start that stops after the ALTER commits still names both
+    /// versions for the rollback guard; the post-start read writes the final one.</para>
+    /// </summary>
+    internal async Task<TimescaleUpdateOutcome> UpdateTimescaleQuiescedAsync(
+        string binDirectory, string dataDirectory, string password, string bundledTimescaleVersion, CancellationToken cancellationToken)
+    {
+        var marker = Path.Combine(dataDirectory, QuiescedUpdateMarkerFileName);
+        int port;
+        try
+        {
+            port = FindFreeLoopbackPort();
+
+            /* Without the marker, a server this start could not stop would be adopted as the store. */
+            File.WriteAllText(marker, port.ToString(CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Net.Sockets.SocketException)
+        {
+            _logger.LogCritical(
+                "The TimescaleDB update did not start: {Message}. Nothing was touched, and the store opens on the version it has; the update is retried on the next service start.",
+                ex.Message);
+            return new TimescaleUpdateOutcome(
+                TimescaleUpdateStatus.Failed, null, bundledTimescaleVersion,
+                $"the update could not prepare its private start ({ex.Message})");
+        }
+
+        var owner = DarlingManagedPostgres.BuildConnectionString(port, password);
+
+        string? before = null;
+        try
+        {
+            _logger.LogInformation(
+                "Checking the store's TimescaleDB against the runtime's {Version} before the store opens (#3908): starting it on private port {Port} with background workers off.",
+                bundledTimescaleVersion, port);
+            await StartClusterAsync(binDirectory, dataDirectory, port, cancellationToken, QuiescedUpdateServerOptions, QuiescedStartWaitSeconds);
+
+            string? after = null;
+            foreach (var database in await ListConnectableDatabasesAsync(owner, cancellationToken))
+            {
+                var isStore = string.Equals(database, DarlingManagedPostgres.DatabaseName, StringComparison.Ordinal);
+                string? found = null;
+                try
+                {
+                    found = await ReadTimescaleVersionUnloadedAsync(owner, database, cancellationToken);
+                    if (isStore)
+                    {
+                        before = found;
+                        after = found;
+                    }
+
+                    if (found is null || string.Equals(found, bundledTimescaleVersion, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (isStore)
+                    {
+                        WriteTimescaleRecord(
+                            dataDirectory, new TimescaleRecord(TimescaleRecordState.Pending, found, bundledTimescaleVersion), _logger);
+                    }
+
+                    await UpdateTimescaleAsFirstStatementAsync(owner, database, cancellationToken);
+                    var moved = await ReadTimescaleVersionLoadedAsync(owner, database, cancellationToken);
+                    if (!string.Equals(moved, bundledTimescaleVersion, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            $"TimescaleDB in database '{database}' is {moved ?? "(absent)"} after ALTER EXTENSION UPDATE, not the runtime's {bundledTimescaleVersion}");
+                    }
+
+                    if (isStore)
+                    {
+                        after = moved;
+                    }
+
+                    _logger.LogWarning(
+                        "TimescaleDB in database '{Database}' updated {From} -> {To} before the store opened (#3908).",
+                        database, found, moved);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && !isStore)
+                {
+                    _logger.LogWarning(
+                        "Could not update TimescaleDB in database '{Database}' ({Message}). It is not the store database, so the store opens regardless; '{Database}' keeps TimescaleDB {Found}, and opens only while the runtime carries that version's libraries.",
+                        database, ex.Message, database, found ?? "(unread)");
+                }
+            }
+
+            return before is not null && !string.Equals(before, after, StringComparison.Ordinal)
+                ? new TimescaleUpdateOutcome(TimescaleUpdateStatus.Updated, before, after, null)
+                : TimescaleUpdateOutcome.None;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogCritical(
+                "Could not update the store's TimescaleDB from {From} to {To} ({Message}). Nothing is reverted: the store opens on the version it has, whose library the runtime carries. The update is retried on the next service start.",
+                before ?? "(unread)", bundledTimescaleVersion, ex.Message);
+            return new TimescaleUpdateOutcome(TimescaleUpdateStatus.Failed, before, bundledTimescaleVersion, ex.Message);
+        }
+        finally
+        {
+            /* Whatever happened, cancellation included, and whether or not the start reported success: a start
+               that timed out may still have a postmaster recovering behind it. */
+            if (await StopClusterConfirmedAsync(binDirectory, dataDirectory))
+            {
+                TryDeleteFile(marker);
+            }
+            else
+            {
+                _logger.LogCritical(
+                    "The server started on private port {Port} to update TimescaleDB would not stop. {Marker} is kept, so the next start recognizes the server and stops it rather than adopting it as the store.",
+                    port, marker);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stops a server <see cref="UpdateTimescaleQuiescedAsync"/> left on its private port (#3908), which happens
+    /// only when the process died, or the stop failed, between that start and its confirmed stop. The marker
+    /// holds the port, and the running postmaster must be on it (<c>postmaster.pid</c>'s fourth line): a server
+    /// on any other port was started by someone else after the marker was left, and is adopted as usual. Without
+    /// this the normal start would adopt the orphan (<c>pg_ctl status</c> answers "running" for a postmaster on
+    /// any port), then fail to reach it on the configured port, and every runtime update would be deferred behind
+    /// it. Returns false only when such an orphan is running and will not stop.
+    /// </summary>
+    internal async Task<bool> StopQuiescedUpdateOrphanAsync(string binDirectory, string dataDirectory)
+    {
+        var marker = Path.Combine(dataDirectory, QuiescedUpdateMarkerFileName);
+        var markedPort = ReadTrimmedOrNull(marker);
+        if (markedPort is null)
+        {
+            return true;
+        }
+
+        if (string.Equals(TryReadPostmasterPort(dataDirectory), markedPort, StringComparison.Ordinal))
+        {
+            _logger.LogWarning(
+                "Found the store on private port {Port}, where a TimescaleDB update this service started left it (#3908). Stopping it before the normal start.",
+                markedPort);
+            if (!await StopClusterConfirmedAsync(binDirectory, dataDirectory))
+            {
+                return false;
+            }
+        }
+
+        TryDeleteFile(marker);
+        return true;
+    }
+
+    /// <summary>The port a <c>postmaster.pid</c> records (its fourth line), or null when there is no readable file.</summary>
+    internal static string? TryReadPostmasterPort(string dataDirectory)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                Path.Combine(dataDirectory, "postmaster.pid"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            for (var line = 1; ; line++)
+            {
+                var text = reader.ReadLine();
+                if (text is null)
+                {
+                    return null;
+                }
+
+                if (line == 4)
+                {
+                    return text.Trim();
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Stops the cluster on <paramref name="dataDirectory"/> and CONFIRMS it is down: a fast shutdown, then an
+    /// immediate one if that did not take, and <c>pg_ctl status</c> must answer "not running" (3). Never throws.
+    /// Confirmation is the point. A runtime directory moves under a live postmaster on Windows (measured), and a
+    /// postmaster left behind on a private port is adopted by the next start, which then cannot reach it.
+    /// </summary>
+    private async Task<bool> StopClusterConfirmedAsync(string binDirectory, string dataDirectory)
+    {
+        var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
+        foreach (var mode in new[] { "fast", "immediate" })
+        {
+            if (await IsStoppedAsync())
+            {
+                return true;
+            }
+
+            try
+            {
+                var (exitCode, output) = await DarlingManagedPostgres.RunToolAsync(
+                    pgCtl, $"stop -D \"{dataDirectory}\" -m {mode} -w -t 120", s_toolTimeout, CancellationToken.None);
+                if (exitCode != 0)
+                {
+                    _logger.LogWarning(
+                        "pg_ctl stop -m {Mode} reported exit code {ExitCode}: {Output}",
+                        mode, exitCode, DarlingToolExitCode.FormatOutput(output, exitCode));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("pg_ctl stop -m {Mode} failed: {Message}", mode, ex.Message);
+            }
+        }
+
+        return await IsStoppedAsync();
+
+        async Task<bool> IsStoppedAsync()
+        {
+            try
+            {
+                var (exitCode, _) = await DarlingManagedPostgres.RunToolAsync(
+                    pgCtl, $"status -D \"{dataDirectory}\"", s_toolTimeout, CancellationToken.None);
+                return exitCode == 3;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The store's TimescaleDB after the normal start (#3908): read it, record it, and settle what this start
+    /// reports. Read on an ordinary session of the running store, so the version is the one every session now
+    /// loads. The record is written from what was READ, never from what was intended, so a stale record corrects
+    /// itself here and the next start's gate acts on the truth. Returns the outcome and the version read. Never
+    /// throws except on cancellation: the store is up, and the worst this can do is fail to report.
+    /// </summary>
+    internal async Task<(TimescaleUpdateOutcome Outcome, string? Installed)> VerifyTimescaleAfterStartAsync(
+        string ownerConnectionString,
+        string dataDirectory,
+        string bundledTimescaleVersion,
+        TimescaleUpdateOutcome quiesced,
+        CancellationToken cancellationToken)
+    {
+        string? installed;
+        try
+        {
+            installed = await ReadTimescaleVersionLoadedAsync(ownerConnectionString, DarlingManagedPostgres.DatabaseName, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogCritical(
+                "Could not read the store's TimescaleDB version after start ({Message}). The store is running; check its extension with SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'.",
+                ex.Message);
+            return (quiesced, null);
+        }
+
+        if (installed is null)
+        {
+            /* Recorded under this runtime (see TimescaleRecordFileName), so the next start on it has nothing to
+               read, and the first start after a runtime change reads it again. */
+            WriteTimescaleRecord(dataDirectory, new TimescaleRecord(TimescaleRecordState.Absent, bundledTimescaleVersion), _logger);
+            return (TimescaleUpdateOutcome.None, null);
+        }
+
+        WriteTimescaleRecord(dataDirectory, new TimescaleRecord(TimescaleRecordState.Current, installed), _logger);
+
+        if (string.Equals(installed, bundledTimescaleVersion, StringComparison.Ordinal))
+        {
+            if (quiesced.Status != TimescaleUpdateStatus.Failed)
+            {
+                return (quiesced, installed);
+            }
+
+            /* A reported failure, and yet the store is current: either its ALTER committed and a later step
+               failed (an update that landed), or the step failed before it read anything and the store was
+               already current (nothing moved). Neither is anything to alert on, and the log says which. */
+            if (quiesced.From is not null && !string.Equals(quiesced.From, installed, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "The TimescaleDB update reported a failure after its ALTER committed ({Message}); the store is on {Installed}, the runtime's version, so the update {From} -> {Installed} landed.",
+                    quiesced.Message, installed, quiesced.From, installed);
+                return (quiesced with { Status = TimescaleUpdateStatus.Updated, To = installed, Message = null }, installed);
+            }
+
+            _logger.LogInformation(
+                "The store's TimescaleDB is already {Installed}, the runtime's version; the update step that failed ({Message}) had nothing to move.",
+                installed, quiesced.Message);
+            return (TimescaleUpdateOutcome.None, installed);
+        }
+
+        if (quiesced.Status == TimescaleUpdateStatus.Failed)
+        {
+            return (quiesced with { From = installed }, installed);
+        }
+
+        _logger.LogCritical(
+            "The store's TimescaleDB is {Installed}, but this runtime ships {Bundled}, and no update ran this start. It moves the next time this service starts the store itself, before anything can connect; a server started by something else, or one this service adopted, keeps this version until then.",
+            installed, bundledTimescaleVersion);
+        return (new TimescaleUpdateOutcome(TimescaleUpdateStatus.Behind, installed, bundledTimescaleVersion, null), installed);
+    }
+
+    /// <summary>
+    /// Whether the shipped package cannot open this store's TimescaleDB (#3908's rollback guard, for the releases
+    /// after this one). The data directory's record names the version or versions the store database can be at,
+    /// and a package without both libraries for each cannot load it: swapping it in would take the store down with
+    /// no alert able to say why. That is what re-installing this release over a later one looks like, once the
+    /// later one has moved the extension past anything this package carries. Refusing keeps the runtime on disk,
+    /// which is the one that opened the store last. The stamp is not written, so the refusal repeats until a
+    /// package that can load the store ships. No record abstains.
+    /// </summary>
+    private bool PackageCannotLoadStore(string dataDirectory, string runtimeZipPath)
+    {
+        var missing = MissingTimescaleLibraries(dataDirectory, runtimeZipPath);
+        if (missing.Count == 0)
+        {
+            return false;
+        }
+
+        var record = ReadTimescaleRecord(dataDirectory)!;
+        var carried = TryReadZipTimescaleLibraryVersions(runtimeZipPath);
+
+        _logger.LogWarning(
+            "Keeping the extracted Postgres runtime instead of the shipped one at {Zip}: this store's TimescaleDB is {Store} (recorded in {Record}), and the package has no libraries for {Missing} (it carries {Carried}), so it could not open the store. This is what installing an older release over a newer one looks like. The runtime on disk, which opened the store last, stays until a package that carries TimescaleDB {Missing} ships.",
+            runtimeZipPath,
+            string.Join(" or ", record.StoreVersions),
+            Path.Combine(dataDirectory, TimescaleRecordFileName),
+            string.Join(" and ", missing),
+            carried.Count == 0 ? "none" : string.Join(", ", carried),
+            string.Join(" and ", missing));
+        return true;
+    }
+
+    /// <summary>
+    /// The store's recorded TimescaleDB versions that <paramref name="runtimeZipPath"/> has no libraries for
+    /// (#3908). Empty when there is no record, or the record names no version. Shared by the swap path's
+    /// refusal and the first-extraction guard, so the two cannot disagree about what "can open the store" means.
+    /// </summary>
+    internal static IReadOnlyList<string> MissingTimescaleLibraries(string dataDirectory, string runtimeZipPath)
+    {
+        var record = ReadTimescaleRecord(dataDirectory);
+        if (record is null || record.StoreVersions.Count == 0)
+        {
+            return [];
+        }
+
+        var carried = TryReadZipTimescaleLibraryVersions(runtimeZipPath);
+        var missing = new List<string>();
+        foreach (var version in record.StoreVersions)
+        {
+            if (!carried.Contains(version, StringComparer.Ordinal))
+            {
+                missing.Add(version);
+            }
+        }
+
+        return missing;
+    }
+
+    /// <summary>
+    /// What the bridge does to one database's extension before pg_upgrade (#3908). <see cref="Needed"/> false: the
+    /// new runtime carries the installed version's libraries, so pg_upgrade restores it as it is and the quiesced
+    /// update moves it after the upgrade commits. Otherwise <see cref="Target"/> is the version to move it to, or
+    /// null when there is none and the upgrade cannot proceed.
+    /// </summary>
+    internal sealed record TimescaleBridgePlan(bool Needed, string? Target);
+
+    /// <summary>
+    /// The bridge decision, PURE (#3908). The one version the OLD runtime can update to is its own default: a
+    /// version it merely carries has libraries but no update scripts, so an ALTER cannot reach it. That default is
+    /// the target when it is above the installed version and the new runtime carries its libraries, so it can
+    /// restore the result. Anything else leaves no target.
+    /// </summary>
+    internal static TimescaleBridgePlan PlanTimescaleBridge(
+        string installed, IReadOnlyCollection<string> newRuntimeLibraries, string? oldRuntimeDefaultVersion)
+    {
+        if (newRuntimeLibraries.Contains(installed, StringComparer.Ordinal))
+        {
+            return new TimescaleBridgePlan(false, null);
+        }
+
+        var target = ParseTimescaleVersion(oldRuntimeDefaultVersion);
+        var floor = ParseTimescaleVersion(installed);
+        var reachable = target is not null
+            && (floor is null || target > floor)
+            && newRuntimeLibraries.Contains(oldRuntimeDefaultVersion!, StringComparer.Ordinal);
+
+        return new TimescaleBridgePlan(true, reachable ? oldRuntimeDefaultVersion : null);
+    }
+
+    /// <summary>
+    /// The databases that allow connections, read from <c>postgres</c>. If that read fails (a <c>postgres</c> that
+    /// itself carries an unloadable extension), the store database alone is returned: it is the one that matters.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> ListConnectableDatabasesAsync(string ownerConnectionString, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var builder = new NpgsqlConnectionStringBuilder(ownerConnectionString) { Database = "postgres", Pooling = false, SearchPath = null };
+            await using var connection = await OpenWithTransportRetryAsync(builder.ConnectionString, cancellationToken);
+            await using var command = new NpgsqlCommand(
+                "SELECT datname FROM pg_database WHERE datallowconn ORDER BY datname", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var databases = new List<string>();
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                databases.Add(reader.GetString(0));
+            }
+
+            return databases;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("Could not list the cluster's databases ({Message}); updating TimescaleDB in the store database only.", ex.Message);
+            return new[] { DarlingManagedPostgres.DatabaseName };
+        }
+    }
+
+    /// <summary>
+    /// Retries <paramref name="action"/> on a TRANSPORT fault only (a backend that lost the post-start
+    /// shared-memory race, #2185), the same classification <c>EnsureDatabaseAsync</c> uses. Every caller wraps a
+    /// connection OPEN in it and nothing else, so what a retry repeats is a connection attempt, never a
+    /// statement. Any PostgreSQL error is an answer, not a transient, and propagates at once.
+    /// </summary>
+    private static async Task<T> WithTransportRetryAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
+    {
+        const int attempts = 6;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await action();
+            }
+            catch (Exception ex) when (attempt < attempts && PostgresTransportFault.IsTransportFault(ex))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>A loopback TCP port nothing is listening on right now, for a cluster only this process will use.</summary>
+    internal static int FindFreeLoopbackPort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
     }
 
     /// <summary>The extracted runtime's <c>pg_ctl --version</c> line, or null when it will not report one.</summary>
@@ -1340,6 +2217,30 @@ internal sealed class DarlingStoreUpgrade
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Keeps <see cref="LegacyRuntimeStampFileName"/> holding <see cref="LegacyRuntimePackageHash"/> (#3908), so
+    /// a rollback to 3.3 through 3.8 keeps the runtime it finds instead of swapping in one that cannot load the
+    /// store. Called on every start, the first extraction included. Best effort: a failure is logged, and the
+    /// store this release runs is unaffected either way.
+    /// </summary>
+    internal static void PinLegacyRuntimeStamp(string runtimeRoot, ILogger logger)
+    {
+        var legacyPath = Path.Combine(runtimeRoot, LegacyRuntimeStampFileName);
+        try
+        {
+            if (!string.Equals(ReadTrimmedOrNull(legacyPath), LegacyRuntimePackageHash, StringComparison.OrdinalIgnoreCase))
+            {
+                File.WriteAllText(legacyPath, LegacyRuntimePackageHash);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(
+                "Could not pin {Path} ({Message}). Only a rollback to 3.3 through 3.8 depends on it: such a release could swap in a runtime that cannot load this store.",
+                legacyPath, ex.Message);
         }
     }
 
@@ -1650,6 +2551,7 @@ internal sealed class DarlingStoreUpgrade
            than either alone, because the alert is the surface someone actually receives. */
         string? postCommitWarning = null;
         string? fromTimescale = null;
+        string? restoredTimescale = null;
         var mode = FileTransferMode.Copy;
 
         _logger.LogWarning(
@@ -1686,7 +2588,9 @@ internal sealed class DarlingStoreUpgrade
                     place the cluster's real locale/encoding/checksum identity and its TimescaleDB version
                     can be read rather than assumed ---- */
             step = "start-old-cluster";
-            await StartClusterAsync(context.OldBinDirectory, context.DataDirectory, context.Port, cancellationToken);
+            /* Quiesced, like the TimescaleDB update (#3908): nothing here needs the scheduler or autovacuum, and a
+               bridge ALTER must not race a job that loaded the old library. */
+            await StartClusterAsync(context.OldBinDirectory, context.DataDirectory, context.Port, cancellationToken, QuiescedUpdateServerOptions);
             oldStarted = true;
 
             step = "read-cluster-identity";
@@ -1697,11 +2601,15 @@ internal sealed class DarlingStoreUpgrade
                 identity.Encoding, identity.Collate, identity.Ctype, identity.LocaleProvider ?? "(none)", identity.DataChecksums ? "on" : "off");
 
             /* ---- 3. the TimescaleDB bridge: pg_upgrade recreates the extension pinned at the version the
-                    OLD cluster has, and the NEW runtime ships exactly one versioned library. Mismatch here
-                    is a guaranteed upgrade failure later, so it is a hard gate, not best-effort. ---- */
+                    OLD cluster has, so the NEW runtime must carry that version's libraries. Mismatch here is a
+                    guaranteed upgrade failure later, so it is a hard gate, not best-effort. ---- */
             step = "timescaledb-bridge";
-            fromTimescale = await BridgeTimescaleAsync(
-                context.Port, context.UserName, context.Password, context.BundledTimescaleVersion, cancellationToken);
+            (fromTimescale, restoredTimescale) = await BridgeTimescaleAsync(
+                context.Port,
+                context.Password,
+                TryReadTimescaleLibraryVersions(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(context.NewBinDirectory))!),
+                TryReadInstalledTimescaleVersion(context.OldBinDirectory),
+                cancellationToken);
 
             /* ---- 4. stop the old cluster cleanly — pg_upgrade refuses to run against a live or
                     unclean-shutdown cluster ---- */
@@ -1853,11 +2761,13 @@ internal sealed class DarlingStoreUpgrade
 
             _logger.LogWarning(
                 "STORE UPGRADE COMPLETE: PostgreSQL {Old} -> {New}, TimescaleDB {FromTs} -> {ToTs}. Verifying the upgraded store now.",
-                context.OldMajor, context.NewMajor, fromTimescale ?? "(none)", context.BundledTimescaleVersion);
+                context.OldMajor, context.NewMajor, fromTimescale ?? "(none)", restoredTimescale ?? "(none)");
 
+            /* ToTimescale is the version pg_upgrade restored. The quiesced update moves it to the runtime's own
+               version next, and the bootstrap reports where it ended up (#3908). */
             return new StoreUpgradeOutcome(
                 StoreUpgradeStatus.Succeeded, context.OldMajor, context.NewMajor,
-                fromTimescale, context.BundledTimescaleVersion, null, postCommitWarning, mode == FileTransferMode.Link);
+                fromTimescale, restoredTimescale, null, postCommitWarning, mode == FileTransferMode.Link);
         }
         catch (OperationCanceledException)
         {
@@ -2191,7 +3101,13 @@ internal sealed class DarlingStoreUpgrade
     /// upgrade window is not the time to reconcile exposure. Uses the detaching runner because pg_ctl's
     /// spawned postmaster outlives it and inherits redirected handles (the redirect-on-start hang).
     /// </summary>
-    private async Task StartClusterAsync(string binDirectory, string dataDirectory, int port, CancellationToken cancellationToken)
+    private async Task StartClusterAsync(
+        string binDirectory,
+        string dataDirectory,
+        int port,
+        CancellationToken cancellationToken,
+        string extraServerOptions = "",
+        int waitSeconds = 120)
     {
         var serverLog = Path.Combine(
             Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)))!,
@@ -2200,15 +3116,36 @@ internal sealed class DarlingStoreUpgrade
         var pgCtl = Path.Combine(binDirectory, "pg_ctl.exe");
         var exitCode = await DarlingManagedPostgres.RunDetachingToolAsync(
             pgCtl,
-            $"-D \"{dataDirectory}\" -o \"-p {port} -c listen_addresses=127.0.0.1\" -l \"{serverLog}\" -w -t 120 start",
-            TimeSpan.FromMinutes(5),
+            $"-D \"{dataDirectory}\" -o \"-p {port} -c listen_addresses=127.0.0.1{extraServerOptions}\" -l \"{serverLog}\" -w -t {waitSeconds} start",
+            TimeSpan.FromSeconds(waitSeconds + 180),
             cancellationToken);
 
         if (exitCode != 0)
         {
             throw new InvalidOperationException(
                 $"could not start the cluster in {dataDirectory} with the runtime at {binDirectory} (pg_ctl exit {DarlingToolExitCode.Describe(exitCode)})" +
-                DarlingToolExitCode.Diagnose(exitCode, pgCtl));
+                DarlingToolExitCode.Diagnose(exitCode, pgCtl) +
+                $"\nServer log tail:\n{ReadLogTail(DarlingManagedPostgres.PickNewestServerLog(serverLog, dataDirectory) ?? serverLog)}");
+        }
+    }
+
+    /// <summary>
+    /// The last lines of a server log, where PostgreSQL explains a failed start. Reads only the file's end, since
+    /// the store's log is long-lived, and shares the file with the server that may still be writing it.
+    /// </summary>
+    private static string ReadLogTail(string logPath)
+    {
+        try
+        {
+            using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            stream.Seek(Math.Max(0, stream.Length - 16384), SeekOrigin.Begin);
+            using var reader = new StreamReader(stream);
+            var lines = reader.ReadToEnd().Split('\n');
+            return string.Join('\n', lines[Math.Max(0, lines.Length - 20)..]).TrimEnd();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"(could not read {logPath}: {ex.Message})";
         }
     }
 
@@ -2270,16 +3207,23 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
-    /// Updates the TimescaleDB extension to <paramref name="targetVersion"/> in EVERY database that has it
-    /// — template1 included, because pg_upgrade carries template1 across too and a stale extension there
-    /// fails the upgrade just as surely as one in the store database. Each database gets a FRESH,
-    /// UNPOOLED connection whose FIRST statement is the ALTER: TimescaleDB refuses the update once its
-    /// library has been loaded into the session, which is why its own documentation calls for a new
-    /// connection. Returns the version found before the update (null when the extension is absent
-    /// everywhere), for the alert text.
+    /// Makes every database's TimescaleDB extension one the NEW runtime can restore, before pg_upgrade runs
+    /// (#1706, reworked by #3908). pg_upgrade recreates the extension at the version the OLD cluster has in each
+    /// database, template1 included, so each version needs complete libraries in the new runtime. When the new
+    /// runtime carries the installed version (every store this service has shipped: 2.28.1 is carried), nothing
+    /// moves here, and the quiesced update moves it once the upgrade has committed, where a failure costs no
+    /// rollback copy. Otherwise the database is moved to <see cref="PlanTimescaleBridge"/>'s target, the old
+    /// runtime's own default version, the ALTER first on a fresh session. Every probe loads nothing (<c>timescaledb.disable_load</c>): the bridge used to
+    /// probe and update on one session, the probe loaded the old library, and TimescaleDB refused the update
+    /// (0A000, measured). Returns the store database's version before and after (both null without the
+    /// extension). A hard gate: any failure throws, because pg_upgrade would only fail later.
     /// </summary>
-    internal async Task<string?> BridgeTimescaleAsync(
-        int port, string userName, string password, string targetVersion, CancellationToken cancellationToken)
+    internal async Task<(string? Before, string? After)> BridgeTimescaleAsync(
+        int port,
+        string password,
+        IReadOnlyCollection<string> newRuntimeLibraries,
+        string? oldRuntimeDefaultVersion,
+        CancellationToken cancellationToken)
     {
         var ownerConnection = DarlingManagedPostgres.BuildConnectionString(port, password);
         var databases = new List<string>();
@@ -2297,28 +3241,17 @@ internal sealed class DarlingStoreUpgrade
             }
         }
 
-        string? observedBefore = null;
+        string? before = null;
+        string? after = null;
 
         foreach (var database in databases)
         {
-            var perDatabase = new NpgsqlConnectionStringBuilder(ownerConnection)
+            var isStore = string.Equals(database, DarlingManagedPostgres.DatabaseName, StringComparison.Ordinal);
+            var installed = await ReadTimescaleVersionUnloadedAsync(ownerConnection, database, cancellationToken);
+            if (isStore)
             {
-                Database = database,
-                Pooling = false,
-                /* The store's search_path is irrelevant here and a missing schema on a maintenance database
-                   would only add noise. */
-                SearchPath = null,
-                CommandTimeout = (int)s_bridgeTimeout.TotalSeconds,
-            };
-
-            await using var connection = new NpgsqlConnection(perDatabase.ConnectionString);
-            await connection.OpenAsync(cancellationToken);
-
-            string? installed;
-            await using (var probe = new NpgsqlCommand(
-                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
-            {
-                installed = await probe.ExecuteScalarAsync(cancellationToken) as string;
+                before = installed;
+                after = installed;
             }
 
             if (installed is null)
@@ -2326,44 +3259,47 @@ internal sealed class DarlingStoreUpgrade
                 continue;
             }
 
-            observedBefore ??= installed;
-
-            if (string.Equals(installed, targetVersion, StringComparison.Ordinal))
+            var plan = PlanTimescaleBridge(installed, newRuntimeLibraries, oldRuntimeDefaultVersion);
+            if (!plan.Needed)
             {
                 _logger.LogInformation(
-                    "TimescaleDB in database '{Database}' is already at {Version} — no bridge needed.", database, installed);
+                    "TimescaleDB in database '{Database}' is {Version}, which the new runtime carries: pg_upgrade restores it as it is, and it moves to the runtime's own version after the upgrade commits.",
+                    database, installed);
                 continue;
             }
 
-            _logger.LogWarning(
-                "Bridging TimescaleDB in database '{Database}': {From} -> {To}. This must happen on the OLD cluster: pg_upgrade recreates the extension pinned at whatever version is installed, and the new runtime ships exactly one version-suffixed library.",
-                database, installed, targetVersion);
-
-            /* The FIRST statement on this connection, deliberately — TimescaleDB rejects the update once
-               its library has been loaded into the session. The probe above reads pg_extension, a plain
-               catalog table, which does not load it. */
-            await using (var update = new NpgsqlCommand("ALTER EXTENSION timescaledb UPDATE", connection)
-            {
-                CommandTimeout = (int)s_bridgeTimeout.TotalSeconds,
-            })
-            {
-                await update.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await using var verify = new NpgsqlCommand(
-                "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-            var after = await verify.ExecuteScalarAsync(cancellationToken) as string;
-            if (!string.Equals(after, targetVersion, StringComparison.Ordinal))
+            if (plan.Target is null)
             {
                 throw new InvalidOperationException(
-                    $"TimescaleDB in database '{database}' is {after ?? "(absent)"} after ALTER EXTENSION UPDATE, but the bundled runtime ships {targetVersion}. " +
+                    $"TimescaleDB in database '{database}' is {installed}. The new runtime carries libraries for {Describe(newRuntimeLibraries)}, and this one can update to {oldRuntimeDefaultVersion ?? "nothing it can name"}, " +
+                    $"and no version both carry is one {installed} can update to, so pg_upgrade could not restore the extension. The upgrade stops here.");
+            }
+
+            _logger.LogWarning(
+                "Bridging TimescaleDB in database '{Database}': {From} -> {To}. This must happen on the OLD cluster: pg_upgrade recreates the extension at whatever version is installed, and the new runtime does not carry {From}.",
+                database, installed, plan.Target, installed);
+
+            await UpdateTimescaleAsFirstStatementAsync(ownerConnection, database, cancellationToken, plan.Target);
+            var moved = await ReadTimescaleVersionLoadedAsync(ownerConnection, database, cancellationToken);
+            if (!string.Equals(moved, plan.Target, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"TimescaleDB in database '{database}' is {moved ?? "(absent)"} after ALTER EXTENSION UPDATE TO '{plan.Target}'. " +
                     "pg_upgrade would fail on the version-suffixed library, so the upgrade stops here.");
             }
 
-            _logger.LogInformation("TimescaleDB in database '{Database}' is now {Version}.", database, after);
+            if (isStore)
+            {
+                after = moved;
+            }
+
+            _logger.LogInformation("TimescaleDB in database '{Database}' is now {Version}.", database, moved);
         }
 
-        return observedBefore;
+        return (before, after);
+
+        static string Describe(IReadOnlyCollection<string> versions)
+            => versions.Count == 0 ? "no TimescaleDB version" : string.Join(", ", versions);
     }
 
     /// <summary>
@@ -2456,17 +3392,20 @@ internal sealed class DarlingStoreUpgrade
     /* ============================ post-start: verify, update, analyze ============================ */
 
     /// <summary>
-    /// Everything that needs a LIVE server, run once the normal bootstrap has started it (so the server is
-    /// owned by this process and shutdown still stops it — starting it here would silently turn the store
-    /// into an "adopted" one this service refuses to stop).
+    /// Everything a major upgrade needs from a LIVE server, run once the normal bootstrap has started it (so the
+    /// server is owned by this process and shutdown still stops it — starting it here would silently turn the
+    /// store into an "adopted" one this service refuses to stop).
     ///
-    /// <para>Three jobs. It VERIFIES the upgrade actually landed — server major, extension version, and a
-    /// real read of a collector table, because "pg_upgrade exited 0" and "the store works" are different
-    /// claims. It applies the SAME-MAJOR TimescaleDB update, which is the #1705 case on its own: a runtime
-    /// bump that changes only the extension needs no pg_upgrade, just the ALTER on a fresh connection. And
-    /// it runs the post-upgrade analyze staging: PostgreSQL 18 carries most optimizer statistics across, so
-    /// this fills the documented gaps (extended statistics, extension-owned statistics) rather than
-    /// re-analyzing a whole store that already has them.</para>
+    /// <para>Two jobs. It VERIFIES the upgrade actually landed — server major and a real read of a collector
+    /// table, because "pg_upgrade exited 0" and "the store works" are different claims. And it runs the
+    /// post-upgrade analyze staging: PostgreSQL 18 carries most optimizer statistics across, so this fills the
+    /// documented gaps (extended statistics, extension-owned statistics) rather than re-analyzing a whole store
+    /// that already has them.</para>
+    ///
+    /// <para>It used to have a third, the same-major TimescaleDB update (#1705), run here on the live store.
+    /// #3908 moved that to before the store opens (<see cref="UpdateTimescaleQuiescedAsync"/>): run here, every
+    /// session that had already loaded the old library failed its next statement once the extension moved, and
+    /// the update killed the scheduler's running jobs, which then sat in crash backoff for up to an hour.</para>
     /// </summary>
     internal async Task<StoreUpgradeOutcome> CompleteAfterStartAsync(
         StoreUpgradeOutcome outcome,
@@ -2476,10 +3415,12 @@ internal sealed class DarlingStoreUpgrade
         string userName,
         string password,
         int bundledMajor,
-        string bundledTimescaleVersion,
         CancellationToken cancellationToken)
     {
-        var upgraded = outcome.Status == StoreUpgradeStatus.Succeeded;
+        if (outcome.Status != StoreUpgradeStatus.Succeeded)
+        {
+            return outcome;
+        }
 
         try
         {
@@ -2487,9 +3428,8 @@ internal sealed class DarlingStoreUpgrade
             await using var connection = new NpgsqlConnection(builder.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
-            if (upgraded)
+            await using (var version = new NpgsqlCommand("SHOW server_version_num", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
             {
-                await using var version = new NpgsqlCommand("SHOW server_version_num", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
                 var raw = await version.ExecuteScalarAsync(cancellationToken) as string;
                 var liveMajor = int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var num) ? num / 10000 : 0;
                 if (liveMajor != bundledMajor)
@@ -2504,9 +3444,8 @@ internal sealed class DarlingStoreUpgrade
                 }
             }
 
-            /* The same-major extension update (#1705). After a pg_upgrade the bridge already moved it, so
-               this is a no-op there; on a TimescaleDB-only runtime bump it IS the whole upgrade. First
-               statement on this fresh connection, for the same alone-first reason as the bridge. */
+            /* Read for the line below only: the quiesced update already ran, and VerifyTimescaleAfterStartAsync
+               records and reports the extension. */
             string? installed;
             await using (var probe = new NpgsqlCommand(
                 "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
@@ -2514,60 +3453,11 @@ internal sealed class DarlingStoreUpgrade
                 installed = await probe.ExecuteScalarAsync(cancellationToken) as string;
             }
 
-            var extensionMoved = false;
+            await VerifySentinelReadAsync(connection, cancellationToken);
 
-            /* An empty bundled version means the runtime carries no timescaledb.control to read — a
-               plain-PostgreSQL bundle. Never "update" the extension toward a version we cannot name. */
-            if (installed is not null
-                && !string.IsNullOrEmpty(bundledTimescaleVersion)
-                && !string.Equals(installed, bundledTimescaleVersion, StringComparison.Ordinal))
-            {
-                _logger.LogWarning(
-                    "The store's TimescaleDB is {Installed} but the bundled runtime ships {Bundled} — updating the extension now (#1705: a store otherwise keeps whatever extension it was created with, forever).",
-                    installed, bundledTimescaleVersion);
-
-                await using (var update = new NpgsqlCommand("ALTER EXTENSION timescaledb UPDATE", connection)
-                {
-                    CommandTimeout = (int)s_bridgeTimeout.TotalSeconds,
-                })
-                {
-                    await update.ExecuteNonQueryAsync(cancellationToken);
-                }
-
-                await using var verify = new NpgsqlCommand(
-                    "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
-                var after = await verify.ExecuteScalarAsync(cancellationToken) as string;
-                if (string.Equals(after, bundledTimescaleVersion, StringComparison.Ordinal))
-                {
-                    _logger.LogWarning("TimescaleDB extension updated: {From} -> {To}.", installed, after);
-                    extensionMoved = true;
-                }
-                else
-                {
-                    _logger.LogCritical(
-                        "TimescaleDB is {After} after ALTER EXTENSION UPDATE, but the bundled runtime ships {Bundled}. The store still runs, but its extension does not match its binaries — investigate before the next release.",
-                        after ?? "(absent)", bundledTimescaleVersion);
-                }
-
-                outcome = outcome with
-                {
-                    Status = upgraded ? outcome.Status : StoreUpgradeStatus.ExtensionUpdated,
-                    FromTimescale = outcome.FromTimescale ?? installed,
-                    ToTimescale = bundledTimescaleVersion,
-                };
-            }
-
-            if (upgraded)
-            {
-                await VerifySentinelReadAsync(connection, cancellationToken);
-            }
-
-            if (upgraded || extensionMoved)
-            {
-                _logger.LogInformation(
-                    "Store runtime is current: PostgreSQL major {Major}, TimescaleDB {Timescale}.",
-                    bundledMajor, installed is null ? "(not installed)" : bundledTimescaleVersion);
-            }
+            _logger.LogInformation(
+                "Store runtime is current: PostgreSQL major {Major}, TimescaleDB {Timescale}.",
+                bundledMajor, installed ?? "(not installed)");
         }
         catch (OperationCanceledException)
         {
@@ -2582,11 +3472,7 @@ internal sealed class DarlingStoreUpgrade
                 ex.Message);
         }
 
-        if (upgraded)
-        {
-            await RunAnalyzeInStagesAsync(newBinDirectory, port, userName, password, bundledMajor, cancellationToken);
-        }
-
+        await RunAnalyzeInStagesAsync(newBinDirectory, port, userName, password, bundledMajor, cancellationToken);
         return outcome;
     }
 

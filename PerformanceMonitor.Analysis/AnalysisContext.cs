@@ -106,6 +106,38 @@ public class AnalysisContext
     public double PeriodDurationMs => (TimeRangeEnd - TimeRangeStart).TotalMilliseconds;
 
     /// <summary>
+    /// How far back from <see cref="TimeRangeEnd"/> a "latest value" read looks for each series' newest
+    /// sample (#3896): the database files summed into <c>DATABASE_TOTAL_SIZE_MB</c> and counted by
+    /// <c>FILE_AUTOGROWTH_PERCENT</c>, the volumes behind <c>DISK_SPACE</c>, the memory clerks, the plan-cache
+    /// snapshot and the memory_stats row.
+    ///
+    /// <para>Those reads used to take each series' newest row with only an upper bound, so they numbered
+    /// the server's ENTIRE retained history to keep a few dozen rows (1.2 s for the database-size read alone
+    /// on a 17-day DARLING01 store, most of it decompressing chunks) and, worse, answered "latest EVER": a
+    /// dropped database's files stayed in the size total until retention aged them out — 31% over on that
+    /// server.
+    /// With the bound the answer is "present within the last day", which is the right meaning. A series
+    /// with no sample in the lookback is either gone or its collector is down, and in the second case the
+    /// fact is better absent than stale; the coverage machinery (#3524/#3551) already reports a dead
+    /// collector.</para>
+    ///
+    /// <para>A day, because it has to clear every cadence these collectors run at by a wide margin — the
+    /// slowest is database_size_stats, hourly by default — while staying short enough that a dropped
+    /// database leaves the answer the next day. A collector rescheduled slower than daily yields no fact.
+    /// The on-load config snapshots (server_config, database_config, trace_flags, server_properties) are
+    /// NOT bounded this way: they are written once per connect, so their newest capture can be weeks old
+    /// on a healthy server.</para>
+    /// </summary>
+    public static readonly TimeSpan LatestValueLookback = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The lower bound every "latest value" read binds: <see cref="TimeRangeEnd"/> minus
+    /// <see cref="LatestValueLookback"/> (#3896). Anchored on the window's END, not "now", so an anchored or
+    /// historical window reads the state as it stood then.
+    /// </summary>
+    public DateTime LatestValueStart => TimeRangeEnd - LatestValueLookback;
+
+    /// <summary>
     /// How much of the window the collector actually observed, stamped by the fact collector at the
     /// start of every pass from the wait-stats collection series (see <see cref="WindowCoverage"/> for
     /// the measurement). Null until that stamp happens — a context that has not been through a collector
@@ -149,6 +181,20 @@ public class AnalysisContext
     public int CollectionFamilyCount { get; set; }
 
     /// <summary>
+    /// The queries the PLAN_REGRESSION fact reported this pass (#3902): one entry per (database, query_id)
+    /// among its at most twenty offenders, stamped by the fact collector after the read. Null until then,
+    /// and null when that read failed.
+    ///
+    /// <para>The regressed-queries drill-down re-runs the same detection to list the top five with their
+    /// text and plan ids, and before this it re-deduplicated the server's whole Query Store slice to do it:
+    /// the most expensive read in the pass, twice. Its top five are the head of the fact's own ranking, so
+    /// it now computes its rows for these queries only, and reads unrestricted when this is null or empty
+    /// (a drill-down run without a fact pass, after a failed fact read, or with no fact to follow),
+    /// exactly as it always did.</para>
+    /// </summary>
+    public IReadOnlyList<PlanRegressionOffender>? PlanRegressionOffenders { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose
@@ -159,6 +205,9 @@ public class AnalysisContext
     public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, string message) =>
         CollectionFailures.Add(new CollectionFailure(family, read, outcome, message));
 }
+
+/// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>
+public readonly record struct PlanRegressionOffender(string DatabaseName, long QueryId);
 
 /// <summary>
 /// How a family read failed (#3691) — the three-outcome degrade the collectors already classify for their log

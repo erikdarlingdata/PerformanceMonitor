@@ -218,6 +218,7 @@ public static class PgMigrations
         new Migration(136, "pg-database-size-and-host-memory", V136Sql),
         new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
         new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
+        new Migration(139, "postmaster-start-time", V139Sql),
     };
 
     /// <summary>
@@ -1744,6 +1745,74 @@ ALTER TABLE collect.store_metrics
 ALTER TABLE collect.pg_server_config
     ADD COLUMN IF NOT EXISTS database_name text,
     ADD COLUMN IF NOT EXISTS role_name text;";
+
+    /// <summary>
+    /// V139 — one nullable column, <c>postmaster_start_time</c>, on two existing tables (#3955): the
+    /// <c>checkpointer</c> row of <c>collect.store_metrics</c> and every row of <c>collect.pg_write_stats</c>. Each
+    /// sample of a server's cumulative checkpointer counters now says which postmaster produced it, so a reader
+    /// can tell an interval that spans a restart from one that does not. No new table, no new hypertable
+    /// (<c>TimescaleSupport.HypertableCount</c> stays 72), no DEFAULT, no backfill, no passthrough refresh, and
+    /// <b>no Lite twin</b>: Lite stores neither table.
+    ///
+    /// <para><b>The lie this ends.</b> PostgreSQL counts a shutdown checkpoint in
+    /// <c>pg_stat_checkpointer.num_requested</c> (<c>pg_stat_bgwriter.checkpoints_req</c> through 16) and keeps the
+    /// count across the restart: 0|0|0, then 0|1|0, then 0|2|0 as <c>num_timed | num_requested | num_done</c> on a
+    /// fresh 18.6 cluster over two fast stops. The Store Checkpointer Pressure self-alert (#3783) reads any
+    /// requested checkpoint in an interval as proof the store outran <c>max_wal_size</c>, so every service restart
+    /// raised it: on 2026-09-22 a production store reported "2 WAL-forced checkpoint(s)" for an interval whose
+    /// server log held one timed checkpoint and two <c>shutdown immediate</c> ones, and no WAL-triggered checkpoint
+    /// at all. Every host restarts when it upgrades. The monitored-target write reads difference the same counter,
+    /// so a monitored server's restart read as WAL pressure in <c>PG_CHECKPOINT_PRESSURE</c> and in
+    /// <c>get_pg_write_stats</c> the same way. <see cref="PostmasterRestart"/> is the rule those readers now share;
+    /// this rung is the evidence it reads.</para>
+    ///
+    /// <para><b>Why a stored column rather than a read of <c>pg_postmaster_start_time()</c> at read time.</b> A
+    /// live read says when the CURRENT postmaster started, which dates the newest sample only if nothing restarted
+    /// since it was taken, so <c>get_store_metrics</c> read an hour after a restart would call the last clean
+    /// interval unknown. It also cannot serve the monitored-target reads, which difference rows the store holds
+    /// for thirty days about servers it does not query at read time. A value on every sample makes the rule
+    /// exact: two samples that report one postmaster start were taken by one postmaster, compared on the
+    /// server's own clock, so skew between the collecting host and the server cannot move the answer. The per-row
+    /// shape is the one <c>pg_write_stats</c> already gives its three <c>stats_reset</c> stamps, for the same
+    /// reason: the reads difference per sample and need the epoch on the row they difference.</para>
+    ///
+    /// <para><b>Naive UTC</b>, written as <c>pg_postmaster_start_time() AT TIME ZONE 'UTC'</c> by
+    /// <c>StoreSelfMetrics.CheckpointerInsertSql</c> (both majors' statements) and by the shared
+    /// <c>PgWriteStatsCollector</c>, never a bare <c>::timestamp</c> cast, which renders in the session's zone.
+    /// <b>Nullable, no DEFAULT, no backfill</b>, matching every column-adding rung: a row written before this rung
+    /// cannot know which postmaster wrote it, and NULL is what the rule reads as "no evidence". On the newer
+    /// sample of a pair that means the interval is judged as before; on the older it means the rule falls back to
+    /// whether that sample predates the newer sample's postmaster start, which is what makes the first interval
+    /// after the upgrade restart unknown rather than a warning. <c>pg_write_stats</c> is a compressed hypertable
+    /// on the fleet (one-day chunks); a nullable, default-less <c>ADD COLUMN</c> is catalog-only there, the
+    /// V127/V128/V133/V137/V138 shape, verified again for this rung on a compressed chunk under TimescaleDB 2.30.1.
+    /// <c>store_metrics</c> is a plain table and must stay one.</para>
+    ///
+    /// <para><b>The V101 rule applies</b> to <c>pg_write_stats</c>: the collector appends the column LAST, so the
+    /// positional COPY writer and an upgraded store's ALTER agree on where it sits, and V88's CREATE text carries it
+    /// for the fresh population because <c>PgSchemaGeneratorTests.EveryPostgresRung_IsIdenticalToTheGeneratedSchema</c>
+    /// holds that text to the generator's current output. <c>store_metrics</c> is not a collector table
+    /// (V53 creates it by hand and no generator walks it), so its column lives in this ALTER alone. <b>No
+    /// passthrough refresh</b>: neither table has a <c>v_</c> view (<c>PgSchemaGenerator.AllPassthroughViews</c>
+    /// agrees), so the V14 frozen-column-list problem cannot arise.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill. It does not change how the write
+    /// and sync phases are judged: a restart-spanning interval still states and judges them, and they include the
+    /// shutdown checkpoint's own phases. It does not touch the counter-reset handling (the Reset status, the
+    /// <c>stats_reset</c> guards), which a crash still reaches first. It adds no alert, knob or Viewer column.</para>
+    /// </summary>
+    private const string V139Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row only,
+   NULL on every other kind by the table's per-kind convention. Nullable, no DEFAULT, no backfill: a pre-rung row
+   cannot know which postmaster wrote it, and NULL is what the restart rule reads as no evidence. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;
+
+/* pg_write_stats is a compressed hypertable on the fleet; a nullable, default-less ADD COLUMN is catalog-only there
+   (the V127/V128/V133/V137/V138 shape). No v_ passthrough, so no view refresh. Appended LAST, matching the
+   collector's payload order, so the positional COPY writer and an upgraded store's column order agree. */
+ALTER TABLE collect.pg_write_stats
+    ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
@@ -3628,6 +3697,14 @@ CREATE INDEX IF NOT EXISTS idx_pg_plan_capture_readiness_time
     /// <para>All THREE <c>stats_reset</c> stamps are stored. <c>pg_stat_reset_shared</c> takes a target, so
     /// they can be reset independently — a read differencing across a reset it could not see would report a
     /// negative interval as an enormous positive one.</para>
+    ///
+    /// <para><b>The column after <c>wal_stats_reset</c> is V139's (#3955), and it is here for the V101 rule.</b>
+    /// A fresh store builds the table from the generated schema at V1 (this CREATE then no-ops,
+    /// <c>IF NOT EXISTS</c>); a store that climbed through V88 before V139 existed has the twenty-six-payload-column
+    /// table this text built at the time. <c>PgSchemaGeneratorTests</c> requires this rung to be the generator's
+    /// output column for column, and the generator emits the collector's CURRENT columns, so this text carries
+    /// <c>postmaster_start_time</c> for the fresh population and V139's ALTER carries it for the existing one.
+    /// Neither is redundant.</para>
     /// </summary>
     private const string V88Sql = @"
 CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
@@ -3660,7 +3737,8 @@ CREATE TABLE IF NOT EXISTS collect.pg_write_stats (
     wal_sync bigint,
     wal_write_time_ms double precision,
     wal_sync_time_ms double precision,
-    wal_stats_reset timestamp
+    wal_stats_reset timestamp,
+    postmaster_start_time timestamp
 );
 
 CREATE INDEX IF NOT EXISTS idx_pg_write_stats_time

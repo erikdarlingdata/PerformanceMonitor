@@ -380,4 +380,22 @@ public class StoreStatementStatsTests
 
         Assert.Equal("total_exec_ms", DarlingMcpStoreQueryStatsTools.OrderColumns["total_time"]);
     }
+
+    /// <summary>
+    /// #3920's fourth review (M5): the tool masks every text it shows, because pg_stat_statements keeps a statement's
+    /// RAW text, literals and all, when its entry is gone at executor end, and that text passes the reader's allowlist
+    /// like any SELECT. A normalized text comes through as it was, PostgreSQL 18's IN-list marker included; the two
+    /// sentinels pass untouched; a raw text is masked, or withheld when it cannot be read to its end.
+    /// </summary>
+    [Fact]
+    public void TheToolMasksEveryTextItShows_AndLeavesNormalizedTextAsItWas()
+    {
+        const string normalized = "SELECT s.server_id, s.name FROM collect.servers AS s WHERE s.server_id IN ($1 /*, ... */) AND s.enabled = $2";
+        Assert.Equal(normalized, DarlingMcpStoreQueryStatsTools.ShownText(normalized));
+        Assert.Equal("SELECT '?'::text AS pw, $1::integer, ?", DarlingMcpStoreQueryStatsTools.ShownText("SELECT 'RawLiteral3920'::text AS pw, $1::integer, 4111111111111111"));
+        Assert.Equal(StoreStatementStats.WithheldText, DarlingMcpStoreQueryStatsTools.ShownText("SELECT 'cut at the reader"));
+        Assert.Equal(StoreStatementStats.WithheldText, DarlingMcpStoreQueryStatsTools.ShownText(StoreStatementStats.WithheldText));
+        Assert.Equal(StoreStatementStats.InsufficientPrivilegeText, DarlingMcpStoreQueryStatsTools.ShownText(StoreStatementStats.InsufficientPrivilegeText));
+        Assert.Equal("", DarlingMcpStoreQueryStatsTools.ShownText(""));
+    }
 }

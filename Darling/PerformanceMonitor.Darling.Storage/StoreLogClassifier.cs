@@ -919,7 +919,8 @@ public static class StoreLogClassifier
     /// writes into them masked as SQL (<see cref="PgLogTextRedactor.RedactDetail"/>,
     /// <see cref="PgLogTextRedactor.RedactContext"/>, #3920), a STATEMENT or QUERY field as SQL
     /// (<see cref="PgLogTextRedactor.RedactStoredStatement"/>, one line, or <see cref="WithheldStatement"/>
-    /// when it cannot be read to its end), and LOCATION's own line as written. Each field's tab-continuation
+    /// when it cannot be read to its end), and LOCATION's own line as written when it has PostgreSQL's shape
+    /// (<see cref="MaskLocation"/>). Each field's tab-continuation
     /// lines are masked with it, so a value that spans lines is masked whole. The prefix and field names stay,
     /// so the sample still reads as the server's entry. Idempotent: masking masked text changes nothing, which
     /// is what lets rows stored before this build be re-masked by the same function.
@@ -955,12 +956,7 @@ public static class StoreLogClassifier
                     "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
                     "DETAIL" => PgLogTextRedactor.RedactDetail(text) ?? string.Empty,
                     "CONTEXT" => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
-                    /* LOCATION's own line is a source file and line, kept. A line after it is not (a command's
-                       stderr under log_error_verbosity = verbose lands there) and is masked as prose (#3920's
-                       review). */
-                    "LOCATION" => text.IndexOf('\n') is var newline and >= 0
-                        ? text[..(newline + 1)] + (PgLogTextRedactor.RedactMessage(text[(newline + 1)..]) ?? string.Empty)
-                        : text,
+                    "LOCATION" => MaskLocation(text),
                     _ => PgLogTextRedactor.RedactMessage(text) ?? string.Empty,
                 };
 
@@ -974,6 +970,25 @@ public static class StoreLogClassifier
         }
 
         return result.ToString();
+    }
+
+    /* The line PostgreSQL writes after LOCATION: the reporting function and its source file and line,
+       "ProcessInterrupts, postgres.c:3383" (elog.c keeps only the file's base name). */
+    private static readonly Regex s_sourceLocation = new(
+        @"^[A-Za-z_][A-Za-z0-9_]*, [A-Za-z0-9_./-]+:[0-9]+$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// A LOCATION field: its own line kept as written only when it has the shape PostgreSQL writes there, and
+    /// masked as prose otherwise (#3920's fourth review), like every line after it (a command's stderr under
+    /// <c>log_error_verbosity = verbose</c> lands there, #3920's review).
+    /// </summary>
+    private static string MaskLocation(string text)
+    {
+        var newline = text.IndexOf('\n');
+        var first = newline < 0 ? text : text[..newline];
+        var kept = s_sourceLocation.IsMatch(first) ? first : PgLogTextRedactor.RedactMessage(first) ?? string.Empty;
+        return newline < 0 ? kept : kept + "\n" + (PgLogTextRedactor.RedactMessage(text[(newline + 1)..]) ?? string.Empty);
     }
 
     /// <summary>

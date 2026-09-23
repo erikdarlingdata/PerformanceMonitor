@@ -343,7 +343,9 @@ LIMIT 5";
     /// Top regressed queries behind a PLAN_REGRESSION finding.
     /// Re-runs Detector B's detection for the top 5 offenders. Uses the same 14-day
     /// last_execution_time comparison window as the detector — NOT the standard analysis
-    /// window — so the days-old "best plan" baseline is present.
+    /// window — so the days-old "best plan" baseline is present. Since #3902 it re-runs it over
+    /// the queries the fact reported this pass (<see cref="AnalysisContext.PlanRegressionOffenders"/>),
+    /// and over every query only when the fact did not run.
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -442,6 +444,16 @@ deduped AS
     WHERE server_id = $1
     AND   execution_type_desc = 'Regular'
     AND   last_execution_time >= $2
+    -- #3902: the PLAN_REGRESSION fact's offenders when the fact ran this pass ($5/$6, from
+    -- AnalysisContext.PlanRegressionOffenders), otherwise every query ($5 NULL). The top five this read
+    -- returns are the head of the ranking the fact has already computed -- the same detection over the same
+    -- window -- so deduplicating the server's whole slice again to find them was the pass's most expensive
+    -- read run twice. The two reads fold plans the same way (plan_agg, then plan_dedup) and rank the same
+    -- way, so this read's top five are among the fact's twenty. The lists are matched independently, which
+    -- admits every pairing of the listed databases and query ids: a superset of the offenders, never a
+    -- subset.
+    AND   ($5::VARCHAR[] IS NULL
+           OR (list_contains($5::VARCHAR[], database_name) AND list_contains($6::BIGINT[], query_id)))
 ),
 plan_agg AS
 (
@@ -571,6 +583,20 @@ LIMIT 5";
            would report for this run. */
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+
+        /* $5/$6 (#3902): the fact's offenders, or NULL when it did not run, failed, or reported none. An
+           empty list is read as unrestricted rather than as "nothing": a pass whose fact found no regression
+           raises no PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a
+           fact. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        cmd.Parameters.Add(new DuckDBParameter
+        {
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.DatabaseName).ToList()
+        });
+        cmd.Parameters.Add(new DuckDBParameter
+        {
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.QueryId).ToList()
+        });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

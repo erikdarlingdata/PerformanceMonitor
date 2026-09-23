@@ -15,6 +15,8 @@
        A newer release on its own is NOT a failure. TimescaleDB ships every few weeks, and a new runtime is a
        store upgrade on every field host (DarlingStoreUpgrade), so it moves when there is a reason, and an
        advisory is that reason. 3.8.0 shipped 2.28.1 after GHSA-hcfx-29v5-2rcw was fixed in 2.29.1.
+       Only the pinned version is checked. The older builds the runtime carries (fetch-pg-runtime.ps1's
+       $tsCarried) are loaded only by a store whose update to the pin failed, which raises its own alert.
        An advisory already tracked by an issue is listed in $acknowledged. It is reported as a warning
        while it still applies, and the run fails once it no longer does, so the entry gets deleted.
 
@@ -83,9 +85,7 @@ function Test-Fixed([version]$Pinned, [version[]]$Patched) {
 # reason every week, and a NEW finding (the next PostgreSQL minor, a second advisory) changes nothing
 # anyone can see. An entry that stops matching fails the run instead, so the list cannot outlive its
 # reason: delete the entry in the change that moves the pin.
-$acknowledged = @{
-    'GHSA-hcfx-29v5-2rcw' = 'https://github.com/erikdarlingdata/PerformanceMonitor/issues/3908'
-}
+$acknowledged = @{}
 
 $findings = [System.Collections.Generic.List[string]]::new()
 $notices = [System.Collections.Generic.List[string]]::new()

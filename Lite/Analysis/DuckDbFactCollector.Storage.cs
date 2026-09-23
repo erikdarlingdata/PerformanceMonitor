@@ -14,7 +14,8 @@ public partial class DuckDbFactCollector
 {
     /// <summary>
     /// Collects total database data size from file_io_stats.
-    /// Sums the latest size_mb across all database files for the server.
+    /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookback"/>
+    /// of the window's end (#3896) — a file not seen in a day belongs to a database that no longer exists.
     /// </summary>
     private async Task CollectDatabaseSizeFactAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -24,6 +25,10 @@ public partial class DuckDbFactCollector
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
+            /* #3896: $2 is the LOOKBACK start (AnalysisContext.LatestValueStart), not the window start.
+               Unbounded, the window function read every archived parquet file this server has — nothing
+               could prune a row group on collection_time — and a dropped database's files stayed in the
+               sum until the archive aged them out. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -31,7 +36,8 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name, file_name ORDER BY collection_time DESC) AS rn
     FROM v_file_io_stats
     WHERE server_id = $1
-    AND   collection_time <= $2
+    AND   collection_time >= $2
+    AND   collection_time <= $3
     AND   size_mb > 0
 )
 SELECT SUM(size_mb) AS total_size_mb
@@ -39,6 +45,7 @@ FROM latest
 WHERE rn = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -230,7 +237,8 @@ AND   collection_time <= $3";
     /// <summary>
     /// Collects the percent-autogrowth-on-large-files config fact (WS3): data/log files set
     /// to grow in PERCENTAGE steps that are also large (>= 10 GB), where a single growth is a
-    /// huge, stalling allocation. Reads the latest snapshot per file from database_size_stats,
+    /// huge, stalling allocation. Reads the latest snapshot per file from database_size_stats
+    /// within <see cref="AnalysisContext.LatestValueLookback"/> of the window's end (#3896),
     /// excludes system databases, and emits ONE aggregate FILE_AUTOGROWTH_PERCENT fact carrying
     /// the offending-file/database counts (the per-file detail + copy-paste fix is attached
     /// later by the drill-down collector).
@@ -243,6 +251,9 @@ AND   collection_time <= $3";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
+            /* #3896: bounded to the lookback like the database-size read (it had no time bound at all, so a
+               dropped database's file counted for the whole database_size_stats retention), and on the same
+               bounds as the drill-down that lists these files (DrillDownCollector.CollectAutogrowthPercentFiles). */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -250,6 +261,8 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
     FROM v_database_size_stats
     WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
 )
 SELECT
     COUNT(*) AS file_count,
@@ -261,6 +274,8 @@ AND   total_size_mb >= 10240
 AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStart });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -293,7 +308,8 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
     }
 
     /// <summary>
-    /// Collects disk space facts from database_size_stats: volume free space, file sizes.
+    /// Collects disk space facts from database_size_stats: volume free space, file sizes. Each volume's
+    /// latest sample within <see cref="AnalysisContext.LatestValueLookback"/> of the window's end (#3896).
     /// </summary>
     private async Task CollectDiskSpaceFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -303,6 +319,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
+            /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStart). */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -310,7 +327,8 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY volume_mount_point ORDER BY collection_time DESC) AS rn
     FROM v_database_size_stats
     WHERE server_id = $1
-    AND   collection_time <= $2
+    AND   collection_time >= $2
+    AND   collection_time <= $3
     AND   volume_total_mb > 0
 )
 SELECT
@@ -322,6 +340,7 @@ SELECT
 FROM latest WHERE rn = 1";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

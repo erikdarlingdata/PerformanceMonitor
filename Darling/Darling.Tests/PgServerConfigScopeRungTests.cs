@@ -47,11 +47,10 @@ namespace Darling.Tests;
 /// asserts that partition over the tree rather than over a list, so the NEXT reader has to choose an arm
 /// deliberately.</para>
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off
-/// <see cref="QsCaptureModeRouteKnobToastRungTests"/> (V137) when this rung landed — a fully-migrated store
-/// must map to EXACTLY this version, or the viewer's connect-time gate refuses a store that is actually
-/// current. When the next rung lands they move on again, and what stays is everything true of this rung
-/// wherever it sits: its name, its DDL, its probe sentinel at its own ordinal, and that a store which
+/// <para>This file carried the "I am the top rung" claims that moved off
+/// <see cref="QsCaptureModeRouteKnobToastRungTests"/> (V137) when this rung landed, and handed them on to
+/// <see cref="PostmasterStartTimeRungTests"/> (V139, #3955) when that one did. What stays is everything true of
+/// this rung wherever it sits: its name, its DDL, its probe sentinel at its own ordinal, and that a store which
 /// stopped here maps to exactly 138.</para>
 ///
 /// <para>The collector's <c>pg_settings</c> behaviour and its two original reads are
@@ -65,7 +64,9 @@ public sealed class PgServerConfigScopeRungTests
     private const int RungVersion = 138;
     private const int PreviousVersion = 137;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V139 (#3955, the
+    /// postmaster start time) appended its own — so this is a position within the signature rather than its end,
+    /// the handoff <see cref="QsCaptureModeRouteKnobToastRungTests"/> made to this file one rung ago.</summary>
     private const int ProbeOrdinal = 113;
 
     private const string Table = "pg_server_config";
@@ -84,7 +85,10 @@ public sealed class PgServerConfigScopeRungTests
         Assert.Equal("pg-server-config-database-role-overrides", V138.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
+           being true when V139 landed. The invariant that outlives the handoff is that the LADDER's top and
+           the declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -271,18 +275,19 @@ public sealed class PgServerConfigScopeRungTests
     /// <summary>
     /// <b>The census.</b> Every product read of <c>pg_server_config</c> either EXCLUDES the overrides
     /// (<c>database_name IS NULL</c> and <c>role_name IS NULL</c>) or is the ONE read that selects them
-    /// (<c>database_name IS NOT NULL OR role_name IS NOT NULL</c>). Ten anchors, named individually rather
-    /// than matched in bulk, because the shapes differ and each one's reason does: nine latest-per-name reads
-    /// and one override read.
+    /// (<c>database_name IS NOT NULL OR role_name IS NOT NULL</c>). Twelve anchors, named individually rather
+    /// than matched in bulk, because the shapes differ and each one's reason does: nine latest-per-name reads,
+    /// the one override read, and the two <c>FROM</c>s of the scoped change feed (#3937), which selects the
+    /// overrides too.
     ///
     /// <para>The inner <c>MAX(collection_time)</c> subqueries are deliberately NOT required to carry the
     /// predicate — every one of the seven is per SERVER, not per name, so an override row cannot move the
     /// anchor, and a predicate there would be noise asserting a shape that does not matter. That is why this
     /// pin counts OUTER statements by anchor instead of counting <c>FROM</c> occurrences: the occurrence count
-    /// is 19 across the tree and only 10 of them are reads.</para>
+    /// is 21 across the tree and only 12 of them are reads.</para>
     ///
     /// <para>The last clause is the one that catches the NEXT reader: any <c>FROM pg_server_config</c> in a
-    /// product file whose statement carries neither arm fails, so an eleventh read has to choose. The scan is
+    /// product file whose statement carries neither arm fails, so a thirteenth read has to choose. The scan is
     /// over the five product projects with comments stripped, so a comment quoting the table (there are
     /// several, including this rung's own) is not mistaken for a read.</para>
     /// </summary>
@@ -313,9 +318,9 @@ public sealed class PgServerConfigScopeRungTests
             }
         }
 
-        /* The shared reader carries three of the ten in one file: two filtering statements and the one
-           override read. Asserted on the constants themselves rather than on the file's text, so a predicate
-           moved between them fails here. */
+        /* The shared reader carries five of the twelve in one file: two filtering statements, the one
+           override read, and the scoped change feed's two FROMs. Asserted on the constants themselves rather
+           than on the file's text, so a predicate moved between them fails here. */
         foreach (var (name, sql) in new[]
         {
             (nameof(DarlingPgServerConfigReader.CurrentConfigSql), DarlingPgServerConfigReader.CurrentConfigSql),
@@ -338,7 +343,24 @@ public sealed class PgServerConfigScopeRungTests
         Assert.Contains("SELECT MAX(collection_time)", overrideSql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", overrideSql, StringComparison.Ordinal);
 
-        /* The clause that catches the eleventh reader. Counted over OUTER statements: an occurrence whose
+        /* #3937: the scoped change feed is the census's second override-SELECTING statement. Its two reads of
+           the table are one statement: `snapshots` reads the server's snapshot INSTANTS off every row (a
+           snapshot with no override left in it still has to pair, or a RESET of the last override is never
+           seen), so that FROM is per server rather than per name and carries neither arm on its own; the
+           statement's `overrides` CTE carries the positive arm, and the census's 2000-character statement
+           window from that first FROM reaches it. Both counted, which is the 10 -> 12. Asserted here so the
+           positive arm cannot quietly leave the CTE while the window still sees it somewhere else. */
+        var scopedSql = StripComments(DarlingPgServerConfigReader.ScopedConfigChangesSql);
+        Assert.Equal(2, FromTable.Matches(scopedSql).Count);
+        Assert.Contains("AND   (c.database_name IS NOT NULL OR c.role_name IS NOT NULL)", scopedSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_name IS NULL", scopedSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("role_name IS NULL", scopedSql, StringComparison.Ordinal);
+        Assert.True(
+            scopedSql.IndexOf("(c.database_name IS NOT NULL OR c.role_name IS NOT NULL)", StringComparison.Ordinal)
+                - scopedSql.IndexOf("FROM pg_server_config AS c", StringComparison.Ordinal) < 2000,
+            "the scoped feed's positive arm has moved out of the census's statement window from its first FROM");
+
+        /* The clause that catches the thirteenth reader. Counted over OUTER statements: an occurrence whose
            surrounding statement carries one of the two arms is accounted for, and one that carries neither
            is a read nothing has decided about. */
         var undecided = new List<string>();
@@ -370,7 +392,9 @@ public sealed class PgServerConfigScopeRungTests
             }
         }
 
-        Assert.Equal(10, reads);
+        /* 10 -> 12 (#3937): ScopedConfigChangesSql's `snapshots` subquery and `overrides` CTE, both aliased
+           `FROM pg_server_config AS c`, both classified "selects" above. */
+        Assert.Equal(12, reads);
         Assert.True(undecided.Count == 0,
             "a pg_server_config read carries neither arm of the V138 scope split, so it will see per-database "
           + "and per-role override rows as if they were the server's settings: ["
@@ -382,22 +406,23 @@ public sealed class PgServerConfigScopeRungTests
     /* ---- the probe (top arm) -------------------------------------------------------------------------- */
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm. The
-    /// probe asks the question, the caller reads the answer, the map has the parameter — a sentinel present at
-    /// only some of them shifts every LATER ordinal onto the wrong column, and a missing top arm maps a
-    /// fully-migrated store one rung short, permanently: <c>RequiredStoreSchemaVersion</c> is
-    /// <c>StorageVersion.SchemaVersion</c>, so the connect-time gate would refuse a store that is current.
+    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
+    /// returns 138. The probe asks the question, the caller reads the answer, the map has the parameter — a
+    /// sentinel present at only some of them shifts every LATER ordinal onto the wrong column. The top-arm half of
+    /// this claim moved to <see cref="PostmasterStartTimeRungTests"/> (V139) with the top.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
         Assert.Contains(
             $"table_name = '{Table}'\n                                                     AND   column_name = 'database_name'",
             ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
+        /* The "nothing past me" half of this claim moved to V139's test with the top ordinal; what stays is
+           that this rung's sentinel is read at its OWN ordinal, which is what keeps every later one on the
+           right column. */
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPgServerConfigDatabaseRoleOverrides", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -405,9 +430,9 @@ public sealed class PgServerConfigScopeRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* The top rung's sentinel IS the last argument. Derived from the signature rather than named by hand,
-           so the arity tracks the method — a literal here goes stale the next rung. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V139 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasPgServerConfigDatabaseRoleOverrides", method.GetParameters()[ProbeOrdinal].Name);
 
         var all = Enumerable.Repeat((object)true, arity).ToArray();
@@ -420,14 +445,16 @@ public sealed class PgServerConfigScopeRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns this rung's version. */
         var thisArm = viewer.IndexOf("if (hasPgServerConfigDatabaseRoleOverrides)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasQsCaptureModeRouteKnobToast)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V138 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V138 sentinel arm — a store stopped here would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V138 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V138 arm sits below the previous rung's, so a V138 store maps one rung low");
+        /* This rung's own literal, not the build's version: the "returns StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to V139's test with the top. */
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the table and the columns are named in the probe line and nowhere in the arm's

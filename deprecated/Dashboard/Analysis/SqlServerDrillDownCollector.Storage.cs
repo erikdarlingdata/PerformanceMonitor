@@ -91,6 +91,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
     FROM collect.database_size_stats
     WHERE database_name NOT IN ('master', 'msdb', 'model', 'tempdb')
+    AND   collection_time >= @lookbackStart
+    AND   collection_time <= @endTime
 )
 SELECT TOP (50)
     database_name,
@@ -105,6 +107,10 @@ AND   total_size_mb >= @minSizeMb
 ORDER BY total_size_mb DESC;";
 
         cmd.Parameters.Add(new SqlParameter("@minSizeMb", 10240.0)); /* 10 GB */
+        /* #3896: the same bounds as the FILE_AUTOGROWTH_PERCENT fact, so the list names exactly the files it
+           counted — unbounded, a dropped database's file was listed with an ALTER for a database that is gone. */
+        cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+        cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync();

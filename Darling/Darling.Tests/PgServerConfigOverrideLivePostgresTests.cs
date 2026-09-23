@@ -194,6 +194,122 @@ public sealed class PgServerConfigOverrideLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #3937: the change feed over a planted four-snapshot history that straddles the V138 stamp. t0 is before
+    /// <c>applied_at</c> (server-wide rows only, as every pre-V138 snapshot is); t1 is the FIRST snapshot at or
+    /// after it and already carries two overrides - baseline, the collector started seeing them, so neither is a
+    /// SET; t2 moves the server-wide <c>work_mem</c>, moves the database override's value, and adds a
+    /// database+role override; t3 removes the role override. Exactly four rows come back, newest first, the
+    /// server-wide row ahead of the override rows at the same instant. Then the tool: a server-wide row renders
+    /// byte-identically with and without override rows present, and with none present the page carries no
+    /// scoped key at all.
+    /// </summary>
+    [Fact]
+    public async Task TheChangeFeed_ReportsOverrideChangesSetsAndResets_AndLeavesTheServerWideRowsUnchanged()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3937 change-feed round trip.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            DateTime appliedAt;
+            using (var stamp = new NpgsqlCommand("SELECT applied_at FROM darling_schema_version WHERE version = 138", connection))
+            {
+                appliedAt = DateTime.SpecifyKind((DateTime)(await stamp.ExecuteScalarAsync(ct))!, DateTimeKind.Utc);
+            }
+
+            var t0 = DarlingMcpTestData.TruncateToSeconds(appliedAt).AddHours(-1);
+            var t1 = DarlingMcpTestData.TruncateToSeconds(appliedAt).AddSeconds(1);
+            var t2 = t1.AddSeconds(1);
+            var t3 = t2.AddSeconds(1);
+
+            foreach (var t in new[] { t0, t1, t2, t3 })
+            {
+                await SeedAsync(connection, ct, t, "work_mem", t < t2 ? "4096" : "8192", "configuration file", "4096", null, null);
+                await SeedAsync(connection, ct, t, "statement_timeout", "30000", "configuration file", "0", null, null);
+            }
+
+            /* t1: the first post-V138 snapshot, overrides already there - baseline, never "set". */
+            await SeedAsync(connection, ct, t1, "work_mem", "262144", "database", null, "tenant_db", null);
+            await SeedAsync(connection, ct, t1, "statement_timeout", "0", "role", null, null, "reporting_role");
+            /* t2: the database override's value moves, the role override is unchanged, a database+role one appears. */
+            await SeedAsync(connection, ct, t2, "work_mem", "524288", "database", null, "tenant_db", null);
+            await SeedAsync(connection, ct, t2, "statement_timeout", "0", "role", null, null, "reporting_role");
+            await SeedAsync(connection, ct, t2, "work_mem", "1048576", "database+role", null, "tenant_db", "reporting_role");
+            /* t3: the role override is RESET; the other two stay. */
+            await SeedAsync(connection, ct, t3, "work_mem", "524288", "database", null, "tenant_db", null);
+            await SeedAsync(connection, ct, t3, "work_mem", "1048576", "database+role", null, "tenant_db", "reporting_role");
+
+            var rows = await DarlingPgServerConfigReader.GetConfigChangesAsync(postgres, ServerId, t0.AddMinutes(-1), t3.AddMinutes(1), 50, ct);
+            Assert.Equal(new (DateTime, string, string?, string?, string?, string?, string)[]
+            {
+                (DarlingMcpTestData.Naive(t3), "statement_timeout", null, "reporting_role", "0", null, "reset"),
+                (DarlingMcpTestData.Naive(t2), "work_mem", null, null, "4096", "8192", "changed"),
+                (DarlingMcpTestData.Naive(t2), "work_mem", "tenant_db", null, "262144", "524288", "changed"),
+                (DarlingMcpTestData.Naive(t2), "work_mem", "tenant_db", "reporting_role", null, "1048576", "set"),
+            }, rows.Select(r => (r.ChangedAtUtc, r.Name, r.DatabaseName, r.RoleName, r.OldValue, r.NewValue, r.ChangeKind)).ToArray());
+
+            /* The tool, anchored just after t3 so the planted history is inside its window on any store age. */
+            var asOf = t3.AddMinutes(1).ToString("yyyy-MM-ddTHH:mm:ss'Z'", CultureInfo.InvariantCulture);
+            var withOverrides = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfigChanges(postgres, ServerName, 168, 50, asOf)).RootElement;
+            Assert.Equal("config_changes", withOverrides.GetProperty("status").GetString());
+            Assert.Equal(4, withOverrides.GetProperty("change_count").GetInt32());
+            Assert.Contains("change_kind", withOverrides.GetProperty("scoped_changes_note").GetString(), StringComparison.Ordinal);
+            var changes = withOverrides.GetProperty("changes").EnumerateArray().ToList();
+            Assert.Equal(
+                new[] { "changed_at", "name", "role_name", "change_kind", "old_value", "new_value", "source" },
+                changes[0].EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.Equal(JsonValueKind.Null, changes[0].GetProperty("new_value").ValueKind);
+            Assert.Equal(
+                new[] { "changed_at", "name", "database_name", "role_name", "change_kind", "old_value", "new_value", "source" },
+                changes[3].EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.Equal(JsonValueKind.Null, changes[3].GetProperty("old_value").ValueKind);
+            Assert.False(changes[2].TryGetProperty("role_name", out _));
+            var serverWideWith = changes[1].GetRawText();
+
+            /* Overrides gone: the page is the pre-#3937 page - no scoped key anywhere, the server-wide row's own
+               key list, and that row's BYTES the same as when override rows sat beside it. */
+            await DeleteOverrideRowsAsync(connection, ct);
+            var bare = await DarlingMcpPgServerStateTools.GetPgServerConfigChanges(postgres, ServerName, 168, 50, asOf);
+            foreach (var key in new[] { "scoped_changes_note", "change_kind", "database_name", "role_name" })
+            {
+                Assert.DoesNotContain(key, bare, StringComparison.Ordinal);
+            }
+
+            var bareRoot = JsonDocument.Parse(bare).RootElement;
+            Assert.Equal(
+                new[] { "server", "hours_back", "status", "change_count", "truncated", "note", "changes" },
+                bareRoot.EnumerateObject().Select(p => p.Name).ToArray());
+            var only = Assert.Single(bareRoot.GetProperty("changes").EnumerateArray().ToList());
+            Assert.Equal(
+                new[] { "changed_at", "name", "old_value", "new_value", "unit", "source", "context", "description" },
+                only.EnumerateObject().Select(p => p.Name).ToArray());
+            Assert.Equal(serverWideWith, only.GetRawText());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, cleanupCt);
+                using var servers = new NpgsqlCommand("DELETE FROM servers WHERE server_id = $1", cleanup);
+                servers.Parameters.AddWithValue(ServerId);
+                await servers.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
     private static async Task<List<string>> NamesAsync(
         NpgsqlConnection connection, CancellationToken ct, string sql, bool includeDefaults, int limit)
     {

@@ -154,6 +154,34 @@ public sealed class StoreStatementStatsLiveTests
                 Assert.Contains("may not read", denied, StringComparison.Ordinal);
             }
 
+            /* #3920's fourth review (M5). pg_stat_statements stores a statement's RAW text, literals and all, when its
+               entry is gone at executor end: evicted mid-execution, or reset between a protocol Parse and its Execute
+               (pgss_store with no jumble state, PostgreSQL 18's pg_stat_statements.c). Forced here the second way. The
+               view holds the literal, the text is a SELECT the allowlist shows, and the tool shows it masked. */
+            await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))
+            {
+                await using var raw = new NpgsqlCommand("SELECT 'RawLiteral3920'::text AS pgss_raw_marker, $1::integer", c);
+                raw.Parameters.AddWithValue(1);
+                await raw.PrepareAsync(ct);
+                await ExecAsync(c, "SELECT public.pg_stat_statements_reset()", ct);
+                await raw.ExecuteScalarAsync(ct);
+                Assert.Equal(1L, await CountRecordedAsync(c, "RawLiteral3920", ct));
+            }
+
+            var rawShown = await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(reader, top: 1000, full_text: true);
+            Assert.DoesNotContain("RawLiteral3920", rawShown, StringComparison.Ordinal);
+            using (var doc = JsonDocument.Parse(rawShown))
+            {
+                Assert.Contains(
+                    doc.RootElement.GetProperty("statements").EnumerateArray(),
+                    s => QueryOf(s).Contains("'?'::text AS pgss_raw_marker", StringComparison.Ordinal));
+            }
+
+            Assert.DoesNotContain(
+                "RawLiteral3920",
+                await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(reader, top: 1000),
+                StringComparison.Ordinal);
+
             /* The scrub. With utility tracking forced on, a store's state before this build or a bring-your-own
                store's default, the password is recorded VERBATIM. */
             await using (var c = await OpenAsync(ownerCs.ConnectionString, ct))

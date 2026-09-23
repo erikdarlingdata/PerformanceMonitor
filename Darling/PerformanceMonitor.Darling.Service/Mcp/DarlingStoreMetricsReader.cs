@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -51,7 +52,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// CUMULATIVE counters into the interval's write-phase and sync-phase milliseconds and requested-checkpoint
 /// count, the differences the sweep deliberately does not store (the reasoning is on
 /// <see cref="StoreSelfMetrics.CheckpointerInsertSql"/>). Both are pure over rows already in hand and both
-/// are what the self-alert evaluator judges, so the tool and the alert cannot disagree about a number.</para>
+/// are what the self-alert evaluator judges, so the tool and the alert cannot disagree about a number. Since
+/// #3955 the checkpointer pair also carries each row's postmaster start time, and an interval that spans a
+/// restart states no requested count (<see cref="PostmasterRestart"/> says why and how that is decided).</para>
+///
+/// <para>And, since #3903, the pure half of the summary-first payload: <see cref="SelectObjects"/> resolves the
+/// tool's two filters to a view, <see cref="OrderForList"/> and <see cref="OrderByGrowth"/> rank its lists, and
+/// <see cref="ComputeWindowDeltas"/> turns each object's daily series into the one change over the window its
+/// row carries in place of the series. No new SQL: the two reads above feed all three views.</para>
 /// </summary>
 internal static class DarlingStoreMetricsReader
 {
@@ -1141,8 +1149,8 @@ LIMIT $1";
     /* ---------------- #3783: TOAST utilisation on the dimension rows ---------------- */
 
     /// <summary>
-    /// What a dimension row's TOAST pair means (#3783), computed once for the tool's <c>objects[]</c> and
-    /// <c>daily[]</c> and for the self-alert, so the percentage an operator reads and the one the alert judged
+    /// What a dimension row's TOAST pair means (#3783), computed once for the tool's object rows and series
+    /// points and for the self-alert, so the percentage an operator reads and the one the alert judged
     /// are the same arithmetic. <c>null</c> for every kind but <c>dimension</c>: the hypertable, aggregate,
     /// table and catch-all rows carry no TOAST columns (the sweep leaves them NULL by the per-kind convention),
     /// and publishing a note on them would be prose about a measurement nobody took.
@@ -1294,13 +1302,17 @@ LIMIT $1";
     /// newest pair is wanted regardless of window; $1 is <see cref="CheckpointerPairRows"/>, bound rather than
     /// written as a literal for the reason <see cref="LargestUnenumeratedSql"/> binds its cap — a terminal
     /// literal <c>LIMIT</c> on a reader is the shape the page census inventories, and this is not a page.
+    /// <c>postmaster_start_time</c> (V139, #3955) rides along so <see cref="CheckpointerReading.From"/> can tell an
+    /// interval that spans a restart; it is NULL on a row written before the rung, which the rule reads as no
+    /// evidence rather than as a restart.
     /// </summary>
     public const string CheckpointerPairSql = $@"
 SELECT
     metric_time,
     checkpoint_write_ms,
     checkpoint_sync_ms,
-    checkpoints_requested
+    checkpoints_requested,
+    postmaster_start_time
 FROM collect.store_metrics
 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
 AND   checkpoint_write_ms IS NOT NULL
@@ -1311,9 +1323,10 @@ LIMIT $1";
     /// needs exactly the newest row and the one before it and nothing a third row could add.</summary>
     public const int CheckpointerPairRows = 2;
 
-    /// <summary>One checkpointer row as stored: the sweep's stamp (naive UTC) and the three cumulative
-    /// counters as the server reported them at that instant.</summary>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested);
+    /// <summary>One checkpointer row as stored: the sweep's stamp (naive UTC), the three cumulative counters as
+    /// the server reported them at that instant, and (V139, #3955) the <c>pg_postmaster_start_time()</c> of the
+    /// postmaster that reported them, naive UTC, null on a row written before the rung.</summary>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Four states rather than a nullable delta, for the reason
@@ -1339,7 +1352,9 @@ LIMIT $1";
         /// zero. The row after the next sweep will difference cleanly against the post-reset row.</summary>
         Reset,
 
-        /// <summary>A measured interval. The one state the self-alert judges.</summary>
+        /// <summary>A measured interval. The one state the self-alert judges. One that spans a postmaster restart
+        /// (<see cref="CheckpointerReading.PostmasterRestarted"/>, #3955) is still Observed, because its write and
+        /// sync deltas are real, but it states no requested count.</summary>
         Observed,
     }
 
@@ -1357,10 +1372,17 @@ LIMIT $1";
     /// <param name="WriteMs">Milliseconds the checkpointer spent in the write phase inside the interval.</param>
     /// <param name="SyncMs">Milliseconds it spent in the sync (fsync) phase inside the interval — the phase the
     /// production read kills sat inside.</param>
-    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.</param>
+    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.
+    /// Null on an Observed interval that spans a postmaster restart (<paramref name="PostmasterRestarted"/>): the
+    /// shutdown checkpoint is counted as requested and survives the restart, so the count cannot be told from WAL
+    /// pressure there (#3955).</param>
     /// <param name="CumulativeWriteMs">The newest row's raw counter, for a reader who wants the lifetime figure. Null when Absent.</param>
     /// <param name="CumulativeSyncMs">Likewise.</param>
     /// <param name="CumulativeRequested">Likewise.</param>
+    /// <param name="PostmasterRestarted">The interval spans a postmaster restart by <see cref="PostmasterRestart.Spans"/>
+    /// (V139, #3955). False when there is no interval to span (Absent, NoPrevious).</param>
+    /// <param name="PostmasterStartTime">When the postmaster that produced the newest row started, UTC; null when the
+    /// newest row predates V139 or there is no row.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1371,7 +1393,9 @@ LIMIT $1";
         long? Requested,
         long? CumulativeWriteMs,
         long? CumulativeSyncMs,
-        long? CumulativeRequested)
+        long? CumulativeRequested,
+        bool PostmasterRestarted = false,
+        DateTime? PostmasterStartTime = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1382,7 +1406,9 @@ LIMIT $1";
         /// <paramref name="previous"/> null is <see cref="CheckpointerDeltaStatus.NoPrevious"/>; any counter
         /// lower on the newest row is <see cref="CheckpointerDeltaStatus.Reset"/>; a pair whose stamps do not
         /// advance (two rows at one instant cannot happen from one sweep, but the arithmetic must not divide
-        /// by it) is treated as no interval. Otherwise the three subtractions and the measured span.
+        /// by it) is treated as no interval. Otherwise the three subtractions and the measured span, except that
+        /// an interval spanning a postmaster restart (<see cref="PostmasterRestart.Spans"/>, #3955) leaves the
+        /// requested count null: the write and sync deltas are still real, and still Observed.
         /// </summary>
         public static CheckpointerReading From(CheckpointerSample? newest, CheckpointerSample? previous)
         {
@@ -1392,36 +1418,47 @@ LIMIT $1";
             }
 
             var observedAt = DateTime.SpecifyKind(newest.MetricTime, DateTimeKind.Utc);
+            DateTime? startedAt = newest.PostmasterStartTime is DateTime started
+                ? DateTime.SpecifyKind(started, DateTimeKind.Utc)
+                : null;
 
             if (previous is null)
             {
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.NoPrevious, observedAt, null, null, null, null, null,
-                    newest.WriteMs, newest.SyncMs, newest.Requested);
+                    newest.WriteMs, newest.SyncMs, newest.Requested,
+                    PostmasterRestarted: false, PostmasterStartTime: startedAt);
             }
 
             var previousAt = DateTime.SpecifyKind(previous.MetricTime, DateTimeKind.Utc);
             var span = (observedAt - previousAt).TotalSeconds;
+            var restarted = PostmasterRestart.Spans(previous.MetricTime, previous.PostmasterStartTime, newest.PostmasterStartTime);
 
             if (newest.WriteMs < previous.WriteMs || newest.SyncMs < previous.SyncMs || newest.Requested < previous.Requested || span <= 0)
             {
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.Reset, observedAt, previousAt, null, null, null, null,
-                    newest.WriteMs, newest.SyncMs, newest.Requested);
+                    newest.WriteMs, newest.SyncMs, newest.Requested,
+                    restarted, startedAt);
             }
 
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
                 newest.WriteMs - previous.WriteMs,
                 newest.SyncMs - previous.SyncMs,
-                newest.Requested - previous.Requested,
-                newest.WriteMs, newest.SyncMs, newest.Requested);
+                /* #3955: a shutdown checkpoint is counted as requested and the count survives the restart, so
+                   across one the difference cannot be told from WAL pressure. Unknown, never zero. */
+                restarted ? null : newest.Requested - previous.Requested,
+                newest.WriteMs, newest.SyncMs, newest.Requested,
+                restarted, startedAt);
         }
 
         /// <summary>
         /// The self-alert's condition (#3783), judged on an Observed interval only: the sync phase held more
         /// than <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> inside the interval, OR at least one
-        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding.
+        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding. An
+        /// interval that spans a postmaster restart has no requested count (#3955), so only its sync arm can make
+        /// it pressure.
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
@@ -1447,7 +1484,9 @@ LIMIT $1";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var sample = new CheckpointerSample(reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3));
+            var sample = new CheckpointerSample(
+                reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4));
             if (newest is null)
             {
                 newest = sample;
@@ -1565,5 +1604,204 @@ LIMIT $1";
         }
 
         return growth;
+    }
+
+    /* ---------------- #3903: the summary-first payload ---------------- */
+
+    /// <summary>
+    /// The kinds <c>get_store_metrics</c> lists as rows (#3903), which is also the closed set its
+    /// <c>object_kind</c> filter accepts: the six byte-bearing kinds and <c>background_job</c>. The
+    /// <c>store</c>, <c>job_history</c> and <c>checkpointer</c> rows are never list rows: each is a block of
+    /// its own, because its columns are overloaded or cumulative and, rendered as a row, would read as
+    /// something they are not.
+    /// </summary>
+    public static readonly IReadOnlyList<string> ListedKinds = new[]
+    {
+        StoreSelfMetrics.HypertableObjectKind,
+        StoreSelfMetrics.ContinuousAggregateObjectKind,
+        StoreSelfMetrics.DimensionObjectKind,
+        StoreSelfMetrics.TableObjectKind,
+        StoreSelfMetrics.OtherObjectKind,
+        StoreSelfMetrics.SystemObjectKind,
+        StoreSelfMetrics.BackgroundJobObjectKind,
+    };
+
+    /// <summary>A listed kind whose rows carry bytes: every listed kind but <c>background_job</c>.</summary>
+    public static bool IsByteBearing(string objectKind) =>
+        objectKind != StoreSelfMetrics.BackgroundJobObjectKind && ListedKinds.Contains(objectKind, StringComparer.Ordinal);
+
+    /// <summary>How much of its own schedule interval a job's last run took, unrounded, or null when either
+    /// figure is missing or not positive. The ranking reads it whole; the payload rounds it to one decimal.</summary>
+    public static double? CadencePercent(long? lastRunDurationMs, long? scheduleIntervalMs) =>
+        lastRunDurationMs is > 0 && scheduleIntervalMs is > 0
+            ? 100.0 * lastRunDurationMs.Value / scheduleIntervalMs.Value
+            : null;
+
+    /// <summary>
+    /// One object's change across the window, from its first daily point to its last (#3903). This is what the
+    /// object lists carry in place of the per-object daily series the default response no longer does: a
+    /// growth or cadence question reads the difference, and the points stay one call away.
+    ///
+    /// <para><b>Daily points, not raw samples.</b> Each daily point is that day's LAST snapshot
+    /// (<see cref="StoreMetricsDailySql"/>), so the delta is what a caller would compute from the series an
+    /// exact <c>object_name</c> returns. <see cref="Since"/> is the first point's day.</para>
+    ///
+    /// <para><b>Null, never zero, when there is no delta to state</b>: a null reading at either end, or a job
+    /// counter that went backwards. The job counters are cumulative, so a negative count of runs is a reset,
+    /// not a measurement, the <see cref="CheckpointerReading"/> discipline. An object with fewer than two
+    /// points has no entry at all.</para>
+    /// </summary>
+    public sealed record WindowDelta(DateTime Since, long? GrowthBytes, long? RunsInWindow, long? FailuresInWindow);
+
+    /// <summary>
+    /// Every object's <see cref="WindowDelta"/> from the daily series (#3903). Pure. Keyed by (kind, name)
+    /// because the name alone is not unique across kinds: the store row and the job_history row can share one.
+    /// </summary>
+    public static Dictionary<(string Kind, string Name), WindowDelta> ComputeWindowDeltas(IReadOnlyList<StoreMetricDailyPoint> daily)
+    {
+        if (daily is null)
+        {
+            throw new ArgumentNullException(nameof(daily));
+        }
+
+        var deltas = new Dictionary<(string Kind, string Name), WindowDelta>();
+        foreach (var series in daily.GroupBy(p => (p.ObjectKind, p.ObjectName)))
+        {
+            var points = series.OrderBy(p => p.Day).ToList();
+            if (points.Count < 2)
+            {
+                continue;
+            }
+
+            var first = points[0];
+            var last = points[^1];
+            deltas[series.Key] = new WindowDelta(
+                first.Day,
+                last.TotalBytes - first.TotalBytes,
+                Counted(first.TotalRuns, last.TotalRuns),
+                Counted(first.TotalFailures, last.TotalFailures));
+        }
+
+        return deltas;
+    }
+
+    /// <summary>A cumulative counter's increase, or null when either end is missing or it went backwards.</summary>
+    private static long? Counted(long? first, long? last)
+    {
+        if (first is null || last is null || last < first)
+        {
+            return null;
+        }
+
+        return last - first;
+    }
+
+    /// <summary>Which of the three shapes a <c>get_store_metrics</c> call resolved to (#3903).</summary>
+    public enum StoreMetricsView
+    {
+        /// <summary>No filter: the store-level blocks and three ranked lists.</summary>
+        Summary,
+
+        /// <summary>A filter matched objects: every match, ranked, as one list bounded by <c>limit</c>.</summary>
+        List,
+
+        /// <summary>An exact <c>object_name</c> matched one object: its row and its daily series.</summary>
+        Object,
+    }
+
+    /// <summary>What the filters selected: the view, and the listed rows it covers (every listed row for the
+    /// summary; possibly none for a filter, which the tool answers as <c>empty</c>).</summary>
+    public sealed record ObjectSelection(StoreMetricsView View, IReadOnlyList<StoreMetricRow> Matched);
+
+    /// <summary>
+    /// Resolves the two filters against the latest rows (#3903). Pure. <paramref name="objectKind"/> narrows
+    /// to one kind; <paramref name="objectName"/> then matches case-insensitively, EXACT first: one exact
+    /// match is the object view, because a name that is also a substring of others (wait_stats, and the
+    /// jobs and aggregates named after it) must still be reachable on its own. With no exact match, every
+    /// name that contains it is listed. Only <see cref="ListedKinds"/> are ever candidates.
+    /// </summary>
+    public static ObjectSelection SelectObjects(IReadOnlyList<StoreMetricRow> latest, string? objectKind, string? objectName)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        var candidates = latest
+            .Where(r => ListedKinds.Contains(r.ObjectKind, StringComparer.Ordinal))
+            .Where(r => objectKind is null || string.Equals(r.ObjectKind, objectKind, StringComparison.Ordinal))
+            .ToList();
+
+        if (objectName is null)
+        {
+            return new ObjectSelection(objectKind is null ? StoreMetricsView.Summary : StoreMetricsView.List, candidates);
+        }
+
+        var exact = candidates.Where(r => string.Equals(r.ObjectName, objectName, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count == 1)
+        {
+            return new ObjectSelection(StoreMetricsView.Object, exact);
+        }
+
+        return new ObjectSelection(
+            StoreMetricsView.List,
+            exact.Count > 1
+                ? exact
+                : candidates.Where(r => r.ObjectName.Contains(objectName, StringComparison.OrdinalIgnoreCase)).ToList());
+    }
+
+    /// <summary>
+    /// The one order every object list uses (#3903): byte-bearing objects largest first, then background
+    /// jobs, those whose failure count grew in the window first and then the closest to their own cadence.
+    /// A failing job leads because a failure is the more urgent signal, and one the Store Job Over Cadence
+    /// alert never judges: it reads successful runs only (<see cref="TimescaleSupport.JobCadenceReadSql"/>).
+    /// Ties break on the last run, kind and name, so two calls page the same way. Pure.
+    /// </summary>
+    public static List<StoreMetricRow> OrderForList(
+        IEnumerable<StoreMetricRow> rows, IReadOnlyDictionary<(string Kind, string Name), WindowDelta> deltas)
+    {
+        return rows
+            .OrderBy(r => IsByteBearing(r.ObjectKind) ? 0 : 1)
+            .ThenByDescending(r => r.TotalBytes ?? long.MinValue)
+            .ThenByDescending(r => Delta(deltas, r)?.FailuresInWindow ?? 0)
+            .ThenByDescending(r => CadencePercent(r.LastRunDurationMs, r.ScheduleIntervalMs) ?? double.MinValue)
+            .ThenByDescending(r => r.LastRunDurationMs ?? long.MinValue)
+            .ThenBy(r => r.ObjectKind, StringComparer.Ordinal)
+            .ThenBy(r => r.ObjectName, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>The byte-bearing rows that have a growth figure, largest growth first (#3903). A shrinking
+    /// object ranks by its negative delta, so it trails rather than vanishing. Pure.</summary>
+    public static List<StoreMetricRow> OrderByGrowth(
+        IEnumerable<StoreMetricRow> rows, IReadOnlyDictionary<(string Kind, string Name), WindowDelta> deltas)
+    {
+        return rows
+            .Where(r => IsByteBearing(r.ObjectKind) && Delta(deltas, r)?.GrowthBytes is not null)
+            .OrderByDescending(r => Delta(deltas, r)!.GrowthBytes)
+            .ThenByDescending(r => r.TotalBytes ?? long.MinValue)
+            .ThenBy(r => r.ObjectKind, StringComparer.Ordinal)
+            .ThenBy(r => r.ObjectName, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>One row's window delta, or null when its series has fewer than two points.</summary>
+    public static WindowDelta? Delta(IReadOnlyDictionary<(string Kind, string Name), WindowDelta> deltas, StoreMetricRow row) =>
+        deltas.TryGetValue((row.ObjectKind, row.ObjectName), out var delta) ? delta : null;
+
+    /// <summary>One object's daily points, oldest first (#3903): the object view's series, matched on kind AND
+    /// name for the reason <see cref="ComputeWindowDeltas"/> keys on both.</summary>
+    public static List<StoreMetricDailyPoint> SeriesFor(IReadOnlyList<StoreMetricDailyPoint> daily, StoreMetricRow row)
+    {
+        if (daily is null)
+        {
+            throw new ArgumentNullException(nameof(daily));
+        }
+
+        return daily
+            .Where(p => string.Equals(p.ObjectKind, row.ObjectKind, StringComparison.Ordinal)
+                        && string.Equals(p.ObjectName, row.ObjectName, StringComparison.Ordinal))
+            .OrderBy(p => p.Day)
+            .ToList();
     }
 }

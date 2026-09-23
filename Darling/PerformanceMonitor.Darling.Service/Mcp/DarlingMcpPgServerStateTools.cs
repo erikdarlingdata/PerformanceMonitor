@@ -474,7 +474,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. Returns one row describing the whole window, not a series.")]
+    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. A restart inside the window leaves checkpoints_requested and pct_checkpoints_requested null, with postmaster_restarted true: PostgreSQL counts a shutdown checkpoint as requested and keeps the count across the restart, so across one the requested figure cannot be told from WAL pressure (postmaster_start_time says when the server last started, so a window after it can be chosen). Returns one row describing the whole window, not a series.")]
     public static async Task<string> GetPgWriteStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -534,8 +534,10 @@ public sealed class DarlingMcpPgServerStateTools
                 checkpoints_timed = row.CheckpointsTimed,
                 checkpoints_requested = row.CheckpointsRequested,
                 /* The whole reason both numbers are here. Null rather than 0 when there were no
-                   checkpoints at all — 0% requested would claim a healthy result from no evidence. */
-                pct_checkpoints_requested = timed + requested > 0
+                   checkpoints at all — 0% requested would claim a healthy result from no evidence — and null when
+                   the requested count itself is (a restart inside the window, #3955): a share computed from the
+                   timed count alone would read as 0% requested, a clean result from no evidence again. */
+                pct_checkpoints_requested = row.CheckpointsRequested is not null && timed + requested > 0
                     ? Math.Round((double)requested / (timed + requested) * 100, 1)
                     : (double?)null,
                 checkpoint_write_time_ms = row.CheckpointWriteTimeMs,
@@ -572,6 +574,10 @@ public sealed class DarlingMcpPgServerStateTools
                       + "beside these are collected normally."
                     : null,
                 counter_reset = row.ResetDuringWindow,
+                /* #3955: a restart inside the window, found from consecutive rows' postmaster start times; it is
+                   why checkpoints_requested is null. postmaster_start_time is the window's last sample's. */
+                postmaster_restarted = row.PostmasterRestartedDuringWindow,
+                postmaster_start_time = row.PostmasterStartTimeUtc,
                 note = "Requested checkpoints mean max_wal_size filled before the scheduled interval, so a "
                      + "high requested share means write volume is forcing them. "
                      + (backendCountersRemoved
@@ -593,6 +599,18 @@ public sealed class DarlingMcpPgServerStateTools
                      + (row.ResetDuringWindow
                          ? " The counters were RESET inside this window, so these figures cover only the "
                            + "time since the reset."
+                         : string.Empty)
+                     + (row.PostmasterRestartedDuringWindow
+                         ? " PostgreSQL RESTARTED inside this window"
+                           + (row.PostmasterStartTimeUtc is { } started
+                               ? " (its postmaster started at "
+                                 + started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " UTC)"
+                               : string.Empty)
+                           + ". A shutdown checkpoint is counted as REQUESTED and the count survives the restart, so "
+                           + "checkpoints_requested and pct_checkpoints_requested are null rather than a figure that "
+                           + "would read the restart as WAL pressure. For a requested count, set hours_back (or as_of) "
+                           + "so the window starts after that restart. The timed count is unaffected; the checkpoint "
+                           + "write and sync time include the shutdown checkpoint's own work."
                          : string.Empty),
             }, McpHelpers.JsonOptions);
         }
@@ -751,7 +769,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change.")]
+    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change. PER-DATABASE AND PER-ROLE OVERRIDES (ALTER DATABASE/ROLE SET) are reported too, interleaved with the server-wide rows by changed_at: such a row carries database_name and/or role_name (only the ones it is scoped to) and change_kind - changed, set (old_value null: the override appeared) or reset (new_value null: it was removed) - while a server-wide row carries neither, and overrides already present when the collector first read them are not reported as set.")]
     public static async Task<string> GetPgServerConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -789,7 +807,17 @@ public sealed class DarlingMcpPgServerStateTools
             var truncated = fetched.Count > limit;
             var rows = truncated ? fetched.Take(limit).ToList() : fetched;
 
-            return JsonSerializer.Serialize(new
+            /* #3937: the rows are typed `object` so one list can carry two shapes. A server-wide row is the SAME
+               anonymous shape it always was, and System.Text.Json serializes an object-typed element by its
+               runtime type, so its bytes do not move. An override row is built as a JsonObject because
+               McpHelpers.JsonOptions writes nulls: a shared shape with database_name / role_name / change_kind
+               would put `"database_name": null` on every server-wide row, and an override scoped to one role
+               would say `"database_name": null` where the truth is "every database". So a scoped row names only
+               the scope it has, plus change_kind, and omits unit / context / description, which the
+               pg_db_role_setting catalog does not hold (read them off the server-wide row for the same name, as
+               get_pg_server_config's database_overrides_note says). old_value and new_value stay on it even
+               when NULL, because there NULL is the answer: set had nothing before, reset has nothing after. */
+            var page = new
             {
                 server = resolved.ServerName,
                 hours_back,
@@ -799,23 +827,73 @@ public sealed class DarlingMcpPgServerStateTools
                 note = "changed_at is the time of the snapshot that FIRST reported the new value, so the "
                      + "change happened at some point in the hour before it - this collector runs hourly. "
                      + "A setting appearing for the first time is not reported here.",
-                changes = rows.Select(r => new
-                {
-                    changed_at = r.ChangedAtUtc,
-                    name = r.Name,
-                    old_value = r.OldValue,
-                    new_value = r.NewValue,
-                    unit = r.Unit,
-                    source = r.Source,
-                    context = r.Context,
-                    description = r.ShortDescription,
-                }),
-            }, McpHelpers.JsonOptions);
+                changes = rows.Select(r => r.DatabaseName is null && r.RoleName is null
+                    ? (object)new
+                    {
+                        changed_at = r.ChangedAtUtc,
+                        name = r.Name,
+                        old_value = r.OldValue,
+                        new_value = r.NewValue,
+                        unit = r.Unit,
+                        source = r.Source,
+                        context = r.Context,
+                        description = r.ShortDescription,
+                    }
+                    : ScopedChange(r)),
+            };
+
+            /* The override note is ATTACHED, like get_pg_server_config's database_overrides, so a page with no
+               override row - every page on a cluster with none, and every page before V138 - is byte-identical
+               to what this tool returned before #3937. */
+            if (rows.All(r => r.DatabaseName is null && r.RoleName is null))
+            {
+                return JsonSerializer.Serialize(page, McpHelpers.JsonOptions);
+            }
+
+            var node = JsonSerializer.SerializeToNode(page, McpHelpers.JsonOptions)?.AsObject()
+                ?? throw new InvalidOperationException("the config-changes page did not serialize to a JSON object");
+            node["scoped_changes_note"] = "Rows carrying database_name and/or role_name are per-database or per-role "
+                + "overrides (ALTER DATABASE/ROLE SET), interleaved with the server-wide rows by changed_at. "
+                + "change_kind says what happened between two consecutive snapshots of the server: changed (the "
+                + "override's value moved), set (it appeared - old_value is null) or reset (it was removed - "
+                + "new_value is null). An override already present on the first snapshot after the collector "
+                + "began reading overrides is not reported as set: nobody set it then, the collector started "
+                + "seeing it. An override row has no unit, context or description; read those off the "
+                + "server-wide setting of the same name.";
+            return node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
             return McpHelpers.FormatError("get_pg_server_config_changes", ex);
         }
+    }
+
+    /// <summary>
+    /// One override change as the payload renders it (#3937): the scope names it HAS and none it does not, then
+    /// change_kind, then the value pair. Property order follows the server-wide row's where the two share names.
+    /// </summary>
+    private static JsonObject ScopedChange(DarlingPgServerConfigReader.PgConfigChangeRow r)
+    {
+        var o = new JsonObject
+        {
+            ["changed_at"] = JsonSerializer.SerializeToNode(r.ChangedAtUtc, McpHelpers.JsonOptions),
+            ["name"] = r.Name,
+        };
+        if (r.DatabaseName is not null)
+        {
+            o["database_name"] = r.DatabaseName;
+        }
+
+        if (r.RoleName is not null)
+        {
+            o["role_name"] = r.RoleName;
+        }
+
+        o["change_kind"] = r.ChangeKind;
+        o["old_value"] = r.OldValue;
+        o["new_value"] = r.NewValue;
+        o["source"] = r.Source;
+        return o;
     }
 
 }
