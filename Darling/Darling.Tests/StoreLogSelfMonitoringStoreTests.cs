@@ -267,13 +267,35 @@ public class StoreLogSelfMonitoringStoreTests
         Assert.Contains("StoreSelfMetrics.SweepAsync", body, StringComparison.Ordinal);
         Assert.Contains("StoreLogSweep.SweepAsync", body, StringComparison.Ordinal);
 
-        /* And it has its OWN catch, which the two passes either side of it do not. This is the only pass
-           on the tick whose PRIVILEGE is not guaranteed - reading the log needs pg_read_server_files plus
-           EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may not have granted - so
-           sharing the outer catch would let one permanent condition cost the collector-cost flush BELOW it
-           every hour forever. Asserted by position: a catch has to sit between the two calls. */
+        var sizingSweep = body.IndexOf("StoreSelfMetrics.SweepAsync", StringComparison.Ordinal);
         var logSweep = body.IndexOf("StoreLogSweep.SweepAsync", StringComparison.Ordinal);
         var costFlush = body.IndexOf("_collectorCost.FlushAsync", StringComparison.Ordinal);
+
+        /* #3923: the sizing pass gets its OWN narrow catch too, ahead of the store-log capture - the same
+           "cost the flush below it forever" reasoning the capture's catch already carries, hit for real by
+           #3918 (a catch-all census failing 42703 on TimescaleDB 2.29+) while the sizing pass still shared
+           the OUTER catch. Position: between the sizing call and the store-log capture, asserted the same
+           way as the capture's own catch below - a mutation that drops it, or moves it past the capture,
+           reds here. Filter: excludes a command TIMEOUT (still the outer catch's job) and a connection the
+           fault already broke (the two passes after it need it live) - the two conditions checked directly
+           against the catch's own text so a mutation that widens either arm reds too. */
+        var sizingCatch = body.IndexOf("catch (PostgresException ex) when", StringComparison.Ordinal);
+        Assert.True(
+            sizingCatch > sizingSweep && sizingCatch < logSweep,
+            "the sizing pass has no catch of its own between it and the store-log capture, so a statement "
+            + "the store permanently rejects there would cost the store-log census and the collector-cost "
+            + "flush too");
+
+        var sizingCatchBody = body[sizingCatch..logSweep];
+        Assert.Contains("!PgBaselineProvider.IsCommandTimeout(ex)", sizingCatchBody, StringComparison.Ordinal);
+        Assert.Contains("connection.State == ConnectionState.Open", sizingCatchBody, StringComparison.Ordinal);
+
+        /* And the store-log capture has its OWN catch, which the two passes either side of it do not. This
+           is the only pass on the tick whose PRIVILEGE is not guaranteed - reading the log needs
+           pg_read_server_files plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
+           not have granted - so sharing the outer catch would let one permanent condition cost the
+           collector-cost flush BELOW it every hour forever. Asserted by position: a catch has to sit between
+           the two calls. */
         var innerCatch = body.IndexOf("catch (Exception ex) when", logSweep, StringComparison.Ordinal);
 
         Assert.True(costFlush > logSweep, "the collector-cost flush no longer follows the store-log sweep");
@@ -281,6 +303,17 @@ public class StoreLogSelfMonitoringStoreTests
             innerCatch > logSweep && innerCatch < costFlush,
             "the store-log sweep has no catch of its own between it and the collector-cost flush, so a "
             + "store whose role cannot read the log would cost the flush too");
+
+        /* #3971: the passes after that catch need a connection it may have just closed - Npgsql closes THIS
+           one outright on the capture's ERROR rather than leaving it idle-but-usable. Position: the reopen
+           has to sit between the store-log catch and the collector-cost flush, so the re-mask in between
+           (which runs on the same connection) gets it live too. */
+        var reopen = body.IndexOf("connection.State != ConnectionState.Open", StringComparison.Ordinal);
+        Assert.True(
+            reopen > innerCatch && reopen < costFlush,
+            "the connection is never checked and reopened between the store-log catch and the "
+            + "collector-cost flush, so a capture that closed it would take the re-mask and the flush "
+            + "down too");
 
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
