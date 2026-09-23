@@ -38,7 +38,12 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <paramref name="Rows"/> of 0 is a real statement about what the source held. False when the target's host
 /// is not an RDS or Aurora endpoint, so no AWS call was made and nothing at all is known about the
 /// source.</param>
-public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached)
+/// <param name="ForeignZoneLines">#4046 part 1b: lines this cycle skipped as stamped in a zone other than the
+/// target's own UTC <c>log_timezone</c>, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgServerLogTail.ForeignZoneLinesMeasurement"/>. Always 0 for a
+/// transport that does not carry a zone-stamped prefix (<c>RdsPlanIngestor</c>, <c>RdsCpuIngestor</c>) and
+/// for a cycle where the target's setting could not be read, which keeps today's refusal instead.</param>
+public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached, int ForeignZoneLines = 0)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -50,5 +55,5 @@ public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached)
     /// The source was read and held <paramref name="rows"/> rows worth storing — including zero, which here
     /// is a genuine all-clear bounded by the read's own window rather than an absence of information.
     /// </summary>
-    public static RdsIngestOutcome Read(int rows) => new(rows, true);
+    public static RdsIngestOutcome Read(int rows, int foreignZoneLines = 0) => new(rows, true, foreignZoneLines);
 }

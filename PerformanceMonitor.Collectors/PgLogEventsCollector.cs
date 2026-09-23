@@ -78,6 +78,23 @@ UNION ALL
 SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
+    /* The binary-route twin (#4046 part 1c), sent instead of QueryText once PgReadBinaryFileCapability
+       finds the grant. tail.body is bytea here, so the marker arms are cast through convert_to rather than
+       left as a bare text literal — a UNION ALL between bytea and an "unknown"-typed string literal would
+       ask PostgreSQL to parse the marker text AS bytea input, which it is not. convert_to produces the
+       marker's own UTF-8 bytes instead, and ReadAsync decodes column 0 the same way whichever arm produced
+       it, so the marker comparison downstream never has to know which route ran. */
+    private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoStderrLogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
     public override string Name => "pg_log_events";
 
     public override string TargetTable => "pg_log_events";
@@ -101,7 +118,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         _ = RequireKey(context);
-        return new(QueryText);
+        return new(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText);
     }
 
     private static PgLogHashKey RequireKey(CollectorContext context) =>
@@ -165,7 +182,14 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var body = reader.IsDBNull(0) ? null : reader.GetString(0);
+            /* #4046 part 1c: on the binary route column 0 is bytea (real tail data and the convert_to'd
+               marker rows alike), decoded leniently so a byte a failed login planted becomes U+FFFD instead
+               of the 22021 the text route would have thrown before this row ever reached C#. */
+            var body = reader.IsDBNull(0)
+                ? null
+                : context.PgReadBinaryFileGranted
+                    ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0))
+                    : reader.GetString(0);
 
             /* The marker row (#3410). It cannot collide with a real body: a log tail that is exactly the
                marker text and nothing else is not a log. Thrown so the runner records the named skip. */

@@ -410,6 +410,10 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
 
+    /* When each server's failed log_timezone read last logged at Warning (#4051 round-2 review, L-2). See
+       LogTimezoneReadFailureLevel. In memory on purpose: a restart that warns once more is the right answer. */
+    private readonly ConcurrentDictionary<int, DateTime> _logTimezoneReadWarnedUtc = new();
+
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
     public DateTime? LastQueryStoreItemFailureUtc(int serverId)
@@ -695,6 +699,35 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// <paramref name="result"/> with <see cref="PgReadBinaryFileAdvisory.Sentence"/> merged into its host
+    /// note when <paramref name="server"/> is still on the text route AND has not been noted inside
+    /// <see cref="PgReadBinaryFileAdvisory.NoteInterval"/> (#4046); otherwise <paramref name="result"/>
+    /// unchanged. The caller (<c>DarlingWorker.RunOneAsync</c>) gates this to <c>pg_log_events</c> only, so a
+    /// target gets one note a day rather than whichever of the three log-tail collectors happens to run and
+    /// win the gate. Reads <see cref="PgReadBinaryFileCapability"/>'s cache rather than probing again — the
+    /// server-scoped path already resolved it for this exact target this cycle, for every collector that
+    /// reads <see cref="PgServerLogTail"/>. A managed target was never entered into that cache at all (it reaches
+    /// its log through the RDS API, never through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/>), so
+    /// <c>TryGetCachedVerdict</c> answers false for it and this never fires there. It answers false for a
+    /// database that is neither UTF8 nor SQL_ASCII too, where the grant would change nothing (#4051 review L4).
+    /// It takes the <see cref="ServerRuntime"/> rather than a key, like the other two cache helpers, so all three
+    /// key the cache the same way (#4051 round-2 review).
+    /// </summary>
+    internal static CollectorRunResult WithReadBinaryFileAdvisoryNote(CollectorRunResult result, ServerRuntime server)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(server);
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+
+        return PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted)
+            && !granted
+            && PgReadBinaryFileAdvisory.ShouldNote(targetKey)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgReadBinaryFileAdvisory.Sentence) }
+            : result;
+    }
+
+    /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
     ///
     /// <para>Reported as a normal <see cref="CollectorRunResult"/> so the cycle accounts for it exactly like
@@ -737,15 +770,119 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
+           effect with no reconnect and #3604-style connect-time caching would miss that. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's own read of <c>log_timezone</c>, over a throwaway connection to
+    /// the target — the RDS ingestors reach the log through the AWS API, not SQL, so they carry no target
+    /// connection of their own. False (today's refusal on a foreign-zone line) when the setting cannot be
+    /// read, matching the self-hosted route's NULL-column fallback in <see cref="PgServerLogTail.LogTimezoneIsUtc"/>.
+    /// </summary>
+    private async Task<bool> TryReadLogTimezoneIsUtcAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            var isUtc = await ReadLogTimezoneIsUtcAsync(connection, cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _logTimezoneReadWarnedUtc.TryRemove(server.ServerId, out _);
+            return isUtc;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Warning, not Debug: a read that fails every cycle turns part 1b off for this target, and at Debug
+               that went unseen while every call failed (#4051 review H1). At most once an hour per server,
+               though, with Debug in between (#4051 round-2 review, L-2). */
+            _logger?.Log(LogTimezoneReadFailureLevel(_logTimezoneReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
+                "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
+                + "line this cycle is refused as before.", server.Config.DisplayName);
+            return false;
+        }
+    }
+
+    /// <summary>How long a server's failed <c>log_timezone</c> reads stay at Debug after one logs at Warning.</summary>
+    internal static readonly TimeSpan LogTimezoneReadWarningInterval = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// #4051 round-2 review, L-2: the level for a failed <c>log_timezone</c> read on <paramref name="serverId"/>.
+    /// Warning for the first failure, and again once <see cref="LogTimezoneReadWarningInterval"/> has passed since
+    /// the last Warning. Debug in between. A read that fails every cycle stays visible, without a stack trace on
+    /// every cycle (576 a day per managed target). The Warning is recorded on the same call that returns it.
+    /// </summary>
+    internal static LogLevel LogTimezoneReadFailureLevel(
+        ConcurrentDictionary<int, DateTime> warnedUtc, int serverId, DateTime nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(warnedUtc);
+
+        if (warnedUtc.TryGetValue(serverId, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
+        {
+            return LogLevel.Debug;
+        }
+
+        warnedUtc[serverId] = nowUtc;
+        return LogLevel.Warning;
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's <c>log_timezone</c> read as a whole statement.
+    /// <see cref="PgServerLogTail.LogTimezoneSql"/> is an expression the self-hosted readers select beside the
+    /// tail, so on its own it needs the SELECT. Without it every call failed with 42601 and part 1b never took
+    /// effect on an RDS or Aurora target (#4051 review H1).
+    /// </summary>
+    internal const string LogTimezoneReadSql = "SELECT " + PgServerLogTail.LogTimezoneSql;
+
+    /// <summary>
+    /// Whether the target's <c>log_timezone</c> renders UTC, read on <paramref name="connection"/>, which must
+    /// already be open. Its own method so a live test can run the exact statement the managed route sends.
+    /// </summary>
+    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        using var command = connection.CreateCommand();
+        command.CommandTimeout = 10;
+        command.CommandText = LogTimezoneReadSql;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+    }
+
+    /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
+    /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
+    /// self-hosted collectors.</summary>
+    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(ServerRuntime server, int foreignZoneLines)
+    {
+        if (foreignZoneLines <= 0)
+        {
+            return CollectorContext.NoMeasurements;
+        }
+
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = _deltas,
+        };
+        PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+        return context.Measurements;
     }
 
     /// <summary>
@@ -764,14 +901,20 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
+           the target fresh each cycle rather than caching it at connect. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
     }
 
@@ -936,6 +1079,78 @@ public sealed class DarlingCollectorRunner
             "  [{Server}] {Collector} [{Database}] {Outcome} after sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms (nothing stored)",
             displayName, collectorName, databaseName, outcome, databaseSqlMs,
             phases.ConnectMs, phases.OpenMs, phases.DrainMs, phases.OtherMs);
+    }
+
+    /// <summary>
+    /// The three collectors that open <see cref="PgServerLogTail.TailCteSql"/> (#4046 part 1c) — the set
+    /// eligible for the <see cref="PgReadBinaryFileCapability"/> check and the binary route, and the same
+    /// set <c>ReadsServerLogWithPgReadFile</c> in <c>DarlingWorker</c> names for the fault message, kept as
+    /// its own copy here rather than shared across the two classes' current visibility boundary.
+    /// </summary>
+    private static bool ReadsPgServerLogTail(string collectorName) =>
+        collectorName is "pg_log_events" or "pg_deadlocks" or "pg_plan_capture";
+
+    /// <summary>
+    /// #4046 part 1c: sets <see cref="CollectorContext.PgReadBinaryFileGranted"/> for a PostgreSQL log-tail
+    /// collector from <see cref="PgReadBinaryFileCapability"/> (its own hourly cache), and leaves every other
+    /// collector on the default text route with no round trip. Its own method so the gate is testable; the
+    /// server-scoped path that calls it needs a live target.
+    /// </summary>
+    internal static async ValueTask ResolvePgReadBinaryFileGrantAsync(
+        CollectorContext context,
+        string collectorName,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
+        {
+            context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The one place <see cref="PgReadBinaryFileCapability"/>'s cache key comes from (#4051 round-2 review). The
+    /// helper that fills the cache, the one that reads it for the advisory note, and the one that drops a stale
+    /// verdict all take the <see cref="ServerRuntime"/> and key through here. None of them can drift to a
+    /// different key and leave an invalidation that never hits.
+    /// </summary>
+    private static string ReadBinaryFileCacheKey(ServerRuntime server) => server.StorageName;
+
+    /// <summary>
+    /// #4046 part 1c (#4051 review L1): drops <paramref name="targetKey"/>'s cached
+    /// <see cref="PgReadBinaryFileCapability"/> verdict when a log-tail collector's fault says it is stale, so the
+    /// next cycle re-checks instead of waiting out the hour.
+    /// <list type="bullet">
+    /// <item>A 22021 is the text route meeting a planted byte, and its message tells the operator to grant
+    /// pg_read_binary_file. A grant made in answer should take effect on the next cycle.</item>
+    /// <item>A 42501 while the verdict says granted means the grant was revoked, or the login changed, since the
+    /// check. Every binary-route read would fail until the hour ran out.</item>
+    /// </list>
+    /// A 42501 on the text route leaves the verdict alone, so a target that never granted pg_read_file is not
+    /// re-probed every cycle. A 22021 on a database whose encoding the binary route does not serve leaves it
+    /// alone too, since no grant changes that answer. A proven write to the STORE leaves it alone (#4051 round-2
+    /// review), because that fault says nothing about the target's log. The checks run cheapest first and
+    /// allocate nothing for a fault that is not a <see cref="PostgresException"/>, because the general handler
+    /// that calls this is also the OutOfMemoryException landing pad.
+    /// </summary>
+    internal static void ForgetStaleReadBinaryFileVerdict(string collectorName, Exception ex, ServerRuntime server)
+    {
+        if (ex is not PostgresException pg
+            || !ReadsPgServerLogTail(collectorName)
+            || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+
+        if ((pg.SqlState == "22021" && !PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(targetKey))
+            || (pg.SqlState == "42501" && PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted) && granted))
+        {
+            PgReadBinaryFileCapability.Invalidate(targetKey);
+        }
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
@@ -2286,6 +2501,14 @@ public sealed class DarlingCollectorRunner
                    query_stats) could occupy a monitored server for minutes — the exact profile we must never
                    present. Null budget = itemToken IS cancellationToken and this block is byte-for-byte what
                    it was. */
+                /* #4046 part 1c: resolved on the connection that is about to run the query, BEFORE
+                   BuildQuery decides which of the two tail routes to send — a target's grant can arrive
+                   with no reconnect, so this is checked (through its own hourly cache) independently of
+                   how long the connection has been open, rather than folded into the connect-time facts on
+                   CollectorTargetInfo that live for the connection's whole life. */
+                await ResolvePgReadBinaryFileGrantAsync(
+                    context, definition.Name, targetConnection, server, cancellationToken);
+
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;

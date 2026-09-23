@@ -100,7 +100,22 @@ database Darling connects to**, not in `postgres` for good measure:
 ```sql
 GRANT pg_read_server_files TO darling_monitor;
 GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling_monitor;
 ```
+
+The third grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
+`pg_read_file()` returns `text`, which PostgreSQL validates against the database encoding before this
+process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
+login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
+byte sits in the window, blinding all three collectors at once. `pg_read_binary_file()` returns `bytea`,
+which carries no such check, and the three collectors switch to it on their own once it is granted, with no
+restart and no config change: on the next cycle after a read that failed on such a byte, otherwise within an
+hour. That applies to a database whose encoding is UTF8 or SQL_ASCII. PostgreSQL checks SQL_ASCII text as
+UTF-8 on its way to the collector, so a SQL_ASCII database meets the same failure and gets the same fix. In any
+other encoding, the collectors stay on `pg_read_file()`, because the binary route decodes the log as UTF-8.
+LATIN1 accepts every byte except NUL, so a planted byte never fails its read. The EUC encodings and WIN1252 can
+still fail it, and the grant does not help there. The fault message says so, and
+[#4062](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4062) tracks a fix.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
 identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
