@@ -674,12 +674,25 @@ GROUP BY server_id, collector_name";
     internal const string CollectionHealthRollupProbeSql =
         "SELECT to_regclass('collect." + TimescaleSupport.CollectionHealthHourlyView + "') IS NOT NULL";
 
+    /// <summary>The earliest watermark that can mean something was materialized (#3973): no Darling store holds
+    /// a collection from before 2000, so no real refresh can leave the watermark below it. Anything earlier is
+    /// the extension's "nothing materialized" sentinel, whichever one it uses.</summary>
+    internal static readonly DateTime MaterializedWatermarkFloor = new(2000, 1, 1);
+
     /// <summary>The aggregate's watermark — the instant below which it serves ONLY materialized buckets. NULL
-    /// before the first refresh (<c>-infinity</c>: nothing materialized, the whole window is served real-time
-    /// from raw). Run only after <see cref="CollectionHealthRollupProbeSql"/> said the aggregate exists (which
-    /// implies TimescaleDB, so the catalog is there).</summary>
+    /// while nothing is materialized, when the whole window is served real-time from raw. Run only after
+    /// <see cref="CollectionHealthRollupProbeSql"/> said the aggregate exists (which implies TimescaleDB, so the
+    /// catalog is there).
+    ///
+    /// <para><b>"Nothing materialized" is not <c>-infinity</c> (#3973).</b> The extension reports the minimum
+    /// FINITE timestamp, 4714-11-24 BC, both before the first refresh and after a refresh over a window with no
+    /// rows (measured on TimescaleDB 2.28.1 and 2.30.1). <c>isfinite()</c> passes it, and Npgsql cannot hold it
+    /// as a <see cref="DateTime"/>, so the fleet overview failed with "Out of range of DateTime" on every fresh
+    /// store until rows had landed and a refresh had covered them. Anything before
+    /// <see cref="MaterializedWatermarkFloor"/> now reads as nothing materialized, whichever sentinel produced
+    /// it.</para></summary>
     internal const string CollectionHealthWatermarkSql = @"
-SELECT CASE WHEN isfinite(w) THEN w END
+SELECT CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
 FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
       FROM _timescaledb_catalog.continuous_agg
       WHERE user_view_schema = 'collect'
@@ -759,7 +772,8 @@ GROUP BY server_id, collector_name";
     /// pass, else the exact raw scan. (a) ABSENT: no aggregate (plain PostgreSQL, or not yet created) → raw.
     /// (b) CONTINUITY: any whole hour in [head end, watermark) missing as a bucket → raw
     /// (<see cref="CollectionHealthContinuitySql"/> says why). A guard read that fails is treated as a failed
-    /// guard, availability-first: the raw scan is always exact, only slower.
+    /// guard, availability-first: the raw scan is always exact, only slower. That includes a value the client
+    /// cannot convert (#3973): a guard read that produced one used to fail the whole overview instead.
     /// </summary>
     internal static async Task<bool> CollectionHealthRollupUsableAsync(
         NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken)
@@ -795,7 +809,7 @@ GROUP BY server_id, collector_name";
             var present = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
             return present >= expected;
         }
-        catch (PostgresException)
+        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
         {
             return false;
         }
