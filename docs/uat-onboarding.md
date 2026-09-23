@@ -87,7 +87,8 @@ will not override it. When the two disagree the service says so, once per start,
 ### 1.2 Download and verify
 
 Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) you were
-pointed at, then check the hash before you extract anything:
+pointed at, then check the hash before you extract anything. Do this from an **elevated** PowerShell in the
+folder you downloaded to: the next step extracts into Program Files, which only administrators can write.
 
 ```powershell
 $zip = 'PerformanceMonitorDarling-3.5.0.zip'    # whatever you actually downloaded
@@ -101,10 +102,12 @@ macOS and Linux too.)
 ### 1.3 Extract to a machine-scoped path
 
 ```powershell
-Expand-Archive -Path $zip -DestinationPath C:\PerformanceMonitorDarling
+Expand-Archive -Path $zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling"
 ```
 
-**`C:\PerformanceMonitorDarling` is the documented location and you should use it.** Not your Desktop, not
+**`C:\Program Files\PerformanceMonitorDarling` is the documented location and you should use it.** Not a folder made
+directly under `C:\`: ordinary users can write to one, so `install-darling.ps1` refuses it
+([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)). Not your Desktop, not
 Downloads, not anywhere under `C:\Users\`, not a UNC path or a mapped drive. The service runs as the
 unprivileged virtual account `NT SERVICE\PerformanceMonitor Darling`, which is not you and not an
 administrator, and a user profile grants access to nobody else — the service installs cleanly and then cannot
@@ -117,9 +120,11 @@ reason; the [full explanation is in the reference](../Darling/README.md#the-inst
 
 ### 1.4 Write `darling.json`
 
+Still elevated, so Notepad can save into Program Files:
+
 ```powershell
-Copy-Item C:\PerformanceMonitorDarling\darling.sample.json C:\PerformanceMonitorDarling\darling.json
-notepad C:\PerformanceMonitorDarling\darling.json
+Copy-Item "C:\Program Files\PerformanceMonitorDarling\darling.sample.json" "C:\Program Files\PerformanceMonitorDarling\darling.json"
+notepad "C:\Program Files\PerformanceMonitorDarling\darling.json"
 ```
 
 The minimum is one entry in `servers`. Everything else in the sample has a working default:
@@ -147,7 +152,7 @@ usually want to [run the service as a domain account or gMSA](../Darling/README.
 instead. For SQL auth, set `"auth": "sql"`, a `"username"`, and an `"encryptedPassword"`:
 
 ```powershell
-cd C:\PerformanceMonitorDarling
+cd "C:\Program Files\PerformanceMonitorDarling"
 .\PerformanceMonitor.Darling.Service.exe --encrypt-password
 ```
 
@@ -163,7 +168,7 @@ It prints `Password: ` and waits. Type the password, press Enter, and it prints 
 > ```powershell
 > $ErrorActionPreference = 'Continue'
 > $blob = Read-Host -Prompt 'password' |
->     & C:\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe --encrypt-password 2>$null |
+>     & "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --encrypt-password 2>$null |
 >     Select-String -Pattern '^AQAAA' | ForEach-Object { $_.Line }
 > ```
 
@@ -175,7 +180,7 @@ to a different box. The same rule applies to the MCP and web tokens in Part 3 an
 ### 1.5 Pre-flight
 
 ```powershell
-cd C:\PerformanceMonitorDarling
+cd "C:\Program Files\PerformanceMonitorDarling"
 .\PerformanceMonitor.Darling.Service.exe --test-connection
 ```
 
@@ -204,7 +209,7 @@ account's, and the per-server connect lines in step 1.7 are the real proof.
 From an **elevated** PowerShell, in the install folder:
 
 ```powershell
-cd C:\PerformanceMonitorDarling
+cd "C:\Program Files\PerformanceMonitorDarling"
 .\install-darling.ps1
 ```
 
@@ -233,7 +238,7 @@ Get-Content "$env:ProgramData\PerformanceMonitorDarling\logs\darling-service_$(G
 **Proof** — these lines, in this order:
 
 ```
-Loaded configuration from C:\PerformanceMonitorDarling\darling.json: 1 server(s)
+Loaded configuration from C:\Program Files\PerformanceMonitorDarling\darling.json: 1 server(s)
 Extracting the bundled Postgres runtime from ...\pg-runtime.zip (first run)
 Initializing managed Postgres cluster in C:\ProgramData\PerformanceMonitorDarling\pg (first run)
 Managed Postgres cluster initialized (scram-sha-256, data checksums, UTF8/C locale)
@@ -274,7 +279,7 @@ read-only seat is a real thing (see 2.3).
 ### 2.1 On the service host
 
 Double-click the **Darling Viewer** shortcut the installer made, or run
-`C:\PerformanceMonitorDarling\viewer\PerformanceMonitor.Darling.Viewer.exe`.
+`C:\Program Files\PerformanceMonitorDarling\viewer\PerformanceMonitor.Darling.Viewer.exe`.
 
 **There is nothing to configure.** It looks for `darling.json` in four places, in order: an explicit
 command-line path, `%DARLING_CONFIG%`, beside its own exe, and then **one directory up** — which is exactly
@@ -308,7 +313,7 @@ no remote viewer at all; no amount of viewer-side configuration changes that. On
 **elevated** PowerShell:
 
 ```powershell
-cd C:\PerformanceMonitorDarling
+cd "C:\Program Files\PerformanceMonitorDarling"
 .\PerformanceMonitor.Darling.Service.exe --configure-network
 ```
 
@@ -442,7 +447,7 @@ off, and turning it on is one command.
 **Headless**, from an **elevated** PowerShell on the service host:
 
 ```powershell
-cd C:\PerformanceMonitorDarling
+cd "C:\Program Files\PerformanceMonitorDarling"
 .\PerformanceMonitor.Darling.Service.exe --enable-web
 ```
 
@@ -688,7 +693,7 @@ PowerShell:
 
 ```powershell
 Restart-Service 'PerformanceMonitor Darling'
-C:\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe --configure-firewall
+& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --configure-firewall
 ```
 
 **How the auth actually works in a browser.** Open `http://192.168.1.205:5153/` and paste the token into the
@@ -746,7 +751,7 @@ probe — runs the product's own fixed, read-only queries under the collectors' 
 From an **elevated** PowerShell on the service host:
 
 ```powershell
-cd C:\PerformanceMonitorDarling
+cd "C:\Program Files\PerformanceMonitorDarling"
 .\PerformanceMonitor.Darling.Service.exe --enable-mcp
 ```
 
@@ -805,7 +810,7 @@ box — so a lost token does not cost you a re-onboard. Then, from an **elevated
 
 ```powershell
 Restart-Service 'PerformanceMonitor Darling'
-C:\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe --configure-firewall
+& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --configure-firewall
 ```
 
 **Proof**, in the service log:
