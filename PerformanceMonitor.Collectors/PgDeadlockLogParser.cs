@@ -231,9 +231,19 @@ public static class PgDeadlockLogParser
     /// the strength of a cycle that succeeded by every signal the ingestor has. Do not read #3008 as
     /// covering both.</para>
     /// </summary>
-    public static List<ParsedDeadlock> Extract(string? logBody)
+    public static List<ParsedDeadlock> Extract(string? logBody) => Extract(logBody, logTimezoneIsUtc: false, out _);
+
+    /// <summary>
+    /// The managed-route twin (#4046 part 1b): when the target's own <c>log_timezone</c> renders UTC
+    /// (<see cref="IsUtcLogTimezoneSetting"/>), a candidate block in another zone is not the server's own —
+    /// planted the same way a self-hosted target's is (#4046) — and is skipped and counted in
+    /// <paramref name="foreignZoneLines"/> instead of throwing the slab's whole read out. False (the
+    /// convenience overload above) keeps today's refusal, for a caller that could not read the setting.
+    /// </summary>
+    public static List<ParsedDeadlock> Extract(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
     {
         var results = new List<ParsedDeadlock>();
+        foreignZoneLines = 0;
 
         if (string.IsNullOrEmpty(logBody))
         {
@@ -242,7 +252,8 @@ public static class PgDeadlockLogParser
 
         foreach (Match match in s_deadlockBlock.Matches(logBody))
         {
-            var parsed = FromReport(match.Value);
+            var parsed = FromReport(match.Value, logTimezoneIsUtc, out var blockForeignZoneLines);
+            foreignZoneLines += blockForeignZoneLines;
 
             if (parsed is not null)
             {

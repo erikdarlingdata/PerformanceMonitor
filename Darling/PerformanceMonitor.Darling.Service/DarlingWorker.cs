@@ -9159,6 +9159,28 @@ LIMIT 1";
                     + "server whose logging_collector is off does not land here — that is detected first "
                     + "and recorded as its own named state."),
 
+            /* #4046 part 1c: pg_read_file() returns text, which PostgreSQL validates against the client
+               encoding before this process ever sees a byte of it. A failed login can plant one byte that
+               is not valid UTF-8 (0xFF) in the FATAL message %u/%d echo unescaped into the log, under any
+               log_line_prefix, and that byte throws 22021 for the WHOLE tail read for as long as it sits
+               inside the window — every one of the three readers sharing PgServerLogTail's tail CTE goes
+               blind, not just the one that happened to read this cycle. The fix is a grant, so this is
+               classified PERMISSIONS like the two arms above rather than left to the generic sentence:
+               pg_read_binary_file() returns bytea, which carries no such check, and the collector already
+               takes that route on its own the moment the grant exists (PgReadBinaryFileCapability). Keyed on
+               Unclassified for the same reason the 58P01 arm is: the classifier leaves 22021 there. */
+            CollectorTargetFault.Unclassified when ReadsServerLogWithPgReadFile(collectorName) && ex.SqlState == "22021" =>
+                ("PERMISSIONS",
+                    $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the log tail this cycle read contains a byte "
+                    + "that is not valid UTF-8. pg_read_file() returns text and PostgreSQL rejects it before "
+                    + "this collector sees a row, even though only one byte, anywhere in the 4 MB window, is "
+                    + "bad; a client can plant one with nothing but a failed login, since a role or database "
+                    + "name it supplies lands unescaped in the FATAL message (#4046). Grant "
+                    + "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint) "
+                    + WhereToGrantIt(connectedDatabase)
+                    + " This collector then reads the same bytes as bytea instead, which has no encoding "
+                    + "check — an invalid byte renders as U+FFFD rather than blinding the read."),
+
             /* #3240: a missing source object on a collector that DECLARES its extension dependency
                (ICollectorSchemaInfo.RequiredPgExtensions, #3191) is not ambiguous — the absent thing is
                that extension, installing it is the remedy, and no grant changes anything. Recorded under

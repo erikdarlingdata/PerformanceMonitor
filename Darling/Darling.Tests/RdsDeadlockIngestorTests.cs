@@ -233,7 +233,7 @@ public sealed class RdsDeadlockIngestorTests
         await cancelled.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => ingestor.IngestAsync(1, "target-a", Host, cancelled.Token));
+            () => ingestor.IngestAsync(1, "target-a", Host, cancellationToken: cancelled.Token));
 
         /* The read happened - the fake ignores the token - and the write did not. */
         Assert.Single(client.Downloads);

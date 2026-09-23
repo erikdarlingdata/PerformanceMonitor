@@ -737,15 +737,69 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
+           effect with no reconnect and #3604-style connect-time caching would miss that. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's own read of <c>log_timezone</c>, over a throwaway connection to
+    /// the target — the RDS ingestors reach the log through the AWS API, not SQL, so they carry no target
+    /// connection of their own. False (today's refusal on a foreign-zone line) when the setting cannot be
+    /// read, matching the self-hosted route's NULL-column fallback in <see cref="PgServerLogTail.LogTimezoneIsUtc"/>.
+    /// </summary>
+    private async Task<bool> TryReadLogTimezoneIsUtcAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText = PgServerLogTail.LogTimezoneSql;
+            command.CommandTimeout = 10;
+            var value = await command.ExecuteScalarAsync(cancellationToken);
+            return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
+                + "line this cycle is refused as before.", server.Config.DisplayName);
+            return false;
+        }
+    }
+
+    /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
+    /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
+    /// self-hosted collectors.</summary>
+    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(ServerRuntime server, int foreignZoneLines)
+    {
+        if (foreignZoneLines <= 0)
+        {
+            return CollectorContext.NoMeasurements;
+        }
+
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = _deltas,
+        };
+        PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+        return context.Measurements;
     }
 
     /// <summary>
@@ -764,14 +818,20 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
+           the target fresh each cycle rather than caching it at connect. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
     }
 
@@ -937,6 +997,15 @@ public sealed class DarlingCollectorRunner
             displayName, collectorName, databaseName, outcome, databaseSqlMs,
             phases.ConnectMs, phases.OpenMs, phases.DrainMs, phases.OtherMs);
     }
+
+    /// <summary>
+    /// The three collectors that open <see cref="PgServerLogTail.TailCteSql"/> (#4046 part 1c) — the set
+    /// eligible for the <see cref="PgReadBinaryFileCapability"/> check and the binary route, and the same
+    /// set <c>ReadsServerLogWithPgReadFile</c> in <c>DarlingWorker</c> names for the fault message, kept as
+    /// its own copy here rather than shared across the two classes' current visibility boundary.
+    /// </summary>
+    private static bool ReadsPgServerLogTail(string collectorName) =>
+        collectorName is "pg_log_events" or "pg_deadlocks" or "pg_plan_capture";
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
         ICollectorDefinition<TRow> definition,
@@ -2286,6 +2355,17 @@ public sealed class DarlingCollectorRunner
                    query_stats) could occupy a monitored server for minutes — the exact profile we must never
                    present. Null budget = itemToken IS cancellationToken and this block is byte-for-byte what
                    it was. */
+                /* #4046 part 1c: resolved on the connection that is about to run the query, BEFORE
+                   BuildQuery decides which of the two tail routes to send — a target's grant can arrive
+                   with no reconnect, so this is checked (through its own hourly cache) independently of
+                   how long the connection has been open, rather than folded into the connect-time facts on
+                   CollectorTargetInfo that live for the connection's whole life. */
+                if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(definition.Name))
+                {
+                    context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
+                        targetConnection, server.StorageName, cancellationToken);
+                }
+
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
