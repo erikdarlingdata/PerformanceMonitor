@@ -49,8 +49,15 @@ public sealed class PgTableTuningTests
            The column list is pinned against the read itself in ForcePlanFailuresAccessPathTests. */
         Assert.Contains("idx_query_store_stats_server_time_forcing ON collect.query_store_stats (server_id, collection_time DESC) INCLUDE (database_name, query_id, plan_id, force_failure_count, is_forced_plan, plan_forcing_type, last_force_failure_reason)", sql, StringComparison.Ordinal);
 
+        /* #3934: the store-metrics latest read's skip-scan index — the (kind, name) prefix for the loose
+           index scan that walks distinct objects, the full three columns for each object's per-key
+           ORDER BY metric_time DESC LIMIT 1 probe. No INCLUDE: DarlingStoreMetricsReader.StoreMetricsLatestSql
+           needs every payload column, so this is a plain composite the read's LATERAL probe descends, not a
+           covering index for an Index Only Scan. */
+        Assert.Contains("idx_store_metrics_kind_name_time ON collect.store_metrics (object_kind, object_name, metric_time DESC)", sql, StringComparison.Ordinal);
+
         /* Every index is idempotent (no-op where a field box already hand-applied it, or a prior start made it). */
-        Assert.Equal(8, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index; +1: the #3573 forced-plan covering index */
+        Assert.Equal(9, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index; +1: the #3573 forced-plan covering index; +1: the #3934 store-metrics skip-scan index */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
         /* Per-table autovacuum-insert override on exactly the FOUR high-rate insert tables (NOT a global GUC
@@ -69,7 +76,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(13, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim, +1 #3573 forced-plan covering index */
+        Assert.Equal(14, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim, +1 #3573 forced-plan covering index, +1 #3934 store-metrics skip-scan index */
     }
 
     /// <summary>
