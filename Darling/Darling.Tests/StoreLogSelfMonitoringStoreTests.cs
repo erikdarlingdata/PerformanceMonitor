@@ -315,6 +315,14 @@ public class StoreLogSelfMonitoringStoreTests
             + "collector-cost flush, so a capture that closed it would take the re-mask and the flush "
             + "down too");
 
+        /* #3971: a capture the store will never allow (58P01 no log directory, 42501 no log read) warns once
+           per process, then drops to Debug, inside the capture's own catch. */
+        var captureCatch = body.Substring(innerCatch, reopen - innerCatch);
+        Assert.Contains("PostgresErrorCodes.UndefinedFile", captureCatch, StringComparison.Ordinal);
+        Assert.Contains("PostgresErrorCodes.InsufficientPrivilege", captureCatch, StringComparison.Ordinal);
+        Assert.Contains("_storeLogCaptureUnavailableWarned", captureCatch, StringComparison.Ordinal);
+        Assert.Contains("LogDebug(", captureCatch, StringComparison.Ordinal);
+
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
         Assert.DoesNotContain("_nextStoreLog", worker, StringComparison.Ordinal);

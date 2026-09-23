@@ -847,6 +847,12 @@ public sealed class DarlingWorker : BackgroundService
 
     private bool _storeLogRemaskDone;
 
+    /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
+       process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
+       none), and 42501, a login without the log read. get_store_log already reports the gap on the read
+       surface, so the hourly Warning only repeated what nobody was going to change. */
+    private bool _storeLogCaptureUnavailableWarned;
+
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
        once in RunCollectionLoopAsync over the SAME deliverer/history the shared engine uses, so the
        self-alerts inherit its delivery/cooldown/restart-replay. Held as a field because the connection
@@ -6856,11 +6862,23 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogWarning(
-                    "Store log capture failed, so this hour's store-log census is missing (get_store_log "
-                    + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
-                    + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
-                    ex.Message);
+                var unavailable = ex is PostgresException
+                {
+                    SqlState: PostgresErrorCodes.UndefinedFile or PostgresErrorCodes.InsufficientPrivilege,
+                };
+                if (unavailable && _storeLogCaptureUnavailableWarned)
+                {
+                    _logger.LogDebug("Store log capture is still unavailable: {Message}", ex.Message);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Store log capture failed, so this hour's store-log census is missing (get_store_log "
+                        + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
+                        + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
+                        ex.Message);
+                    _storeLogCaptureUnavailableWarned |= unavailable;
+                }
             }
 
             /* #3971: Npgsql closes THIS connection outright on the capture's ERROR rather than leaving it
@@ -6875,6 +6893,8 @@ LIMIT 1";
                closing the connection, finds it already Open here and this is a no-op. */
             if (connection.State != ConnectionState.Open)
             {
+                /* A Broken connection must be closed before it can open again; closing a Closed one is a no-op. */
+                await connection.CloseAsync();
                 await connection.OpenAsync(budget.Token);
             }
 
