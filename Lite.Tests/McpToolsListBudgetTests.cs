@@ -426,27 +426,10 @@ public sealed class McpToolsListBudgetTests
         var isServiceResult = _measureServiceProviderIsService is null
             ? "(no provider captured)"
             : _measureServiceProviderIsService.IsService(parameterType).ToString();
-        var ranClasses = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a =>
-            {
-                try
-                {
-                    return a.GetTypes();
-                }
-                catch
-                {
-                    return Array.Empty<Type>();
-                }
-            })
-            .Where(t => t.Namespace is "Lite.Tests" or "Darling.Tests" && t.Name.EndsWith("Tests", StringComparison.Ordinal))
-            .Select(t => t.Name)
-            .OrderBy(n => n, StringComparer.Ordinal)
-            .ToList();
 
         return $" #4075 (DI service leaked into served schema; root cause still open): parameter CLR type is "
             + $"'{parameterType.FullName}'; IServiceProviderIsService.IsService(type) on this build's provider = {isServiceResult}; "
-            + $"Measure() built on managed thread {_measureBuildThreadId}, build count = {_measureBuildCount}; "
-            + $"loaded test classes = [{string.Join(", ", ranClasses)}].";
+            + $"Measure() built on managed thread {_measureBuildThreadId}, build count = {_measureBuildCount}.";
     }
 
     private static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
