@@ -229,8 +229,8 @@ CROSS JOIN (VALUES (1, 'shared_buffers', '16384', '8kB'), (2, 'fsync', 'on', NUL
 
             if (timescaleEnabled)
             {
-                var dayChunks = ChunkScans(day);
-                var fallbackChunks = ChunkScans(fallback);
+                var dayChunks = PlanChunkScans.Count(day);
+                var fallbackChunks = PlanChunkScans.Count(fallback);
                 Assert.True(fallbackChunks >= 11,
                     $"the fallback should plan every seeded chunk (eleven days of snapshots), planned {fallbackChunks}:\n{fallback}");
                 Assert.True(dayChunks is >= 1 and <= 4,
@@ -372,10 +372,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'configuration file')", connection);
 
         return plan.ToString();
     }
-
-    /// <summary>Scan nodes over a hypertable chunk, compressed or not.</summary>
-    private static int ChunkScans(string plan) =>
-        plan.Split('\n').Count(l => Regex.IsMatch(l, @"(?:Scan|ColumnarScan)[^\n]* on _hyper_\d+_\d+_chunk"));
 
     private static async Task DeleteSentinelsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
