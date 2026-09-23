@@ -360,7 +360,7 @@ All 28, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_lock_stats` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
 | `pg_deadlocks` | 5 min | 5 min | the first deadlock reported — an event log, not a counter |
-| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes beside the fingerprint of the statement that spilled once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
+| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
 | `pg_cpu_utilization` | 5 min | 5 min | 5 min (Performance Insights backfills the 1-minute points) |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |

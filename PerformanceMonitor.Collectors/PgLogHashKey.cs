@@ -56,7 +56,7 @@ public sealed class PgLogHashKey
     public const string UnavailableMessage =
         "PostgreSQL log events are not collected: this service has no log-hash key (#4004). The key is loaded once at "
         + "service start, and the service log's start-up error names the key file and why it could not be used. The "
-        + "service never replaces an existing key on its own, because a new key gives every stored log event a new "
+        + "service does not replace a key it cannot use on its own, because a new key gives every stored log event a new "
         + "identity; fix the file's access, or delete it to have the next start generate a new one.";
 
     private static readonly Regex s_whitespace = new(@"\s+", RegexOptions.CultureInvariant);

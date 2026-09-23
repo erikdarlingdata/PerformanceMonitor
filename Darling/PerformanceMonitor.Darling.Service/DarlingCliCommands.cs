@@ -265,7 +265,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --export-viewer-config [dir] [--config <path>]  Write a ready-to-copy viewer folder (darling.json + server.crt + README.txt)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-network Interactive LAN-exposure wizard." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --configure-firewall  Create/remove the scoped firewall rules to match darling.json (run elevated)." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json and the store credentials (run elevated)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --harden-files      Re-apply the ACLs on darling.json, the store credentials and the log-hash key (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-mcp        Enable the MCP endpoint in the store and open its firewall (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-mcp       Disable the MCP endpoint in the store and remove its firewall rule (run elevated)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-web        Enable the web dashboard in the store and open its firewall (run elevated)." + Environment.NewLine +
@@ -3308,10 +3308,10 @@ public static class DarlingCliCommands
         };
 
     /// <summary>
-    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it,
-    /// and what it is called in the report. Kept as data so the list is readable as a policy rather than as
-    /// control flow — which file gets INTERACTIVE read is the only judgement in this verb, and it should be
-    /// visible at a glance.
+    /// One target of <see cref="HardenFiles"/>: a path, whether the interactive operator legitimately reads it
+    /// (for a directory: walks through it, never reads it), and what it is called in the report. Kept as data so
+    /// the list is readable as a policy rather than as control flow — which file gets INTERACTIVE read is the
+    /// only judgement in this verb, and it should be visible at a glance.
     /// </summary>
     private readonly record struct HardenTarget(string Path, bool AllowInteractive, bool IsDirectory, string What);
 
@@ -3345,10 +3345,12 @@ public static class DarlingCliCommands
            will not load is a warning, not a stop: the config file itself is still hardened, and the store
            targets fall back to the documented default location. */
         string? dataDirectory = null;
+        string? keyDirectory = null;
         try
         {
             var config = DarlingConfig.Load(configPath);
             dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
         }
         catch (Exception ex)
         {
@@ -3363,8 +3365,8 @@ public static class DarlingCliCommands
         var storeRoot = Path.GetDirectoryName(Path.GetFullPath(dataDirectory));
         var targets = new List<HardenTarget>
         {
-            /* INTERACTIVE read, alone in this list: the Viewer (ViewerSettings.ResolveConfigPath) and the CLI
-               verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
+            /* INTERACTIVE read, the only file in this list that keeps it: the Viewer (ViewerSettings.ResolveConfigPath)
+               and the CLI verbs run as the operator and must still read the live config. Nothing reads a backup (#1769). */
             new(resolvedConfig, AllowInteractive: true, IsDirectory: false, "the live config"),
         };
 
@@ -3375,9 +3377,26 @@ public static class DarlingCliCommands
 
         if (!string.IsNullOrEmpty(storeRoot))
         {
-            targets.Add(new(storeRoot, AllowInteractive: false, IsDirectory: true, "the store directory"));
+            /* INTERACTIVE traverse, never read: the operator walks through it to the config, never to the credential
+               blobs in it. Mirrors DarlingManagedPostgres' own call. */
+            targets.Add(new(storeRoot, AllowInteractive: true, IsDirectory: true, "the store directory"));
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
+            targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+        }
+
+        /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
+           service creates with no INTERACTIVE access at all, so it gets none here either. Only when darling-keys IS
+           this install's key directory (#4004 review): on a managed install it never exists legitimately, and the
+           config's folder can let any local user create one, as a junction to anything. */
+        var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        if (keyDirectory is not null
+            && string.Equals(
+                Path.GetFullPath(keyDirectory), Path.Combine(configDirectory, DarlingLogHashKeyFile.BringYourOwnDirectoryName),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
+            targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
         }
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
@@ -3404,6 +3423,7 @@ public static class DarlingCliCommands
 
         var exposed = 0;
         var touched = 0;
+        var refused = 0;
 
         foreach (var target in targets)
         {
@@ -3415,13 +3435,33 @@ public static class DarlingCliCommands
 
             touched++;
 
+            /* #4004 review: an ACL set by path follows every junction and symbolic link on it, so one planted in the
+               config's folder would have this elevated run rewrite whatever it points at. */
+            if (ReparsePointOnPath(configDirectory, target.Path) is { } link)
+            {
+                error.WriteLine($"  REFUSED  {target.Path} ({target.What}): {link}, so nothing was changed through it. Remove it and re-run.");
+                refused++;
+                continue;
+            }
+
             try
             {
-                if (target.IsDirectory)
+                if (IsBelow(configDirectory, target.Path))
                 {
-                    /* Traverse, not read: the operator's Viewer needs to walk to the config, never to read the
-                       credential blobs sitting in here. Mirrors DarlingManagedPostgres' own call. */
-                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: true);
+                    /* Through a handle to exactly the checked object, so a link swapped in after the check above is
+                       not followed either. A directory's AllowInteractive is traverse, never read. */
+                    if (DarlingFileSecurity.HardenWithoutFollowingLinks(target.Path, target.IsDirectory, target.AllowInteractive, configDirectory) is { } swapped)
+                    {
+                        error.WriteLine($"  REFUSED  {target.Path} ({target.What}): {swapped}, so nothing was changed through it. Remove it and re-run.");
+                        refused++;
+                        continue;
+                    }
+                }
+                else if (target.IsDirectory)
+                {
+                    /* A directory's AllowInteractive is traverse, never read (the store directory's, above); a
+                       directory the service keeps from the operator entirely (darling-keys) keeps even that. */
+                    DarlingFileSecurity.HardenDirectory(target.Path, allowInteractiveTraverse: target.AllowInteractive);
                 }
                 else
                 {
@@ -3469,6 +3509,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        if (refused > 0)
+        {
+            error.WriteLine($"{refused} of {touched} item(s) were REFUSED: a junction or symbolic link is on the path, or the file has another name (a hard link), and nothing is changed through one.");
+        }
+
         if (exposed > 0)
         {
             error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
@@ -3477,9 +3522,61 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        if (refused > 0)
+        {
+            return 1;
+        }
+
         output.WriteLine($"All {touched} item(s) secured. The service re-asserts these ACLs at every start.");
         return 0;
     }
+
+    /// <summary>
+    /// Why <paramref name="target"/> must not be hardened by path: the first junction or symbolic link (any reparse
+    /// point) on its path below <paramref name="configDirectory"/>, the target itself included, or a component that
+    /// could not be checked for one; null when there is none (#4004 review). An ACL set by path
+    /// follows every one of them, and the config's folder can let any local user create one, so
+    /// <see cref="HardenFiles"/> refuses such a target rather than rewrite whatever it points at. A target outside that
+    /// folder (the store's) is checked itself.
+    /// </summary>
+    internal static string? ReparsePointOnPath(string configDirectory, string target)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configDirectory));
+        var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(target));
+        var inside = IsBelow(root, path);
+
+        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+        {
+            if (inside && current.Length <= root.Length)
+            {
+                break;
+            }
+
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return $"{current} is a junction or symbolic link";
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* Fail closed: a path that cannot be checked is not known to be free of one. */
+                return $"{current} could not be checked for a junction or symbolic link ({ex.Message})";
+            }
+
+            if (!inside)
+            {
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, a volume root included
+    /// (<see cref="DarlingPathContainment.IsStrictlyBelow"/>, #4004 review, round 3).</summary>
+    internal static bool IsBelow(string directory, string path) => DarlingPathContainment.IsStrictlyBelow(directory, path);
 
     /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
     /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>

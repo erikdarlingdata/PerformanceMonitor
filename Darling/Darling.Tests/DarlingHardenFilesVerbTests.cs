@@ -101,7 +101,10 @@ public class DarlingHardenFilesVerbTests
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
-        var body = source[at..Math.Min(source.Length, at + 6000)];
+        /* The same window as the two pins below: #4004's review added the log-hash key's targets to the list, which
+           moved the verify pass past the old 6,000, and its round 2 the junction refusal (DarlingHardenFilesJunctionTests),
+           which moved it past 8,000. */
+        var body = source[at..Math.Min(source.Length, at + 10000)];
 
         /* It re-reads rather than trusting the call. */
         Assert.Contains("DarlingFileSecurity.IsReadableByOrdinaryUsers(", body, StringComparison.Ordinal);
@@ -135,7 +138,7 @@ public class DarlingHardenFilesVerbTests
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
         Assert.True(at >= 0, "HardenFiles is gone (#2352)");
 
-        var body = source[at..Math.Min(source.Length, at + 8000)];
+        var body = source[at..Math.Min(source.Length, at + 10000)];
 
         /* It asks the SCM, and hardens for what it gets back. */
         Assert.Contains("RegisteredServiceAccount(ServiceName)", body, StringComparison.Ordinal);
@@ -163,7 +166,7 @@ public class DarlingHardenFilesVerbTests
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
 
         var at = source.IndexOf("public static int HardenFiles(", StringComparison.Ordinal);
-        var body = source[at..Math.Min(source.Length, at + 8000)];
+        var body = source[at..Math.Min(source.Length, at + 10000)];
 
         Assert.Contains("GrantsHardenedAccount(", body, StringComparison.Ordinal);
         Assert.Contains("LOCKED OUT", body, StringComparison.Ordinal);
@@ -211,5 +214,273 @@ public class DarlingHardenFilesVerbTests
         Assert.Contains("ObjectName", body, StringComparison.Ordinal);
         Assert.Contains("LocalSystem", body, StringComparison.Ordinal);
         Assert.Contains("WellKnownSidType.LocalSystemSid", body, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #4004's review, round 2 (M2): the documented install folder inherits Authenticated Users:(M) from C:\, so any
+/// local user can create <c>darling-keys</c> there as a junction, and an ACL set by path follows it: the elevated run
+/// rewrote the DACL of whatever it pointed at, a denial of service that also handed the service account full control.
+/// In the <c>darling-config-env</c> collection because the key's directory depends on
+/// <c>DOTNET_RUNNING_IN_CONTAINER</c>, which tests there set process-wide.
+/// </summary>
+[Collection("darling-config-env")]
+public class DarlingHardenFilesJunctionTests
+{
+    /// <summary>
+    /// On a bring-your-own install, where darling-keys is the key's directory, a junction there is refused with exit 1
+    /// and its target's DACL is left as it was; on a managed install darling-keys is not a target at all. A scratch
+    /// directory stands in for the install and for the junction's target.
+    /// </summary>
+    [Fact]
+    public void AJunctionNamedDarlingKeys_IsRefused_AndItsTargetsAclIsUntouched()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Junctions and DACLs are Windows'.");
+            return;
+        }
+
+        /* A registered service makes the verb harden for that account, process-wide. */
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+
+        var scratch = Directory.CreateTempSubdirectory("darling-4004-junction-");
+        var install = Path.Combine(scratch.FullName, "install");
+        var victim = Path.Combine(scratch.FullName, "victim");
+        var junction = Path.Combine(install, DarlingLogHashKeyFile.BringYourOwnDirectoryName);
+        try
+        {
+            Directory.CreateDirectory(install);
+            Directory.CreateDirectory(victim);
+            var victimFile = Path.Combine(victim, DarlingLogHashKeyFile.WindowsFileName);
+            File.WriteAllText(victimFile, "someone else's");
+            var victimAcl = Sddl(victim);
+            var victimFileAcl = Sddl(victimFile);
+            MakeJunction(junction, victim);
+            Assert.True((File.GetAttributes(junction) & FileAttributes.ReparsePoint) != 0, "the junction was not created");
+
+            var config = Path.Combine(install, "darling.json");
+            File.WriteAllText(config, "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\"}}");
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(1, exit);
+            Assert.Contains($"REFUSED  {junction} (the log-hash key directory): {junction} is a junction or symbolic link", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"REFUSED  {Path.Combine(junction, DarlingLogHashKeyFile.WindowsFileName)} (the log-hash key): {junction} is a junction or symbolic link", error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(victimAcl, Sddl(victim));
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+
+            /* A managed install: darling-keys never exists legitimately, so it is not a target at all. */
+            File.WriteAllText(config, "{\"postgres\":{\"managed\":true,\"dataDirectory\":" + System.Text.Json.JsonSerializer.Serialize(Path.Combine(scratch.FullName, "store", "pg")) + "}}");
+            var managedOutput = new StringWriter();
+            var managedError = new StringWriter();
+
+            DarlingCliCommands.HardenFiles(config, managedOutput, managedError);
+
+            Assert.DoesNotContain(DarlingLogHashKeyFile.BringYourOwnDirectoryName, managedOutput.ToString() + managedError.ToString(), StringComparison.Ordinal);
+            Assert.Equal(victimAcl, Sddl(victim));
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+        }
+        finally
+        {
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction);
+            }
+
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The harden itself goes through a handle to exactly the checked object, so a link swapped in after the verb's
+    /// path check is not followed either: a junction in the middle of the path changes the handle's final path, a link
+    /// at the name itself is opened as the link, and both are refused with nothing changed. An ordinary file gets the
+    /// hardened ACL.
+    /// </summary>
+    [Fact]
+    public void TheHandleHarden_RefusesALinkAnywhereOnThePath_AndHardensAnOrdinaryFile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Junctions and DACLs are Windows'.");
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-4004-handle-");
+        var install = Path.Combine(scratch.FullName, "install");
+        var victim = Path.Combine(scratch.FullName, "victim");
+        var junction = Path.Combine(install, "through");
+        try
+        {
+            Directory.CreateDirectory(install);
+            Directory.CreateDirectory(victim);
+            var victimFile = Path.Combine(victim, "target.txt");
+            File.WriteAllText(victimFile, "someone else's");
+            var victimAcl = Sddl(victim);
+            var victimFileAcl = Sddl(victimFile);
+            MakeJunction(junction, victim);
+
+            var middle = DarlingFileSecurity.HardenWithoutFollowingLinks(Path.Combine(junction, "target.txt"), isDirectory: false, allowInteractive: false, install);
+            Assert.NotNull(middle);
+            Assert.Contains("resolves to", middle, StringComparison.Ordinal);
+
+            var atTheName = DarlingFileSecurity.HardenWithoutFollowingLinks(junction, isDirectory: true, allowInteractive: false, install);
+            Assert.Equal($"{junction} is a junction or symbolic link", atTheName);
+
+            Assert.Equal(victimAcl, Sddl(victim));
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+
+            var ordinary = Path.Combine(install, "darling.json");
+            File.WriteAllText(ordinary, "{}");
+            Assert.Null(DarlingFileSecurity.HardenWithoutFollowingLinks(ordinary, isDirectory: false, allowInteractive: true, install));
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(ordinary));
+            Assert.True(DarlingFileSecurity.GrantsHardenedAccount(ordinary));
+            Assert.Contains(";;;IU)", Sddl(ordinary), StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction);
+            }
+
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #4004's review, round 3: a hard link is not a reparse point, and the handle's final path is the name it was
+    /// opened by, so a <c>darling.json.bak-x</c> planted as a hard link to someone else's file passed both checks and
+    /// would have had the hardened DACL applied to that file. A file with more than one name is refused, by the handle
+    /// harden and by the verb (exit 1), and the file's DACL is untouched.
+    /// </summary>
+    [Fact]
+    public void AHardLinkedBackup_IsRefused_AndTheFileItNamesKeepsItsAcl()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Hard links through CreateHardLinkW, and DACLs, are Windows'.");
+            return;
+        }
+
+        /* A registered service makes the verb harden for that account, process-wide. */
+        Assert.SkipWhen(DarlingFileSecurity.RegisteredServiceAccount("PerformanceMonitor Darling") is not null,
+            "The Darling service is registered on this machine.");
+
+        var scratch = Directory.CreateTempSubdirectory("darling-4004-hardlink-");
+        var install = Path.Combine(scratch.FullName, "install");
+        var victim = Path.Combine(scratch.FullName, "victim");
+        try
+        {
+            Directory.CreateDirectory(install);
+            Directory.CreateDirectory(victim);
+            var victimFile = Path.Combine(victim, "someones.txt");
+            File.WriteAllText(victimFile, "someone else's");
+            var victimFileAcl = Sddl(victimFile);
+            var backup = Path.Combine(install, "darling.json.bak-x");
+            Assert.True(CreateHardLinkW(backup, victimFile, IntPtr.Zero), "the hard link was not created");
+
+            var refusal = DarlingFileSecurity.HardenWithoutFollowingLinks(backup, isDirectory: false, allowInteractive: false, install);
+
+            Assert.Equal($"{backup} is a hard link: the file has 2 names, and its ACL is the same under every one of them", refusal);
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+
+            /* The verb finds it as a config backup beside darling.json. The store directory is a scratch path that does
+               not exist, so nothing outside the scratch directory is touched. */
+            var config = Path.Combine(install, "darling.json");
+            File.WriteAllText(config, "{\"postgres\":{\"managed\":false,\"connectionString\":\"Host=127.0.0.1;Username=darling\",\"dataDirectory\":"
+                + System.Text.Json.JsonSerializer.Serialize(Path.Combine(scratch.FullName, "store", "pg")) + "}}");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = DarlingCliCommands.HardenFiles(config, output, error);
+
+            Assert.Equal(1, exit);
+            Assert.Contains($"REFUSED  {backup} (a config backup): {backup} is a hard link", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains($"SECURED  {config} (the live config)", output.ToString(), StringComparison.Ordinal);
+            Assert.Equal(victimFileAcl, Sddl(victimFile));
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #4004's review, round 3: a config directory at a volume root contained nothing, because <c>C:\</c> plus a
+    /// separator is <c>C:\\</c>. Its targets then took the path-based harden, and the link walk checked only the target
+    /// itself, so a junction in the middle of the path was followed. A volume root now contains what is on it, and the
+    /// walk from a target up to it finds that junction.
+    /// </summary>
+    [Fact]
+    public void AConfigDirectoryAtAVolumeRoot_ContainsWhatIsOnIt()
+    {
+        var root = Path.GetPathRoot(Path.GetTempPath())!;
+        var separator = Path.DirectorySeparatorChar.ToString();
+
+        Assert.True(DarlingCliCommands.IsBelow(root, Path.Combine(root, "darling.json")));
+        Assert.True(DarlingCliCommands.IsBelow(root, Path.Combine(root, DarlingLogHashKeyFile.BringYourOwnDirectoryName, DarlingLogHashKeyFile.WindowsFileName)));
+        Assert.False(DarlingCliCommands.IsBelow(root, root));
+        Assert.True(DarlingCliCommands.IsBelow(Path.Combine(root, "cfg") + separator, Path.Combine(root, "cfg", "darling.json")));
+        Assert.False(DarlingCliCommands.IsBelow(Path.Combine(root, "cfg"), Path.Combine(root, "cfgx", "darling.json")));
+        Assert.False(DarlingCliCommands.IsBelow(Path.Combine(root, "cfg"), Path.Combine(root, "cfg")));
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scratch = Directory.CreateTempSubdirectory("darling-4004-root-");
+        var junction = Path.Combine(scratch.FullName, "through");
+        var victim = Path.Combine(scratch.FullName, "victim");
+        try
+        {
+            Directory.CreateDirectory(victim);
+            File.WriteAllText(Path.Combine(victim, "darling.json.bak-x"), "someone else's");
+            MakeJunction(junction, victim);
+            Assert.True((File.GetAttributes(junction) & FileAttributes.ReparsePoint) != 0, "the junction was not created");
+
+            Assert.Equal(
+                $"{junction} is a junction or symbolic link",
+                DarlingCliCommands.ReparsePointOnPath(root, Path.Combine(junction, "darling.json.bak-x")));
+        }
+        finally
+        {
+            if (Directory.Exists(junction))
+            {
+                Directory.Delete(junction);
+            }
+
+            DarlingManagedPostgresTests.TryDeleteRecursive(scratch.FullName);
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static string Sddl(string path) =>
+        Directory.Exists(path)
+            ? new DirectoryInfo(path).GetAccessControl().GetSecurityDescriptorSddlForm(System.Security.AccessControl.AccessControlSections.Access)
+            : new FileInfo(path).GetAccessControl().GetSecurityDescriptorSddlForm(System.Security.AccessControl.AccessControlSections.Access);
+
+    private static void MakeJunction(string link, string target)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe")
+        {
+            ArgumentList = { "/c", "mklink", "/J", link, target },
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        })!;
+        process.StandardOutput.ReadToEnd();
+        process.StandardError.ReadToEnd();
+        process.WaitForExit();
     }
 }
