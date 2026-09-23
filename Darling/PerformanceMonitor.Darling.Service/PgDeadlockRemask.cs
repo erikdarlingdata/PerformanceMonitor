@@ -56,8 +56,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>The alerts go first</b>, because they are found through the reports: an incident's key is the raw
 /// hash of a report, and the report's text is what its normalized incident is built from
 /// (<see cref="DarlingWorker.BuildPgDeadlockIncident"/>, the live alert's own builder). Once a report is
-/// rewritten its raw hash is gone, so the report pass starts only after the alert pass is done (or waiting out a
-/// failure), and an alert it missed takes a keyed key rather than keeping the raw one (<see cref="RemaskAlert"/>).</para>
+/// rewritten its raw hash is gone, so the report pass starts only after the alert pass is done (or has given up,
+/// #4036's round-2 review), and an alert it missed takes a keyed key rather than keeping the raw one
+/// (<see cref="RemaskAlert"/>).</para>
 ///
 /// <para><b>Stored analysis findings</b> are the third copy: a finding persists its deadlock drill-down and prose
 /// for 30 days, and one written before #4005 kept its exemplars' SQL raw. They are rewritten last, by the read's own
@@ -1182,8 +1183,19 @@ AND   xmin = $3::xid";
         /// <summary>Every stage, in the order a tick runs them.</summary>
         public IReadOnlyList<StageProgress> Stages => [Alerts, Reports, AlertKeys, Findings, FindingAlerts];
 
-        /// <summary>True once every stage is done for this process.</summary>
+        /// <summary>True once every stage is done for this process, a stage that gave up included. Not the worker's
+        /// gate: <see cref="Pending"/> is.</summary>
         public bool Done => Stages.All(stage => stage.Done);
+
+        /// <summary>
+        /// Whether a tick has anything to do: a stage not done yet, or one that gave up, which
+        /// <see cref="RunAsync"/> tries again <see cref="RetryGivenUpAfter"/> later. The worker's gate (#4036's
+        /// round-2 review, finding 1): gated on <see cref="Done"/>, which a stage that gave up satisfies, a process
+        /// whose every stage had finished or given up never called <see cref="RunAsync"/> again, so the day-later
+        /// retry never ran and the rows a stage gave up on stayed raw until a restart or their retention. Cheap
+        /// while nothing is due: every stage is skipped without a statement.
+        /// </summary>
+        public bool Pending => Stages.Any(stage => !stage.Done || stage.GaveUp);
     }
 
     /// <summary>
@@ -1194,9 +1206,12 @@ AND   xmin = $3::xid";
     ///
     /// <para><b>Alerts, then reports, then findings, then finding alerts.</b> An alert is found through its report's
     /// raw hash, which the report stage replaces, so the alerts go first; findings and their alerts last, so a slow
-    /// findings read cannot hold the reports back. A stage starts once the one before it is done, or is waiting out a
-    /// failure: a failing stage must not starve the rest (<see cref="MaxConsecutiveStageFailures"/>). Once every
-    /// report is rewritten, the alerts are walked once more (<see cref="RemaskProgress.AlertKeys"/>): an alert the
+    /// findings read cannot hold the reports back. The reports start once the alerts are done, by a clean walk or by
+    /// giving up (#4036's round-2 review, finding 2), never while the alerts only wait out a failure, so no report is
+    /// rewritten before its alert is rebuilt; the findings and finding alerts need nothing before them, so a failing
+    /// stage cannot starve them (<see cref="MaxConsecutiveStageFailures"/>). Once every report is rewritten by a clean
+    /// walk (not by a report stage that gave up), the alerts are walked once more
+    /// (<see cref="RemaskProgress.AlertKeys"/>): an alert the
     /// first walk missed (it moved behind the cursor, or that stage gave up) finds no report by its raw hash and takes
     /// a keyed key (<see cref="RemaskAlert"/>), never keeps the raw one. Not before: while a report is raw, an alert
     /// already carrying its new identity finds no report by it either, and keying it would cut it from its
@@ -1241,9 +1256,17 @@ AND   xmin = $3::xid";
 
         foreach (var stage in progress.Stages)
         {
-            /* The alert keys wait for every report, not for a report stage merely waiting out a failure: while a
-               report is raw, an alert already carrying its new identity finds nothing by it. */
-            if (stage.Done || (ReferenceEquals(stage, progress.AlertKeys) && !progress.Reports.Done))
+            /* #4036's round-2 review, finding 2: an alert must never be cut from its report.
+               - The reports wait for the alerts to be done (a clean walk, or given up), not merely to be waiting out
+                 a failure: a report rewritten before its alert is rebuilt leaves the alert naming a hash no report
+                 carries any more.
+               - The alert keys wait for every report to be rewritten, by a clean walk: not for a report stage
+                 waiting out a failure, and not for one that gave up. While a report is raw, an alert already
+                 carrying its new identity (32 hex, like a raw hash) finds nothing by it, and keying it would cut
+                 it from that report for good. */
+            if (stage.Done
+                || (ReferenceEquals(stage, progress.Reports) && !progress.Alerts.Done)
+                || (ReferenceEquals(stage, progress.AlertKeys) && (!progress.Reports.Done || progress.Reports.GaveUp)))
             {
                 continue;
             }

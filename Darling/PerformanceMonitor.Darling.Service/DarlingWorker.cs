@@ -7007,8 +7007,10 @@ LIMIT 1";
                Page after page until the slice's own cap (#4012's review: a page an hour took about 11 days for the
                reports alone), alerts, then reports, then findings, with the store-log slice's own-catch, own-cap
                posture: neither a failure nor a slow slice may cost the collector-cost flush below. RunAsync ends
-               quietly on its cap and keeps each walk's cursor; a stage's own failures are counted and logged there. */
-            if (!_pgDeadlockRemask.Done)
+               quietly on its cap and keeps each walk's cursor; a stage's own failures are counted and logged there.
+               Gated on Pending, not Done (#4036's round-2 review, finding 1): a stage that gave up counts as done,
+               and RunAsync is where it is tried again a day later, so it must still be called. */
+            if (_pgDeadlockRemask.Pending)
             {
                 if (connection.State != ConnectionState.Open)
                 {

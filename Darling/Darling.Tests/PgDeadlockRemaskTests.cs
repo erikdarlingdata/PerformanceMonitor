@@ -615,22 +615,30 @@ public sealed class PgDeadlockRemaskTests
 
         var logger = new CountingLogger();
         var progress = new PgDeadlockRemask.RemaskProgress();
-        await PgDeadlockRemask.RunAsync(connection, progress, s_key, logger, ct);
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
         Assert.Equal(1, progress.Alerts.ConsecutiveFailures);
         Assert.False(progress.Alerts.Done);
-        Assert.True(progress.Reports.Done);
         Assert.True(progress.Findings.Done);
-        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
 
-        /* Failures 2, 3 and 4 come after 0, 1 and 3 skipped ticks; the fourth stops the stage. */
+        /* #4036's round-2 review, finding 2: the reports wait for the alerts to be done, not merely to be waiting out
+           a failure, so no report is rewritten before its alert is rebuilt. */
+        Assert.False(progress.Reports.Done);
+        Assert.Equal(30L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        /* Failures 2, 3 and 4 come after 0, 1 and 3 skipped ticks; the fourth stops the stage, and the reports run
+           on that tick. The alert keys start only then, and give up after their own four failures. */
         var failuresByTick = new List<int>();
-        for (var tick = 0; tick < 8; tick++)
+        var reportsDoneByTick = new List<bool>();
+        for (var tick = 0; tick < 14; tick++)
         {
-            await PgDeadlockRemask.RunAsync(connection, progress, s_key, logger, ct);
+            await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
             failuresByTick.Add(progress.Alerts.ConsecutiveFailures);
+            reportsDoneByTick.Add(progress.Reports.Done);
         }
 
-        Assert.Equal([2, 2, 3, 3, 3, 3, 4, 4], failuresByTick);
+        Assert.Equal([2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4], failuresByTick);
+        Assert.Equal([false, false, false, false, false, false, true, true, true, true, true, true, true, true], reportsDoneByTick);
+        Assert.Equal(0L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
         Assert.True(progress.Alerts.Done);
         Assert.True(progress.Alerts.GaveUp);
         Assert.True(progress.AlertKeys.GaveUp);
@@ -638,18 +646,133 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal(3 * PgDeadlockRemask.MaxConsecutiveStageFailures, logger.Warnings);
 
         /* #4012's review, finding 5: a stage that gave up is not given up for the life of the process. Within the day
-           it stays given up; a day after, it is tried again from its start, and with its table back it finishes. */
+           it stays given up; a day after, it is tried again from its start, and with its table back it finishes.
+           #4036's round-2 review, finding 1: through the worker's own gate, which must still let the tick run once
+           every stage has finished or given up (Done is true then; Pending is what the worker reads). */
         await ExecuteAsync(connection, "ALTER TABLE config_alert_log_away RENAME TO config_alert_log", ct);
-        await PgDeadlockRemask.RunAsync(connection, progress, s_key, logger, ct);
+        Assert.True(progress.Done);
+        Assert.True(progress.Pending);
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
         Assert.True(progress.Alerts.GaveUp);
         foreach (var stage in progress.Stages.Where(s => s.GaveUp))
         {
             stage.GaveUpUtc = DateTime.UtcNow - PgDeadlockRemask.RetryGivenUpAfter - TimeSpan.FromMinutes(1);
         }
 
-        await PgDeadlockRemask.RunAsync(connection, progress, s_key, logger, ct);
+        await TickAsTheWorkerAsync(connection, progress, s_key, logger, ct);
         Assert.True(progress.Done);
         Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
+        Assert.False(progress.Pending);
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 2(b): an alert stage that fails once (no ticks skipped) must not let the
+    /// reports run in that tick. A report rewritten before its alert is rebuilt leaves the alert naming a hash no
+    /// report carries, and the alert-key stage then keys it: cut from its report for good. The alert must end naming
+    /// its report's new identity.
+    /// </summary>
+    [Fact]
+    public async Task AnAlertStageFailure_DoesNotLetTheReportsRunAheadOfIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+        await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(
+            new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] }), ct);
+
+        /* One failure of the alert stage: its table is away for one tick. */
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log RENAME TO config_alert_log_away", ct);
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.Equal(1, progress.Alerts.ConsecutiveFailures);
+        Assert.Equal(0, progress.Alerts.SkipTicks);
+        Assert.False(progress.Reports.Done);
+        Assert.Equal(5L, await ScalarAsync(connection, $"SELECT count(*) FROM pg_deadlocks WHERE {PgDeadlockLogParser.RawGraphHashSql("deadlock_hash", "graph_text")}", ct));
+
+        await ExecuteAsync(connection, "ALTER TABLE config_alert_log_away RENAME TO config_alert_log", ct);
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+        Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
+
+        var reportHash = await ScalarTextAsync(connection, $"SELECT deadlock_hash FROM pg_deadlocks WHERE victim_pid = {first.VictimPid}", ct);
+        var alertKey = SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context);
+        Assert.Equal(PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph).DedupKey, reportHash);
+        Assert.Equal(reportHash, alertKey);
+    }
+
+    /// <summary>
+    /// #4036's round-2 review, finding 2(a): the alert-key stage waits for the reports to be rewritten by a clean
+    /// walk, not for a report stage that gave up. An alert already rebuilt to its raw report's new identity finds no
+    /// report by it while the report is raw, and keying it then would cut it from the report for good. Once the
+    /// reports' day-later retry rewrites the report, the alert names it.
+    /// </summary>
+    [Fact]
+    public async Task TheAlertKeys_WaitForAReportStageThatGaveUp()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live deadlock re-mask test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = await OpenMigratedAsync(scratch.ConnectionString, ct);
+        var now = DateTime.SpecifyKind(DateTime.UtcNow.Date, DateTimeKind.Unspecified).AddHours(12);
+        await PlantRawReportsAsync(connection, 5, now.AddDays(-2), ct);
+        var first = await ReadFirstRawReportAsync(connection, ct);
+        await PlantAlertAsync(connection, now.AddDays(-2), null, AlertContextSerializer.Serialize(
+            new AlertContext { Incidents = [new AlertIncident(first.Hash, [first.Victim!])] }), ct);
+        var newIdentity = PgDeadlockRemask.RemaskedIncident(first.OccurredAt, first.VictimPid, 2, first.Victim, first.Graph).DedupKey;
+
+        /* The alerts are rebuilt (the alert names its report's new identity), then the report stage gives up with
+           its reports still raw, as four failures in a row leave it. */
+        var progress = new PgDeadlockRemask.RemaskProgress();
+        while (!progress.Alerts.Done)
+        {
+            var (next, _, _, _) = await PgDeadlockRemask.RemaskStoredAlertsAsync(connection, progress.AlertCursor, null, null, ct);
+            progress.AlertCursor = next;
+            progress.Alerts.Done = next is null;
+        }
+
+        Assert.Equal(newIdentity, SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context));
+        progress.Reports.Done = true;
+        progress.Reports.GaveUp = true;
+        progress.Reports.GaveUpUtc = DateTime.UtcNow;
+
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.Equal(0, progress.AlertKeys.Walks);
+        Assert.False(progress.AlertKeys.Done);
+        Assert.Equal(newIdentity, SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context));
+
+        /* A day later the reports are tried again and rewritten; the alert keys run then, and the alert still names
+           its report. */
+        progress.Reports.GaveUpUtc = DateTime.UtcNow - PgDeadlockRemask.RetryGivenUpAfter - TimeSpan.FromMinutes(1);
+        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        Assert.True(progress.Done);
+        Assert.All(progress.Stages, stage => Assert.False(stage.GaveUp, stage.Name));
+        Assert.Equal(newIdentity, await ScalarTextAsync(connection, $"SELECT deadlock_hash FROM pg_deadlocks WHERE victim_pid = {first.VictimPid}", ct));
+        Assert.Equal(newIdentity, SingleIncidentKey(Assert.Single(await ReadAlertsAsync(connection, ct)).Context));
+    }
+
+    private static string SingleIncidentKey(string contextJson) =>
+        Assert.Single(Assert.IsType<AlertContextDto>(JsonSerializer.Deserialize<AlertContextDto>(contextJson)).Incidents!).DedupKey;
+
+    /* One hourly tick as DarlingWorker runs it: RunAsync behind the worker's own gate, which
+       TheWorkerRunsTheRemaskWithOrWithoutAKey pins the worker to. */
+    private static async Task TickAsTheWorkerAsync(
+        NpgsqlConnection connection, PgDeadlockRemask.RemaskProgress progress, PgLogHashKey? key,
+        Microsoft.Extensions.Logging.ILogger logger, CancellationToken ct)
+    {
+        if (progress.Pending)
+        {
+            await PgDeadlockRemask.RunAsync(connection, progress, key, logger, ct);
+        }
     }
 
     /// <summary>
@@ -733,6 +856,11 @@ public sealed class PgDeadlockRemaskTests
     {
         var worker = ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs");
         Assert.Contains("await PgDeadlockRemask.RunAsync(connection, _pgDeadlockRemask, _pgDeadlockRemaskKey, _logger, remaskBudget.Token);", worker, StringComparison.Ordinal);
+
+        /* #4036's round-2 review, finding 1: the gate the tests' TickAsTheWorkerAsync reproduces. Done counts a stage
+           that gave up, so gated on it the day-later retry never ran. */
+        Assert.Contains("if (_pgDeadlockRemask.Pending)", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("_pgDeadlockRemask.Done", worker, StringComparison.Ordinal);
         Assert.DoesNotContain("_pgDeadlockRemaskKey is not", worker, StringComparison.Ordinal);
         Assert.DoesNotContain("_pgDeadlockRemaskKey is null", worker, StringComparison.Ordinal);
     }
