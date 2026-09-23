@@ -423,13 +423,13 @@ public static class PgLogTextRedactor
     /* A scanner's error, in every language PostgreSQL 18 ships it in (#4006). The scanner writes "<what> at or near
        "<text>"" (scanner_yyerror, plpgsql_yyerror), jsonpath's grammar "... of jsonpath input", and past the last
        token "<what> at end of input"; the server log then appends " at character N" (elog.c). Every one of these
-       is translated under lc_messages, and the ERROR label is not: es, id and ja keep it in English, and so does
-       every catalogue that translates PL/pgSQL alone (cs, el, ro, vi, zh_TW), so a translated form reaches the
-       stored message exactly as the English one did before #3996's review. English was the only form read, and a
-       Japanese error kept its token verbatim. These are the msgstrs of every catalogue in the postgres and plpgsql
-       domains, verbatim; PgLogCatalogueShapeTests reads the bundled runtime's .mo files and fails on one missing
-       here, so a PostgreSQL bump cannot reopen #4006 quietly. %1$s is the head (the error's name, from a fixed set
-       of messages), %2$s the token, and a catalogue may put the token first. */
+       is translated under lc_messages, while the ERROR label stays English in es, id and ja, and in every catalogue
+       that translates PL/pgSQL alone (cs, el, ro, vi, zh_TW; the label is the backend's), so a translated form
+       reaches the stored message exactly as the English one does. English was the only form read before #4006,
+       and a Japanese error kept its token verbatim. These are the msgstrs of every catalogue in the postgres and
+       plpgsql domains, verbatim; PgLogCatalogueShapeTests reads the bundled runtime's .mo files and fails on one
+       missing here, so a PostgreSQL bump cannot reopen #4006 quietly. %1$s is the head (the error's name, from a
+       fixed set of messages), %2$s the token, and a catalogue may put the token first. */
 
     /// <summary>Every catalogue's <c>%s at or near "%s"</c> (#4006): what the token of a syntax error is written
     /// inside, in the postgres and plpgsql domains.</summary>
