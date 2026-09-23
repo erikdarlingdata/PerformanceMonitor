@@ -228,14 +228,17 @@ public sealed class McpFilterSemanticsLivePostgresTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            var today = DateTime.UtcNow.Date;
+            var now = DateTime.UtcNow;
+            var today = now.Date;
             /* Inside the collection log's 60-day horizon, outside the signals' 30 — the ghost stretch. */
             var ghostDay = today.AddDays(-45);
             /* Inside every default horizon; becomes a ghost once ONE signal's retention is overridden to 10. */
             var nearDay = today.AddDays(-20);
-            var expectedHorizon = DailySummaryRetention.HorizonFor(DateTime.UtcNow, DarlingRetention.DataRetentionBaseDays);
+            var expectedHorizon = DailySummaryRetention.HorizonFor(now, DarlingRetention.DataRetentionBaseDays);
 
-            await SeedRunAsync(connection, ct, DateTime.UtcNow.AddMinutes(-2), "SUCCESS");
+            /* Today's run has to land on today: two minutes back crosses midnight UTC in a day's first two
+               minutes, which failed CI at 00:01Z. Lite's twin carries the same guard (#3963). */
+            await SeedRunAsync(connection, ct, now.AddMinutes(-2) < today ? now : now.AddMinutes(-2), "SUCCESS");
             await SeedRunAsync(connection, ct, ghostDay.AddHours(12), "SUCCESS");
             await SeedRunAsync(connection, ct, nearDay.AddHours(12), "SUCCESS");
 

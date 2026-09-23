@@ -76,7 +76,10 @@ public sealed class MemoryTrendGrantJoinToolTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task JoinedPoints_CarryThePoolSum_AGenuineZero_AndANullForTheUncoveredPoint()
     {
-        var t0 = DateTime.UtcNow.AddMinutes(-30);
+        /* Pinned 10 seconds past a bucket floor: one-minute buckets land on round clock minutes, so an unpinned
+           t0 in a minute's last six seconds pushed t1's snapshot (6s later) into t2's bucket and failed about
+           one run in ten. */
+        var t0 = FiveMinuteFloor(DateTime.UtcNow.AddMinutes(-30)).AddSeconds(10);
         var t1 = t0.AddMinutes(1);
         var t2 = t0.AddMinutes(2);
 
@@ -118,7 +121,9 @@ public sealed class MemoryTrendGrantJoinToolTests : IClassFixture<SharedDuckDbFi
     [Fact]
     public async Task AFullyCoveredWindow_CarriesNoGrantedNoteAtAll()
     {
-        var t0 = DateTime.UtcNow.AddMinutes(-20);
+        /* Pinned past a bucket floor for the same reason: under the default two-minute width an unpinned t0 in a
+           bucket's last three seconds split the snapshot from its sample. */
+        var t0 = FiveMinuteFloor(DateTime.UtcNow.AddMinutes(-20)).AddSeconds(10);
         await SeedMemoryAsync(t0);
         await SeedGrantAsync(t0.AddSeconds(3), poolId: 2, grantedMb: 50.0);
 
