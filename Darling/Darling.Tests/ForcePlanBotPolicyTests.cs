@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using PerformanceMonitor.Analysis;
 using Xunit;
@@ -411,5 +412,69 @@ public sealed class ForcePlanBotPolicyTests
         /* Normalize clamps knobs, never flips gates — an operator's explicit arm survives. */
         Assert.True(reckless.Enabled);
         Assert.False(reckless.DryRun);
+    }
+    /* ---------------- #3953: the best plan's age ---------------- */
+
+    /// <summary>
+    /// The interval table makes the 14-day window real, so a best plan can be two weeks old. The unattended bot does
+    /// not act on one older than <see cref="ForcePlanBotPolicy.MaxBestPlanAgeDays"/>: it is Blocked with the reason
+    /// named, even with every gate open. A plan inside the age runs the ordinary decision, and a target with no age
+    /// (a finding from before the column, when raw's retention bounded it) is not gated.
+    /// </summary>
+    [Fact]
+    public void AStaleBestPlan_IsBlocked_AFreshOneIsNot_AndAnUnknownAgeIsNotGated()
+    {
+        var stale = Target() with { BestPlanLastSeenUtc = Now.AddDays(-(ForcePlanBotPolicy.MaxBestPlanAgeDays + 1)) };
+        var fresh = Target() with { BestPlanLastSeenUtc = Now.AddDays(-(ForcePlanBotPolicy.MaxBestPlanAgeDays - 1)) };
+
+        var staleDecision = Evaluate(stale, Enabled(dryRun: false), serverOptedIn: true);
+        Assert.Equal(ForcePlanBotDecisionKind.Blocked, staleDecision.Kind);
+        Assert.Equal(new[] { ForcePlanBotPolicy.ReasonBestPlanStale }, staleDecision.Reasons);
+
+        Assert.Equal(ForcePlanBotDecisionKind.Force, Evaluate(fresh, Enabled(dryRun: false), serverOptedIn: true).Kind);
+        Assert.Equal(ForcePlanBotDecisionKind.Force, Evaluate(Target(), Enabled(dryRun: false), serverOptedIn: true).Kind);
+        Assert.Equal("best_plan_stale", ForcePlanBotPolicy.ReasonBestPlanStale);
+        Assert.Equal(4, ForcePlanBotPolicy.MaxBestPlanAgeDays);
+    }
+
+    /// <summary>The drill-down's <c>best_plan_last_seen</c> reaches the target through the shared extractor.</summary>
+    [Fact]
+    public void TheExtractor_CarriesTheBestPlansLastSeen_FromTheDrillDown()
+    {
+        var lastSeen = new DateTime(2026, 8, 25, 13, 45, 0, DateTimeKind.Unspecified);
+        var finding = new AnalysisFinding
+        {
+            FindingId = 1,
+            AnalysisTime = Now,
+            ServerId = 42,
+            ServerName = "SQL01",
+            DatabaseName = "orders",
+            TimeRangeStart = Now.AddHours(-4),
+            TimeRangeEnd = Now,
+            Severity = 1.6,
+            Confidence = 1.0,
+            Category = "queries",
+            StoryPath = "PLAN_REGRESSION",
+            StoryPathHash = "hash_PLAN_REGRESSION",
+            StoryText = "story",
+            RootFactKey = "PLAN_REGRESSION",
+            DrillDown = new Dictionary<string, object>
+            {
+                ["regressed_queries"] = new[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["database"] = "orders",
+                        ["query_id"] = 42L,
+                        ["best_plan_id"] = 7L,
+                        ["regression_factor"] = 10.0,
+                        ["best_plan_last_seen"] = lastSeen,
+                    },
+                },
+            },
+        };
+
+        var target = Assert.Single(FactRemediation.ExtractPlanRegressionTargets(finding));
+        Assert.Equal(lastSeen, target.BestPlanLastSeenUtc);
     }
 }

@@ -203,6 +203,21 @@ public static class ForcePlanBotPolicy
     public const string ReasonDryRun = "dry_run";
     public const string ReasonServerNotOptedIn = "server_not_opted_in";
 
+    /// <summary>
+    /// #3953: the target's best plan last ran more than <see cref="MaxBestPlanAgeDays"/> before the pass. The
+    /// interval table makes PLAN_REGRESSION's 14-day window real, so a best plan can now be up to two weeks old;
+    /// the advisory surface shows such a plan with its age, and the unattended bot does not act on it.
+    /// </summary>
+    public const string ReasonBestPlanStale = "best_plan_stale";
+
+    /// <summary>
+    /// #3953: the oldest best plan the unattended bot will consider, in days before the pass. Four is raw Query
+    /// Store's retention (<c>TimescaleSupport.RawRetentionInterval</c>): the regime the would-force journal on an
+    /// armed store has been scored in, so the ledger the owner scores before arming #2138's write path does not
+    /// silently mix two regimes. It narrows automation only, and widening it is a decision on the scored ledger.
+    /// </summary>
+    public const int MaxBestPlanAgeDays = 4;
+
     /* The bot's OWN two blockers (#3654) — on the policy, not in FactRemediation's shared vocabulary,
        because only an unattended actor needs them. The advisory surface can say "unknown" and hand
        the decision to a human who will cross-reference; a bot has no one to hand it to. */
@@ -386,6 +401,14 @@ public static class ForcePlanBotPolicy
         if (policyBlockers is { Count: > 0 })
         {
             return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Blocked, policyBlockers);
+        }
+
+        /* #3953: after the cooldown (a stale target is journaled once per window, like any blocked one) and the
+           shared blockers. A null age is a finding from before the column existed, when raw's 4-day retention
+           already bounded it, so it is not gated. */
+        if (target.BestPlanLastSeenUtc is DateTime bestLastSeen && bestLastSeen < nowUtc.AddDays(-MaxBestPlanAgeDays))
+        {
+            return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Blocked, new[] { ReasonBestPlanStale });
         }
 
         /* Failure memory. RecentFailedForces is already windowed by the caller's read (see

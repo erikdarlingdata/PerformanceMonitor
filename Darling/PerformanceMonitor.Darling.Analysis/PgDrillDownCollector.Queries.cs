@@ -646,6 +646,10 @@ scored AS
         b.plan_id AS best_plan_id,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
+        -- #3953: when the best plan last ran. With the interval table the window really reaches 14 days, so a
+        -- best plan can be up to two weeks old; the operator text states its age and the unattended force bot
+        -- gates on it (ForcePlanBotPolicy.MaxBestPlanAgeDays).
+        b.last_exec AS best_plan_last_seen,
         -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (PgFactCollector.QueryPerf.cs,
         -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
         -- old GREATEST a duration-only regression could appear here that the fact never counted.
@@ -704,7 +708,8 @@ SELECT
     regression_factor,
     query_text,
     replica_role,
-    parameter_sensitivity_cofired
+    parameter_sensitivity_cofired,
+    best_plan_last_seen
 FROM scored
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
@@ -787,7 +792,10 @@ LIMIT 5";
                 replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
                 /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
                    force-plan caution text; the future bot never auto-forces a flagged target. */
-                parameter_sensitivity_cofired = !reader.IsDBNull(12) && reader.GetBoolean(12)
+                parameter_sensitivity_cofired = !reader.IsDBNull(12) && reader.GetBoolean(12),
+                /* #3953: when the best plan last ran (naive UTC), appended so the ordinals above are untouched.
+                   The force-plan bot's age gate and the advice's age read it. */
+                best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : reader.GetDateTime(13)
             });
         }
 
