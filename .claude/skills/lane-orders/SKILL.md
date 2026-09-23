@@ -14,7 +14,10 @@ conflict.
 **The coordinator fills these per wave, in every brief:**
 - `<LANE>`, `<ISSUES>`, `<DEADLINE>`;
 - `<RIG_PORT>`, `<RIG_DIR>`, `<PG_RUNTIME_ZIP>`;
-- `<REPORT_FILE>`, `<CHANGELOG_BUFFER_DIR>`;
+- `<REPORT_FILE>`, `<CHANGELOG_BUFFER_DIR>`. Under worktree isolation, `<REPORT_FILE>` must be inside the lane's
+  own worktree (for example `.lane-report.md`, untracked), because the harness blocks writes to the coordinator's
+  scratchpad. Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not
+  exclude that path;
 - `<CO_AUTHOR_TRAILER>`, `<SESSION_URL>`.
 
 ## For the coordinator
@@ -94,6 +97,9 @@ At each report:
 - The tests are MTP executables: run `Darling.Tests.exe` / `Lite.Tests.exe` from `bin/Debug/<tfm>/`, filtered with
   `-class "*Name*"` or `-method "*Name*"`. `dotnet test` does not work.
 - For a lone failure in a class you didn't touch, re-run that class alone before calling it yours.
+- **Filter by every class in every test file you touch**, not by the file's name. One file can hold several classes
+  (`PgPlanCaptureCollectorDefinitionTests.cs` also holds `PgPlanLogParserTests`), and filtering on one class skips
+  the others, including tests you just added. That let a forged-header regression reach CI (#4016).
 - Census, meta and pin tests are real gates:
   - `McpPayloadContractCensusTests` and the MCP inventory pins;
   - `StartupCommandTimeoutTests` and `StorageCommandTimeoutTests`;

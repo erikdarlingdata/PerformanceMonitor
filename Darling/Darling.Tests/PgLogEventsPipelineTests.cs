@@ -89,7 +89,7 @@ public sealed class PgLogEventsPipelineTests
         + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
         + "2026-09-18 03:07:12.345 UTC [1549] 322048460535975151HINT:  See server log for query details.\n";
 
-    private static List<PgLogEvent> Classify(string text) => PgLogEventClassifier.Default.Classify(text);
+    private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
 
     /* ---- assembly ------------------------------------------------------------------------------------ */
 
@@ -336,7 +336,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var parsers = PgLogEventClassifier.DefaultParsers.ToList();
         parsers.Insert(parsers.Count - 1, new StandInCheckpointParser());
-        var classifier = new PgLogEventClassifier(parsers);
+        var classifier = new PgLogEventClassifier(parsers, TestLogHashKeys.Fixed);
 
         var events = classifier.Classify(SelfHostedLog);
         var checkpoints = events.Where(e => e.Family == PgLogFamilies.Checkpoint).ToList();
@@ -407,10 +407,10 @@ public sealed class PgLogEventsPipelineTests
 
         /* Same shape, different values, one fingerprint; and the fingerprint is over the REDACTED text, so
            the raw literal is not even hashed. */
-        var a = PgLogTextRedactor.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT * FROM t WHERE id = 1 AND name = 'a'"));
-        var b = PgLogTextRedactor.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT  *  FROM t\nWHERE id = 999 AND name = 'zzz'"));
+        var a = TestLogHashKeys.Fixed.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT * FROM t WHERE id = 1 AND name = 'a'"));
+        var b = TestLogHashKeys.Fixed.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT  *  FROM t\nWHERE id = 999 AND name = 'zzz'"));
         Assert.Equal(a, b);
-        Assert.Null(PgLogTextRedactor.Fingerprint(null));
+        Assert.Null(TestLogHashKeys.Fixed.Fingerprint(null));
 
         /* The two regexes are the plan parser's own instances, not copies: the field is internal and this
            type reads it. A second spelling is the drift the scope note forbids. */
@@ -1214,8 +1214,11 @@ public sealed class PgLogEventsPipelineTests
         /* Both siblings, #3997: logging_collector = off (the original marker) and logging_collector = on
            with no stderr-format file left after the newest CTE's own exclusion (the new one). The two
            WHERE clauses cannot both be true — one needs the setting off, the other needs it on — which is
-           the mutual-exclusion PgServerLogTail's own remarks argue for. */
-        const string plansBefore = tail + "\nSELECT\n    (m[1])::bigint                                   AS query_id,\n    (m[2])::double precision                         AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ \\n]+ \\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 2000";
+           the mutual-exclusion PgServerLogTail's own remarks argue for. The regexp itself is #4016's fixed
+           pattern (merged from dev after this branch started), not #3997's own change — the extra
+           [^ [\n]+ [^[\n]*  before the pid bracket tolerates a prefix token #4016 found real logs carry
+           there; this pin follows dev's text rather than restating the old one. */
+        const string plansBefore = tail + "\nSELECT\n    (m[1])::bigint                                   AS query_id,\n    (m[2])::double precision                         AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ [\\n]+ [^[\\n]*\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 2000";
 
         /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
            candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
@@ -1375,10 +1378,18 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains("total_events = page.WindowTotal", body, StringComparison.Ordinal);
         Assert.DoesNotContain(">= limit", body, StringComparison.Ordinal);
 
-        /* #3996's review (4): raw_line_hash is an unkeyed hash of the raw entry, literals included, so a reader who
-           can rebuild the rest of the line can test guesses at a value against it offline. No row returns it. */
+        /* #3996's review (4), #4004: raw_line_hash and statement_fingerprint hash text a reader can mostly rebuild, so
+           a surface that returned either would hand out what a guess is tested against. Keyed now, and still returned
+           by nothing: not the tool, not the reader's page, not the web log tab. */
         Assert.DoesNotContain("r.RawLineHash", body, StringComparison.Ordinal);
         Assert.DoesNotContain("raw_line_hash =", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("r.StatementFingerprint", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("statement_fingerprint =", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(typeof(DarlingPgLogEventReader.PgLogEventRow).GetProperties(),
+            p => p.Name.Contains("Hash", StringComparison.Ordinal) || p.Name.Contains("Fingerprint", StringComparison.Ordinal));
+        var logTab = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        Assert.DoesNotContain("statement_fingerprint", logTab, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw_line_hash", logTab, StringComparison.Ordinal);
 
         /* The instructions' census moved with the tool. */
         var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
@@ -1423,7 +1434,7 @@ public sealed class PgLogEventsPipelineTests
         await using var store = NpgsqlDataSource.Create(DeadStore);
 
         var client = new FakeRds();
-        var ingestor = new RdsLogEventIngestor(store, new RdsLogSource(_ => client));
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => client));
 
         var failure = await Assert.ThrowsAnyAsync<Exception>(() => ingestor.IngestAsync(1, "target-a", RdsHost));
         Assert.IsNotType<RdsLogUnavailableException>(failure);
@@ -1433,14 +1444,14 @@ public sealed class PgLogEventsPipelineTests
         Assert.Null(client.Downloads[1].Marker);
 
         var local = new FakeRds { FirstBody = SelfHostedLog.Replace(" UTC ", " EST ", StringComparison.Ordinal) };
-        var refusing = new RdsLogEventIngestor(store, new RdsLogSource(_ => local));
+        var refusing = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => local));
         await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(() => refusing.IngestAsync(1, "target-a", RdsHost));
         await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(() => refusing.IngestAsync(1, "target-a", RdsHost));
         Assert.Null(local.Downloads[1].Marker);
 
         /* A non-RDS host is NOT_REACHED, not zero rows (#3017), and no AWS call is made. */
         var quiet = new FakeRds();
-        var notReached = await new RdsLogEventIngestor(store, new RdsLogSource(_ => quiet)).IngestAsync(1, "target-a", "db.internal.example");
+        var notReached = await new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => quiet)).IngestAsync(1, "target-a", "db.internal.example");
         Assert.False(notReached.SourceReached);
         Assert.Empty(quiet.Downloads);
     }
@@ -1449,6 +1460,7 @@ public sealed class PgLogEventsPipelineTests
 
     private static CollectorContext TestContext() => new()
     {
+        LogHashKey = TestLogHashKeys.Fixed,
         ServerId = 1,
         ServerName = "target-a",
         CollectionTime = new DateTime(2026, 9, 18, 3, 10, 0, DateTimeKind.Unspecified),
@@ -1680,7 +1692,7 @@ public sealed class PgLogEventsLivePostgresTests
                — the second write is the overlapping self-hosted re-read, and the read must collapse it. */
             var stamp = DateTime.UtcNow.AddMinutes(-3).ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
             var body = LogFixture(stamp);
-            var events = PgLogEventClassifier.Default.Classify(body);
+            var events = new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(body);
             Assert.Equal(15, events.Count);
 
             await WriteAsync(postgres, events, ct);
@@ -1829,6 +1841,7 @@ public sealed class PgLogEventsLivePostgresTests
             var definition = PgLogEventsCollector.Instance;
             var context = new CollectorContext
             {
+                LogHashKey = TestLogHashKeys.Fixed,
                 ServerId = ServerId, ServerName = ServerName,
                 CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
                 Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
@@ -1885,6 +1898,7 @@ public sealed class PgLogEventsLivePostgresTests
         writer.Importer = importer;
         var context = new CollectorContext
         {
+            LogHashKey = TestLogHashKeys.Fixed,
             ServerId = ServerId, ServerName = ServerName, CollectionTime = collectionTime,
             Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
         };

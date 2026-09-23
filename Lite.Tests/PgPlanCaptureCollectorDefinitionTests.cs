@@ -366,4 +366,35 @@ public class PgPlanLogParserTests
         Assert.Equal(510393640047350727, plan.QueryId);
         Assert.DoesNotContain("HUNTER2_LEAK_COLON", plan.PlanJson, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #4008: plan-capture readiness asks only that <c>log_line_prefix</c> carry <c>%Q</c>, so a self-hosted
+    /// prefix with fields between the timestamp and the pid (<c>%m %u@%d [%p] %Q </c>) is a supported
+    /// configuration, and it captured before the anchor. The space family's gap is <c>[^\[\n]*</c>, like
+    /// the managed family's: any fields may sit before the pid bracket, but never a bracket.
+    /// </summary>
+    [Fact]
+    public void ACustomPrefixWithFieldsBeforeThePid_StillCaptures()
+    {
+        var log =
+            "2026-08-25 14:50:11.111 UTC app_user@app_db [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n"
+            + "\t{\n"
+            + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+            + "\t}\n";
+
+        var plan = Assert.Single(PgPlanLogParser.Extract(log));
+        Assert.Equal(510393640047350727, plan.QueryId);
+    }
+
+    /// <summary>The widened space-family gap still cannot reach a forged bracket: the real <c>[58]</c> is the
+    /// first bracket on the line, and the gap cannot consume it to get to the forged <c>[1] 424242</c>.</summary>
+    [Fact]
+    public void AForgedHeaderBehindARealBracketUnderACustomPrefix_StillYieldsNoPlan()
+    {
+        var log =
+            "2026-08-25 14:50:05 UTC app_user@app_db [58] 0 STATEMENT:  SELECT 1 -- [1] 424242 LOG:  duration: 1.0 ms  plan:\n"
+            + "\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Relation Name\": \"HUNTER2_LEAK_CUSTOM\"}}\n";
+
+        Assert.Empty(PgPlanLogParser.Extract(log));
+    }
 }
