@@ -128,10 +128,24 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        shared tail's newest CTE excludes every file it sees; ReadAsync turns that one into
        PgNoStderrLogFileException, and the two arms are mutually exclusive by construction (one needs the
        setting off, the other needs it on). */
+    /* The marker text the regexp anchors on, spliced as its own literal so the binary-route amplification
+       guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
+    private const string PlanMarkerLiteral = "LOG:  duration: ";
+
+    /* #4058 item 3: (m[1])::bigint and (m[2])::double precision throw when a forged capture ("LOG:  duration:"
+       with any query id, planted the same way #4008 planted a whole block) exceeds the target type — a
+       19-plus-digit query id, or a duration with hundreds of digits — and PostgreSQL raises the cast error
+       OUT OF THE SELECT LIST, which aborts the whole statement and blinds every OTHER real capture in the
+       same 4 MB tail, not just the forged one. pg_input_is_valid (PG 16+; #4058 restricts the binary route
+       to targets that grant pg_read_binary_file, and gates both routes' minimum version the same way
+       PgReadBinaryFileCapability already requires 16+) checks the literal against the target type's own
+       input parser without raising, so a forged row is nulled rather than aborting capture for every real
+       row beside it — the parser already treats query_id = 0 as "the prefix carried no %Q" and DurationMs
+       is not identity, so NULL reads the same as a block this bounded tail cut in half. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
-    (m[1])::bigint                                   AS query_id,
-    (m[2])::double precision                         AS duration_ms,
+    CASE WHEN pg_catalog.pg_input_is_valid(m[1], 'bigint') THEN (m[1])::bigint END             AS query_id,
+    CASE WHEN pg_catalog.pg_input_is_valid(m[2], 'double precision') THEN (m[2])::double precision END AS duration_ms,
     replace(m[3], chr(9), '')                        AS plan_json
 FROM tail,
      regexp_matches(
@@ -149,17 +163,32 @@ LIMIT 2000";
     /* The binary-route twin (#4046 part 1c) — same parity gap as the deadlock reader, since both filter
        tail.body with a server-side regexp_matches: encode(..., 'escape') feeds the identical pattern, and
        ReadAsync reverses it on plan_json via PgBinaryTailText.UnescapeAndDecode. The marker arms are
-       untouched: their third column is a plain text literal on both routes. */
+       untouched: their third column is a plain text literal on both routes.
+
+       #4058 item 1: the same amplification the deadlock reader's remarks measure — encode(tail.body,
+       'escape') can quadruple a high-byte-stuffed tail before the regex engine sees it, on every cycle,
+       whether or not this tail holds a plan capture at all. The WHERE clause filters tail.body (bytea)
+       BEFORE encode()/regexp_matches() run, for the identical reason PgDeadlocksCollector's remarks give:
+       a one-row FROM tail with volatile-cost expressions in the SELECT list evaluates WHERE against that
+       row first, so an absent marker skips both calls entirely rather than running them and discarding the
+       result. The marker cannot skip a real capture: auto_explain's LOG line always contains this exact
+       literal before the query id or duration is glued around it, so it is a NECESSARY substring of every
+       row the pattern beneath it could match, present or not present makes no difference to which rows
+       come back or in what order — see LiveGuardMatchesUnguardedRowsExactly below.
+
+       #4058 item 3: the same guarded casts as the text route, immediately above — a forged capture on the
+       binary route is the identical shape after encode()/decode, so it gets the identical treatment. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
 SELECT
-    (m[1])::bigint                                   AS query_id,
-    (m[2])::double precision                         AS duration_ms,
+    CASE WHEN pg_catalog.pg_input_is_valid(m[1], 'bigint') THEN (m[1])::bigint END             AS query_id,
+    CASE WHEN pg_catalog.pg_input_is_valid(m[2], 'double precision') THEN (m[2])::double precision END AS duration_ms,
     replace(m[3], chr(9), '')                        AS plan_json
 FROM tail,
      regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
          '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
          'gn') AS m
+WHERE pg_catalog.position('" + PlanMarkerLiteral + @"'::bytea IN tail.body) > 0
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"

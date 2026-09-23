@@ -150,6 +150,10 @@ SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 500";
 
+    /* The marker text the regexp anchors on — 'ERROR:  deadlock detected' — spliced as its own literal
+       so the amplification guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
+    private const string DeadlockMarkerLiteral = "ERROR:  deadlock detected";
+
     /* The binary-route twin (#4046 part 1c), sent instead of QueryText once PgReadBinaryFileCapability
        finds the grant: the same tailer, in its bytea form, with tail.body wrapped in
        encode(..., 'escape') before the SAME pattern runs over it — verified on the rig (PostgreSQL 18.6)
@@ -157,7 +161,24 @@ LIMIT 500";
        punctuation in a timestamp) and only backslash-doubles and NUL/high-byte-octal-escapes, so the
        pattern needs no change; see PgBinaryTailText.UnescapeAndDecode for the reversal ReadAsync applies
        to m[1] afterward. The marker arms are untouched: m[1] is text on both routes, so there is no
-       bytea/text mismatch here the way there is in PgLogEventsCollector's whole-body column. */
+       bytea/text mismatch here the way there is in PgLogEventsCollector's whole-body column.
+
+       #4058 item 1: encode(tail.body, 'escape') turns every byte at or above 0x80 into a four-character
+       octal escape, so a tail a failed login has stuffed with high bytes (the startup packet's role or
+       database name lands in the FATAL line unescaped) can grow the 4 MB tail to roughly 16 MB of text
+       before the regex engine ever sees it — about 64 MB of internal engine state, on EVERY cycle, whether
+       or not the tail holds a deadlock report at all. The WHERE clause below is evaluated on tail.body
+      (bytea) BEFORE encode()/regexp_matches() run, and PostgreSQL's planner does not need to be told to
+       order it that way: encode(tail.body, 'escape') and regexp_matches(...) are both volatile-cost table
+       expressions in the SELECT list of a one-row FROM tail — there is exactly one row to filter, so the
+       WHERE applies before the target list is ever evaluated for it (proved on the rig: a PL/pgSQL function
+       standing in for encode() that RAISEs unconditionally is never invoked when the marker is absent, and
+       fires normally when it is present). position() on bytea is a byte-for-byte substring search — no
+       encoding, no regex — so it costs a single pass over the SAME 4 MB the tail already is, not a second
+       4 MB. It cannot skip a real report: DeadLockReport's ERROR line always contains this exact literal
+       verbatim before %Q or anything else is glued to it, so the marker is a NECESSARY substring of every
+       candidate the pattern beneath it could ever match, and the guard changes nothing about which rows the
+       query returns or their order when it IS present — see LiveGuardMatchesUnguardedRowsExactly below. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
 SELECT
     m[1]    AS report_text,
@@ -167,6 +188,7 @@ FROM tail,
          pg_catalog.encode(tail.body, 'escape'),
          '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
+WHERE pg_catalog.position('" + DeadlockMarkerLiteral + @"'::bytea IN tail.body) > 0
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
