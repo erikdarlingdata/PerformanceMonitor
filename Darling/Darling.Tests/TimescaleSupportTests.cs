@@ -1601,6 +1601,15 @@ AND   is_compressed = {(compressed ? "true" : "false")}", connection);
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
         Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        /* #3949: collection_log is OUTSIDE CollectorCatalog (see EnsureCollectionLogHypertableAsync's own
+           test above), and the off-grid collection_health_hourly aggregate this test's RetentionPolicyCount
+           counts on is built FROM it. The shipped order (DarlingWorker's s_storeObjectConvergence) always
+           runs this before EnsureContinuousAggregatesAsync; this test must too, or "all 21 applied" depends
+           on some OTHER live-postgres class having already converted collection_log first — a run-order
+           flake caught live: collection_health_hourly's CREATE failed 0A000 invalid continuous aggregate
+           view when this test ran before anything else on the shared store had done the conversion. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct),
+            "EnsureCollectionLogHypertableAsync is expected to convert (or no-op on) collection_log once the extension is enabled");
 
         /* This test MUTATES the shared fixture's shape, so it restores it. Creating the hourly CAGGs changes
            compose's tier routing (RunComposedPanel_OldWindow_AgainstPlainPostgres_RunsCleanOnRaw asserts a
@@ -1731,6 +1740,12 @@ AND   ((SELECT min(bucket) FROM collect.query_stats_hourly) IS NULL
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
             "the dev fixture is expected to have TimescaleDB installed");
         Assert.Equal(CollectorCatalog.All.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        /* #3949: same ordering requirement as the EndToEnd retention test above - collection_log must be a
+           hypertable before EnsureContinuousAggregatesAsync builds the off-grid collection_health_hourly
+           aggregate RetentionPolicyCount counts on, or this test's "all 21 applied" depends on run order
+           across the whole live-postgres collection instead of on its own setup. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct),
+            "EnsureCollectionLogHypertableAsync is expected to convert (or no-op on) collection_log once the extension is enabled");
 
         var preexistingCaggs = await ExistingCaggsAsync(connection, ct);
 
