@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -29,10 +28,10 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <list type="bullet">
 /// <item><description><see cref="RedactStatement"/> — a monitored target's <c>STATEMENT:</c> companion, which is
-/// never stored: only <see cref="Fingerprint"/>'s hash of this form is, so one statement shape recurs to one
-/// fingerprint whatever it ran with. It applies the plan parser's own patterns by INSTANCE
+/// never stored: only its keyed fingerprint is (<see cref="PgLogHashKey.Fingerprint"/>, #4004), so one statement shape
+/// recurs to one fingerprint whatever it ran with. It applies the plan parser's own patterns by INSTANCE
 /// (<see cref="PgPlanLogParser.s_quotedLiteral"/>, <see cref="PgPlanLogParser.s_bareNumber"/>), and it is unchanged
-/// since #3601 so fingerprints stay continuous with every row already stored.</description></item>
+/// since #3601, so a shape's fingerprint changes only when the store's key does.</description></item>
 /// <item><description><see cref="RedactStoredStatement"/> — SQL text that IS stored: a single-pass lexer that
 /// replaces every literal with <c>?</c> and refuses a statement it cannot read to its end
 /// (<see cref="WithheldStatement"/>).</description></item>
@@ -894,8 +893,8 @@ public static class PgLogTextRedactor
     }
 
     /// <summary>The form a monitored target's <c>STATEMENT:</c> companion is fingerprinted in, and never stored in:
-    /// quoted literals AND bare numbers out, identifier-glued digits kept. Unchanged since #3601, so
-    /// <see cref="Fingerprint"/> stays continuous with the rows already stored. Null in, null out.</summary>
+    /// quoted literals AND bare numbers out, identifier-glued digits kept. Unchanged since #3601; its output is hashed
+    /// under the store's key (<see cref="PgLogHashKey.Fingerprint"/>, #4004) and never stored. Null in, null out.</summary>
     public static string? RedactStatement(string? statement)
     {
         if (string.IsNullOrEmpty(statement))
@@ -938,7 +937,7 @@ public static class PgLogTextRedactor
     /// replaced read <c>"owner's count"</c> as the opening of a literal and <c>/* a /* b */ it's */</c> as
     /// ending at the first <c>*/</c>, and in both the following literal was left standing (#3915's review).</para>
     ///
-    /// <para>The log-event pipeline keeps only <see cref="Fingerprint"/>'s hash of a statement, so it hashes
+    /// <para>The log-event pipeline keeps only a keyed hash of a statement (<see cref="PgLogHashKey.Fingerprint"/>), so it hashes
     /// <see cref="RedactStatement"/>'s output and a <c>DO</c> body stays part of the shape it hashes; this is
     /// for a surface that keeps the TEXT. Null in, null out.</para>
     /// </summary>
@@ -1231,45 +1230,8 @@ public static class PgLogTextRedactor
     private static bool IsIdentifierChar(char c, bool first) =>
         char.IsAsciiLetter(c) || c == '_' || c >= '\u0080' || (!first && char.IsAsciiDigit(c));
 
-    /// <summary>
-    /// Identity of a statement SHAPE: SHA-256 over the REDACTED text, 32 hex characters, the plan hash's
-    /// width. Two executions of one statement with different literals fingerprint alike. Only what
-    /// <see cref="RedactStatement"/> masks stays out of the hash: a dollar-quoted body (a <c>DO</c> block, a
-    /// <c>$$...$$</c> literal) is hashed as written, so for such a statement the fingerprint is an offline guessing
-    /// oracle like <see cref="RawLineHash"/> (#3996's review, #4004).
-    /// </summary>
-    public static string? Fingerprint(string? redactedStatement)
-    {
-        if (string.IsNullOrWhiteSpace(redactedStatement))
-        {
-            return null;
-        }
-
-        /* Whitespace-normalised so a statement re-indented by a client fingerprints with its siblings.
-           Case is kept: PostgreSQL identifiers are case-sensitive when quoted, and folding would merge
-           two different statements. */
-        var normalised = Regex.Replace(redactedStatement.Trim(), @"\s+", " ");
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalised));
-        return Convert.ToHexString(bytes, 0, 16);
-    }
-
-    /// <summary>
-    /// Identity of one log ENTRY across sightings: SHA-256 over the entry's raw text, 32 hex characters.
-    /// The self-hosted tail re-reads an overlapping window every cycle, so the same entry arrives on every
-    /// cycle it stays inside the window; the reads dedupe on this the way the deadlock reads dedupe on
-    /// <c>deadlock_hash</c>. Over the RAW text on purpose — two entries that store alike (the same error from
-    /// one statement shape run with two different values, in the same millisecond, from the same pid) are two
-    /// events, and the hash has to keep them apart.
-    ///
-    /// <para><b>It is not a secret-safe digest</b> (#3996's review). An unkeyed hash of text a reader can mostly
-    /// reconstruct (the stored prose, the normalized statement, the prefix) is an offline guessing oracle for the
-    /// part the reader cannot: a four-digit PIN in a failed UPDATE came back from the stored hash in 6 ms. So no
-    /// read surface returns it; it stays a column the reads dedupe on inside the store, and a keyed replacement is
-    /// #4004.</para>
-    /// </summary>
-    public static string RawLineHash(string rawText)
-    {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(rawText ?? string.Empty));
-        return Convert.ToHexString(bytes, 0, 16);
-    }
+    /* The two identities a log event is stored with, raw_line_hash and statement_fingerprint, lived here as unkeyed
+       SHA-256 until #4004: an offline guessing oracle for the literals they hid (#3996's review recovered a PIN from
+       one in 6 ms). They are HMAC-SHA-256 under the store's own key now, in PgLogHashKey, and there is deliberately
+       no unkeyed spelling left to call. */
 }

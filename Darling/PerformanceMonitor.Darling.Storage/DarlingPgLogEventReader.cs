@@ -52,8 +52,6 @@ public static class DarlingPgLogEventReader
         string Message,
         string? Detail,
         string? Context,
-        string? StatementFingerprint,
-        string RawLineHash,
         int TimesSeen,
         PgLogEventMetricsRow Metrics);
 
@@ -179,8 +177,8 @@ public static class DarlingPgLogEventReader
             d.message,
             d.detail,
             d.context,
-            d.statement_fingerprint,
-            d.raw_line_hash,
+            /* statement_fingerprint and raw_line_hash stay inside the store (#3996, #4004): keyed identities the
+               reads dedupe on above, never a column any surface returns, so the page does not carry them. */
             d.times_seen,
             /* The window's distinct-event count under the SAME filters, on the SAME statement: after the
                distinct, before the limit. The page is what LIMIT admits; this is what it was cut from. */
@@ -370,25 +368,23 @@ public static class DarlingPgLogEventReader
                 Message: PerformanceMonitor.Collectors.PgLogTextRedactor.RedactMessage(reader.IsDBNull(8) ? string.Empty : reader.GetString(8)) ?? string.Empty,
                 Detail: reader.IsDBNull(9) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactDetail(reader.GetString(9)),
                 Context: reader.IsDBNull(10) ? null : PerformanceMonitor.Collectors.PgLogTextRedactor.RedactContext(reader.GetString(10)),
-                StatementFingerprint: reader.IsDBNull(11) ? null : reader.GetString(11),
-                RawLineHash: reader.GetString(12),
-                TimesSeen: reader.GetInt32(13),
+                TimesSeen: reader.GetInt32(11),
                 Metrics: new PgLogEventMetricsRow(
-                    RelationName: reader.IsDBNull(15) ? null : reader.GetString(15),
-                    Bytes: reader.IsDBNull(16) ? null : reader.GetInt64(16),
-                    DurationMs: reader.IsDBNull(17) ? null : reader.GetInt64(17),
-                    PagesRemoved: reader.IsDBNull(18) ? null : reader.GetInt64(18),
-                    PagesRemaining: reader.IsDBNull(19) ? null : reader.GetInt64(19),
-                    TuplesRemoved: reader.IsDBNull(20) ? null : reader.GetInt64(20),
-                    TuplesRemaining: reader.IsDBNull(21) ? null : reader.GetInt64(21),
-                    BufferHits: reader.IsDBNull(22) ? null : reader.GetInt64(22),
-                    BufferMisses: reader.IsDBNull(23) ? null : reader.GetInt64(23),
-                    BufferDirtied: reader.IsDBNull(24) ? null : reader.GetInt64(24),
-                    WalRecords: reader.IsDBNull(25) ? null : reader.GetInt64(25),
-                    WalBytes: reader.IsDBNull(26) ? null : reader.GetInt64(26),
-                    IsAnalyze: reader.IsDBNull(27) ? null : reader.GetBoolean(27))));
+                    RelationName: reader.IsDBNull(13) ? null : reader.GetString(13),
+                    Bytes: reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                    DurationMs: reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                    PagesRemoved: reader.IsDBNull(16) ? null : reader.GetInt64(16),
+                    PagesRemaining: reader.IsDBNull(17) ? null : reader.GetInt64(17),
+                    TuplesRemoved: reader.IsDBNull(18) ? null : reader.GetInt64(18),
+                    TuplesRemaining: reader.IsDBNull(19) ? null : reader.GetInt64(19),
+                    BufferHits: reader.IsDBNull(20) ? null : reader.GetInt64(20),
+                    BufferMisses: reader.IsDBNull(21) ? null : reader.GetInt64(21),
+                    BufferDirtied: reader.IsDBNull(22) ? null : reader.GetInt64(22),
+                    WalRecords: reader.IsDBNull(23) ? null : reader.GetInt64(23),
+                    WalBytes: reader.IsDBNull(24) ? null : reader.GetInt64(24),
+                    IsAnalyze: reader.IsDBNull(25) ? null : reader.GetBoolean(25))));
 
-            windowTotal = reader.GetInt32(14);
+            windowTotal = reader.GetInt32(12);
         }
 
         return new PgLogEventsPage(rows, windowTotal);

@@ -64,6 +64,9 @@ services:
       # regenerated and re-applied to the roles on every recreation, which works but re-keys them each time.
       # `docker compose exec darling cat /var/lib/darling/credentials/pg-admin-credential` shows the admin
       # password, for connecting a Darling Viewer or psql to the store as admin rather than as the owner.
+      # #4004: it also holds log-hash-key, the secret the stored log events' identities are keyed with. The service
+      # never replaces it; without the volume a recreated container generates a new one, which gives every log
+      # event stored after that a new identity (one repeat of each entry still in the log tail, and new fingerprints).
       - darling-credentials:/var/lib/darling/credentials
     secrets:
       # One file per secret; darling.json references them as file:/run/secrets/<name> (#1804) —

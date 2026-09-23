@@ -1473,7 +1473,7 @@ WHERE u.rolname = current_user";
     /// distrusts it when it cannot (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host
     /// directory another host user owns or can write to is outside what either check can see.</para>
     /// </summary>
-    private static string? UntrustedComposeCredentialReason(FileInfo info)
+    internal static string? UntrustedComposeCredentialReason(FileInfo info)
     {
         if (info.LinkTarget is not null)
         {
@@ -1518,7 +1518,7 @@ WHERE u.rolname = current_user";
     /// that cannot be created or checked (a read-only mount, say) is one nothing is read from or written to, and
     /// the roles are still provisioned with this start's passwords, as they were when only the write could fail.
     /// </summary>
-    private static ComposeCredentialDirectoryTrust PrepareComposeCredentialDirectory(string directory, bool create, ILogger logger)
+    internal static ComposeCredentialDirectoryTrust PrepareComposeCredentialDirectory(string directory, bool create, ILogger logger)
     {
         try
         {
@@ -1616,7 +1616,7 @@ WHERE u.rolname = current_user";
 
     private const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
 
-    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+    internal const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
 
     /// <summary>A mode the way an operator types it, <c>0700</c>, rather than the enum's flag names.</summary>
     internal static string Octal(UnixFileMode mode) => "0" + Convert.ToString((int)mode, 8);

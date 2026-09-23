@@ -2014,6 +2014,11 @@ public sealed class DarlingWorker : BackgroundService
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
            CollectSchemaChangeEvents is a file-only knob (darling.json), read the same way for symmetry —
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
+        /* #4004: the store's log-hash key, loaded ONCE here and shared by every run that hashes log text (pg_log_events
+           on the pg_read_file and RDS routes), so raw_line_hash and statement_fingerprint are keyed with a secret the
+           store never holds. Generated only when none exists and never replaced: null means the file could not be used,
+           the reason is already logged, and those runs refuse rather than hash without it. */
+        var logHashKey = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
@@ -2027,7 +2032,8 @@ public sealed class DarlingWorker : BackgroundService
             /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides
                the cadence gate reads — one source, so the scope a run collects under and the schedule it
                was dispatched under can never come from two different reloads. */
-            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides));
+            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides),
+            logHashKey: logHashKey);
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
