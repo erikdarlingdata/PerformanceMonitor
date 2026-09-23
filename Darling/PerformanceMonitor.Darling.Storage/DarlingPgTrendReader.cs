@@ -1015,6 +1015,101 @@ public static class DarlingPgTrendReader
         """;
 
     /// <summary>
+    /// <see cref="DominantIoSubjectSql"/>'s choice, read from each series' ENDPOINTS instead of differencing every
+    /// row in order (#3961) — TimescaleDB stores only, because <c>first()</c> / <c>last()</c> are TimescaleDB's.
+    ///
+    /// <para><b>Why.</b> The LAG form has to sort every (backend_type, object_type, context) row of the window
+    /// before its window function can run: on DARLING01 over 168 h that is 788,341 rows, a quicksort of about
+    /// 105,000 rows per chunk, and 3.8 to 5.8 s for a choice the trend it feeds answers in a quarter of a
+    /// second — the store's collation is already C, so no cheaper comparison was left to take. The ranking only
+    /// needs each series' summed increase, and for a counter that never goes backwards that sum IS its last
+    /// value minus its first: 0.30 s over the same week, the same pair, and identical sums on the eight busiest
+    /// pairs.</para>
+    ///
+    /// <para><b>Exact where it cannot assume.</b> Beside the choice it returns <c>any_rewound</c>: whether ANY
+    /// series in the window shows a sign it went backwards — its <c>stats_reset</c> moved (PostgreSQL stamps it
+    /// on <c>pg_stat_reset_shared('io')</c> and on crash recovery alike), a counter dipped below its first value
+    /// or ended below its peak, or a counter is NULL on some rows but not others. When one does, the caller
+    /// discards this answer and runs <see cref="DominantIoSubjectSql"/> itself, so a window holding a reset is
+    /// ranked by the shipped arithmetic to the unit and only the common case takes the shortcut. A counter NULL
+    /// on EVERY row (an operation pg_stat_io does not track for that object type) is not a rewind: it contributes
+    /// nothing on either path. The one rewind this cannot see moves no <c>stats_reset</c>, never dips below the
+    /// window's first value, and regrows past its old peak by the window's end; its only effect would be which
+    /// pair a call without backend_type / context follows — never a figure, which the trend computes from every
+    /// interval regardless.</para>
+    ///
+    /// <para>The HAVING / ORDER BY tail is the LAG form's, whitespace aside (pinned), so the two readings of the
+    /// same sums cannot rank them differently. One row always: the choice (both NULL when nothing qualifies)
+    /// and the flag. $1 server_id, $2/$3 window (naive UTC), $4 backend_type filter, $5 context filter (NULL =
+    /// free).</para>
+    /// </summary>
+    public const string DominantIoSubjectEndpointsSql = """
+        WITH series AS (
+            SELECT
+                backend_type,
+                object_type,
+                context,
+                last(reads, collection_time)   - first(reads, collection_time)   AS d_reads,
+                last(writes, collection_time)  - first(writes, collection_time)  AS d_writes,
+                last(extends, collection_time) - first(extends, collection_time) AS d_extends,
+                last(hits, collection_time)    - first(hits, collection_time)    AS d_hits,
+                MIN(stats_reset) IS DISTINCT FROM MAX(stats_reset)
+                OR (bool_or(stats_reset IS NULL) AND bool_or(stats_reset IS NOT NULL))
+                OR (bool_or(reads IS NULL)   AND bool_or(reads IS NOT NULL))
+                OR (bool_or(writes IS NULL)  AND bool_or(writes IS NOT NULL))
+                OR (bool_or(extends IS NULL) AND bool_or(extends IS NOT NULL))
+                OR (bool_or(hits IS NULL)    AND bool_or(hits IS NOT NULL))
+                OR coalesce(MIN(reads)   < first(reads, collection_time)   OR last(reads, collection_time)   < MAX(reads), false)
+                OR coalesce(MIN(writes)  < first(writes, collection_time)  OR last(writes, collection_time)  < MAX(writes), false)
+                OR coalesce(MIN(extends) < first(extends, collection_time) OR last(extends, collection_time) < MAX(extends), false)
+                OR coalesce(MIN(hits)    < first(hits, collection_time)    OR last(hits, collection_time)    < MAX(hits), false)
+                AS rewound
+            FROM pg_io_stats
+            WHERE server_id = $1
+            AND   backend_type IS NOT NULL
+            AND   context IS NOT NULL
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text IS NULL OR backend_type = $4)
+            AND   ($5::text IS NULL OR context = $5)
+            GROUP BY backend_type, object_type, context
+        ),
+        sampled AS (
+            SELECT backend_type, context, d_reads, d_writes, d_extends, d_hits
+            FROM series
+        )
+        SELECT
+            chosen.backend_type,
+            chosen.context,
+            flag.any_rewound
+        FROM (SELECT coalesce(bool_or(rewound), false) AS any_rewound FROM series) AS flag
+        LEFT JOIN LATERAL (
+            SELECT
+                backend_type,
+                context
+            FROM sampled
+            GROUP BY backend_type, context
+            /* Buffer HITS qualify a pair as active, even though they rank below operations. A fully cached
+               workload is the HEALTHY state, and on one every combination has hits and no physical I/O at all -
+               so a HAVING over operations alone answered "nothing to follow" for a server that is perfectly
+               observable, and refused to draw the most reassuring chart there is. Measured: a six-hour window
+               on the rig's quieter target had 0 operations and thousands of hits. */
+            HAVING coalesce(SUM(d_reads), 0) + coalesce(SUM(d_writes), 0)
+                 + coalesce(SUM(d_extends), 0) + coalesce(SUM(d_hits), 0) > 0
+            ORDER BY
+                coalesce(SUM(d_reads), 0) + coalesce(SUM(d_writes), 0) + coalesce(SUM(d_extends), 0) DESC,
+                /* Hits break the tie BEFORE the name does. Without this line a window where nothing touched a
+                   disk falls straight through to alphabetical order, which is the same defect ranking on
+                   read_time_ms would have caused - a name picked by sorting and presented as the busiest thing
+                   on the server. */
+                coalesce(SUM(d_hits), 0) DESC,
+                backend_type,
+                context
+            LIMIT 1
+        ) AS chosen ON true
+        """;
+
+    /// <summary>
     /// The database worth following: the biggest temp-file spiller, or the busiest by block access when
     /// nothing spilled at all. Same ordering as the single-window read, for the same reason — spilling is
     /// the question this data answers that nothing else here can.
@@ -1101,18 +1196,27 @@ public static class DarlingPgTrendReader
 
     /// <param name="backendTypeFilter">Constrains the choice to one backend type; null leaves it free.</param>
     /// <param name="contextFilter">Constrains the choice to one context; null leaves it free.</param>
+    /// <param name="fromEndpoints">True on a TimescaleDB store: read the choice through
+    /// <see cref="DominantIoSubjectEndpointsSql"/> (#3961), and through <see cref="DominantIoSubjectSql"/> only
+    /// when that says a series in the window rewound. A plain-PostgreSQL store has no <c>first()</c> /
+    /// <c>last()</c> and always takes <see cref="DominantIoSubjectSql"/>. Callers get this from
+    /// <see cref="IsTimescaleDbStoreAsync"/>.</param>
     public static async Task<(string BackendType, string Context)?> GetDominantIoSubjectAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? backendTypeFilter = null, string? contextFilter = null,
+        string? backendTypeFilter = null, string? contextFilter = null, bool fromEndpoints = false,
         CancellationToken cancellationToken = default)
     {
-        await using var command = postgres.CreateCommand(DominantIoSubjectSql);
-        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
-        command.Parameters.Add(TextOrNull(backendTypeFilter));
-        command.Parameters.Add(TextOrNull(contextFilter));
+        if (fromEndpoints)
+        {
+            await using var endpoints = SubjectCommand(postgres, DominantIoSubjectEndpointsSql, serverId, startUtc, endUtc, backendTypeFilter, contextFilter);
+            await using var fast = await endpoints.ExecuteReaderAsync(cancellationToken);
+            if (await fast.ReadAsync(cancellationToken) && !fast.GetBoolean(2))
+            {
+                return fast.IsDBNull(0) || fast.IsDBNull(1) ? null : (fast.GetString(0), fast.GetString(1));
+            }
+        }
+
+        await using var command = SubjectCommand(postgres, DominantIoSubjectSql, serverId, startUtc, endUtc, backendTypeFilter, contextFilter);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
@@ -1121,6 +1225,43 @@ public static class DarlingPgTrendReader
         }
 
         return (reader.GetString(0), reader.GetString(1));
+    }
+
+    /// <summary>Either subject read, bound: $1 server_id, $2/$3 window (naive UTC), $4/$5 the two filters.</summary>
+    private static NpgsqlCommand SubjectCommand(
+        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc,
+        string? backendTypeFilter, string? contextFilter)
+    {
+        var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.Add(TextOrNull(backendTypeFilter));
+        command.Parameters.Add(TextOrNull(contextFilter));
+        return command;
+    }
+
+    /// <summary>
+    /// Whether the timescaledb extension is installed AND created in this database — the same question and the
+    /// same catalog <see cref="TimescaleSupport.DetectAsync"/> asks of a live connection, spelled out again here
+    /// because that method takes an <c>NpgsqlConnection</c> and every read in this file only ever holds a data
+    /// source.
+    /// </summary>
+    public const string TimescaleExtensionPresentSql = "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')";
+
+    /// <summary>
+    /// Is TimescaleDB's extension present in this store? <see cref="DominantIoSubjectEndpointsSql"/>'s
+    /// <c>first()</c> / <c>last()</c> are TimescaleDB hyperfunctions, so a plain-PostgreSQL store (#3913) must
+    /// never be routed to it - calling them there fails at parse time with an undefined-function error, not a
+    /// slow-but-correct answer. One indexed lookup, cheap enough (unlike the window-scanning reads around it)
+    /// to ask fresh on every call rather than memoize per data source.
+    /// </summary>
+    public static async Task<bool> IsTimescaleDbStoreAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(TimescaleExtensionPresentSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
     }
 
     /// <summary>

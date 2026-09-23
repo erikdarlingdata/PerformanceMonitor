@@ -355,6 +355,51 @@ public sealed class PgTrendReaderTests
     }
 
     /// <summary>
+    /// #3961: the endpoint reading of the automatic I/O choice ranks the same sums the same way. Its HAVING /
+    /// ORDER BY tail is the LAG form's (comments and whitespace aside), its filters are the LAG form's, each
+    /// series is read as last minus first, and it reports <c>any_rewound</c> — a moved <c>stats_reset</c>, a
+    /// partly-NULL counter, a counter below its first value or ending below its peak — so the reader can hand a
+    /// rewound window to the LAG form rather than trust the endpoints. A NULL comparison (a counter NULL on every
+    /// row) must NOT flag: the live DARLING01 run found half the series flagged for exactly that until the
+    /// comparisons were coalesced.
+    /// </summary>
+    [Fact]
+    public void TheEndpointChoice_RanksTheLagFormsSums_AndFlagsAWindowThatRewound()
+    {
+        var lag = Code(DarlingPgTrendReader.DominantIoSubjectSql);
+        var endpoints = Code(DarlingPgTrendReader.DominantIoSubjectEndpointsSql);
+
+        static string Tail(string sql) => Regex.Replace(sql[sql.IndexOf("HAVING", StringComparison.Ordinal)..sql.IndexOf("LIMIT 1", StringComparison.Ordinal)], @"\s+", " ").Trim();
+        Assert.Equal(Tail(lag), Tail(endpoints));
+        Assert.Contains("($4::text IS NULL OR backend_type = $4)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("($5::text IS NULL OR context = $5)", endpoints, StringComparison.Ordinal);
+
+        foreach (var counter in new[] { "reads", "writes", "extends", "hits" })
+        {
+            Assert.Contains($"last({counter}, collection_time)", endpoints, StringComparison.Ordinal);
+            Assert.Contains($"bool_or({counter} IS NULL)", endpoints, StringComparison.Ordinal);
+            Assert.Matches(new Regex(@"coalesce\(MIN\(" + counter + @"\)\s+< first\(" + counter + @", collection_time\)\s+OR last\(" + counter + @", collection_time\)\s+< MAX\(" + counter + @"\), false\)"), endpoints);
+        }
+
+        Assert.Contains("MIN(stats_reset) IS DISTINCT FROM MAX(stats_reset)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("coalesce(bool_or(rewound), false) AS any_rewound", endpoints, StringComparison.Ordinal);
+        Assert.DoesNotContain("LAG(", endpoints, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3961: the capability probe that gates the endpoint reading asks exactly what
+    /// <see cref="TimescaleSupport.DetectAsync"/> asks of a live connection - the same catalog, the same column -
+    /// so the two can never disagree about whether a store has the extension.
+    /// </summary>
+    [Fact]
+    public void TimescaleExtensionPresentSql_AsksTheSameQuestion_AsTimescaleSupportDetectAsync()
+    {
+        Assert.Equal(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')",
+            DarlingPgTrendReader.TimescaleExtensionPresentSql);
+    }
+
+    /// <summary>
     /// The I/O subject is a PAIR, and either half can be named alone.
     ///
     /// <para>A pair because a hit ratio summed across contexts is meaningless: <c>bulkread</c> is a

@@ -304,8 +304,13 @@ public sealed class DarlingMcpPgTrendTools
                    Whichever half was named CONSTRAINS the choice, and subject_source says which half was
                    chosen for them - the alternative was accepting a backend type and quietly answering
                    about a different one. */
+                /* #3961: the LAG form sorts every pg_io_stats row in the window before it can rank them -
+                   3.8 s over a week on DARLING01. A TimescaleDB store answers from each series' endpoints
+                   instead, in a quarter of a second; a plain-PostgreSQL store has no first()/last() and
+                   keeps the row-by-row form. */
+                var fromEndpoints = await DarlingPgTrendReader.IsTimescaleDbStoreAsync(postgres);
                 var dominant = await DarlingPgTrendReader.GetDominantIoSubjectAsync(
-                    postgres, resolved.ServerId, start, windowEnd, askedBackend, askedContext);
+                    postgres, resolved.ServerId, start, windowEnd, askedBackend, askedContext, fromEndpoints);
 
                 if (dominant is null)
                 {
