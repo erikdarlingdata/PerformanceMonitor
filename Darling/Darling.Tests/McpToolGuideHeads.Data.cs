@@ -33,9 +33,9 @@ public sealed class McpToolGuideHeadsDataTests
     /// <summary>The per-tool guardrail phrase each head must state.</summary>
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
-        ("get_file_io_stats", "Reads the newest snapshot, not a window"),
-        ("get_perfmon_stats", "Reads the newest snapshot, not a window"),
-        ("get_server_properties", "Reads the newest snapshot, not a window"),
+        ("get_file_io_stats", "LATEST IS A TIME: the newest snapshot, not a window"),
+        ("get_perfmon_stats", "LATEST IS A TIME: the newest snapshot, not a window"),
+        ("get_server_properties", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_top_procedures_by_cpu", "LIFETIME extremes, not windowed"),
         ("get_top_queries_by_cpu", "LIFETIME extremes, not windowed"),
         ("get_top_queries_by_cpu", "an empty page under it is the window's real answer, not a miss"),

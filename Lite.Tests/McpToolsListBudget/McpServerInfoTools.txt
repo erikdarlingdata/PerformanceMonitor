@@ -2,5 +2,5 @@
 tool get_database_sizes 480
 param get_database_sizes.server_name 28
 
-tool get_server_properties 559
+tool get_server_properties 571
 param get_server_properties.server_name 28

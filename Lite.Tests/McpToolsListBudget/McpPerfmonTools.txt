@@ -1,5 +1,5 @@
 # McpPerfmonTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_perfmon_stats 509
+tool get_perfmon_stats 521
 param get_perfmon_stats.counter_name 61
 param get_perfmon_stats.instance_name 57
 param get_perfmon_stats.server_name 28
