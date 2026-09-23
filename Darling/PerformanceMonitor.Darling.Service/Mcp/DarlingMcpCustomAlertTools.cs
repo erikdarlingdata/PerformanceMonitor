@@ -100,6 +100,12 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "validate_custom_alert_rule"), Description(
+        "Dry-run: validates a custom-alert-rule definition JSON WITHOUT persisting anything, returning {valid:true} or " +
+        "{valid:false, error} naming the first problem. This is the exact authority create_custom_alert_rule / " +
+        "update_custom_alert_rule run before saving, and the evaluator applies when it loads a rule, so a result valid " +
+        "here is accepted there too. A count-aggregate predicate that can fire when the count is 0 is always rejected: it " +
+        "cannot tell zero events from a stalled collector. " +
+        "<<GUIDE>> " +
         "Dry-run: validates a custom-alert-rule definition WITHOUT persisting anything. Returns {valid:true} or " +
         "{valid:false, error:\"...\"} naming the first problem. This is the exact authority " +
         "create_custom_alert_rule / update_custom_alert_rule run before saving AND the evaluator applies when " +
@@ -142,7 +148,9 @@ public sealed class DarlingMcpCustomAlertTools
         "validate_custom_alert_rule); an invalid definition returns {status:\"invalid\", ...} and saves " +
         "nothing. On success returns the stored rule (id, version 1, and the definition). A name collision " +
         "returns {status:\"conflict\", ...}. The rule is stamped as MCP-authored. A rule created enabled starts " +
-        "being evaluated on the next sweep; pass enabled=false to stage it paused.")]
+        "being evaluated on the next sweep; pass enabled=false to stage it paused. With 100 rules already enabled " +
+        "fleet-wide, an enabled create is refused as {status:\"invalid\", ...}; paused rules do not count, so " +
+        "enabled=false still saves.")]
     public static async Task<string> CreateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The rule name - unique across all rules, max 200 characters.")] string name,
@@ -175,6 +183,13 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "update_custom_alert_rule"), Description(
+        "Partial update of an existing rule: send only the fields to change (name, description, definition, enabled); an " +
+        "omitted field keeps its current value. description ALSO accepts an empty string \"\" to clear it (vocabulary " +
+        "shared with update_custom_view). A new definition is validated first; an invalid one changes nothing. Pass the " +
+        "'version' last read from get_custom_alert_rule: a mismatch returns {status:\"conflict\"} rather than overwriting. " +
+        "Setting enabled:true is refused as {status:\"invalid\"} if it would push the fleet-wide enabled-rule count over " +
+        "its cap. " +
+        "<<GUIDE>> " +
         "Updates an existing custom alert rule in place - a PARTIAL update: send only the fields you want to " +
         "change (name, description, definition, enabled), and every field you omit keeps its current value " +
         "(omitting description does NOT clear it). To CLEAR the description, send it as an empty string \"\" - " +
@@ -184,7 +199,11 @@ public sealed class DarlingMcpCustomAlertTools
         "last read via get_custom_alert_rule - if someone else changed the rule since, this returns " +
         "{status:\"conflict\", ...} rather than silently overwriting their edit (reload and re-apply). A " +
         "missing id returns {status:\"not_found\", ...}; a name collision returns {status:\"conflict\", ...}. On " +
-        "success returns the stored rule with its bumped version.")]
+        "success returns the stored rule with its bumped version. " +
+        "Enabling a rule (enabled:true, whether it is a fresh transition or re-saving one already on) is refused with " +
+        "{status:\"invalid\"} once the fleet-wide enabled-rule count is at its 100 cap (\"Enabled custom alert rule limit " +
+        "(100) reached. Disable or delete another rule before enabling this one.\"); leaving a rule disabled, or setting " +
+        "it disabled, never counts against that cap and is never refused for it.")]
     public static async Task<string> UpdateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of the rule to update (from list_custom_alert_rules).")] long rule_id,
@@ -280,6 +299,13 @@ public sealed class DarlingMcpCustomAlertTools
         "not that the rule has fired. A null current_value is no-data and never breaches.";
 
     [McpServerTool(Name = "test_custom_alert_rule"), Description(
+        "Evaluate-now for a SAVED rule (rule_id) OR a supplied definition (exactly one): compiles the metric and reads " +
+        "its CURRENT value on each in-scope server, reporting per-server {server, current_value, breaching, severity} " +
+        "WITHOUT delivering a notification, writing history, or touching per-server streak state. breaching:true means " +
+        "the predicate is true THIS INSTANT, not that the rule has fired: hysteresis and streak state are not applied. A " +
+        "null current_value is no-data and never breaches. Zero in-scope servers returns status:no_in_scope_servers with " +
+        "empty results, not an error. " +
+        "<<GUIDE>> " +
         "Evaluate-now: for a SAVED rule (rule_id) OR a supplied definition, compiles the rule's metric and reads " +
         "its CURRENT value on each in-scope monitored server, reporting the value and whether it WOULD breach " +
         "(and at which severity tier) right now - WITHOUT delivering a notification, writing history, or touching " +
@@ -288,7 +314,11 @@ public sealed class DarlingMcpCustomAlertTools
         "severity}. IMPORTANT: this is the INSTANTANEOUS predicate only - a real alert also requires the " +
         "condition to persist across the rule's hysteresis (breachSamples/clearSamples) and per-server streak, " +
         "which a one-shot cannot reproduce, so breaching:true means 'true right now', not 'has fired'. A null " +
-        "current_value is no-data (an empty window, or a measure that is NULL for that server) and never breaches.")]
+        "current_value is no-data (an empty window, or a measure that is NULL for that server) and never breaches. " +
+        "When no monitored server is in scope for the rule (an empty tag, or a servers list matching none), the answer is " +
+        "{status:\"no_in_scope_servers\", rule_id, name, note, results:[]} instead of the per-server list; a normal run's " +
+        "response carries no top-level status field at all, so an empty results array only ever means " +
+        "no_in_scope_servers, never a run that quietly skipped every server.")]
     public static async Task<string> TestCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The id of a SAVED rule to test (from list_custom_alert_rules). Provide this OR definition, not both.")] long? rule_id = null,
@@ -403,6 +433,12 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [McpServerTool(Name = "list_custom_alert_templates"), Description(
+        "Lists the built-in STARTER custom-alert-rule templates: curated {key, name, description, definition} entries for " +
+        "common PostgreSQL and SQL Server signals, where definition is a ready-to-use rule body. The starters are " +
+        "deliberately conservative, not tuned: browse them, adjust thresholds and scope to your fleet, then pass the " +
+        "definition to create_custom_alert_rule to save it, or test_custom_alert_rule to see what it would do right now. " +
+        "Read-only: lists code-defined templates and touches no store. " +
+        "<<GUIDE>> " +
         "Lists the built-in STARTER custom-alert-rule templates - curated {metric, predicate, hysteresis} " +
         "definitions for common signals: PostgreSQL (dead-tuple pile-up / replica replay lag / connection " +
         "count / table bloat / replication-slot WAL retention) and SQL Server (high signal-wait % / sustained " +

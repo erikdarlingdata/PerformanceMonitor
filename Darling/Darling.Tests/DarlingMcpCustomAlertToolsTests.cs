@@ -64,6 +64,20 @@ public sealed class DarlingMcpCustomAlertToolsSurfaceTests
         .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
         .ToArray();
 
+    /// <summary>
+    /// create_custom_alert_rule refuses an enabled create at the store's enabled-rule cap. Its description names the
+    /// cap from the same constant the store enforces, so a caller who hits the refusal has already read why.
+    /// </summary>
+    [Fact]
+    public void CreateDescription_NamesTheEnabledRuleCap()
+    {
+        var create = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "create_custom_alert_rule");
+        var description = create.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description;
+
+        Assert.Contains($"With {PerformanceMonitor.Darling.Service.CustomAlertRuleStore.EnabledRuleCap} rules already enabled fleet-wide, an enabled create is refused", description, StringComparison.Ordinal);
+        Assert.Contains("paused rules do not count", description, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ToolSurface_IsExactlyTheEightCustomAlertTools()
     {
