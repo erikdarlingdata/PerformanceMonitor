@@ -96,6 +96,14 @@ Proceed with a source zip whose SHA256 could not be verified.
 Proceed even though processes are running out of the install tree. Almost always the wrong answer - the
 copy will fail on a locked file and leave mixed binaries - but there is no way to be sure from here that
 your case is not the exception.
+
+.PARAMETER AcceptWritableExtraction
+Skip the check that refuses a FOLDER -Source ordinary local users can already write to (#4043). A zip
+-Source is covered by the SHA256 check above regardless of who could write to the folder it sits in - the
+hash is of the zip's CONTENT. A folder -Source has no such check: this script only confirms the service exe
+is present in it, so a folder that ever inherited Authenticated Users: Modify (extracted directly under
+C:\, or into Downloads) may already hold a swapped binary between whenever it was extracted and now. Passing
+this accepts that risk - verify the zip's SHA256 before extracting it instead.
 #>
 [CmdletBinding()]
 param(
@@ -110,7 +118,8 @@ param(
     [switch]$ListRollbacks,
     [switch]$RemoveStaleFiles,
     [switch]$SkipHashCheck,
-    [switch]$SkipStopGuard
+    [switch]$SkipStopGuard,
+    [switch]$AcceptWritableExtraction
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,6 +130,54 @@ $manifestName = 'darling-install-manifest.txt'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
 function Note([string]$message) { Write-Host $message }
+
+# Read-only counterpart to Lock-DarlingInstallTree, for #4043: is $path ALREADY writable by someone outside
+# $trusted, right now, before anything is locked or a service account even exists? #4038's lock only stops
+# FURTHER writes - it never inspects what is already on disk, so a binary swapped in the gap between
+# extracting the zip and running this script survives the lock untouched. This is the check that catches
+# that gap, called at 1a on the root and the service exe before the lock ever runs.
+#
+# Only those two paths, never a recursive walk: Expand-Archive does not stamp per-file ACLs, so nothing
+# under an ordinary extraction should carry a wider grant than the root itself, and a full recursive
+# pre-lock walk would just re-do Lock-DarlingInstallTree's own post-lock verification for no benefit.
+#
+# The write-rights bitmask mirrors Lock-DarlingInstallTree's: the named rights (write, append/create,
+# delete, change-permissions, take-ownership) plus the two generic bits an inherited ACE can carry instead
+# of the specific ones. The return is principal NAMES, not SIDs: this fires as a refusal an operator has to
+# act on, and 'S-1-5-11' means nothing to most of them, so each is translated back to an account or group
+# name where Windows can, and left as the raw SID only when it can't (an orphaned SID from a deleted account).
+#
+# Kept byte-identical to install-darling.ps1's copy, alongside Lock-DarlingInstallTree, which
+# DarlingInstallLocationTests already compares between the two scripts.
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted) {
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+    try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
+    catch { return @("$path (its permissions could not be read: $($_.Exception.Message))") }
+    $bad = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
+        $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+    return @($bad | ForEach-Object {
+        $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
+        "$name on $path"
+    })
+}
+
+# The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
+# SYSTEM, Administrators, TrustedInstaller, and whoever is running this script elevated right now - a
+# folder the installing admin's own account owns and can write to is exactly what a normal extraction
+# looks like, not a finding. Kept as its own function because install-darling.ps1 and upgrade-darling.ps1
+# both need it and must agree on it.
+function Get-DarlingPreLockTrustedSids() {
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    return @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)),
+        (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType),
+        [Security.Principal.WindowsIdentity]::GetCurrent().User)
+}
 function Good([string]$message) { Write-Host $message -ForegroundColor Green }
 function Warn([string]$message) { Write-Host "WARNING: $message" -ForegroundColor Yellow }
 
@@ -1260,6 +1317,38 @@ else {
         Fail "'$Source' does not hold $serviceExeName, so it is not an extracted Darling build."
     }
     Warn "The source is a folder, so this script cannot verify it - verify the zip's SHA256 before you extract it."
+
+    # A zip -Source is covered above regardless of who could write to the folder it sits in, because the
+    # hash is of the zip's CONTENT. A folder -Source has no content check at all - only that the exe is
+    # present - so this is its own pre-lock writable-extraction window (#4043): if the folder ever inherited
+    # a broad write grant (extracted directly under C:\, or into Downloads) between whenever it was made and
+    # now, a local user could have swapped a binary in it, and nothing above would notice. Same check
+    # install-darling.ps1 runs at 1a, same trusted set, same override.
+    if (-not $AcceptWritableExtraction) {
+        $preLockTrusted = Get-DarlingPreLockTrustedSids
+        $writable = @(Get-UntrustedWriteGrantees $Source $preLockTrusted) + @(Get-UntrustedWriteGrantees (Join-Path $Source $serviceExeName) $preLockTrusted)
+        $writable = @($writable | Select-Object -Unique)
+        if ($writable.Count -gt 0) {
+            $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
+            $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
+            Fail @"
+Ordinary users can already write to the source folder '$Source':
+
+$lines$more
+
+This script only confirms $serviceExeName is present in a folder -Source - it does not, and cannot, verify
+its CONTENT the way a zip's SHA256 does. A binary here may already have been replaced. Extract the new
+build under C:\Program Files\<something>, or another folder only an administrator can write to, and point
+-Source there instead - or verify the zip's SHA256 and pass the zip itself as -Source.
+
+If this folder is deliberately writable (a dev loop) and you accept the risk, re-run with
+-AcceptWritableExtraction. Nothing has been stopped or copied.
+"@
+        }
+    }
+    else {
+        Warn '-AcceptWritableExtraction - not checking whether the source folder was already writable by other local users.'
+    }
 }
 
 # ============================ the service has to exist ============================

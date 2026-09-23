@@ -10,6 +10,11 @@ C:\PerformanceMonitorDarling). What it does, in order:
 
   1. Verifies elevation, the service exe, and darling.json (offers to copy darling.sample.json
      and stops so you can edit it - the service is not installed with an unedited sample).
+  1a. REFUSES an install tree an ordinary local user can ALREADY write to, before anything - including
+     the lock at 1b2 - has run (#4043): the usual case is Authenticated Users: Modify, inherited from
+     C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this checks the
+     root and the service exe's own ACL and refuses outright, naming the principals, unless
+     -AcceptWritableExtraction is passed (a dev loop that extracts somewhere deliberately writable).
   1b. REFUSES an install directory the service account can never read: anywhere under a user profile
      (C:\Users\...), or a UNC / mapped-drive path. The service runs as an unprivileged virtual account
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
@@ -58,12 +63,21 @@ After the service reaches Running, launch the interactive --configure-network wi
 store / MCP / web-dashboard LAN endpoints (guided, delegated validation, comment-preserving darling.json
 edit + backup). Off by default; the endpoints stay loopback-only unless you pass this or edit darling.json
 by hand.
+
+.PARAMETER AcceptWritableExtraction
+Skip the 1a check that refuses an install tree ordinary local users can already write to. That check exists
+because a lock (1b2) only stops writes from here on - it cannot undo one made before it ran, so a tree that
+was EVER writable by someone besides SYSTEM, Administrators, TrustedInstaller and you may already hold a
+swapped binary. Passing this accepts that risk. It exists for a dev loop that extracts into a folder you
+know is writable on purpose (a repo working copy, a shared build share) - not for a real install. Extract
+under C:\Program Files\<something>, or another folder only an administrator can write to, instead.
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipPreflight,
     [switch]$NoShortcuts,
-    [switch]$Network
+    [switch]$Network,
+    [switch]$AcceptWritableExtraction
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,6 +95,51 @@ $dotnetMajor = 10
 $dotnetDownloadUrl = 'https://dotnet.microsoft.com/download/dotnet/10.0'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
+
+# Read-only counterpart to Lock-DarlingInstallTree, for #4043: is $path ALREADY writable by someone outside
+# $trusted, right now, before anything is locked or a service account even exists? #4038's lock only stops
+# FURTHER writes - it never inspects what is already on disk, so a binary swapped in the gap between
+# extracting the zip and running this script survives the lock untouched. This is the check that catches
+# that gap, called at 1a on the root and the service exe before the lock ever runs.
+#
+# Only those two paths, never a recursive walk: Expand-Archive does not stamp per-file ACLs, so nothing
+# under an ordinary extraction should carry a wider grant than the root itself, and a full recursive
+# pre-lock walk would just re-do Lock-DarlingInstallTree's own post-lock verification for no benefit.
+#
+# The write-rights bitmask mirrors Lock-DarlingInstallTree's: the named rights (write, append/create,
+# delete, change-permissions, take-ownership) plus the two generic bits an inherited ACE can carry instead
+# of the specific ones. The return is principal NAMES, not SIDs: this fires as a refusal an operator has to
+# act on, and 'S-1-5-11' means nothing to most of them, so each is translated back to an account or group
+# name where Windows can, and left as the raw SID only when it can't (an orphaned SID from a deleted account).
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted) {
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+    try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
+    catch { return @("$path (its permissions could not be read: $($_.Exception.Message))") }
+    $bad = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
+        $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+    return @($bad | ForEach-Object {
+        $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
+        "$name on $path"
+    })
+}
+
+# The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
+# SYSTEM, Administrators, TrustedInstaller, and whoever is running this script elevated right now - a
+# folder the installing admin's own account owns and can write to is exactly what a normal extraction
+# looks like, not a finding. Kept as its own function because install-darling.ps1 and upgrade-darling.ps1
+# both need it and must agree on it.
+function Get-DarlingPreLockTrustedSids() {
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    return @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)),
+        (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType),
+        [Security.Principal.WindowsIdentity]::GetCurrent().User)
+}
 
 # True when $candidate IS $parent or sits underneath it.
 #
@@ -461,6 +520,53 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 
 if (-not (Test-Path $serviceExe)) {
     Fail "PerformanceMonitor.Darling.Service.exe not found beside this script. Extract the full Darling zip and run install-darling.ps1 from the extracted folder."
+}
+
+# -- 1a. Refuse an install tree an ordinary user can ALREADY write to (#4043) -----------------------
+# #4038's lock at 1b2 closes the tree against writes from here on. It cannot undo one made before it ran:
+# a folder created directly under C:\ - the documented location - inherits "Authenticated Users: Modify"
+# from the volume root the instant it is extracted, and anything from then until this script reaches 1b2
+# is a window a local user could use to replace the service exe, a DLL, or a pg-runtime binary. A planted
+# binary loads as the service account on first start, and the lock never checks CONTENTS, only future
+# writes, so it would not catch this.
+#
+# A signature or hash check run BY this script, AFTER the lock, was considered and withdrawn (#4043 review):
+# it only catches an attacker who leaves install-darling.ps1 itself alone, and someone who can replace the
+# service exe can just as easily replace this script, which the admin then runs elevated. The trust root is
+# where the admin extracted the zip, not anything a script reads back from inside that tree.
+#
+# So this checks the one thing that actually predicts the risk: is the tree ALREADY writable by someone
+# outside SYSTEM, Administrators, TrustedInstaller and the admin running this script, right now, before
+# anything has run. That fires on every risky extraction, attack or not, and does not depend on an attacker
+# having left anything else untouched. The service exe is checked as well as the root: an inherited grant is
+# not the only way in, and #4038's own review flagged checking only the root as incomplete.
+if (-not $AcceptWritableExtraction) {
+    $preLockTrusted = Get-DarlingPreLockTrustedSids
+    $writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted) + @(Get-UntrustedWriteGrantees $serviceExe $preLockTrusted)
+    $writable = @($writable | Select-Object -Unique)
+    if ($writable.Count -gt 0) {
+        $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
+        $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
+        Fail @"
+Ordinary users can already write to this install folder, before this script has locked anything down:
+
+$lines$more
+
+Files here may already have been replaced with something other than what the zip shipped - the lock this
+script applies next (1b2) only stops FURTHER writes, it does not check what is already on disk. This is
+the usual shape of a folder made directly under C:\, which inherits Authenticated Users: Modify from the
+volume root.
+
+Extract the zip under C:\Program Files\<something>, or another folder only an administrator can write to,
+and run this script from there instead. If this folder is deliberately writable (a dev loop) and you
+accept the risk, re-run with -AcceptWritableExtraction.
+
+Nothing was installed or changed.
+"@
+    }
+}
+else {
+    Write-Host 'WARNING: -AcceptWritableExtraction - not checking whether this folder was already writable by other local users. Files here may already differ from what the zip shipped.' -ForegroundColor Yellow
 }
 
 # -- 1b. Refuse an install root the service account can never read (#2187) -------------------------

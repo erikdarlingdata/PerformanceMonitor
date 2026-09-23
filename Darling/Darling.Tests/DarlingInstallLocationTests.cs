@@ -538,6 +538,94 @@ function Get-CimInstance {
     }
 
     /// <summary>
+    /// #4043: the pre-lock writable-extraction check ships twice for the same reason the lock itself does -
+    /// install-darling.ps1 checks the install root before 1b2 ever runs, upgrade-darling.ps1 checks a folder
+    /// -Source before it copies that folder's content over the (already locked) install root, and neither
+    /// script can import the other's copy. Compared byte for byte so a fix to one does not silently miss the
+    /// other.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_ShipsIdenticallyInTheInstallAndUpgradeScripts()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+
+        Assert.Equal(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"), ExtractFunction(upgrade, "Get-UntrustedWriteGrantees"));
+        Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"), ExtractFunction(upgrade, "Get-DarlingPreLockTrustedSids"));
+    }
+
+    /// <summary>
+    /// #4043, executed as shipped: a folder made directly under the system drive root inherits a broad write
+    /// grant from it (the same shape #4034's own test relies on, and the one the pre-lock check exists to
+    /// catch before any lock has run). Proves the check FIRES on that naturally-inherited shape, falls SILENT
+    /// once the tree is hardened to only the trusted set, and also fires when the grant sits on the service
+    /// exe alone with a clean root - the "also check the exe" requirement. The admin running this script must
+    /// never be a finding on its own, since Get-DarlingPreLockTrustedSids adds them.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_CatchesAnInheritedGrant_AndIsSilentOnceHardened()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4043-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                Set-Content -LiteralPath "$root\svc.exe" -Value 'x'
+                $trusted = Get-DarlingPreLockTrustedSids
+
+                # Phase 1: freshly made directly under the drive root - nothing hardened yet, the exact shape
+                # extracting a zip to C:\<name> has the instant it lands, before install-darling.ps1 runs a
+                # single line.
+                'inheritedCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+
+                # Phase 2: hardened to only the trusted set (what 1b2's lock produces) - must fall silent.
+                $c = New-Object System.Security.AccessControl.DirectorySecurity
+                $c.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $c.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                Set-Acl -LiteralPath $root -AclObject $c
+                'lockedDownCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+
+                # Phase 3: root stays clean, but the SERVICE EXE ALONE carries a broad grant - must still fire,
+                # scoped to the exe, because an inherited root grant is not the only way a binary is writable.
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $x = New-Object System.Security.AccessControl.FileSecurity
+                $x.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
+                $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'Allow')))
+                Set-Acl -LiteralPath "$root\svc.exe" -AclObject $x
+                $exeFound = @(Get-UntrustedWriteGrantees "$root\svc.exe" $trusted)
+                'exeOnlyCount=' + $exeFound.Count
+                'exeNamesAuthUsers=' + (($exeFound -join ';') -match 'Authenticated Users')
+                'rootStillCleanCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+
+                # The running admin is trusted even with no explicit grant naming them - a folder they own and
+                # can write to is a normal extraction, not a finding.
+                'meIsTrusted=' + ($trusted -contains [Security.Principal.WindowsIdentity]::GetCurrent().User)
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        var inherited = int.Parse(answers.Find(a => a.StartsWith("inheritedCount=", StringComparison.Ordinal))!.Substring("inheritedCount=".Length));
+        Assert.True(inherited > 0, "a folder made directly under the system drive root must inherit at least one write grant outside SYSTEM/Administrators/TrustedInstaller/the admin - if this box's C:\\ no longer grants one, the pre-lock check has nothing to prove here: " + string.Join(" | ", answers));
+
+        Assert.Contains("lockedDownCount=0", answers);
+        Assert.Contains("exeOnlyCount=1", answers);
+        Assert.Contains("exeNamesAuthUsers=True", answers);
+        Assert.Contains("rootStillCleanCount=0", answers);
+        Assert.Contains("meIsTrusted=True", answers);
+    }
+
+    /// <summary>
     /// #4034, executed as shipped against a real tree. A folder created directly under the system drive root
     /// inherits "Authenticated Users: Modify" from it (the documented install location's hole). After the lock the
     /// root must be protected and grant ordinary users read and execute only, the service account Modify (it
