@@ -117,7 +117,10 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(Reader.ServerSummaryBlockingSql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
         Assert.Contains("deadlock_time >= $2 AND collection_time >= $3", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
 
-        Assert.Contains("MAX(collection_time)", Reader.ServerSummaryLastCollectionSql, StringComparison.Ordinal);
+        /* #3976: ORDER BY ... DESC LIMIT 1, not MAX(collection_time) — same answer, a plan-shape TimescaleDB
+           can stop at the newest chunk with a row instead of planning every retained one. */
+        Assert.Contains("ORDER BY collection_time DESC LIMIT 1", Reader.ServerSummaryLastCollectionSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", Reader.ServerSummaryLastCollectionSql, StringComparison.Ordinal);
     }
 
     [Fact]

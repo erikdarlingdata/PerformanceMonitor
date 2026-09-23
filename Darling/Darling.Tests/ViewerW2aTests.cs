@@ -141,7 +141,12 @@ public sealed class ViewerOverviewSqlTests
     public void SummaryLastCollectionSql_TakesTheNewestCollectionTime()
     {
         var sql = ViewerDataService.ServerSummaryLastCollectionSql;
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
+        /* #3976: ORDER BY ... DESC LIMIT 1, not MAX(collection_time) — ExecuteScalarAsync reads the same
+           null either way, but this shape lets TimescaleDB stop at the newest chunk with a row instead of
+           planning every retained one to prove a MAX. */
+        Assert.Contains("ORDER BY collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
     }
