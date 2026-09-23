@@ -797,10 +797,14 @@ END $do$;
 
 -- 1b. Re-assert attributes every start, and the password (as a SCRAM-SHA-256 verifier, #3910) only for a
 --     role whose stored verifier does not already accept its credential file: the file is the source of
---     truth. Only reached when the guard above passed (fresh + marked, or already Darling-marked).
-ALTER ROLE {admin}  LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Admin, adminVerifier)};
-ALTER ROLE {viewer} LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Viewer, viewerVerifier)};
-ALTER ROLE {mcp}    LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Mcp, mcpVerifier)};
+--     truth. Only reached when the guard above passed (fresh + marked, or already Darling-marked). Every
+--     attribute that widens a role is switched off by name (#3914), not only SUPERUSER: a role this batch
+--     ADOPTS (it already carries the marker) keeps whatever was granted to it since, and CREATEROLE, CREATEDB,
+--     REPLICATION or BYPASSRLS on viewer or mcp would outrank every grant below. Section 11 does the same for
+--     role memberships.
+ALTER ROLE {admin}  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Admin, adminVerifier)};
+ALTER ROLE {viewer} LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Viewer, viewerVerifier)};
+ALTER ROLE {mcp}    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Mcp, mcpVerifier)};
 
 -- 1c. statement_timeout backstop on the composed-query identities (Custom Views v2, #1563). viewer is the web
 --     dashboard's DB identity and mcp the optional network MCP identity; both serve the network-reachable
@@ -1016,6 +1020,34 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     probe rung + ladder fixture + version-pin tests for no gain.
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
+
+-- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
+--     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
+--     pg_read_all_data undoes the secret-column carve, and membership in the owner is every privilege the owner
+--     has. A role this batch adopts would otherwise keep them, so every one is revoked, every start.
+--     GRANTED BY the recorded grantor: since PostgreSQL 16 a superuser's plain REVOKE removes only the grants
+--     recorded as the bootstrap superuser's, and leaves one made by any other role in place with a WARNING.
+--     CASCADE: a grant the member itself made with an ADMIN OPTION depends on that membership, and RESTRICT would
+--     fail the whole batch on it every start. A grantor that no longer exists (possible before 16, which ignores
+--     the grantor on REVOKE) is left out of the statement. A row an earlier CASCADE already removed draws a
+--     WARNING, never an error.
+DO $do$
+DECLARE
+   membership record;
+BEGIN
+   FOR membership IN
+      SELECT g.rolname AS granted, m.rolname AS member, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE m.rolname IN ('{admin}', '{viewer}', '{mcp}')
+   LOOP
+      EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member)
+         || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+         || ' CASCADE';
+   END LOOP;
+END $do$;
 ";
     }
 

@@ -36,8 +36,44 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("FROM pg_roles WHERE rolname = 'viewer'", sql, StringComparison.Ordinal);
         Assert.Contains($"CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
         Assert.Contains($"CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
-        Assert.Contains($"ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
-        Assert.Contains($"ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
+        /* #3914 review F5, a deliberate change to this pin: the re-assert switches off every attribute that widens a
+           role, not SUPERUSER alone, so an ADOPTED role (already marked) cannot keep CREATEROLE, CREATEDB,
+           REPLICATION or BYPASSRLS that someone gave it since. The CREATE lines need nothing: those are CREATE ROLE's
+           defaults. */
+        Assert.Contains($"ALTER ROLE admin  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE viewer LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3914 review F5: every role membership in which admin, viewer or mcp is the MEMBER is revoked, every start —
+    /// a pg_read_all_data would undo the secret-column carve, and membership in the owner is all of the owner's
+    /// rights. Measured on the bundled PostgreSQL 18: a superuser's plain <c>REVOKE role FROM member</c> removes only
+    /// a grant recorded as the bootstrap superuser's and leaves another grantor's with a WARNING, and RESTRICT fails
+    /// on a membership the member used to grant onward — so the statement names the recorded grantor and cascades.
+    /// Revoking ALL of them is right only because the batch grants none, which is pinned here too: every GRANT in it
+    /// is a privilege ON something.
+    /// </summary>
+    [Fact]
+    public void BuildProvisioningSql_RevokesEveryMembershipOfTheThreeRoles_AndGrantsNone()
+    {
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
+
+        var section = sql[sql.IndexOf("-- 11. Role memberships (#3914)", StringComparison.Ordinal)..];
+        Assert.Contains("FROM pg_catalog.pg_auth_members AS a", section, StringComparison.Ordinal);
+        Assert.Contains("JOIN pg_catalog.pg_roles AS m ON m.oid = a.member", section, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor", section, StringComparison.Ordinal);
+        Assert.Contains("WHERE m.rolname IN ('admin', 'viewer', 'mcp')", section, StringComparison.Ordinal);
+        Assert.Contains("EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member)", section, StringComparison.Ordinal);
+        Assert.Contains("format(' GRANTED BY %I', membership.grantor)", section, StringComparison.Ordinal);
+        Assert.Contains("|| ' CASCADE';", section, StringComparison.Ordinal);
+
+        /* It comes after every grant, so nothing later in the batch can hand a membership back. */
+        Assert.DoesNotContain("GRANT ", section[section.IndexOf("DO $do$", StringComparison.Ordinal)..], StringComparison.Ordinal);
+
+        /* And the batch grants no membership: each GRANT statement names what it is ON. */
+        var statements = System.Text.RegularExpressions.Regex.Matches(sql, @"(?m)^\s*GRANT\s[^;]*;");
+        Assert.NotEmpty(statements);
+        Assert.All(statements, statement => Assert.Matches(@"\sON\s", statement.Value));
     }
 
     [Fact]
@@ -236,7 +272,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("FROM pg_roles WHERE rolname = 'mcp'", sql, StringComparison.Ordinal);
         Assert.Contains($"CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
         Assert.Contains("COMMENT ON ROLE mcp IS 'darling-managed';", sql, StringComparison.Ordinal);
-        Assert.Contains($"ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE mcp    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
         Assert.Contains("RAISE EXCEPTION 'Role \"mcp\" already exists and was not created by Darling", sql, StringComparison.Ordinal);
 
         /* viewer's read surface, granted as SEPARATE 'TO mcp' statements — NOT appended to the pinned
@@ -429,15 +465,17 @@ public sealed class DarlingManagedRolesTests
         var sql = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15, PasswordReassert.Viewer);
 
-        Assert.Contains("ALTER ROLE admin  LOGIN NOSUPERUSER;", sql, StringComparison.Ordinal);
-        Assert.Contains($"ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
-        Assert.Contains("ALTER ROLE mcp    LOGIN NOSUPERUSER;", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE admin  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS;", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE viewer LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS PASSWORD '{ProvisioningTestSecrets.Viewer}';", sql, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS;", sql, StringComparison.Ordinal);
         Assert.Contains($"CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Admin}';", sql, StringComparison.Ordinal);
         Assert.Contains($"CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD '{ProvisioningTestSecrets.Mcp}';", sql, StringComparison.Ordinal);
 
+        /* No PASSWORD clause anywhere after the CREATE branch: the #3914 attribute list moved the clause off the end
+           of "LOGIN NOSUPERUSER", so the check is on the clause itself rather than on what used to precede it. */
         var none = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15, PasswordReassert.None);
-        Assert.DoesNotContain("LOGIN NOSUPERUSER PASSWORD", none[none.IndexOf("-- 1b.", StringComparison.Ordinal)..], StringComparison.Ordinal);
+        Assert.DoesNotContain(" PASSWORD '", none[none.IndexOf("-- 1b.", StringComparison.Ordinal)..], StringComparison.Ordinal);
     }
 
     /// <summary>
