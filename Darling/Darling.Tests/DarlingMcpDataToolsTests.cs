@@ -705,7 +705,11 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var sql = DarlingDataReader.ServerListSql;
         Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(cl.collection_time)", sql, StringComparison.Ordinal);       /* freshness source */
+        /* #3976: a per-server LATERAL probe, not a correlated MAX(collection_time) — same freshness source,
+           a plan TimescaleDB can stop at the newest chunk with a row instead of planning every retained one. */
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY cl.collection_time DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_collection_log cl", sql, StringComparison.Ordinal);
     }
 
