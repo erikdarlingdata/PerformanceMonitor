@@ -14,7 +14,10 @@ conflict.
 **The coordinator fills these per wave, in every brief:**
 - `<LANE>`, `<ISSUES>`, `<DEADLINE>`;
 - `<RIG_PORT>`, `<RIG_DIR>`, `<PG_RUNTIME_ZIP>`;
-- `<REPORT_FILE>`, `<CHANGELOG_BUFFER_DIR>`;
+- `<REPORT_FILE>`, `<CHANGELOG_BUFFER_DIR>`. Under worktree isolation, `<REPORT_FILE>` must be inside the lane's
+  own worktree (for example `.lane-report.md`, untracked), because the harness blocks writes to the coordinator's
+  scratchpad. Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not
+  exclude that path;
 - `<CO_AUTHOR_TRAILER>`, `<SESSION_URL>`.
 
 ## For the coordinator
