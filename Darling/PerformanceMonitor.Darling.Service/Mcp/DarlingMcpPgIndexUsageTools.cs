@@ -199,7 +199,13 @@ public sealed class DarlingMcpPgIndexUsageTools
 
     [McpServerTool(Name = "get_pg_index_usage")]
     [Description(
-        "PostgreSQL per-index usage: how often each index was scanned, what it costs, and - the part a raw "
+        "Per-index usage and droppability advice, beyond raw pg_stat_user_indexes. scans_in_window, not "
+        + "lifetime total_scans_since_stats_reset, is the disuse figure; needs 2+ samples (no index-creation "
+        + "timestamp exists). Droppability is GATED on primary key/unique/exclusion/replica-identity/partial/"
+        + "expression/invalid facts: unscanned_without_a_structural_blocker is a candidate, never a "
+        + "conclusion. WRITERS ONLY - a replica's scan counts are its own, not the writer's. Floors at 64 kB "
+        + "(plus any INVALID index), so counts run lower than get_pg_index_bloat's floor-free census. "
+        + "<<GUIDE>> PostgreSQL per-index usage: how often each index was scanned, what it costs, and - the part a raw "
         + "pg_stat_user_indexes query cannot give you - whether it is actually safe to drop. Reports BOTH the "
         + "server's lifetime scan count since its statistics were last reset AND the scans observed across "
         + "the stored window, which is the more useful figure: an index with millions of lifetime scans and "
@@ -214,12 +220,14 @@ public sealed class DarlingMcpPgIndexUsageTools
         + "indexes than get_pg_index_bloat, which is the complete btree census with no size floor - 1,517 "
         + "against 2,500 on one measured target, a difference that is entirely that floor. Neither is "
         + "missing objects, and for indexes too large for get_pg_index_bloat to measure this is the only "
-        + "collector carrying their size over time.")]
+        + "collector carrying their size over time. This is what bounds the page - read truncated to know "
+        + "whether the server held more indexes than were returned; it is observed by fetching one row past "
+        + "this cap, never inferred from a full page.")]
     public static async Task<string> GetPgIndexUsage(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days). Widen this to the longest interval any scheduled job runs on before calling an index unused.")] int hours_back = 168,
-        [Description("Maximum indexes to return, biggest unscanned first. Default 25. This is what bounds the page - read truncated to know whether the server held more indexes than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
+        [Description("Maximum indexes to return, biggest unscanned first. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
