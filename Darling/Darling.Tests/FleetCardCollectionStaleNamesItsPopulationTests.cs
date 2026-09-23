@@ -172,6 +172,11 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
     /// age, explode that band into the shared flags, take the flag, put it on the card. There is no error
     /// count in the chain, no <c>collection_log</c> read, and no use of the roll-up's published window — which
     /// is why the card's <c>window_start</c> / <c>window_end</c> never bounded it.
+    ///
+    /// <para>#3935 routed the classification through <c>ClassifyWindowedFreshness</c>, which adds the
+    /// registration instant and one arm, Offline. It cannot produce Stale, so this flag's population is
+    /// unchanged; <see cref="FleetCardTellsDarkFromNeverCollectedTests.TheCollectionStaleFlag_KeepsItsPopulation"/>
+    /// holds that over the combinations.</para>
     /// </summary>
     [Fact]
     public void TheMcpCard_DerivesTheFlagFromFreshnessAndNothingElse()
@@ -180,7 +185,7 @@ public sealed class FleetCardCollectionStaleNamesItsPopulationTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
 
         Assert.Contains(
-            "var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);\n"
+            "var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now);\n"
           + "        var flags = ServerCollectionStatusRules.FlagsFor(freshness);",
             reader, StringComparison.Ordinal);
         Assert.Contains("var collectionStale = flags.CollectionStale;", reader, StringComparison.Ordinal);
