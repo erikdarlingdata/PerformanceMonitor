@@ -378,6 +378,112 @@ VALUES ($1, $2, $3, $4, 'appdb', $5, $6, $7, $8, $9, $10, $11, NULL)",
         });
     }
 
+    /// <summary>
+    /// #3961: get_pg_io_trend's automatic subject, read from each series' endpoints on a TimescaleDB store, is the
+    /// LAG form's choice — and a window where a series rewound is handed to the LAG form rather than trusted.
+    ///
+    /// <para>Three pairs over five snapshots. <c>client backend / normal</c> rises steadily by 1,000 operations;
+    /// <c>checkpointer / normal</c> by 800, with its write counter NULL on every row (an operation pg_stat_io does
+    /// not track there is not a rewind); <c>autovacuum worker / normal</c> climbs 5,000, is RESET (its
+    /// <c>stats_reset</c> moves) and climbs 100 more. Summed increases put the autovacuum worker first at 5,100 —
+    /// but its last value minus its first is 100, so an endpoint reading that trusted every series would hand the
+    /// default to the client backend. It does not: the window reports <c>any_rewound</c>, and the LAG form answers.
+    /// Before the reset the same three pairs rank from their endpoints alone, with the same answer both ways.</para>
+    /// </summary>
+    [Fact]
+    public async Task PgIoSubjectChoice_FromEndpoints_IsTheLagFormsChoice_AndARewoundWindowIsHandedToIt()
+    {
+        await RunAsync(async (connection, postgres, ct) =>
+        {
+            /* A week clear of this file's other pg_io_stats fact (2026-03-04): that one seeds the same
+               server_id, the same backend_type/context/object_type, and its five timestamps land inside a
+               naively-chosen window here too - concurrent facts in this class share one live database, and a
+               shared clock plus a shared key is what a full-suite run turned into cross-test contamination. */
+            var t0 = new DateTime(2026, 3, 11, 10, 0, 0);
+            var firstReset = new DateTime(2026, 1, 1, 0, 0, 0);
+            var secondReset = new DateTime(2026, 3, 11, 10, 3, 30);
+            for (var i = 0; i < 5; i++)
+            {
+                var t = t0.AddMinutes(i);
+                await SeedPgIoRowAsync(connection, ct, t, "client backend", "relation", "normal", reads: 10_000 + 250 * i, writes: 100, hits: 50_000, stats_reset: firstReset);
+                await SeedPgIoRowAsync(connection, ct, t, "checkpointer", "relation", "normal", reads: 7_000 + 200 * i, writes: null, hits: 0, stats_reset: firstReset);
+
+                /* 0, 2,500, 5,000, then the reset: 0 again, 100. */
+                long vacuumReads = i < 3 ? 2_500L * i : 100L * (i - 3);
+                await SeedPgIoRowAsync(connection, ct, t, "autovacuum worker", "relation", "normal", reads: vacuumReads, writes: 0, hits: 0,
+                    stats_reset: i < 3 ? firstReset : secondReset);
+            }
+
+            /* This rig runs TimescaleDB, so get_pg_io_trend's call site must choose the endpoint path - proving
+               the capability probe, not just the SQL it gates. */
+            Assert.True(await DarlingPgTrendReader.IsTimescaleDbStoreAsync(postgres, ct));
+
+            var start = t0.AddMinutes(-1);
+            var end = t0.AddMinutes(10);
+            var lag = await DarlingPgTrendReader.GetDominantIoSubjectAsync(postgres, ServerId, start, end, fromEndpoints: false, cancellationToken: ct);
+            var endpoints = await DarlingPgTrendReader.GetDominantIoSubjectAsync(postgres, ServerId, start, end, fromEndpoints: true, cancellationToken: ct);
+            Assert.Equal(("autovacuum worker", "normal"), lag);
+            Assert.Equal(lag, endpoints);
+            var (naive, rewound) = await EndpointReadAsync(postgres, start, end, ct);
+            Assert.True(rewound, "a stats_reset moved inside the window, so the endpoint read must hand it over");
+            Assert.Equal(("client backend", "normal"), naive);   // what trusting the endpoints would have said
+
+            /* End to end through the MCP tool itself (#3961): the call site's own capability check must route
+               this TimescaleDB rig to the same answer the reader gives directly. */
+            var asOf = Stamp(end);
+            var trend = Root(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, null, null, 1, asOf, bucket_minutes: 1));
+            Assert.Equal("autovacuum worker", trend.GetProperty("backend_type").GetString());
+            Assert.Equal("normal", trend.GetProperty("context").GetString());
+
+            /* Before the reset: every series monotonic (the checkpointer's all-NULL writes included), the fast path
+               answers, and it is the LAG form's answer. */
+            var beforeReset = t0.AddMinutes(2).AddSeconds(30);
+            var (fast, fastRewound) = await EndpointReadAsync(postgres, start, beforeReset, ct);
+            Assert.False(fastRewound, "no series rewound before 10:03:30");
+            Assert.Equal(("autovacuum worker", "normal"), fast);
+            Assert.Equal(
+                await DarlingPgTrendReader.GetDominantIoSubjectAsync(postgres, ServerId, start, beforeReset, fromEndpoints: false, cancellationToken: ct),
+                await DarlingPgTrendReader.GetDominantIoSubjectAsync(postgres, ServerId, start, beforeReset, fromEndpoints: true, cancellationToken: ct));
+
+            /* A rewind that moves no stats_reset still shows: the client backend's reads drop below where the
+               window started, and the flag trips on the counter itself. */
+            await SeedPgIoRowAsync(connection, ct, t0.AddMinutes(5), "client backend", "relation", "normal", reads: 9_000, writes: 100, hits: 50_000, stats_reset: firstReset);
+            var (_, dipped) = await EndpointReadAsync(postgres, start, t0.AddMinutes(5), ct, backendType: "client backend");
+            Assert.True(dipped, "a counter below its first value is a rewind even when stats_reset did not move");
+
+            /* Either half of the subject still constrains the endpoint read. */
+            Assert.Equal(("checkpointer", "normal"),
+                await DarlingPgTrendReader.GetDominantIoSubjectAsync(postgres, ServerId, start, beforeReset, "checkpointer", null, fromEndpoints: true, cancellationToken: ct));
+        });
+    }
+
+    /// <summary>Runs <see cref="DarlingPgTrendReader.DominantIoSubjectEndpointsSql"/> directly: its choice and its
+    /// rewind flag, which the reader consumes rather than returns.</summary>
+    private static async Task<((string, string)? Choice, bool AnyRewound)> EndpointReadAsync(
+        NpgsqlDataSource postgres, DateTime start, DateTime end, CancellationToken ct, string? backendType = null)
+    {
+        await using var command = postgres.CreateCommand(DarlingPgTrendReader.DominantIoSubjectEndpointsSql);
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(start);
+        command.Parameters.AddWithValue(end);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)backendType ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = DBNull.Value });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "the endpoint read always returns one row");
+        var choice = reader.IsDBNull(0) ? ((string, string)?)null : (reader.GetString(0), reader.GetString(1));
+        return (choice, reader.GetBoolean(2));
+    }
+
+    private static async Task SeedPgIoRowAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime t, string backendType, string objectType, string context,
+        long reads, long? writes, long hits, DateTime? stats_reset) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO pg_io_stats
+    (collection_id, collection_time, server_id, server_name, backend_type, object_type, context,
+     reads, read_time_ms, writes, write_time_ms, extends, op_bytes, hits, evictions, stats_reset)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, 0, 0, 8192, $10, 0, $11)",
+            CollectionIdGenerator.Next(), t, ServerId, ServerName, backendType, objectType, context, reads, writes, hits, stats_reset);
+
     /* ───────────────────────────── plumbing ───────────────────────────── */
 
     private static async Task RunAsync(Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
