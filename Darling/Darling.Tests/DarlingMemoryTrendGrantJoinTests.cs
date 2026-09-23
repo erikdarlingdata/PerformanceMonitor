@@ -25,9 +25,11 @@ namespace Darling.Tests;
 /// matched point carries the pool-summed measurement, a matched point measuring NOTHING granted is a
 /// genuine 0.0 (a snapshot existed — zero is a measurement, not a fabrication), and an unmatched point is
 /// null with the envelope's granted_note explaining the gap — a note that vanishes entirely when every
-/// point matched. The join is nearest-match within 30 seconds because each collector stamps its own
-/// DateTime.UtcNow per run: same-cycle rows sit seconds apart, so equality returns nothing, while a wider
-/// match would smear a slower grants cadence across points it never measured.
+/// point matched. Since #3960 the join is by BUCKET: both series are bucketed at the same width and a memory
+/// point takes the grant snapshots inside its bucket — their average as total_granted_mb and the largest as
+/// peak_granted_mb — where it used to take the nearest snapshot within 30 seconds. Each collector stamps its own
+/// DateTime.UtcNow per run, so same-cycle rows sit seconds apart and share a bucket, while a slower grants
+/// cadence still leaves the buckets it never measured null rather than smeared.
 ///
 /// <para>Gated on DARLING_TEST_PG like every other live class.</para>
 /// </summary>
@@ -59,12 +61,14 @@ public sealed class DarlingMemoryTrendGrantJoinTests
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
 
-            /* ── fully covered: one memory point, one grants snapshot 3s later — value, and NO note ── */
-            var t0 = MinutesAgo(30);
+            /* ── fully covered: one memory point, one grants snapshot 3s later — value, and NO note ── Every
+               sample sits 10 seconds into a minute that starts a five-minute bucket, so each lands in its own
+               minute bucket and all four share one five-minute bucket, whatever the clock says now. */
+            var t0 = FiveMinuteFloor(MinutesAgo(30)).AddSeconds(10);
             await SeedMemoryAsync(connection, ct, t0);
             await SeedGrantAsync(connection, ct, t0.AddSeconds(3), poolId: 2, grantedMb: 50m);
 
-            var covered = JsonDocument.Parse(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4)).RootElement;
+            var covered = JsonDocument.Parse(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4, bucket_minutes: 1)).RootElement;
             Assert.Equal(50.0, covered.GetProperty("trend")[0].GetProperty("total_granted_mb").GetDouble(), precision: 6);
             Assert.False(covered.TryGetProperty("granted_note", out _),
                 "a window the grants series fully covers must not be captioned with a gap note");
@@ -83,17 +87,29 @@ public sealed class DarlingMemoryTrendGrantJoinTests
             await SeedGrantAsync(connection, ct, t2.AddSeconds(6), poolId: 2, grantedMb: 0m);
             /* nothing anywhere near t3 */
 
-            var root = JsonDocument.Parse(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4)).RootElement;
+            var root = JsonDocument.Parse(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4, bucket_minutes: 1)).RootElement;
             var trend = root.GetProperty("trend");
             Assert.Equal(4, trend.GetArrayLength());
             Assert.Equal(125.0, trend[1].GetProperty("total_granted_mb").GetDouble(), precision: 6);
+            Assert.Equal(125.0, trend[1].GetProperty("peak_granted_mb").GetDouble(), precision: 6);
             Assert.Equal(JsonValueKind.Number, trend[2].GetProperty("total_granted_mb").ValueKind);
             Assert.Equal(0.0, trend[2].GetProperty("total_granted_mb").GetDouble(), precision: 6);
             Assert.Equal(JsonValueKind.Null, trend[3].GetProperty("total_granted_mb").ValueKind);
+            Assert.Equal(JsonValueKind.Null, trend[3].GetProperty("peak_granted_mb").ValueKind);
 
             var note = root.GetProperty("granted_note").GetString()!;
             Assert.Contains("get_memory_grants", note, StringComparison.Ordinal);
-            Assert.Contains("30 seconds", note, StringComparison.Ordinal);
+            Assert.Contains("inside the bucket", note, StringComparison.Ordinal);
+
+            /* ── #3960: a wider bucket joins EVERY grant snapshot inside it — the per-snapshot pool sums 50, 125
+               and 0 average to 58.33 with 125 as the peak; the old nearest-snapshot join had no answer for a
+               point that summarizes several snapshots. The one bucket is covered, so no note. ── */
+            var wide = JsonDocument.Parse(await DarlingMcpTrendTools.GetMemoryTrend(postgres, ServerName, 4, bucket_minutes: 5)).RootElement;
+            var bucket = Assert.Single(wide.GetProperty("trend").EnumerateArray());
+            Assert.Equal(58.33, bucket.GetProperty("total_granted_mb").GetDouble(), precision: 6);
+            Assert.Equal(125.0, bucket.GetProperty("peak_granted_mb").GetDouble(), precision: 6);
+            Assert.Equal(40000.0, bucket.GetProperty("total_server_memory_mb").GetDouble(), precision: 6);
+            Assert.False(wide.TryGetProperty("granted_note", out _));
 
             bodySucceeded = true;
         }
@@ -106,6 +122,9 @@ public sealed class DarlingMemoryTrendGrantJoinTests
 
     private static DateTime MinutesAgo(int minutes) =>
         DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
+
+    private static DateTime FiveMinuteFloor(DateTime t) =>
+        new(t.Ticks - (t.Ticks % TimeSpan.FromMinutes(5).Ticks), t.Kind);
 
     private static async Task SeedMemoryAsync(NpgsqlConnection connection, CancellationToken ct, DateTime t) =>
         await DarlingMcpTestData.ExecAsync(connection, ct, @"

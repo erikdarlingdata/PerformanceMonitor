@@ -132,6 +132,9 @@ public sealed class TrendBucketsTests
         {
             TrendBuckets.FileIoMaxPoints, TrendBuckets.LockWaitMaxPoints, TrendBuckets.DurationMaxPoints,
             TrendBuckets.PgIoMaxPoints, TrendBuckets.PgDatabaseMaxPoints,
+            /* #3960 */
+            TrendBuckets.WaitMaxPoints, TrendBuckets.CpuMaxPoints, TrendBuckets.TempDbMaxPoints,
+            TrendBuckets.MemoryMaxPoints, TrendBuckets.PerfmonMaxPoints, TrendBuckets.PgQueryDurationMaxPoints,
         };
 
         foreach (var cap in caps)

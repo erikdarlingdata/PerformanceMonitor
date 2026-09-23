@@ -263,6 +263,88 @@ internal static class DarlingTrendReader
         return items;
     }
 
+    /// <summary>
+    /// The memory trend BUCKETED (#3960): <see cref="MemoryTrendSql"/>'s samples, byte for byte, gathered into
+    /// buckets of <c>$4</c> minutes — each level averaged over the samples in the bucket (a level is never summed),
+    /// stamped at the bucket's start, the first at the window's start. $1 server_id, $2/$3 window (naive UTC),
+    /// $4 the bucket width in minutes.
+    /// </summary>
+    public const string MemoryTrendBucketedSql = $"""
+        SELECT
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(COALESCE(total_server_memory_mb, 0)) AS total_server_memory_mb,
+            AVG(COALESCE(target_server_memory_mb, 0)) AS target_server_memory_mb,
+            AVG(COALESCE(buffer_pool_mb, 0)) AS buffer_pool_mb,
+            AVG(COALESCE(plan_cache_mb, 0)) AS plan_cache_mb
+        FROM (
+        {MemoryTrendSql}
+        ) AS samples
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="MemoryTrendBucketedSql"/>.</summary>
+    public static async Task<List<MemoryBucketPoint>> GetMemoryBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<MemoryBucketPoint>();
+        await using var command = postgres.CreateCommand(MemoryTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new MemoryBucketPoint(
+                reader.GetDateTime(0),
+                Number(reader, 1),
+                Number(reader, 2),
+                Number(reader, 3),
+                Number(reader, 4)));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// The memory-grant series in the same buckets (#3960): <see cref="MemoryGrantTrendSql"/>'s per-collection totals
+    /// averaged and maxed per bucket, so <c>get_memory_trend</c> joins the two series on the bucket they share rather
+    /// than on the nearest snapshot. $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public const string MemoryGrantTrendBucketedSql = $"""
+        SELECT
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(total_granted_mb) AS avg_granted_mb,
+            MAX(total_granted_mb) AS peak_granted_mb
+        FROM (
+        {MemoryGrantTrendSql}
+        ) AS grants
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="MemoryGrantTrendBucketedSql"/>.</summary>
+    public static async Task<List<GrantBucketPoint>> GetGrantBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<GrantBucketPoint>();
+        await using var command = postgres.CreateCommand(MemoryGrantTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new GrantBucketPoint(reader.GetDateTime(0), Number(reader, 1), Number(reader, 2)));
+        }
+
+        return items;
+    }
+
+    /// <summary>A numeric column as a double, 0 for NULL — the memory reads' long-standing reading of a missing level.</summary>
+    private static double Number(NpgsqlDataReader reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? 0 : Convert.ToDouble(reader.GetValue(ordinal), System.Globalization.CultureInfo.InvariantCulture);
+
     /* ─────────────────────────── perfmon trend ─────────────────────────── */
 
     /// <summary>
@@ -322,6 +404,68 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(2) ? null : reader.GetInt64(2),
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetInt32(4)));
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// A perfmon counter BUCKETED (#3960): <see cref="PerfmonTrendSql"/>'s per-collection sums, byte for byte,
+    /// gathered into buckets of <c>$5</c> minutes with every reading the envelope may need — the average, largest
+    /// and last value, and the deltas summed per interval class (rated, unknowable 0, unrecorded NULL) with the
+    /// seconds the rated ones accrued over — because which one a point publishes depends on the counter's kind
+    /// (<see cref="TrendPayloads.PerfmonTrend"/>). The rate's peak is the busiest single rated collection, through
+    /// the NULLIF the stored interval always takes. $1 server_id, $2 counter_name, $3/$4 window (naive UTC), $5 the
+    /// bucket width in minutes.
+    /// </summary>
+    public const string PerfmonTrendBucketedSql = $"""
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            AVG(cntr_value) AS avg_value,
+            MAX(cntr_value) AS max_value,
+            (array_agg(cntr_value ORDER BY collection_time DESC))[1] AS last_value,
+            SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds > 0) AS rated_delta,
+            SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS rated_seconds,
+            COUNT(*) FILTER (WHERE sample_interval_seconds = 0) AS unknowable_collections,
+            SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds = 0) AS unknowable_delta,
+            SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds IS NULL) AS unrecorded_delta,
+            MAX(CAST(delta_cntr_value AS double precision) / NULLIF(sample_interval_seconds, 0)) AS peak_per_second,
+            CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+        FROM (
+        {PerfmonTrendSql}
+        ) AS collections
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="PerfmonTrendBucketedSql"/>.</summary>
+    public static async Task<List<PerfmonBucketPoint>> GetPerfmonBucketsAsync(
+        NpgsqlDataSource postgres, int serverId, string counterName, DateTime startUtc, DateTime endUtc, int bucketMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        var items = new List<PerfmonBucketPoint>();
+        await using var command = postgres.CreateCommand(PerfmonTrendBucketedSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddText(command, counterName);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new PerfmonBucketPoint(
+                reader.GetDateTime(0),
+                Number(reader, 1),
+                reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
+                reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
+                reader.IsDBNull(7) ? null : Convert.ToInt64(reader.GetValue(7)),
+                reader.IsDBNull(8) ? null : Convert.ToInt64(reader.GetValue(8)),
+                reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : reader.GetInt32(10)));
         }
 
         return items;

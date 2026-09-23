@@ -21,10 +21,12 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #3548: get_memory_trend joins the memory-grant series so total_granted_mb carries real data — the
-/// complete fix #3529's null was the honest placeholder for. The join is nearest-match within 30 seconds
-/// because the two collectors each stamp their own DateTime.UtcNow per run: same-cycle rows sit seconds
-/// apart, so an equality join returns nothing, while a wider match would smear a slower grants cadence
-/// across points it never measured.
+/// complete fix #3529's null was the honest placeholder for. Since #3960 the join is by BUCKET: both series
+/// are bucketed at the same width and a memory point takes the grant snapshots inside its bucket — their
+/// average as total_granted_mb and the largest as peak_granted_mb — where it used to be the nearest snapshot
+/// within 30 seconds. Each collector stamps its own DateTime.UtcNow per run, so same-cycle rows sit seconds
+/// apart and share a bucket, while a slower grants cadence still leaves the buckets it never measured null
+/// rather than smeared.
 ///
 /// <para>The three claims worth pinning are the three an agent acts on: a matched point carries the
 /// pool-summed measurement, a matched point measuring NOTHING granted is a genuine 0.0 (a snapshot
@@ -90,12 +92,15 @@ public sealed class MemoryTrendGrantJoinToolTests : IClassFixture<SharedDuckDbFi
         await SeedGrantAsync(snap0, poolId: 2, grantedMb: 100.0);
         await SeedGrantAsync(t1.AddSeconds(6), poolId: 2, grantedMb: 0.0);
 
-        var payload = await McpMemoryTools.GetMemoryTrend(new LocalDataService(_duckDb), _serverManager, ServerName, 4);
+        /* #3960: bucket_minutes: 1 keeps t0/t1/t2 each in their own bucket — the default 4-hour window's
+           auto-sized width (2 minutes) would otherwise fold two of the three one-minute-apart points together. */
+        var payload = await McpMemoryTools.GetMemoryTrend(new LocalDataService(_duckDb), _serverManager, ServerName, 4, bucket_minutes: 1);
         var root = JsonDocument.Parse(payload).RootElement;
 
         var trend = root.GetProperty("trend");
         Assert.Equal(3, trend.GetArrayLength());
         Assert.Equal(125.0, trend[0].GetProperty("total_granted_mb").GetDouble(), precision: 6);
+        Assert.Equal(125.0, trend[0].GetProperty("peak_granted_mb").GetDouble(), precision: 6);
 
         /* The genuine zero: a snapshot existed and measured nothing granted. Distinguishable from the
            uncovered point below only because the join keeps zero-vs-unknown apart. */
@@ -103,10 +108,11 @@ public sealed class MemoryTrendGrantJoinToolTests : IClassFixture<SharedDuckDbFi
         Assert.Equal(0.0, trend[1].GetProperty("total_granted_mb").GetDouble(), precision: 6);
 
         Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("total_granted_mb").ValueKind);
+        Assert.Equal(JsonValueKind.Null, trend[2].GetProperty("peak_granted_mb").ValueKind);
 
         var note = root.GetProperty("granted_note").GetString()!;
         Assert.Contains("get_memory_grants", note, StringComparison.Ordinal);
-        Assert.Contains("30 seconds", note, StringComparison.Ordinal);
+        Assert.Contains("inside the bucket", note, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -124,22 +130,40 @@ public sealed class MemoryTrendGrantJoinToolTests : IClassFixture<SharedDuckDbFi
             "a window the grants series fully covers must not be captioned with a gap note");
     }
 
+    /// <summary>
+    /// #3960: the join is by bucket now, not by a 30-second proximity window, so a wider bucket joins EVERY
+    /// grant snapshot inside it — three per-snapshot pool sums, 50, 125 and 0, average to 58.333... with 125 as
+    /// the peak; the old nearest-snapshot join had no answer for a point that summarizes several snapshots. All
+    /// three snapshots and the one memory sample sit inside the SAME five-minute bucket, so the bucket is fully
+    /// covered and carries no granted_note.
+    /// </summary>
     [Fact]
-    public async Task TheToleranceBoundary_Is30Seconds_InAt30_OutAt31()
+    public async Task WiderBucket_JoinsEveryGrantSnapshotInsideIt_AverageAndPeak()
     {
-        var tIn = DateTime.UtcNow.AddMinutes(-40);
-        var tOut = tIn.AddMinutes(5);
+        var t0 = FiveMinuteFloor(DateTime.UtcNow.AddMinutes(-40)).AddSeconds(10);
 
-        await SeedMemoryAsync(tIn);
-        await SeedMemoryAsync(tOut);
-        await SeedGrantAsync(tIn.AddSeconds(30), poolId: 2, grantedMb: 75.0);
-        await SeedGrantAsync(tOut.AddSeconds(31), poolId: 2, grantedMb: 999.0);
+        await SeedMemoryAsync(t0);
+        await SeedGrantAsync(t0.AddSeconds(3), poolId: 2, grantedMb: 50.0);
+        await SeedGrantAsync(t0.AddMinutes(1), poolId: 2, grantedMb: 125.0);
+        await SeedGrantAsync(t0.AddMinutes(2), poolId: 2, grantedMb: 0.0);
 
-        var payload = await McpMemoryTools.GetMemoryTrend(new LocalDataService(_duckDb), _serverManager, ServerName, 4);
-        var trend = JsonDocument.Parse(payload).RootElement.GetProperty("trend");
+        var payload = await McpMemoryTools.GetMemoryTrend(new LocalDataService(_duckDb), _serverManager, ServerName, 4, bucket_minutes: 5);
+        var root = JsonDocument.Parse(payload).RootElement;
+        var bucket = Assert.Single(root.GetProperty("trend").EnumerateArray());
 
-        Assert.Equal(75.0, trend[0].GetProperty("total_granted_mb").GetDouble(), precision: 6);
-        Assert.Equal(JsonValueKind.Null, trend[1].GetProperty("total_granted_mb").ValueKind);
+        Assert.Equal(58.33, bucket.GetProperty("total_granted_mb").GetDouble(), precision: 6);
+        Assert.Equal(125.0, bucket.GetProperty("peak_granted_mb").GetDouble(), precision: 6);
+        Assert.Equal(40000.0, bucket.GetProperty("total_server_memory_mb").GetDouble(), precision: 6);
+        Assert.False(root.TryGetProperty("granted_note", out _));
+    }
+
+    /// <summary>The floor of a five-minute bucket under <see cref="PerformanceMonitor.Common.TrendBuckets.OriginSql"/>
+    /// (midnight 2000-01-01, so every ladder width lands on round clock times) — the C# twin of the bucketing
+    /// both SKUs' SQL does, so a seed can land deliberately inside one bucket regardless of when the suite runs.</summary>
+    private static DateTime FiveMinuteFloor(DateTime t)
+    {
+        var bucketTicks = TimeSpan.FromMinutes(5).Ticks;
+        return new DateTime(t.Ticks - (t.Ticks % bucketTicks), t.Kind);
     }
 
     private async Task<DuckDBConnection> SeedConnectionAsync()

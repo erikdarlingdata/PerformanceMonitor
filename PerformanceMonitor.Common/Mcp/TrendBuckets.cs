@@ -67,9 +67,9 @@ internal static class TrendBuckets
     public const int ChartPointBudget = 1500;
 
     /* Each read's cap on an explicitly requested width, sized so the largest answer the read can give stays under
-       256 KB (the bytes per point differ fourfold across the five reads). The light single-series reads can serve
-       a whole day at one-minute points; the wide ones cannot. Darling.Tests' TrendPayloadBudgetLiveTests measures
-       every read's largest answer on a week of one-minute collections (196-249 KB) and pins it under 320 KB. */
+       256 KB (the bytes per point differ fourfold across the reads). The light single-series reads can serve a
+       whole day at one-minute points; the wide ones cannot. Darling.Tests' TrendPayloadBudgetLiveTests measures
+       every read's largest answer on a week of one-minute collections and pins it under 320 KB. */
 
     /// <summary><c>get_file_io_trend</c>: about 220 bytes a point.</summary>
     public const int FileIoMaxPoints = 1000;
@@ -85,6 +85,26 @@ internal static class TrendBuckets
 
     /// <summary><c>get_pg_database_trend</c>: about 270 bytes a point.</summary>
     public const int PgDatabaseMaxPoints = 1000;
+
+    /* The rest of the trend family (#3960), sized the same way. */
+
+    /// <summary><c>get_wait_trend</c>: about 170 bytes a point.</summary>
+    public const int WaitMaxPoints = 1500;
+
+    /// <summary><c>get_cpu_utilization</c>: about 190 bytes a point.</summary>
+    public const int CpuMaxPoints = 1300;
+
+    /// <summary><c>get_tempdb_trend</c>: about 300 bytes a point.</summary>
+    public const int TempDbMaxPoints = 800;
+
+    /// <summary><c>get_memory_trend</c>: about 200 bytes a point.</summary>
+    public const int MemoryMaxPoints = 1200;
+
+    /// <summary><c>get_perfmon_trend</c>: about 140 bytes a point.</summary>
+    public const int PerfmonMaxPoints = 1800;
+
+    /// <summary><c>get_pg_query_duration_trend</c>: about 170 bytes a point.</summary>
+    public const int PgQueryDurationMaxPoints = 1500;
 
     /// <summary>
     /// The fixed origin every bucketing read aligns to, as a SQL literal both dialects accept (PostgreSQL
@@ -237,23 +257,34 @@ internal static class TrendBuckets
     };
 
     /// <summary>
-    /// The sentence every bucketed trend owes its reader about what a point IS, shared by both SKUs and all five
-    /// reads so the words cannot drift. Leads with the grain, because a rolled-up series read as raw is the one
-    /// misreading this whole change must not introduce; then how each kind of figure was rolled up (counts summed,
-    /// rates and ratios recomputed from those sums — never an average of averages, which would weight a quiet
-    /// collection the same as a busy one); then what survives the rollup (the extreme single collection, so a
-    /// spike is not averaged away); then how to get finer points.
+    /// The sentence every bucketed trend of counts and rates owes its reader about what a point IS, shared by both
+    /// SKUs and every such read so the words cannot drift. Leads with the grain, because a rolled-up series read as
+    /// raw is the one misreading this whole change must not introduce; then how each kind of figure was rolled up
+    /// (counts summed, rates and ratios recomputed from those sums — never an average of averages, which would
+    /// weight a quiet collection the same as a busy one); then what survives the rollup (the extreme single
+    /// collection, so a spike is not averaged away); then how to get finer points. A read of levels says
+    /// <see cref="LevelNote"/> instead.
     /// </summary>
-    public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints)
-    {
-        var width = Adjective(bucketMinutes);
-        var sizing = requested
+    public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints) =>
+        $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start). "
+        + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered — never averaged from per-collection values — so a bucket the window cuts short holds smaller counts but a true rate. "
+        + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
+        + Sizing(requested, budgetPoints);
+
+    /// <summary>
+    /// <see cref="AggregateNote"/>'s twin for a read of LEVELS — memory, tempdb space, CPU percentages, a gauge
+    /// counter (#3960) — where summing would be meaningless: each level is averaged over the bucket's samples and the
+    /// highest single sample kept as the peak. <paramref name="firstAtWindowStart"/> is false for CPU, whose points
+    /// sit on each sample's own instant and a collection can report a sample from before the window's start.
+    /// </summary>
+    public static string LevelNote(int bucketMinutes, bool requested, int budgetPoints, bool firstAtWindowStart = true) =>
+        $"Each point averages the samples in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start{(firstAtWindowStart ? " (the first point at the window's start)" : string.Empty)}. "
+        + "A level is averaged, never summed, and peak_* is the highest single sample inside the bucket, so a spike survives the rollup. "
+        + Sizing(requested, budgetPoints);
+
+    /// <summary>The closing sentence both notes share: where the width came from, and how to ask for another.</summary>
+    private static string Sizing(bool requested, int budgetPoints) =>
+        requested
             ? "The width is the bucket_minutes you passed."
             : $"The width was chosen to keep this answer near {budgetPoints.ToString(CultureInfo.InvariantCulture)} points; pass bucket_minutes (1-{MaxBucketMinutes}) for another width, or narrow hours_back for finer points.";
-
-        return $"Each point summarizes the collections in one {width} bucket and is stamped at the bucket's start (the first point at the window's start). "
-            + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered — never averaged from per-collection values — so a bucket the window cuts short holds smaller counts but a true rate. "
-            + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
-            + sizing;
-    }
 }

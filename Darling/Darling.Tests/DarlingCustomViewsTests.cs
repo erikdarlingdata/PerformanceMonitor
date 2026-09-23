@@ -190,7 +190,7 @@ public sealed class DarlingCustomViewsTests
            read — the whole reason the metadata is hand-authored (reflection would emit the C# param names). */
         AssertParamKeys("get_query_store_top", "server", "hours", "top", "database_name", "as_of");
         AssertParamKeys("get_wait_stats", "server", "hours", "limit", "as_of");
-        AssertParamKeys("get_wait_trend", "wait_type", "server", "hours", "as_of");
+        AssertParamKeys("get_wait_trend", "wait_type", "server", "hours", "as_of", "bucket_minutes");
         AssertParamKeys("get_plan_xml", "query_hash", "server", "database_name");
         AssertParamKeys("get_top_queries_by_cpu", "server", "hours", "top", "database_name", "parallel_only", "min_dop", "as_of");
         AssertParamKeys("compare_analysis", "server", "hours", "baseline_hours_back", "as_of");
