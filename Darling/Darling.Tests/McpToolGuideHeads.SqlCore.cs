@@ -17,12 +17,26 @@ namespace Darling.Tests;
 /// of <c>DarlingMcpTools</c> (Darling) and their byte-identical Lite twins (both apps' bodies mirror each other
 /// field-for-field, so the original prose was already byte-identical on both SKUs and the heads and tails stay
 /// that way here too). <c>get_analysis_facts</c> and <c>get_analysis_findings</c> joined the same way in a later
-/// lane. Lite's twin is <c>Lite.Tests/McpToolGuideHeadsSqlCoreTests</c>. Follows the pattern in
+/// lane, and <c>mute_analysis_finding</c> and <c>audit_config</c> joined in a later one still. Lite's twin is
+/// <c>Lite.Tests/McpToolGuideHeadsSqlCoreTests</c>. Follows the pattern in
 /// <see cref="McpToolGuideHeadsDataTests"/>.
 /// </summary>
 public sealed class McpToolGuideHeadsSqlCoreTests
 {
     private static readonly string[] ConvertedTools =
+    [
+        "analyze_server",
+        "audit_config",
+        "compare_analysis",
+        "get_analysis_facts",
+        "get_analysis_findings",
+        "mute_analysis_finding",
+    ];
+
+    /// <summary>The four tools whose original prose carried no product-specific fact; their heads name neither
+    /// SKU. <c>mute_analysis_finding</c> and <c>audit_config</c> are deliberately excluded (see
+    /// <see cref="MuteHeadStatesTheSharedErrorStatus_AuditHeadNamesDarlingInOneClause"/>).</summary>
+    private static readonly string[] ToolsWithNoProductQualifier =
     [
         "analyze_server",
         "compare_analysis",
@@ -55,6 +69,14 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         ("get_analysis_findings", "confidence_basis flags rows persisted before this scoring existed as path-shape, not corroboration"),
         ("get_analysis_findings", "remediation_command/structured_remediation are advisory, never executed"),
         ("get_analysis_findings", "Recurrence fields are LABELS at unchanged severity"),
+        ("audit_config", "NO check branches on it (MAXDOP is topology-based, the others are resource-based)"),
+        ("audit_config", "Darling also audits PostgreSQL targets"),
+        ("mute_analysis_finding", "not per-occurrence"),
+        ("mute_analysis_finding", "registered: a NEW row was stored this call"),
+        ("mute_analysis_finding", "already_muted: the scope already held the hash; nothing was written"),
+        ("mute_analysis_finding", "matched_now: retained findings in scope carrying the hash now"),
+        ("mute_analysis_finding", "muted_unmatched (registered, matched_now 0; maybe a mistyped hash)"),
+        ("mute_analysis_finding", "error (the write failed; nothing is muted)"),
     ];
 
     [Fact]
@@ -84,18 +106,38 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         Assert.Contains("same duration as the comparison period", McpToolGuideTests.Served("compare_analysis").Tail!, StringComparison.Ordinal);
     }
 
-    /// <summary>Both tools' original prose carried no product-specific fact (the two SKUs' tool bodies mirror
-    /// each other field-for-field), so nothing needed to be kept off the shared head for D6 — heads and tails
-    /// are byte-identical on both SKUs, which the generic cross-SKU pin in <c>McpToolGuideTests</c> also covers.</summary>
+    /// <summary>These four tools' original prose carried no product-specific fact (the two SKUs' tool bodies
+    /// mirror each other field-for-field), so nothing needed to be kept off the shared head for D6 — heads and
+    /// tails are byte-identical on both SKUs, which the generic cross-SKU pin in <c>McpToolGuideTests</c> also
+    /// covers.</summary>
     [Fact]
     public void BothHeads_CarryNoProductQualifier()
     {
-        foreach (var tool in ConvertedTools)
+        foreach (var tool in ToolsWithNoProductQualifier)
         {
             var served = McpToolGuideTests.Served(tool).Served;
             Assert.DoesNotContain("Darling", served, StringComparison.Ordinal);
             Assert.DoesNotContain("Lite", served, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>D6: a failed mute write reports <c>status: \"error\"</c> on both products (Darling in its own
+    /// payload, Lite through <c>McpHelpers.FormatError</c>), so the shared head states it once. Only
+    /// <c>audit_config</c>'s fact differs by product (Darling also audits PostgreSQL targets), so its
+    /// byte-identical head names Darling in one clause that is true whichever SKU serves it.</summary>
+    [Fact]
+    public void MuteHeadStatesTheSharedErrorStatus_AuditHeadNamesDarlingInOneClause()
+    {
+        Assert.Contains("error (the write failed; nothing is muted).", McpToolGuideTests.Served("mute_analysis_finding").Served, StringComparison.Ordinal);
+        Assert.Contains("Darling also audits PostgreSQL targets.", McpToolGuideTests.Served("audit_config").Served, StringComparison.Ordinal);
+    }
+
+    /// <summary>The head's "error (the write failed; nothing is muted)" is backed by Darling's own tail, which still
+    /// carries the original sentence in full: what triggers it and that nothing is muted when it does.</summary>
+    [Fact]
+    public void MuteAnalysisFinding_DarlingTailNamesTheErrorStatusInFull()
+    {
+        Assert.Contains("\"error\" when the row could not be written (nothing is muted)", McpToolGuideTests.Served("mute_analysis_finding").Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>D2: two parameter descriptions were trimmed to clear the 200-character cap once their tools

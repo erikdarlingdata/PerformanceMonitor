@@ -4,7 +4,7 @@ param analyze_server.as_of 167
 param analyze_server.hours_back 104
 param analyze_server.server_name 28
 
-tool audit_config 932
+tool audit_config 451
 param audit_config.server_name 28
 
 tool compare_analysis 611
@@ -26,7 +26,7 @@ param get_analysis_findings.hours_back 49
 param get_analysis_findings.include_drilldown 122
 param get_analysis_findings.server_name 28
 
-tool mute_analysis_finding 1444
+tool mute_analysis_finding 597
 param mute_analysis_finding.reason 27
 param mute_analysis_finding.server_name 50
 param mute_analysis_finding.story_path_hash 45
