@@ -204,14 +204,18 @@ ORDER BY s.d";
     }
 
     /// <summary>
-    /// The oldest UTC day every daily-summary source still holds on Lite (#3541 A9): today minus the archive
-    /// retention. Month arithmetic rather than <see cref="DailySummaryRetention.HorizonFor"/>'s day count
-    /// because Lite's horizon is DECLARED in months (<see cref="RetentionService.ArchiveRetentionMonths"/>)
-    /// and the cleanup that enforces it subtracts months; converting to a day count here would make the two
-    /// disagree by a day or two around month ends.
+    /// The oldest UTC day every daily-summary source still holds on Lite (#3541 A9):
+    /// <see cref="RetentionService.OldestRetainedInstant"/>, the first month start at or after the archive
+    /// retention's cutoff. It is not the cutoff day itself: the cleanup deletes an archive file whole once the
+    /// month it is named for falls before the cutoff, so the rows between the cutoff and the next month start
+    /// are gone with it, and a horizon at the cutoff read those days as held and uncollected rather than
+    /// purged. The Overview freshness band reads the same instant (#3967), so the two surfaces agree on when
+    /// Lite's history ends. Month arithmetic rather than <see cref="DailySummaryRetention.HorizonFor"/>'s
+    /// day count, because Lite's horizon is DECLARED in months
+    /// (<see cref="RetentionService.ArchiveRetentionMonths"/>).
     /// </summary>
     internal static DateTime DailySummaryRetentionHorizon(DateTime utcNow) =>
-        utcNow.AddMonths(-RetentionService.ArchiveRetentionMonths).Date;
+        RetentionService.OldestRetainedInstant(utcNow);
 
     /// <summary>
     /// Gets the daily summary for a specific date (or today if null). Delegates to the range query for a

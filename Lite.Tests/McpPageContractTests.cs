@@ -677,13 +677,21 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026")), StringComparison.Ordinal);
     }
 
-    /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock.</summary>
+    /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock, rounded
+    /// up to the month start the whole-file archive cleanup actually keeps: the cutoff's own month is deleted
+    /// with its file, so a mid-month cutoff holds nothing until the next month begins.</summary>
     [Fact]
-    public void TheLiteHorizon_IsTheArchiveRetention_InMonths()
+    public void TheLiteHorizon_IsTheArchiveRetention_InMonths_FromTheFirstWholeMonthKept()
     {
-        var now = new DateTime(2026, 9, 18, 14, 30, 0, DateTimeKind.Utc);
-        Assert.Equal(now.AddMonths(-RetentionService.ArchiveRetentionMonths).Date, LocalDataService.DailySummaryRetentionHorizon(now));
         Assert.Equal(3, RetentionService.ArchiveRetentionMonths);
+
+        var midMonth = new DateTime(2026, 9, 18, 14, 30, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 7, 1), LocalDataService.DailySummaryRetentionHorizon(midMonth));
+        Assert.Equal(RetentionService.OldestRetainedInstant(midMonth), LocalDataService.DailySummaryRetentionHorizon(midMonth));
+
+        /* A cutoff that is itself a month start keeps that month: its file is not before the cutoff. */
+        var monthStart = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 6, 1), LocalDataService.DailySummaryRetentionHorizon(monthStart));
     }
 
     /* ───────────────────────── the contract, as a census ───────────────────────── */
