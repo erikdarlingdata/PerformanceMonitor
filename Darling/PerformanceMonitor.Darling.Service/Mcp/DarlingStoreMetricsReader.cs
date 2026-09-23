@@ -1377,7 +1377,8 @@ SELECT
     checkpoint_write_ms,
     checkpoint_sync_ms,
     checkpoints_requested,
-    postmaster_start_time
+    postmaster_start_time,
+    checkpoints_timed
 FROM collect.store_metrics
 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
 AND   checkpoint_write_ms IS NOT NULL
@@ -1391,7 +1392,10 @@ LIMIT $1";
     /// <summary>One checkpointer row as stored: the sweep's stamp (naive UTC), the three cumulative counters as
     /// the server reported them at that instant, and (V139, #3955) the <c>pg_postmaster_start_time()</c> of the
     /// postmaster that reported them, naive UTC, null on a row written before the rung.</summary>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null);
+    /// <param name="Timed">(V140, #4037) The cumulative COUNT of TIMED checkpoints as the server reported it,
+    /// null on a row written before the rung. <see cref="CheckpointerReading.From"/> reads a null on either
+    /// sample as no evidence for the average-per-checkpoint arm, never as zero.</param>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
@@ -1455,6 +1459,10 @@ LIMIT $1";
     /// when there is no interval to span (Absent, NoPrevious) and on every Observed one.</param>
     /// <param name="PostmasterStartTime">When the postmaster that produced the newest row started, UTC; null when the
     /// newest row predates V139 or there is no row.</param>
+    /// <param name="Timed">(V140, #4037) TIMED checkpoints inside the interval. Null when either sample predates
+    /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
+    /// from sync alone, never falling back to the old summed-sync rule.</param>
+    /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1467,7 +1475,9 @@ LIMIT $1";
         long? CumulativeSyncMs,
         long? CumulativeRequested,
         bool PostmasterRestarted = false,
-        DateTime? PostmasterStartTime = null)
+        DateTime? PostmasterStartTime = null,
+        long? Timed = null,
+        long? CumulativeTimed = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1500,19 +1510,25 @@ LIMIT $1";
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.NoPrevious, observedAt, null, null, null, null, null,
                     newest.WriteMs, newest.SyncMs, newest.Requested,
-                    PostmasterRestarted: false, PostmasterStartTime: startedAt);
+                    PostmasterRestarted: false, PostmasterStartTime: startedAt,
+                    Timed: null, CumulativeTimed: newest.Timed);
             }
 
             var previousAt = DateTime.SpecifyKind(previous.MetricTime, DateTimeKind.Utc);
             var span = (observedAt - previousAt).TotalSeconds;
             var restarted = PostmasterRestart.Spans(previous.MetricTime, previous.PostmasterStartTime, newest.PostmasterStartTime);
 
-            if (newest.WriteMs < previous.WriteMs || newest.SyncMs < previous.SyncMs || newest.Requested < previous.Requested || span <= 0)
+            /* Timed goes backwards only when both samples carry it; a null on either side is "no evidence",
+               never treated as a fall from something to nothing (#4037). */
+            var timedReset = newest.Timed is long nt && previous.Timed is long pt && nt < pt;
+
+            if (newest.WriteMs < previous.WriteMs || newest.SyncMs < previous.SyncMs || newest.Requested < previous.Requested || timedReset || span <= 0)
             {
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.Reset, observedAt, previousAt, null, null, null, null,
                     newest.WriteMs, newest.SyncMs, newest.Requested,
-                    restarted, startedAt);
+                    restarted, startedAt,
+                    Timed: null, CumulativeTimed: newest.Timed);
             }
 
             /* #3955: the shutdown checkpoint is one more requested checkpoint and its own write and sync phases,
@@ -1523,8 +1539,16 @@ LIMIT $1";
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.Restarted, observedAt, previousAt, null, null, null, null,
                     newest.WriteMs, newest.SyncMs, newest.Requested,
-                    PostmasterRestarted: true, PostmasterStartTime: startedAt);
+                    PostmasterRestarted: true, PostmasterStartTime: startedAt,
+                    Timed: null, CumulativeTimed: newest.Timed);
             }
+
+            /* (V140, #4037) Timed only when BOTH samples carry it; one row from before the rung leaves the
+               average-per-checkpoint arm with no denominator for this interval, stated as null rather than
+               guessed at from the requested count alone. */
+            long? timedDelta = newest.Timed is long newestTimed && previous.Timed is long previousTimed
+                ? newestTimed - previousTimed
+                : null;
 
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
@@ -1532,19 +1556,39 @@ LIMIT $1";
                 newest.SyncMs - previous.SyncMs,
                 newest.Requested - previous.Requested,
                 newest.WriteMs, newest.SyncMs, newest.Requested,
-                PostmasterRestarted: false, PostmasterStartTime: startedAt);
+                PostmasterRestarted: false, PostmasterStartTime: startedAt,
+                Timed: timedDelta, CumulativeTimed: newest.Timed);
         }
 
+        /// <summary>(V140, #4037) Checkpoints inside the interval, timed plus requested — the average arm's
+        /// denominator. Null when <see cref="Timed"/> is null (a pre-rung sample on either side of the pair).</summary>
+        public long? CheckpointCount => Timed is long timed ? timed + (Requested ?? 0) : null;
+
+        /// <summary>(V140, #4037) <see cref="SyncMs"/> divided by <see cref="CheckpointCount"/> — the figure the
+        /// self-alert and the MCP block judge against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>,
+        /// in place of the interval's summed sync milliseconds. Null when there is no checkpoint count to divide
+        /// by, or the interval held zero checkpoints (nothing to average).</summary>
+        public double? AverageSyncMsPerCheckpoint =>
+            CheckpointCount is long count && count > 0 && SyncMs is long sync ? (double)sync / count : null;
+
         /// <summary>
-        /// The self-alert's condition (#3783), judged on an Observed interval only: the sync phase held more
-        /// than <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> inside the interval, OR at least one
-        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding,
-        /// and that includes one that spans a postmaster restart (#3955).
+        /// The self-alert's condition (#3783, judged per-checkpoint average since #4037), on an Observed
+        /// interval only: the AVERAGE sync milliseconds per checkpoint in the interval
+        /// (<see cref="AverageSyncMsPerCheckpoint"/> = SyncMs / (timed + requested)) held more than
+        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was WAL-forced.
+        /// The old rule judged the interval's SUMMED sync milliseconds against the same bar, which is a
+        /// PER-CHECKPOINT bar (the MCP read deadline) — an hourly interval covers about twelve timed checkpoints
+        /// on the default five-minute checkpoint_timeout, so a healthy store whose checkpoints synced five to
+        /// eight seconds each summed past the bar every interval and never recovered. A pre-V140 row leaves
+        /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
+        /// back to the old sum, and the requested arm still fires on any WAL-forced checkpoint. Zero checkpoints
+        /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
+        /// finding, and that includes one that spans a postmaster restart (#3955).
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
-            && ((SyncMs is long sync && sync > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
-                || (Requested is long requested && requested > 0));
+            && ((Requested is long requested && requested > 0)
+                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
     }
 
     /// <summary>
@@ -1567,7 +1611,8 @@ LIMIT $1";
         {
             var sample = new CheckpointerSample(
                 reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetDateTime(4));
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.IsDBNull(5) ? null : reader.GetInt64(5));
             if (newest is null)
             {
                 newest = sample;
