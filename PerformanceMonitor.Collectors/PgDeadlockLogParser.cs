@@ -259,8 +259,22 @@ public static class PgDeadlockLogParser
     /// <exception cref="PgLogTimezoneUnsupportedException">The prefix zone is not a zero-offset one, so the
     /// timestamp beside it is local rather than UTC and the report cannot be stored (#2993). Thrown by the
     /// assembler, whose zone check is this parser's own <see cref="IsZeroOffsetLogZone"/>.</exception>
-    public static ParsedDeadlock? FromReport(string? reportText)
+    public static ParsedDeadlock? FromReport(string? reportText) => FromReport(reportText, logTimezoneIsUtc: false, out _);
+
+    /// <summary>
+    /// <see cref="FromReport(string?)"/> for a caller that read the target's own <c>log_timezone</c> in the statement
+    /// that returned <paramref name="reportText"/> (#4046). When that setting renders UTC
+    /// (<see cref="IsUtcLogTimezoneSetting"/>), a line in another zone is not the server's own: the assembler skips it
+    /// and counts it in <paramref name="foreignZoneLines"/> instead of refusing, so a report planted in another zone
+    /// yields null and one planted line no longer refuses every read of the target. Otherwise this is exactly
+    /// <see cref="FromReport(string?)"/>, refusal included.
+    /// </summary>
+    /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
+    /// <see cref="FromReport(string?)"/>.</exception>
+    public static ParsedDeadlock? FromReport(string? reportText, bool logTimezoneIsUtc, out int foreignZoneLines)
     {
+        foreignZoneLines = 0;
+
         if (string.IsNullOrEmpty(reportText))
         {
             return null;
@@ -281,8 +295,9 @@ public static class PgDeadlockLogParser
            loop alike. See Extract's remarks for why losing the readable siblings is preferred to storing
            a partial history nothing marks as partial — and for why that trade is cheap on the
            re-reading transport and NOT cheap on the consume-once one. The check is the assembler's, per
-           primary line, through IsZeroOffsetLogZone. */
-        foreach (var entry in PgLogEntryAssembler.Assemble(reportText))
+           primary line, through IsZeroOffsetLogZone. Under a UTC log_timezone the assembler skips and counts a
+           line in another zone instead (#4046): the setting says the server did not write it. */
+        foreach (var entry in PgLogEntryAssembler.Assemble(reportText, logTimezoneIsUtc, out foreignZoneLines))
         {
             if (entry.Severity == "ERROR"
                 && entry.Message.TrimEnd() == "deadlock detected"
@@ -362,7 +377,9 @@ public static class PgDeadlockLogParser
     /// it is the better witness of the two for the row it is attached to. On <c>Europe/London</c> they
     /// disagree for half the year — winter lines are stamped <c>GMT</c> and really are UTC, and a GUC read
     /// would refuse them — and on the managed transport there is no connection to ask at all, because that
-    /// route receives log TEXT and runs no SQL.</para>
+    /// route receives log TEXT and runs no SQL. The setting is read on the <c>pg_read_file</c> route since #4046,
+    /// but only to decide what a line this check rejects MEANS (<see cref="IsUtcLogTimezoneSetting"/>), never
+    /// which lines are accepted.</para>
     /// </summary>
     public static bool IsZeroOffsetLogZone(string? zone)
     {
@@ -391,6 +408,35 @@ public static class PgDeadlockLogParser
            would refuse a server that is perfectly UTC. */
         return s_zeroOffset.IsMatch(token);
     }
+
+    /// <summary>
+    /// Whether a target's <c>log_timezone</c> setting, as <c>current_setting('log_timezone')</c> returns it, stamps
+    /// EVERY line at a zero offset, all year (#4046). Then a line in another zone cannot be the server's own, and the
+    /// readers skip and count it instead of refusing the target.
+    ///
+    /// <para><b>Why it matters.</b> PostgreSQL renders <c>%u</c> and <c>%d</c> into <c>log_line_prefix</c> from the
+    /// startup packet, before authentication and unescaped, so any client that reaches the port can put a newline
+    /// in a role name and write a whole line, stamp and zone included, with one failed login. Before this, one such
+    /// line in another zone refused every read of the target while it stayed in the tail.</para>
+    ///
+    /// <para><b>An allowlist of the zero-offset zones by name, never "the offset now".</b> <c>Europe/London</c> is at
+    /// zero all winter and writes genuine <c>BST</c> lines all summer; reading its current offset would skip real
+    /// lines as planted. Every name here renders <c>UTC</c> or <c>GMT</c> (<c>UCT</c> under old tz data), each of
+    /// which <see cref="IsZeroOffsetLogZone"/> accepts, so a genuine line is never the one skipped. Anything else,
+    /// a POSIX spec like <c>UTC0</c> included, is not UTC here and keeps the refusal, which is the misconfiguration
+    /// that refusal exists for. Compared ignoring case, since PostgreSQL resolves zone names that way.</para>
+    ///
+    /// <para><b>A majority rule was rejected</b> (refuse when most lines disagree): a client can flood failed
+    /// logins to outnumber the genuine lines on a quiet server.</para>
+    /// </summary>
+    public static bool IsUtcLogTimezoneSetting(string? setting) =>
+        !string.IsNullOrWhiteSpace(setting) && s_utcLogTimezoneSettings.Contains(setting.Trim());
+
+    private static readonly HashSet<string> s_utcLogTimezoneSettings = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "UTC", "Etc/UTC", "UCT", "Etc/UCT", "Universal", "Etc/Universal", "Zulu", "Etc/Zulu",
+        "GMT", "Etc/GMT", "GMT0", "Etc/GMT0", "GMT+0", "Etc/GMT+0", "GMT-0", "Etc/GMT-0", "Greenwich", "Etc/Greenwich",
+    };
 
     /// <summary>
     /// Each participant's statement, keyed by pid. A statement runs from its <c>Process N:</c> header to the

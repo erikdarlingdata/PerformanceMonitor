@@ -1223,8 +1223,10 @@ public sealed class PgLogEventsPipelineTests
 
         /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
            candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
-           read. The tailer it opens with is still the shared one, byte for byte. */
-        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ [^ \\n]+ \\[\\d+\\](?:(?!:  )[^\\n])*ERROR:  deadlock detected\\s*\\n(?:(?!:  )[^\\n])*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 500";
+           read. And again in #4046: every row carries the target's log_timezone as a second column, read in the
+           same statement, and the marker arms carry NULL there. The tailer it opens with is still the shared one,
+           byte for byte. */
+        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text,\n    pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+ [^ \\n]+ \\[\\d+\\](?:(?!:  )[^\\n])*ERROR:  deadlock detected\\s*\\n(?:(?!:  )[^\\n])*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 500";
 
         /* Line endings normalised on both sides: the repo's `text=auto eol=crlf` checks the sources out as
            CRLF on Windows and this pin's literals are LF, and a verbatim string carries whatever its file
@@ -1235,10 +1237,12 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(plansBefore, Lf(PgPlanCaptureCollector.Instance.BuildQuery(context).Text));
         Assert.Equal(deadlocksBefore, Lf(PgDeadlocksCollector.Instance.BuildQuery(context).Text));
 
-        /* And the third reader opens with the same tailer and returns the body whole. */
+        /* And the third reader opens with the same tailer and returns the body whole, with the target's
+           log_timezone beside it since #4046 (NULL on the marker arms). */
         var events = Lf(PgLogEventsCollector.Instance.BuildQuery(context).Text);
-        Assert.StartsWith(tail, events, StringComparison.Ordinal);
-        Assert.Contains("SELECT tail.body AS log_body", events, StringComparison.Ordinal);
+        Assert.Equal(
+            tail + "\nSELECT tail.body AS log_body,\n       pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)",
+            events);
         Assert.Contains("'" + PgLoggingCollectorOffException.Marker + "'", events, StringComparison.Ordinal);
         Assert.Contains("'" + PgNoStderrLogFileException.Marker + "'", events, StringComparison.Ordinal);
         Assert.Equal(tail, Lf(PgServerLogTail.TailCteSql));
@@ -1305,6 +1309,72 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(12345L, vacuumWriter.Values[17]);
         Assert.Equal(4567L, vacuumWriter.Values[18]);
         Assert.Equal(false, vacuumWriter.Values[^1]);
+    }
+
+    /// <summary>
+    /// #4046: with the target's log_timezone at UTC, one line stamped in another zone among the UTC lines no
+    /// longer refuses the read. The fixture's fifteen events are classified, the other zone's line is skipped and
+    /// counted on the run, and the runner's note names the setting and the issue beside the count.
+    /// </summary>
+    [Fact]
+    public async Task UnderAUtcLogTimezone_ALineInAnotherZoneIsSkippedAndCounted_AndTheRestIsRead()
+    {
+        var definition = PgLogEventsCollector.Instance;
+        var context = TestContext();
+        var body = "2026-09-18 03:07:12.345 EST [77] ERROR:  not this server's line\n" + SelfHostedLog;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { body, "UTC" } });
+        var rows = await definition.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(15, rows.Count);
+        Assert.DoesNotContain(rows, r => r.Pid == 77);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+
+        var run = DarlingCollectorRunner.WithForeignZoneLinesNote(
+            new CollectorRunResult(rows.Count, 1, 1, context.Measurements));
+        Assert.Contains("(#4046)", run.Note, StringComparison.Ordinal);
+        Assert.EndsWith("; foreign_zone_lines_skipped=1", run.Note, StringComparison.Ordinal);
+
+        /* An ordinary run gets no note at all, as before. */
+        var quiet = new CollectorRunResult(15, 1, 1, CollectorContext.NoMeasurements);
+        Assert.Same(quiet, DarlingCollectorRunner.WithForeignZoneLinesNote(quiet));
+        Assert.Null(quiet.Note);
+    }
+
+    /// <summary>
+    /// #4046's other half: when the target's log_timezone is not UTC, or the row carries no setting (a marker arm's
+    /// NULL, or a route that could not read it), a line in another zone refuses the read exactly as #2993 did.
+    /// </summary>
+    [Theory]
+    [InlineData("America/New_York")]
+    [InlineData("Europe/London")]
+    [InlineData(null)]
+    public async Task UnderAnyOtherLogTimezone_ALineInAnotherZoneStillRefusesTheRead(string? setting)
+    {
+        var body = SelfHostedLog + "2026-09-18 03:07:12.345 EST [77] ERROR:  not this server's line\n";
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { body, setting } });
+        var ex = await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, TestContext(), CancellationToken.None));
+
+        Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    /// <summary>
+    /// The worker records every run through the #4046 note, beside the #4004 rotation note on the same channel.
+    /// Source-level, for the reason <c>PgLogHashKeyTests</c> gives for its own pin: the arm sits inside a live sweep.
+    /// </summary>
+    [Fact]
+    public void TheWorker_PutsTheForeignZoneNoteOnEveryRunItRecords()
+    {
+        var worker = RepoFile.ReadRepoFile(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var rotation = worker.IndexOf("result = _logHashKeyRotation.ApplyTo(collectorName, result);", StringComparison.Ordinal);
+        var note = worker.IndexOf("result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);", StringComparison.Ordinal);
+
+        Assert.True(rotation > 0, "the #4004 rotation note's call moved");
+        Assert.True(note > rotation, "the #4046 note is not applied after the rotation note on the recorded run");
     }
 
     [Fact]
@@ -1874,6 +1944,96 @@ public sealed class PgLogEventsLivePostgresTests
             JsonAssert.Contains("\"family\": \"lock_wait\"", read);
             JsonAssert.Contains("\"truncated\": false", read);
             System.Console.WriteLine("rig counts per family: " + string.Join(", ", counts.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + "=" + k.Value)));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(store!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId));
+        }
+    }
+
+    /// <summary>
+    /// #4046 against a REAL target whose <c>log_timezone</c> is UTC: both production log queries return the setting
+    /// beside the text, in the same statement, and both reads classify under it instead of refusing. A line in the
+    /// tail stamped in another zone becomes a count on the run, never a refusal. Gated on
+    /// DARLING_TEST_PG_UTC_LOG_TARGET, a connection string to a PostgreSQL started with <c>logging_collector = on</c>,
+    /// <c>log_timezone = 'UTC'</c> and a <c>log_line_prefix</c> carrying <c>%u</c> and <c>%d</c> that this reader
+    /// parses, such as <c>'%m [%p] %u@%d '</c>, whose log the login can read, with the store from DARLING_TEST_PG.
+    /// (<c>'%m %u@%d [%p] '</c> puts the pair before the pid, a shape this reader does not parse until #4047.) The
+    /// rig that ran this on the way in: a second 18.6 cluster beside the store.
+    /// </summary>
+    [Fact]
+    public async Task AgainstAUtcTarget_TheLogQueriesReadTheSettingWithTheTail_AndStoreWhatTheServerWrote()
+    {
+        var store = ConnectionString;
+        var target = Environment.GetEnvironmentVariable("DARLING_TEST_PG_UTC_LOG_TARGET");
+        Assert.SkipWhen(string.IsNullOrEmpty(store) || string.IsNullOrEmpty(target),
+            "Set DARLING_TEST_PG (store) and DARLING_TEST_PG_UTC_LOG_TARGET (a PostgreSQL with logging_collector = on and log_timezone = 'UTC' whose log the login can read) to run the #4046 live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var storeConnection = new NpgsqlConnection(store);
+        await storeConnection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(storeConnection, ct);
+        await DarlingMcpTestData.ExecAsync(storeConnection, ct, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId);
+        await using var postgres = NpgsqlDataSource.Create(store!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(storeConnection, ServerId, ServerName, ct);
+
+            var context = new CollectorContext
+            {
+                LogHashKey = TestLogHashKeys.Fixed,
+                ServerId = ServerId, ServerName = ServerName,
+                CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+            };
+
+            List<PgLogEvent> events;
+            List<PgDeadlocksCollector.Row> deadlocks;
+            await using (var targetConnection = new NpgsqlConnection(target))
+            {
+                await targetConnection.OpenAsync(ct);
+
+                await using (var setting = new NpgsqlCommand("SELECT pg_catalog.current_setting('log_timezone')", targetConnection))
+                {
+                    Assert.True(PgDeadlockLogParser.IsUtcLogTimezoneSetting((string?)await setting.ExecuteScalarAsync(ct)),
+                        "DARLING_TEST_PG_UTC_LOG_TARGET must name a target whose log_timezone is UTC");
+                }
+
+                /* A genuine ERROR the server writes itself, so the read has something of its own to store. */
+                await using (var fail = new NpgsqlCommand("SELECT 1 / 0 AS utc_target_4046", targetConnection))
+                {
+                    await Assert.ThrowsAsync<PostgresException>(async () => await fail.ExecuteScalarAsync(ct));
+                }
+
+                await using (var command = new NpgsqlCommand(PgLogEventsCollector.Instance.BuildQuery(context).Text, targetConnection))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    Assert.Equal("log_timezone", reader.GetName(1));
+                    events = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
+                }
+
+                await using (var command = new NpgsqlCommand(PgDeadlocksCollector.Instance.BuildQuery(context).Text, targetConnection))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    Assert.Equal("log_timezone", reader.GetName(1));
+                    deadlocks = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, ct);
+                }
+            }
+
+            Assert.Contains(events, e => e.Severity == "ERROR" && e.Message.Contains("division by zero", StringComparison.Ordinal));
+            Assert.All(events, e => Assert.Equal(DateTimeKind.Utc, e.OccurredAtUtc.Kind));
+            Assert.All(context.Measurements, m => Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, m.Label));
+
+            await WriteAsync(postgres, events, ct);
+            var page = await DarlingPgLogEventReader.GetEventsAsync(postgres, ServerId, DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddMinutes(5), null, 0, 10_000, ct);
+            Assert.Equal(events.Select(e => e.RawLineHash).Distinct().Count(), page.WindowTotal);
+
+            System.Console.WriteLine(
+                $"#4046 rig: events={events.Count} deadlocks={deadlocks.Count} note={CollectorMeasurementNote.Render(context.Measurements) ?? "(none)"}");
             bodySucceeded = true;
         }
         finally

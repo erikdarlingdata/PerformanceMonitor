@@ -50,6 +50,13 @@ namespace PerformanceMonitor.Collectors;
 /// a non-UTC prefix parses PERFECTLY and lands in the wrong hour with nothing disagreeing; the deadlock
 /// parser's <c>FromReport</c> remarks argue the whole-read refusal over the partial history.</para>
 ///
+/// <para><b>Unless the target's own setting says the line is not the server's (#4046).</b> <c>%u</c> and <c>%d</c>
+/// let any client that reaches the port write a whole line into the log with one failed login, so the refusal
+/// above let one planted line blind a target. A caller that read <c>log_timezone</c> in the statement that read the
+/// text passes whether it renders UTC; if it does, a line in another zone is skipped and counted instead. The
+/// decision rests on the setting, never on how many lines disagree, which a flood of failed logins could
+/// decide.</para>
+///
 /// <para><b>Window edges.</b> The self-hosted tail starts at an arbitrary byte and the RDS chunk ends at
 /// one. Lines before the first recognisable prefix are the cut head and are dropped; a final line with no
 /// trailing newline is a cut tail and is dropped with the entry it belongs to, so a half-written primary
@@ -125,9 +132,30 @@ public static class PgLogEntryAssembler
     /// </summary>
     /// <exception cref="PgLogTimezoneUnsupportedException">A primary line's prefix zone is not a zero-offset
     /// one. Thrown from inside the walk, abandoning every entry assembled so far (#2993).</exception>
-    public static List<PgLogEntry> Assemble(string? logBody)
+    public static List<PgLogEntry> Assemble(string? logBody) => Assemble(logBody, logTimezoneIsUtc: false, out _);
+
+    /// <summary>
+    /// Every complete entry in the slab, in log order, for a caller that read the target's own <c>log_timezone</c>
+    /// in the statement that returned <paramref name="logBody"/> (#4046).
+    ///
+    /// <para><b>When that setting renders UTC</b> (<see cref="PgDeadlockLogParser.IsUtcLogTimezoneSetting"/>), a
+    /// line whose zone is not a zero-offset one is not the server's own: a client planted it through <c>%u</c> or
+    /// <c>%d</c>, or it predates a change to the setting. It is skipped and counted in
+    /// <paramref name="foreignZoneLines"/>, primary or companion, and it ends the open entry the way an unrecognised
+    /// line does, so neither it nor the tab lines under it join a genuine entry. Nothing is refused for it: one
+    /// planted line used to refuse every read of the target for as long as it stayed in the tail.</para>
+    ///
+    /// <para><b>Otherwise</b> (false: the setting is another zone, or the route could not read it) this is exactly
+    /// <see cref="Assemble(string?)"/>, refusal included. That refusal is for a target whose log really is local
+    /// time, where a per-line skip would store a partial history nothing marks as partial (see the type
+    /// header).</para>
+    /// </summary>
+    /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
+    /// <see cref="Assemble(string?)"/>.</exception>
+    public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
     {
         var entries = new List<PgLogEntry>();
+        foreignZoneLines = 0;
 
         if (string.IsNullOrEmpty(logBody))
         {
@@ -171,6 +199,21 @@ public static class PgLogEntryAssembler
                    with the tab lines under it, and it ends the open entry: a message's lines are written
                    together, so what follows belongs to this line's message, not the entry above (a German
                    `FEHLER:` line's untranslated `DETAIL:` would otherwise join the entry before it). */
+                if (current is not null)
+                {
+                    entries.Add(current.Build());
+                    current = null;
+                }
+
+                continue;
+            }
+
+            /* #4046: the setting says this zone is not the server's, so the line is not its own. Skipped and
+               counted, and it ends the open entry like an unrecognised line above. */
+            if (logTimezoneIsUtc && !PgDeadlockLogParser.IsZeroOffsetLogZone(match.Groups["zone"].Value))
+            {
+                foreignZoneLines++;
+
                 if (current is not null)
                 {
                     entries.Add(current.Build());
@@ -250,7 +293,7 @@ public static class PgLogEntryAssembler
 
             /* THROWN rather than skipped, and it is the one intolerant thing in the assembler — see the
                type header and PgDeadlockLogParser.FromReport for why a per-line skip is the silent-wrong
-               outcome here. */
+               outcome here. Under a UTC log_timezone the walk skips such a line before it gets here (#4046). */
             if (!PgDeadlockLogParser.IsZeroOffsetLogZone(_zone))
             {
                 throw new PgLogTimezoneUnsupportedException(_zone);

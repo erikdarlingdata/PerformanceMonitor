@@ -65,15 +65,17 @@ public sealed class PgLogEventsCollector : PostgresCollectorDefinitionBase<PgLog
     /* The tailer, shared byte-for-byte with PgPlanCaptureCollector and PgDeadlocksCollector — see
        PgServerLogTail for the full argument. This query's own part is one column: the body, whole. Both
        marker rows ride their own UNION ALL arm, spelled in this query's one column (#3997: the second arm
-       is the csvlog/jsonlog-only gap, mutually exclusive with the first by construction). */
+       is the csvlog/jsonlog-only gap, mutually exclusive with the first by construction). The second column is
+       the target's log_timezone, read with the body (#4046): see ReadAsync. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
-SELECT tail.body AS log_body
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"'
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT '" + PgNoStderrLogFileException.Marker + @"'
+SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override string Name => "pg_log_events";
@@ -180,8 +182,11 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             }
 
             /* The whole pipeline, shared with the RDS transport. A non-UTC zone throws out of here and
-               abandons the batch, which is the trade the deadlock parser argues for (#2993). */
-            rows.AddRange(classifier.Classify(body));
+               abandons the batch, which is the trade the deadlock parser argues for (#2993) — unless the
+               target's own log_timezone renders UTC, when a line in another zone is not the server's and is
+               skipped and counted instead (#4046). */
+            rows.AddRange(classifier.Classify(body, PgServerLogTail.LogTimezoneIsUtc(reader, 1), out var foreignZoneLines));
+            PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
         }
 
         return rows;

@@ -549,6 +549,10 @@ public class CollectorMeasurementSeamTests
                 JobHistoryCollector.IdentityRegressionsMeasurement,
                 JobHistoryCollector.IdentityWatermarkMeasurement,
                 JobHistoryCollector.IdentityTargetRowMeasurement,
+                /* #4046: log lines a pg_read_file reader skipped because the target's UTC log_timezone did not
+                   write them. Measured through PgServerLogTail on behalf of pg_log_events and pg_deadlocks, which
+                   is why the const lives in PgServerLogTail.cs beside its one .Measure( call. */
+                PgServerLogTail.ForeignZoneLinesMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
