@@ -72,6 +72,14 @@ public static class DarlingPgServerConfigReader
     /// </summary>
     public sealed record PgConfigPage(List<PgConfigRow> Rows, int SnapshotNonDefaultCount);
 
+    /// <summary>
+    /// One row of the change feed. A server-wide row has <see cref="DatabaseName"/> and <see cref="RoleName"/>
+    /// both NULL and <see cref="ChangeKind"/> <c>changed</c> - the only kind the server-wide read can observe,
+    /// since a setting appearing is not reported and a pg_settings row never disappears. An override row
+    /// (#3937) carries at least one of the two scope names and one of <c>changed</c>, <c>set</c>
+    /// (<see cref="OldValue"/> NULL: nothing was there before) or <c>reset</c> (<see cref="NewValue"/> NULL:
+    /// nothing is there now), and no unit, context or description, which the catalog does not hold.
+    /// </summary>
     public readonly record struct PgConfigChangeRow(
         DateTime ChangedAtUtc,
         string Name,
@@ -80,7 +88,19 @@ public static class DarlingPgServerConfigReader
         string? Unit,
         string? Context,
         string? Source,
-        string? ShortDescription);
+        string? ShortDescription,
+        string? DatabaseName = null,
+        string? RoleName = null,
+        string ChangeKind = PgConfigChangeKind.Changed);
+
+    /// <summary>The three <see cref="PgConfigChangeRow.ChangeKind"/> spellings, as <see cref="ScopedConfigChangesSql"/>
+    /// projects them (#3937).</summary>
+    public static class PgConfigChangeKind
+    {
+        public const string Changed = "changed";
+        public const string Set = "set";
+        public const string Reset = "reset";
+    }
 
     /// <summary>
     /// The newest snapshot, session-scoped rows removed. Anchored on <c>MAX(collection_time)</c> for the
@@ -487,12 +507,44 @@ public static class DarlingPgServerConfigReader
         return rows;
     }
 
+    /// <summary>
+    /// The change feed (#3937): the server-wide read and the scoped read, each capped at
+    /// <paramref name="limit"/>, merged newest first. At one <c>collection_time</c> the server-wide rows come
+    /// first (by name, their order unchanged) and the override rows after them (by name, then database, then
+    /// role). Each statement is asked for the full <paramref name="limit"/> because the merged first
+    /// <paramref name="limit"/> can come entirely from either one - so the tool's <c>limit + 1</c> over-fetch
+    /// still observes truncation over the union rather than over one half of it. On a store with no override
+    /// rows the scoped read returns nothing and the result is the server-wide read's rows exactly.
+    /// </summary>
     public static async Task<List<PgConfigChangeRow>> GetConfigChangesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit,
         CancellationToken cancellationToken = default)
     {
+        var serverWide = await ReadChangesAsync(postgres, ConfigChangesSql, scoped: false, serverId, startUtc, endUtc, limit, cancellationToken);
+        var scoped = await ReadChangesAsync(postgres, ScopedConfigChangesSql, scoped: true, serverId, startUtc, endUtc, limit, cancellationToken);
+        if (scoped.Count == 0)
+        {
+            return serverWide;
+        }
+
+        var merged = new List<PgConfigChangeRow>(Math.Min(limit, serverWide.Count + scoped.Count));
+        int w = 0, s = 0;
+        while (merged.Count < limit && (w < serverWide.Count || s < scoped.Count))
+        {
+            var takeServerWide = s >= scoped.Count
+                || (w < serverWide.Count && serverWide[w].ChangedAtUtc >= scoped[s].ChangedAtUtc);
+            merged.Add(takeServerWide ? serverWide[w++] : scoped[s++]);
+        }
+
+        return merged;
+    }
+
+    private static async Task<List<PgConfigChangeRow>> ReadChangesAsync(
+        NpgsqlDataSource postgres, string sql, bool scoped, int serverId, DateTime startUtc, DateTime endUtc, int limit,
+        CancellationToken cancellationToken)
+    {
         var rows = new List<PgConfigChangeRow>();
-        await using var command = postgres.CreateCommand(ConfigChangesSql);
+        await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         command.Parameters.AddWithValue(serverId);
         /* Kind-Unspecified at the BIND, per the store's naive-UTC discipline: a Kind=Utc DateTime makes
@@ -504,15 +556,30 @@ public static class DarlingPgServerConfigReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new PgConfigChangeRow(
-                reader.GetDateTime(0),
-                reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7)));
+            rows.Add(scoped
+                /* ScopedConfigChangesSql: collection_time, name, database_name, role_name, prev_setting,
+                   setting, source, change_kind. */
+                ? new PgConfigChangeRow(
+                    reader.GetDateTime(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    Unit: null,
+                    Context: null,
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    ShortDescription: null,
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.GetString(7))
+                : new PgConfigChangeRow(
+                    reader.GetDateTime(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
 
         return rows;
