@@ -287,7 +287,7 @@ public sealed class PgLogHashKeyTests
         try
         {
             var path = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance).Path;
-            Assert.Null(DarlingFileSecurity.ReadersBeyondTrusted(path));
+            Assert.Null(DarlingFileSecurity.AccessBeyondTrusted(path));
 
             var file = new FileInfo(path);
             var security = file.GetAccessControl();
@@ -304,6 +304,125 @@ public sealed class PgLogHashKeyTests
             Assert.Equal(before, File.ReadAllBytes(path));
             /* The shared check alone would have loaded it: INTERACTIVE is not one of its three groups. */
             Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>
+    /// #4044 review: any right refuses the key, not only a read. WriteData lets an account put a key of its own in
+    /// place, which any local user can DPAPI-protect (LocalMachine, entropy in the source); ChangePermissions or
+    /// TakeOwnership lets it grant itself the read; Delete lets it swap the file. The service writes none of these.
+    /// </summary>
+    [Theory]
+    [InlineData(FileSystemRights.WriteData)]
+    [InlineData(FileSystemRights.AppendData)]
+    [InlineData(FileSystemRights.ChangePermissions)]
+    [InlineData(FileSystemRights.TakeOwnership)]
+    [InlineData(FileSystemRights.Delete)]
+    public void AKeyAnyoneBeyondTheServiceHoldsAnyRightTo_IsRefused_OnWindows(FileSystemRights right)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the allowlist is the Windows DACL check");
+        var directory = NewDirectory();
+        try
+        {
+            var path = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance).Path;
+            var file = new FileInfo(path);
+            var security = file.GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.InteractiveSid, null), right, AccessControlType.Allow));
+            file.SetAccessControl(security);
+            var before = File.ReadAllBytes(path);
+
+            var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+            Assert.Null(load.Key);
+            Assert.False(load.Generated);
+            Assert.Contains("INTERACTIVE", load.Refusal, StringComparison.Ordinal);
+            Assert.Equal(before, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>
+    /// #4044 review: the key is judged and read through one handle that shares read alone, so nobody who can write the
+    /// directory can rename, delete, replace or rewrite the file between the check and the read. Checked by path and
+    /// read by path, the two could each find a different file.
+    /// </summary>
+    [Fact]
+    public void AHeldKey_CannotBeRenamedDeletedOrWritten_UntilItIsReleased_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the held handle is the Windows read");
+        var directory = NewDirectory();
+        try
+        {
+            var path = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance).Path;
+            var moved = path + ".moved";
+
+            using (var held = DarlingFileSecurity.OpenForServiceOnlyRead(path, out var refusal))
+            {
+                Assert.Null(refusal);
+                Assert.NotNull(held);
+                Assert.ThrowsAny<IOException>(() => File.Move(path, moved));
+                Assert.ThrowsAny<IOException>(() => File.Delete(path));
+                Assert.ThrowsAny<IOException>(() => File.OpenWrite(path).Dispose());
+            }
+
+            /* Released, the same calls go through: the hold refused them, not the file's ACL. */
+            File.Move(path, moved);
+            Assert.True(File.Exists(moved));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>#4044 review: a key with a second name is refused, since whoever made that name reaches the same
+    /// bytes through a directory the key's own check never sees.</summary>
+    [Fact]
+    public void AHardLinkedKey_IsRefused_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "hard links through CreateHardLinkW are Windows'");
+        var directory = NewDirectory();
+        try
+        {
+            var path = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance).Path;
+            Assert.True(CreateHardLinkW(path + ".second-name", path, IntPtr.Zero), "the hard link was not created");
+
+            var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+            Assert.Null(load.Key);
+            Assert.False(load.Generated);
+            Assert.Contains("hard link", load.Refusal, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>#4044 review: at most 1 KB is read from the held key; a key this service writes is about 350 bytes.</summary>
+    [Fact]
+    public void AnOversizedKey_IsRefused_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the bounded read is the Windows read");
+        var directory = NewDirectory();
+        try
+        {
+            var path = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance).Path;
+            Assert.InRange(new FileInfo(path).Length, 1, 1024);
+            File.WriteAllText(path, new string('A', 1025));
+
+            var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+            Assert.Null(load.Key);
+            Assert.Contains("larger than 1024 bytes", load.Refusal, StringComparison.Ordinal);
         }
         finally
         {
@@ -796,4 +915,8 @@ public sealed class PgLogHashKeyTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 }
