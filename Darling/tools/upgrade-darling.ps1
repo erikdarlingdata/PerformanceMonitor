@@ -128,13 +128,17 @@ function Warn([string]$message) { Write-Host "WARNING: $message" -ForegroundColo
 # all of which run as the service account, and the scripts an administrator runs elevated. A folder created
 # directly under C:\ - the documented location - inherits "Authenticated Users: Modify" from the volume root,
 # so any local user could replace a binary and run code as the service. This stops the root inheriting, removes
-# every broad principal (Authenticated Users, Users, Everyone, INTERACTIVE), and grants back exactly two things:
-# BUILTIN\Users read and execute, and the service account Modify, which it held before through Authenticated
-# Users and still needs because it extracts pg-runtime into the tree. SYSTEM and Administrators keep the full
-# control the volume root gave them. Children take the new ACEs by inheritance; a file with its own protected
-# DACL (darling.json, the credential blobs) keeps it. Returns what is still open as strings, one per path; an
-# empty result means no directory and no file under the root lets a broad principal write. Kept byte-identical
-# in install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallTreeLockTests compares.
+# every broad principal (Authenticated Users, Users, Everyone, INTERACTIVE), and grants back BUILTIN\Users read
+# and execute, plus, when $serviceAccount is given, the service account Modify: it held that before through
+# Authenticated Users and still needs it, because it extracts pg-runtime into the tree. With no account it only
+# locks. install-darling.ps1 calls it that way before anything runs from the tree, and again once the service
+# exists, to make the grant. SYSTEM and Administrators keep the full control the volume root gave them.
+# Children take the new ACEs by inheritance; a file with its own protected DACL (darling.json, the credential
+# blobs) keeps it. The account is normalized the way install-darling.ps1 reads it from the service (LocalSystem
+# is NT AUTHORITY\SYSTEM, a leading .\ is this computer), since neither spelling translates to a SID as written.
+# Returns what is still open, one string per path: anything a broad principal can write, and any junction or
+# link below the root, which the walk does not descend and a real install never holds. Kept byte-identical in
+# install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallLocationTests compares.
 function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -144,7 +148,13 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
         (New-Object System.Security.Principal.SecurityIdentifier($wk::WorldSid, $null)),
         (New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)))
     $usersSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
-    $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+    $grants = @('/grant', "*$($usersSid.Value):(OI)(CI)RX")
+    if ($serviceAccount) {
+        if ($serviceAccount -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
+        $serviceAccount = $serviceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
+        $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)M")
+    }
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
 
@@ -155,7 +165,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     $steps = @(
         @('/inheritance:d'),
         (@('/remove:g') + @($broad | ForEach-Object { "*$($_.Value)" })),
-        @('/grant', "*$($usersSid.Value):(OI)(CI)RX", '/grant', "*$($serviceSid.Value):(OI)(CI)M"))
+        $grants)
     foreach ($step in $steps) {
         $output = & icacls.exe $root @step 2>&1
         if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
@@ -168,6 +178,10 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
     $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($target in $targets) {
+        if ($target.FullName.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            $open += "$($target.FullName) (a junction or link)"
+            continue
+        }
         $rules = (Get-Acl -LiteralPath $target.FullName).GetAccessRules($true, $true, $sidType)
         foreach ($rule in $rules) {
             if ($rule.AccessControlType -eq $allow -and (([int64]$rule.FileSystemRights) -band $write) -ne 0 -and $broad -contains $rule.IdentityReference) {
@@ -1393,6 +1407,37 @@ if ($prunable.Count -gt 0) {
 # (#2529) - search this file for "the files this build no longer ships". After, because the difference
 # being looked for is between what an earlier build put in this tree and what THIS payload ships, and the
 # second half of that only exists once the copy has landed.
+# ============================ lock the install tree (#4034) ============================
+#
+# The same lock install-darling.ps1 applies, so an install made before it is closed at its next upgrade: see
+# Lock-DarlingInstallTree above. BEFORE the copy, so the new build lands in a tree no ordinary user can write
+# to between here and the start; run again after the copy to verify. The account is read from the service's
+# own registration, the account it really runs as, and normalized the way install-darling.ps1 reads it:
+# LocalSystem and a leading .\ do not translate to a SID as written, and a lock that threw on them would leave
+# the tree open behind a warning. NOTHING here calls Fail: the service is stopped and starting it is what the
+# operator came for, so a failure is a loud warning.
+$logonAccount = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue).StartName
+if (-not $logonAccount) { $logonAccount = "NT SERVICE\$serviceName" }
+elseif ($logonAccount -eq 'LocalSystem') { $logonAccount = 'NT AUTHORITY\SYSTEM' }
+else { $logonAccount = $logonAccount -replace '^\.\\', "$env:COMPUTERNAME\" }
+
+function Invoke-UpgradeTreeLock([string]$when) {
+    $open = @()
+    try {
+        $open = @(Lock-DarlingInstallTree $InstallRoot $logonAccount)
+    }
+    catch {
+        $open = @("$InstallRoot ($($_.Exception.Message))")
+    }
+    if ($open.Count -eq 0) {
+        Good "Install folder locked ${when}: only SYSTEM, Administrators and $logonAccount can change what runs from $InstallRoot."
+        return
+    }
+    Warn ("Ordinary users can still write to {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant `"{1}:(OI)(CI)M`". A path BELOW the folder that grants access itself keeps that through the lock: reset it with icacls `"<path>`" /reset /T /C, and remove any junction or link it names." -f $open.Count, $logonAccount, (($open | Select-Object -First 5) -join ', '), $InstallRoot)
+}
+
+Invoke-UpgradeTreeLock 'before the copy'
+
 Note "Laying the new build over $InstallRoot ..."
 $copied = $false
 foreach ($attempt in 1, 2) {
@@ -1519,28 +1564,11 @@ if ($payload.Ok) {
     }
 }
 
-# ============================ lock the install tree (#4034) ============================
+# ============================ re-verify the install tree lock (#4034) ============================
 #
-# The same lock install-darling.ps1 applies at step 4b2, so an install made before that step is closed at its
-# next upgrade: see Lock-DarlingInstallTree above. AFTER the copy, so the new build's files take the tree's
-# ACEs, and BEFORE the start, so the service extracts pg-runtime under the Modify grant made here. The
-# account is read from the service's own registration, the account it really runs as. NOTHING here calls
-# Fail: the service is stopped and starting it is what the operator came for, so a failure is a loud warning.
-$logonAccount = (Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue).StartName
-if (-not $logonAccount) { $logonAccount = "NT SERVICE\$serviceName" }
-$stillOpen = @()
-try {
-    $stillOpen = @(Lock-DarlingInstallTree $InstallRoot $logonAccount)
-}
-catch {
-    $stillOpen = @("$InstallRoot ($($_.Exception.Message))")
-}
-if ($stillOpen.Count -eq 0) {
-    Good "Install folder locked: only SYSTEM, Administrators and $logonAccount can change what runs from $InstallRoot."
-}
-else {
-    Warn ("Ordinary users can still write to {0} path(s) in the install folder, and the service runs from there as {1}, so anyone who can replace a binary can run code as that account. First: {2}. Fix from an elevated prompt with: icacls `"{3}`" /inheritance:d, then icacls `"{3}`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4, then icacls `"{3}`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant `"{1}:(OI)(CI)M`". A path BELOW the folder that grants access itself keeps that through the lock: reset it with icacls `"<path>`" /reset /T /C." -f $stillOpen.Count, $logonAccount, (($stillOpen | Select-Object -First 5) -join ', '), $InstallRoot)
-}
+# The lock went on before the copy (see there). Run again now that the new build and the stale-file cleanup
+# have landed, so what is reported is the tree the service is about to start from.
+Invoke-UpgradeTreeLock 'after the copy'
 
 Note "Starting '$serviceName'..."
 Start-Service -Name $serviceName

@@ -15,6 +15,9 @@ C:\PerformanceMonitorDarling). What it does, in order:
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
      service installs cleanly and then dies at the bundled PostgreSQL's first step (#2185, #2187).
      Extract to a machine-scoped local path such as C:\PerformanceMonitorDarling instead.
+  1b2. Locks the install folder against ordinary users before anything runs from it (#4034): a folder made
+     directly under C:\ otherwise lets any local user replace the service's binaries. Extract into a fresh
+     folder and run this straight away; no lock can undo a file swapped before it.
   1c. REFUSES an install when the ASP.NET Core Runtime 10 is missing, and WARNS when the .NET Desktop
      Runtime 10 is (#2479). Both shipped binaries are framework-dependent; a stock Windows Server image
      has neither runtime, and the failure is the .NET host's own "You must install .NET" error with
@@ -31,6 +34,8 @@ C:\PerformanceMonitorDarling). What it does, in order:
   4b. Restricts darling.json to SYSTEM / Administrators / the service account, plus read for
      INTERACTIVE (the Viewer). It holds encrypted SQL passwords and the MCP/web access tokens,
      and an install folder under C:\ otherwise inherits read access for BUILTIN\Users.
+  4b2. Grants the service account Modify on the locked install folder, which it needs to extract its
+     bundled PostgreSQL there, and re-verifies the lock.
   4c. Creates (or removes) the scoped Windows Firewall rules to match darling.json, via the exe's
      --configure-firewall verb. This requires elevation, which is why it lives here: the service's
      own unprivileged account cannot create them, and only verifies them at runtime.
@@ -271,13 +276,17 @@ function Format-FrameworkVersionList([string[]]$versions) {
 # all of which run as the service account, and the scripts an administrator runs elevated. A folder created
 # directly under C:\ - the documented location - inherits "Authenticated Users: Modify" from the volume root,
 # so any local user could replace a binary and run code as the service. This stops the root inheriting, removes
-# every broad principal (Authenticated Users, Users, Everyone, INTERACTIVE), and grants back exactly two things:
-# BUILTIN\Users read and execute, and the service account Modify, which it held before through Authenticated
-# Users and still needs because it extracts pg-runtime into the tree. SYSTEM and Administrators keep the full
-# control the volume root gave them. Children take the new ACEs by inheritance; a file with its own protected
-# DACL (darling.json, the credential blobs) keeps it. Returns what is still open as strings, one per path; an
-# empty result means no directory and no file under the root lets a broad principal write. Kept byte-identical
-# in install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallTreeLockTests compares.
+# every broad principal (Authenticated Users, Users, Everyone, INTERACTIVE), and grants back BUILTIN\Users read
+# and execute, plus, when $serviceAccount is given, the service account Modify: it held that before through
+# Authenticated Users and still needs it, because it extracts pg-runtime into the tree. With no account it only
+# locks. install-darling.ps1 calls it that way before anything runs from the tree, and again once the service
+# exists, to make the grant. SYSTEM and Administrators keep the full control the volume root gave them.
+# Children take the new ACEs by inheritance; a file with its own protected DACL (darling.json, the credential
+# blobs) keeps it. The account is normalized the way install-darling.ps1 reads it from the service (LocalSystem
+# is NT AUTHORITY\SYSTEM, a leading .\ is this computer), since neither spelling translates to a SID as written.
+# Returns what is still open, one string per path: anything a broad principal can write, and any junction or
+# link below the root, which the walk does not descend and a real install never holds. Kept byte-identical in
+# install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallLocationTests compares.
 function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -287,7 +296,13 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
         (New-Object System.Security.Principal.SecurityIdentifier($wk::WorldSid, $null)),
         (New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)))
     $usersSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
-    $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+    $grants = @('/grant', "*$($usersSid.Value):(OI)(CI)RX")
+    if ($serviceAccount) {
+        if ($serviceAccount -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
+        $serviceAccount = $serviceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
+        $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
+        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)M")
+    }
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
 
@@ -298,7 +313,7 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     $steps = @(
         @('/inheritance:d'),
         (@('/remove:g') + @($broad | ForEach-Object { "*$($_.Value)" })),
-        @('/grant', "*$($usersSid.Value):(OI)(CI)RX", '/grant', "*$($serviceSid.Value):(OI)(CI)M"))
+        $grants)
     foreach ($step in $steps) {
         $output = & icacls.exe $root @step 2>&1
         if ($LASTEXITCODE -ne 0) { return @("$root (icacls $($step -join ' ') failed: $($output -join ' '))") }
@@ -311,6 +326,10 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     if (-not (Get-Acl -LiteralPath $root).AreAccessRulesProtected) { $open += "$root (still inherits from its parent)" }
     $targets = @(Get-Item -LiteralPath $root -Force) + @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($target in $targets) {
+        if ($target.FullName.TrimEnd('\') -ine $root.TrimEnd('\') -and ($target.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            $open += "$($target.FullName) (a junction or link)"
+            continue
+        }
         $rules = (Get-Acl -LiteralPath $target.FullName).GetAccessRules($true, $true, $sidType)
         foreach ($rule in $rules) {
             if ($rule.AccessControlType -eq $allow -and (([int64]$rule.FileSystemRights) -band $write) -ne 0 -and $broad -contains $rule.IdentityReference) {
@@ -320,6 +339,41 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
         }
     }
     return $open
+}
+
+# Runs Lock-DarlingInstallTree for this script (steps 1b2 and 4b2) and says what it found. Best-effort: a
+# failure warns loudly with the by-hand fix rather than aborting an otherwise good install. With no account yet
+# the grant line names the virtual account the service is about to get.
+function Invoke-InstallTreeLock([string]$account) {
+    $open = @()
+    try {
+        $open = @(Lock-DarlingInstallTree $root $account)
+    }
+    catch {
+        $open = @("$root ($($_.Exception.Message))")
+    }
+    if ($open.Count -eq 0) {
+        if ($account) {
+            Write-Host "Locked the install folder: only SYSTEM, Administrators and $account can change what runs from $root." -ForegroundColor Green
+        }
+        else {
+            Write-Host "Locked the install folder against ordinary users before running anything from it: $root" -ForegroundColor Green
+        }
+        return
+    }
+    $grantTo = if ($account) { $account } else { "NT SERVICE\$serviceName" }
+    Write-Host ''
+    Write-Host 'SECURITY WARNING: ordinary users can still write to these paths in the install folder:' -ForegroundColor Red
+    foreach ($p in ($open | Select-Object -First 20)) { Write-Host "  $p" -ForegroundColor Red }
+    if ($open.Count -gt 20) { Write-Host "  ...and $($open.Count - 20) more." -ForegroundColor Red }
+    Write-Host '  The service and its PostgreSQL run from here as the service account, so anyone who can replace a' -ForegroundColor Red
+    Write-Host '  binary can run code as that account. Fix it from an elevated prompt, then re-run this script:' -ForegroundColor Red
+    Write-Host "    icacls `"$root`" /inheritance:d" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4" -ForegroundColor Yellow
+    Write-Host "    icacls `"$root`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant `"$grantTo`:(OI)(CI)M`"" -ForegroundColor Yellow
+    Write-Host '  A path BELOW the folder that grants access itself keeps that through the lock; reset it to the' -ForegroundColor Red
+    Write-Host '  folder''s permissions with icacls "<path>" /reset /T /C, and remove any junction or link it names.' -ForegroundColor Red
+    Write-Host ''
 }
 
 # -- 1. Environment checks ------------------------------------------------------------------------
@@ -444,6 +498,14 @@ Nothing was installed or changed.
     $answer = Read-Host 'Point the service at this folder anyway? [y/N]'
     if ($answer -notmatch '^[Yy]') { exit 4 }
 }
+
+# -- 1b2. Lock the install tree before anything runs from it (#4034) ---------------------------------------
+# The rest of this script runs the service exe (the pre-flight, --configure-firewall) and registers it to run
+# as the service account, so the tree is closed to ordinary users first: see Lock-DarlingInstallTree. There
+# is no service account to grant yet; 4b2 adds it once sc.exe create has made one. What no lock can undo is a
+# file swapped between extracting the zip and running this script, which is why the README says to extract
+# into a fresh folder and run this straight away.
+Invoke-InstallTreeLock ''
 
 # -- 1c. Refuse an install the .NET runtimes on this box cannot run (#2479) ------------------------
 # The first thing a new operator hits and the least self-explanatory. Both shipped binaries are
@@ -732,38 +794,14 @@ if ($failed.Count -gt 0) {
     Write-Host ''
 }
 
-# -- 4b2. Lock the install tree (#4034) -------------------------------------------------------------
-# 4b closes READ access to the secrets; this closes WRITE access to everything that runs. See
-# Lock-DarlingInstallTree above. After 4b on purpose: its files carry their own protected DACLs, which the
-# tree's new ACEs do not touch. Before the first start on purpose: the service extracts pg-runtime into the
-# tree, under the Modify grant made here. upgrade-darling.ps1 runs the same function, so an install made
-# before this step is locked at its next upgrade. Best-effort like 4b: a failure warns loudly rather than
-# aborting an otherwise good install.
-$stillOpen = @()
-try {
-    $stillOpen = @(Lock-DarlingInstallTree $root $serviceAccount)
-}
-catch {
-    $stillOpen = @("$root ($($_.Exception.Message))")
-}
-if ($stillOpen.Count -eq 0) {
-    Write-Host "Locked the install folder: only SYSTEM, Administrators and the service account can change what runs from $root." -ForegroundColor Green
-}
-else {
-    Write-Host ''
-    Write-Host 'SECURITY WARNING: ordinary users can still write to these paths in the install folder:' -ForegroundColor Red
-    foreach ($p in ($stillOpen | Select-Object -First 20)) { Write-Host "  $p" -ForegroundColor Red }
-    if ($stillOpen.Count -gt 20) { Write-Host "  ...and $($stillOpen.Count - 20) more." -ForegroundColor Red }
-    Write-Host '  The service and its PostgreSQL run from here as the service account, so anyone who can replace a' -ForegroundColor Red
-    Write-Host '  binary can run code as that account. Fix it from an elevated prompt, then re-run this script:' -ForegroundColor Red
-    Write-Host "    icacls `"$root`" /inheritance:d" -ForegroundColor Yellow
-    Write-Host "    icacls `"$root`" /remove:g *S-1-5-11 *S-1-5-32-545 *S-1-1-0 *S-1-5-4" -ForegroundColor Yellow
-    Write-Host "    icacls `"$root`" /grant `"*S-1-5-32-545:(OI)(CI)RX`" /grant `"$serviceAccount`:(OI)(CI)M`"" -ForegroundColor Yellow
-    Write-Host '  A path BELOW the folder that grants access itself keeps that through the lock; reset it to the' -ForegroundColor Red
-    Write-Host '  folder''s permissions with:' -ForegroundColor Red
-    Write-Host '    icacls "<path>" /reset /T /C' -ForegroundColor Yellow
-    Write-Host ''
-}
+# -- 4b2. Grant the service its access to the locked tree (#4034) ----------------------------------------
+# 1b2 locked the tree before anything ran from it, with no service to grant yet; sc.exe create has made the
+# account now, so this runs the same lock again with it, which adds the service's Modify grant (it extracts
+# pg-runtime into the tree) and re-verifies. After 4b on purpose: its files carry their own protected DACLs,
+# which the tree's ACEs do not touch. Before the first start on purpose: the extraction needs the grant.
+# upgrade-darling.ps1 runs the same function, so an install made before these steps is locked at its next
+# upgrade.
+Invoke-InstallTreeLock $serviceAccount
 
 # -- 4c. Firewall rules (#1771) --------------------------------------------------------------------
 # The service runs as an unprivileged virtual account that CANNOT create firewall rules. It used to try on

@@ -574,11 +574,26 @@ function Get-CimInstance {
                 $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
                 $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
                 Set-Acl -LiteralPath "$root\planted" -AclObject $p
-
-                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
-                'open=' + (($open | ForEach-Object { $_.Substring($root.Length) } | Sort-Object) -join ';')
+                # A junction inside the tree (to the tree's own pg-runtime, so cleanup never leaves it).
+                & cmd.exe /c mklink /J "$root\planted-junction" "$root\pg-runtime" | Out-Null
 
                 function Rules($path) { (Get-Acl -LiteralPath $path).GetAccessRules($true, $true, $sidType) }
+
+                # Phase 1, as install step 1b2 runs it: no service account yet, so the tree is locked and nothing
+                # is granted to a service.
+                $null = Lock-DarlingInstallTree $root ''
+                'phase1Protected=' + (Get-Acl -LiteralPath $root).AreAccessRulesProtected
+                'phase1Service=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $service }).Count
+
+                # Phase 2, as step 4b2 and the upgrade run it: the service's grant, and the walk's report.
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
+
+                # The account spellings Win32_Service reports that do not translate as written.
+                'localSystem=' + $(try { $null = Lock-DarlingInstallTree $root 'LocalSystem'; 'ok' } catch { 'threw: ' + $_.Exception.Message })
+                $local = $env:USERDOMAIN -eq $env:COMPUTERNAME
+                'dotAccount=' + $(if (-not $local) { 'skipped' } else { try { $null = Lock-DarlingInstallTree $root ('.\' + $env:USERNAME); 'ok' } catch { 'threw: ' + $_.Exception.Message } })
+
                 $rootAcl = Get-Acl -LiteralPath $root
                 'protected=' + $rootAcl.AreAccessRulesProtected
                 'authenticatedUsers=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $auth }).Count
@@ -589,9 +604,11 @@ function Get-CimInstance {
                 'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
             }
             finally {
-                # The test user owns every object here and so keeps WRITE_DAC: reset to inherited, then delete.
+                # The test user owns every object here and so keeps WRITE_DAC: reset to inherited, then delete. The
+                # junction goes first with rmdir, which removes the link and never what it points at.
                 if (Test-Path -LiteralPath $root) {
                     & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    if (Test-Path -LiteralPath "$root\planted-junction") { & cmd.exe /c rmdir "$root\planted-junction" | Out-Null }
                     Remove-Item -LiteralPath $root -Recurse -Force
                 }
             }
@@ -599,7 +616,20 @@ function Get-CimInstance {
 
         var answers = RunWindowsPowerShell(probe.ToString());
 
-        Assert.Contains(@"open=\planted;\planted\evil.dll", answers);
+        Assert.Contains("phase1Protected=True", answers);
+        Assert.Contains("phase1Service=0", answers);
+
+        /* Exactly what cannot be closed by a folder lock: the explicitly-granted child and its file, and the
+           junction, which the walk does not descend. */
+        var open = answers.FindAll(a => a.StartsWith("open:", StringComparison.Ordinal));
+        Assert.Equal(3, open.Count);
+        Assert.Contains(@"open:\planted", open);
+        Assert.Contains(@"open:\planted\evil.dll", open);
+        Assert.Contains(@"open:\planted-junction (a junction or link)", open);
+
+        Assert.Contains("localSystem=ok", answers);
+        Assert.True(answers.Contains("dotAccount=ok") || answers.Contains("dotAccount=skipped"),
+            "a .\\ account must be normalized to this computer, not thrown on: " + string.Join(" | ", answers));
         Assert.Contains("protected=True", answers);
         Assert.Contains("authenticatedUsers=0", answers);
         Assert.Contains("usersRights=ReadAndExecute, Synchronize", answers);
