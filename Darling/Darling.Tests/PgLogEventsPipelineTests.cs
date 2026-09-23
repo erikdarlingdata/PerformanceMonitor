@@ -586,33 +586,56 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #3920's fourth review (M1, L3). A DETAIL is read as SQL only in the three shapes PostgreSQL writes SQL into:
-    /// a deadlock report (its wait-for lines first), a crash report, and a logged EXECUTE's <c>prepare:</c>. Inside
-    /// a deadlock report, a <c>Process N:</c> line starts a new query only when N is one of the deadlock's own
-    /// processes AND the query before it reads to its end. Round 3's splitter broke a query at any such line: a
-    /// literal holding numbered lines ("Process 1: call Jane") kept its middle as identifiers. Any other DETAIL is
-    /// prose, kept as written (#3944), a line shaped like a query head included.
+    /// #3920's fourth review (M1, L3), #3944's review. A DETAIL is read as SQL only in the shapes PostgreSQL writes
+    /// SQL into: a deadlock report (its wait-for lines first), a crash report, a logged EXECUTE's <c>prepare:</c> and
+    /// a statement's parameter values. A deadlock report's query heads are its waiters' <c>Process N:</c> lines, in
+    /// the wait-for lines' order, each once, and each query is read on its own. Round 3's splitter broke a query at
+    /// any such line: a literal holding numbered lines ("Process 1: call Jane") kept its middle as identifiers. A
+    /// line shaped like a waiter's head inside a query leaves the boundaries unknowable, so every query is withheld.
+    /// Any other DETAIL is prose, kept as written (#3944), a line shaped like a query head included.
     /// </summary>
     [Fact]
     public void ADetailIsSqlOnlyInTheShapesPostgresWritesSqlInto()
     {
-        var deadlock = PgLogTextRedactor.RedactDetail(string.Join("\n",
+        const string waitFor = "Process 11 waits for ShareLock on transaction 5; blocked by process 12.\n"
+            + "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.";
+
+        /* Numbered lines inside a literal are the query's own text: no waiter's head among them. */
+        var numbered = PgLogTextRedactor.RedactDetail(waitFor + "\n" + string.Join("\n",
         [
-            "Process 11 waits for ShareLock on transaction 5; blocked by process 12.",
-            "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.",
             "\tProcess 11: UPDATE notes SET body = 'Steps:",
             "\tProcess 1: call Jane Roe at jane@example.com",
-            "\tProcess 12: done' WHERE id = 5",
+            "\tProcess 2: done' WHERE id = 5",
             "\tProcess 12: UPDATE notes SET body = 'x' WHERE id = 6",
         ]));
-        Assert.Equal(string.Join("\n",
+        Assert.Equal(
+            waitFor + "\n\tProcess 11: UPDATE notes SET body = '?' WHERE id = ?\n\tProcess 12: UPDATE notes SET body = '?' WHERE id = ?",
+            numbered);
+        Assert.Equal(numbered, PgLogTextRedactor.RedactDetail(numbered));
+
+        /* A line inside a literal shaped like the next waiter's head: two heads for process 12, so where query 11
+           ends is unknowable, and both are withheld. */
+        var ambiguous = PgLogTextRedactor.RedactDetail(waitFor + "\n" + string.Join("\n",
         [
-            "Process 11 waits for ShareLock on transaction 5; blocked by process 12.",
-            "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.",
-            "\tProcess 11: UPDATE notes SET body = '?' WHERE id = ?",
-            "\tProcess 12: UPDATE notes SET body = '?' WHERE id = ?",
-        ]), deadlock);
-        Assert.Equal(deadlock, PgLogTextRedactor.RedactDetail(deadlock));
+            "\tProcess 11: UPDATE notes SET body = 'Steps:",
+            "\tProcess 12: Leak3944w' WHERE id = 5",
+            "\tProcess 12: UPDATE notes SET body = 'Leak3944x' WHERE id = 6",
+        ]));
+        Assert.Equal(waitFor + "\n\tProcess 11: " + PgLogTextRedactor.WithheldStatement, ambiguous);
+        Assert.Equal(ambiguous, PgLogTextRedactor.RedactDetail(ambiguous));
+
+        /* A query cut at track_activity_query_size inside a literal is withheld on its own: the next query is read
+           from its own first character, so the cut literal cannot pair with its quotes (#3920's rule read it on,
+           and the next query's literal came back as a word). A report cut before its last query keeps the rest. */
+        const string three = "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "Process 200 waits for ShareLock on transaction 6; blocked by process 300.\n"
+            + "Process 300 waits for ShareLock on transaction 7; blocked by process 100.";
+        Assert.Equal(
+            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: UPDATE t SET pw = '?'",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = '\nProcess 200: UPDATE t SET pw = 'Leak3944y' /* it's */"));
+        Assert.Equal(
+            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: SELECT '?', '?'",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = $$\nProcess 200: SELECT $$Leak3944z$$, 'a\"'"));
 
         /* Any other DETAIL is prose, kept as written, a line inside it shaped like a query head included. */
         const string failingRow = "Failing row contains (42, 123-45-6789, Steps:\nProcess 1: mix, null).";
@@ -664,6 +687,34 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(
             "COPY t, line 1: \"4111,Jane\n\tSQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
             PgLogTextRedactor.RedactContext("COPY t, line 1: \"4111,Jane\n\tSQL statement \"Jane Doe\"\n\tx\""));
+    }
+
+    /// <summary>
+    /// #3944's review: a look-alike SQL frame that has not closed by the line where the next real SQL frame opens is
+    /// withheld with it. Read on past that line, the look-alike's text set the lexical state the real statement was
+    /// read in: its open <c>$$</c> closed at the real statement's own, and the literal inside came back as a word. A
+    /// generated sweep of COPY values (look-alike heads of all five SQL frame kinds, ahead of real quoted, remote and
+    /// portal frames) found 23,770 leaks in 1.6 million fields before this rule and none in 2.2 million after it. A
+    /// look-alike that closes on its own line only normalizes that line, and the real frame is read on its own.
+    /// </summary>
+    [Fact]
+    public void ALookAlikeFrame_NeverDecidesHowARealStatementIsRead()
+    {
+        Assert.Equal(
+            "COPY t, line 1, column a: \"v\n\tSQL statement \"" + PgLogTextRedactor.WithheldStatement + "\"",
+            PgLogTextRedactor.RedactContext(
+                "COPY t, line 1, column a: \"v\n\tSQL statement \"$$\"\n\tSQL statement \"SELECT $$Leak3944q$$, 'a\"'\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
+        Assert.Equal(
+            "COPY t, line 1, column a: \"v\n\tremote SQL command: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactContext(
+                "COPY t, line 1, column a: \"v\n\tremote SQL command: $$\"\n\tSQL statement \"SELECT $$Leak3944r$$\"\n\tPL/pgSQL function f() line 3 at SQL statement"));
+
+        var closesOnItsOwnLine = PgLogTextRedactor.RedactContext(
+            "COPY t, line 1, column a: \"v\n\tSQL statement \"x 4111\"\n\tSQL statement \"SELECT 'Leak3944s'\"\n\tPL/pgSQL function f() line 3 at SQL statement");
+        Assert.Equal(
+            "COPY t, line 1, column a: \"v\n\tSQL statement \"x ?\"\n\tSQL statement \"SELECT '?'\"\n\tPL/pgSQL function f() line 3 at SQL statement",
+            closesOnItsOwnLine);
+        Assert.Equal(closesOnItsOwnLine, PgLogTextRedactor.RedactContext(closesOnItsOwnLine));
     }
 
     /// <summary>

@@ -99,10 +99,11 @@ public static class PgLogTextRedactor
     /// <c>track_activity_query_size</c>, 1 kB by default, so this is far past any field it writes itself.</summary>
     internal const int MaxSqlFieldLength = 64 * 1024;
 
-    /// <summary>How many candidate query boundaries one field may test (#3920's fourth review). Each test re-reads
+    /// <summary>How many candidate closes one CONTEXT SQL frame may test (#3920's fourth review). Each test re-reads
     /// the text so far, so an unbounded count made a hostile field quadratic: a 180 KB CONTEXT took 21 s, and the
-    /// self-hosted tail re-reads its overlap window every cycle. Past the cap the boundary is not taken, which
-    /// leaves the SQL to be withheld.</summary>
+    /// self-hosted tail re-reads its overlap window every cycle. Past the cap the close is not taken, which leaves
+    /// the SQL to be withheld. A deadlock report's queries need no cap: their heads are found before any is
+    /// read, and each is read once (<see cref="RedactDetail"/>).</summary>
     internal const int MaxBoundaryTests = 32;
 
     /// <summary>
@@ -115,12 +116,17 @@ public static class PgLogTextRedactor
     /// <c>Process N: query</c>. Every other DETAIL, and a deadlock report's wait-for lines, are kept as
     /// written.
     ///
-    /// <para><b>Where one deadlock query ends</b> (#3920's fourth review). A <c>Process N:</c> line starts the next
-    /// query only when N is one of the deadlock's own processes AND the query before it reads to its end, testing
-    /// at most <see cref="MaxBoundaryTests"/> such lines; any other line, one a literal carries included, belongs to
-    /// the query it follows. A report that goes on in any other shape after its wait-for lines, or one longer than
-    /// <see cref="MaxSqlFieldLength"/>, has its queries withheld: whatever follows the wait-for lines is SQL. Null
-    /// in, null out; idempotent.</para>
+    /// <para><b>Where one deadlock query ends</b> (#3944's review). DeadLockReport writes one <c>Process N:</c> line
+    /// per wait-for line, in the wait-for lines' order, so the query heads are known before any query is read: a
+    /// line that starts with the next waiter's <c>Process N:</c> starts its query, and every other line belongs to
+    /// the query above it. Each query is then read on its own, from its own first character. When the heads found
+    /// are not the waiters in that order, each once (a query holding a line shaped like another process's head, a
+    /// report that goes on in another shape after its wait-for lines), where one query ends is unknowable and every
+    /// query is withheld; so is every query of a report longer than <see cref="MaxSqlFieldLength"/>. #3920's fourth
+    /// review took a head only where the query before it read to its end, which let one query that did not (cut at
+    /// <c>track_activity_query_size</c> inside a literal, or written to look that way) take in the next and read it
+    /// out of step, a literal kept as a word. A report cut before its last queries keeps the ones it has. Null in,
+    /// null out; idempotent.</para>
     /// </summary>
     public static string? RedactDetail(string? detail)
     {
@@ -137,11 +143,10 @@ public static class PgLogTextRedactor
 
         var lines = detail.Split('\n');
         var waits = 0;
-        var pids = new HashSet<string>(StringComparer.Ordinal);
+        var waiters = new List<string>();
         while (waits < lines.Length && s_deadlockWaitFor.Match(lines[waits]) is { Success: true } wait)
         {
-            pids.Add(wait.Groups["pid"].Value);
-            pids.Add(wait.Groups["blocker"].Value);
+            waiters.Add(wait.Groups["pid"].Value);
             waits++;
         }
 
@@ -151,35 +156,41 @@ public static class PgLogTextRedactor
             return detail;
         }
 
-        var output = new List<string>(lines.Length - waits + 1) { string.Join('\n', lines, 0, waits) };
-        var head = s_deadlockQueryHead.Match(lines[waits]);
-        if (!head.Success || !pids.Contains(head.Groups["pid"].Value) || detail.Length > MaxSqlFieldLength)
+        /* Every line that starts with a waiter's head, in order. They must be the waiters themselves, from the
+           first, each once, with the first on the line after the wait-for lines. */
+        var heads = new List<(int Line, Match Head)>();
+        var inOrder = true;
+        for (var k = waits; k < lines.Length && inOrder; k++)
         {
-            output.Add((head.Success ? head.Value : lines[waits].StartsWith('\t') ? "\t" : string.Empty) + WithheldStatement);
+            var head = s_deadlockQueryHead.Match(lines[k]);
+            if (head.Success && waiters.Contains(head.Groups["pid"].Value))
+            {
+                inOrder = heads.Count < waiters.Count && head.Groups["pid"].Value == waiters[heads.Count];
+                heads.Add((k, head));
+            }
+        }
+
+        var output = new List<string>(lines.Length - waits + 1) { string.Join('\n', lines, 0, waits) };
+        if (!inOrder || heads.Count == 0 || heads[0].Line != waits || detail.Length > MaxSqlFieldLength)
+        {
+            var first = s_deadlockQueryHead.Match(lines[waits]);
+            output.Add((first.Success ? first.Value : lines[waits].StartsWith('\t') ? "\t" : string.Empty) + WithheldStatement);
             return string.Join('\n', output);
         }
 
-        var currentHead = head.Value;
-        var query = new StringBuilder(lines[waits], head.Length, lines[waits].Length - head.Length, detail.Length);
-        var tests = 0;
-        for (var k = waits + 1; k < lines.Length; k++)
+        for (var h = 0; h < heads.Count; h++)
         {
-            var next = s_deadlockQueryHead.Match(lines[k]);
-            if (next.Success
-                && pids.Contains(next.Groups["pid"].Value)
-                && tests++ < MaxBoundaryTests
-                && RedactStoredStatement(query.ToString()) is { } masked)
+            var (line, head) = heads[h];
+            var end = h + 1 < heads.Count ? heads[h + 1].Line : lines.Length;
+            var query = new StringBuilder(lines[line], head.Length, lines[line].Length - head.Length, detail.Length);
+            for (var k = line + 1; k < end; k++)
             {
-                output.Add(currentHead + masked);
-                currentHead = next.Value;
-                query.Clear().Append(lines[k], next.Length, lines[k].Length - next.Length);
-                continue;
+                query.Append('\n').Append(lines[k]);
             }
 
-            query.Append('\n').Append(lines[k]);
+            output.Add(head.Value + MaskQuery(query.ToString()));
         }
 
-        output.Add(currentHead + MaskQuery(query.ToString()));
         return string.Join('\n', output);
     }
 
@@ -204,8 +215,10 @@ public static class PgLogTextRedactor
     /// only where a frame could start, so a COPY value running onto a line shaped like a frame stayed part of that
     /// value's prose mask. With prose kept as written that rule protects nothing, and it cost SQL: a function's
     /// <c>SQL statement "COPY t FROM '...'"</c> frame under the <c>COPY t, line N</c> frame its own data raised was
-    /// not read as SQL at all. Now a line mistaken for a frame can only be normalized when it did not need to
-    /// be.</para>
+    /// not read as SQL at all. Now a line mistaken for a frame can only be normalized when it did not need to be,
+    /// or withheld: a frame, mistaken or not, that has not closed by the line where the next SQL frame opens is
+    /// withheld with the rest of the field, so a look-alike's text never decides how a real statement is
+    /// read.</para>
     /// </summary>
     public static string? RedactContext(string? context)
     {
@@ -258,6 +271,16 @@ public static class PgLogTextRedactor
         var tests = 0;
         for (var end = start; end < lines.Length; end++)
         {
+            /* A line that opens an SQL frame of its own is one this frame had to close before (#3944's review).
+               Read on past it, a look-alike frame (a COPY value's or a JSON line's continuation) would take the
+               real frame's statement into its body and lex it from whatever state the look-alike's text left,
+               where a literal can read as the inside of an identifier and be kept. Nothing closed before it, so
+               this frame is withheld with the rest of the field. */
+            if (end > start && (s_contextSqlFrame.IsMatch(lines[end]) || s_contextSqlLine.IsMatch(lines[end])))
+            {
+                return (null, -1);
+            }
+
             var closesHere = (!quoted || (lines[end].EndsWith('"') && (end > start || lines[end].Length > headLength)))
                 && (end + 1 == lines.Length || s_contextFrameStart.IsMatch(lines[end + 1]));
             if (!closesHere)
