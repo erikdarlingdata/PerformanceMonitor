@@ -470,6 +470,77 @@ AND   xmin = $4::xid";
     /// <summary>Whether an alert incident's key has a PostgreSQL deadlock report's hash shape.</summary>
     public static bool IsReportHash(string? key) => key is not null && s_reportHash.IsMatch(key);
 
+    /// <summary>An incident's objects with each statement normalized; the live alert's no-statement text, which
+    /// carries no SQL, as it is.</summary>
+    private static List<string> NormalizedObjects(List<string> objects) =>
+        objects.ConvertAll(o => string.IsNullOrEmpty(o) || s_noStatementObject.IsMatch(o) ? o : PgDeadlockLogParser.NormalizeStatement(o)!);
+
+    /// <summary>
+    /// The property the pass adds to an incident it rebuilt from its raw report (#4036's round-2 review, finding 2),
+    /// so no walk keys it: the rebuilt key is the report's new identity, which is 32 hex like the raw hash it
+    /// replaced, and while the report is still raw it finds nothing by it, just as a raw key whose report is gone
+    /// finds nothing. The marker is its own property, never part of the key, so:
+    /// <list type="bullet">
+    /// <item>it cannot be taken for a raw or keyed hash, and no key's value changes;</item>
+    /// <item>dedupe is unchanged: the rebuilt key is the one the live alert gives the rewritten report, and the
+    /// cooldown seed's anchored <c>"DedupKey":"…"</c> match (<see cref="AlertContextSerializer.BuildDedupKeyLikePattern"/>)
+    /// is unaffected, because the marker follows the incident's other members;</item>
+    /// <item>every reader ignores it: <see cref="AlertIncidentDto"/> does not map it, and nothing in the product
+    /// deserializes an alert context with unmapped members disallowed, so it needs no store migration.</item>
+    /// </list>
+    /// </summary>
+    public const string RebuiltIncidentMarker = "RemaskRebuilt4012";
+
+    /// <summary>The positions of the incidents in <paramref name="contextJson"/> that carry
+    /// <see cref="RebuiltIncidentMarker"/>.</summary>
+    private static HashSet<int> RebuiltIncidentIndexes(string contextJson)
+    {
+        var indexes = new HashSet<int>();
+        using var document = JsonDocument.Parse(contextJson);
+        if (document.RootElement.ValueKind == JsonValueKind.Object
+            && document.RootElement.TryGetProperty(nameof(AlertContextDto.Incidents), out var incidents)
+            && incidents.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var incident in incidents.EnumerateArray())
+            {
+                if (incident.ValueKind == JsonValueKind.Object
+                    && incident.TryGetProperty(RebuiltIncidentMarker, out var marker)
+                    && marker.ValueKind == JsonValueKind.True)
+                {
+                    indexes.Add(index);
+                }
+
+                index++;
+            }
+        }
+
+        return indexes;
+    }
+
+    /// <summary><paramref name="json"/>, serialized from the DTO (which drops the marker), with
+    /// <see cref="RebuiltIncidentMarker"/> on the incidents at <paramref name="rebuilt"/>, appended after their
+    /// other members.</summary>
+    private static string MarkRebuilt(string json, HashSet<int> rebuilt)
+    {
+        if (rebuilt.Count == 0)
+        {
+            return json;
+        }
+
+        var root = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        var incidents = root[nameof(AlertContextDto.Incidents)]!.AsArray();
+        foreach (var index in rebuilt)
+        {
+            if (incidents[index] is System.Text.Json.Nodes.JsonObject incident)
+            {
+                incident[RebuiltIncidentMarker] = true;
+            }
+        }
+
+        return root.ToJsonString();
+    }
+
     /// <summary>
     /// The incident the live alert builds for a raw report once it is rewritten
     /// (<see cref="DarlingWorker.BuildPgDeadlockIncident"/> over the row the read then returns): its key is the
@@ -499,11 +570,20 @@ AND   xmin = $4::xid";
     /// unchanged. Pure.
     /// </summary>
     /// <param name="keyUnresolvedWith">The store's key, to key an unresolvable key with; null leaves such a key as it
-    /// is for now. Null while any report may still be raw: an alert already rewritten to a raw report's new identity
-    /// finds no report by it until the report stage rewrites that report, and keying it then would cut it from the
-    /// report it names (<see cref="RunAsync"/> keys them only after the report stage is done).</param>
+    /// is for now. An incident this pass rebuilt from its report carries <see cref="RebuiltIncidentMarker"/> and is
+    /// never keyed (#4036's round-2 review, finding 2): its key is the report's new identity, which finds no report
+    /// while that report is still raw, and keying it would cut it from the report it names. So the key is passed on
+    /// every walk, the first included (finding 3), and an unmarked key that finds no report is keyed in the same
+    /// write that normalizes its row, rather than bound back to the store raw.</param>
+    /// <param name="reportsMayBeRaw">True for the alert stage, which runs before the reports are rewritten: an
+    /// unmarked key that finds no report is keyed only in a row no pass has rewritten (one with an incident that
+    /// still names a raw report, or still carries a statement to normalize), where it can only be a raw hash. A row
+    /// #4022's pass rewrote carries no marker, and its rebuilt key finds nothing while its report is raw; such a row
+    /// has nothing else to rewrite, so it is not written at all, and the alert-key stage keys what is left once every
+    /// report is rewritten.</param>
     public static (string ContextJson, string? DetailText)? RemaskAlert(
-        string contextJson, string? detailText, Func<string, ResolvedReport> resolve, PgLogHashKey? keyUnresolvedWith)
+        string contextJson, string? detailText, Func<string, ResolvedReport> resolve, PgLogHashKey? keyUnresolvedWith,
+        bool reportsMayBeRaw = false)
     {
         ArgumentNullException.ThrowIfNull(resolve);
 
@@ -522,30 +602,52 @@ AND   xmin = $4::xid";
             return null;
         }
 
+        /* A key the pass rebuilt from its report is the report's new identity (#4036's round-2 review, finding 2):
+           while the report is raw it finds nothing by it, and it is never keyed. */
+        var rebuilt = RebuiltIncidentIndexes(contextJson);
+        var resolvedAt = new Dictionary<int, ResolvedReport>();
+        var neverRemasked = false;
+        for (var index = 0; index < incidents.Count; index++)
+        {
+            if (incidents[index] is { } candidate && IsReportHash(candidate.DedupKey) && !rebuilt.Contains(index))
+            {
+                var resolved = resolve(candidate.DedupKey);
+                resolvedAt[index] = resolved;
+                var objects = candidate.InvolvedObjects ?? new List<string>();
+                neverRemasked |= resolved.State == ReportState.Raw
+                    || (resolved.State == ReportState.Missing && !NormalizedObjects(objects).SequenceEqual(objects, StringComparer.Ordinal));
+            }
+        }
+
+        /* While a report may be raw, an unmarked key that finds no report is keyed only in a row no pass has
+           rewritten, where it can only be a raw hash: one that still names a raw report, or still carries a
+           statement to normalize. A row #4022's pass rewrote (it marked nothing, and left no such incident) may hold
+           a still-raw report's new identity, and waits for the alert-key stage, after every report is rewritten. */
+        var keyWith = reportsMayBeRaw && !neverRemasked ? null : keyUnresolvedWith;
         var replacements = new List<(string OldKey, string NewKey, string OldObjects, string NewObjects)>();
         var rewritten = new List<AlertIncidentDto>(incidents.Count);
-        foreach (var incident in incidents)
+        for (var index = 0; index < incidents.Count; index++)
         {
-            if (incident is null || !IsReportHash(incident.DedupKey))
+            var incident = incidents[index];
+            if (!resolvedAt.TryGetValue(index, out var resolved))
             {
                 rewritten.Add(incident!);
                 continue;
             }
 
-            var objects = incident.InvolvedObjects ?? new List<string>();
-            var resolved = resolve(incident.DedupKey);
+            var objects = incident!.InvolvedObjects ?? new List<string>();
             List<string> newObjects;
             var newKey = incident.DedupKey;
             if (resolved is { State: ReportState.Raw, Incident: { } built })
             {
                 newKey = built.DedupKey;
                 newObjects = built.InvolvedObjects.ToList();
+                rebuilt.Add(index);
             }
             else if (resolved.State == ReportState.Missing)
             {
-                newKey = keyUnresolvedWith?.DeadlockAlertKey(incident.DedupKey) ?? incident.DedupKey;
-                newObjects = objects.ConvertAll(o =>
-                    string.IsNullOrEmpty(o) || s_noStatementObject.IsMatch(o) ? o : PgDeadlockLogParser.NormalizeStatement(o)!);
+                newKey = keyWith?.DeadlockAlertKey(incident.DedupKey) ?? incident.DedupKey;
+                newObjects = NormalizedObjects(objects);
             }
             else
             {
@@ -575,7 +677,7 @@ AND   xmin = $4::xid";
             Fields = item.Fields?.ConvertAll(field => field with { Value = Replace(field.Label, field.Value, replacements) }) ?? item.Fields!,
         }) ?? dto.Details!;
 
-        var json = JsonSerializer.Serialize(dto with { Details = details, Incidents = rewritten });
+        var json = MarkRebuilt(JsonSerializer.Serialize(dto with { Details = details, Incidents = rewritten }), rebuilt);
         var detail = detailText;
         if (detail is not null)
         {
@@ -623,8 +725,8 @@ AND   xmin = $4::xid";
     /// read and the write (a dismissal moves a row), which were left as they were and need the log read again.
     /// </summary>
     public static async Task<(string? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredAlertsAsync(
-        NpgsqlConnection connection, string? afterCursor, PgLogHashKey? keyUnresolvedWith, Action<string, RowOutcome>? rowDone,
-        CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, string? afterCursor, PgLogHashKey? keyUnresolvedWith, bool reportsMayBeRaw,
+        Action<string, RowOutcome>? rowDone, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
@@ -670,7 +772,8 @@ AND   xmin = $4::xid";
         foreach (var row in page)
         {
             var remasked = RemaskAlert(row.Context, row.Detail, reportKey =>
-                reports.TryGetValue((row.ServerId, reportKey), out var report) ? report : new ResolvedReport(ReportState.Missing, null), keyUnresolvedWith);
+                reports.TryGetValue((row.ServerId, reportKey), out var report) ? report : new ResolvedReport(ReportState.Missing, null), keyUnresolvedWith,
+                reportsMayBeRaw);
             var outcome = RowOutcome.Unchanged;
             if (remasked is { } alert)
             {
@@ -1314,15 +1417,20 @@ AND   xmin = $3::xid";
                     (bool End, int Examined) page;
                     if (ReferenceEquals(stage, progress.Alerts))
                     {
+                        /* With the key (#4035, #4036's round-2 review, finding 3): an incident whose report is gone is
+                           keyed in the same write that normalizes its row, so its raw key is never bound back to the
+                           store; an incident this pass rebuilt carries RebuiltIncidentMarker and is never keyed. */
                         var (next, e, _, _) = await RemaskStoredAlertsAsync(
-                            connection, progress.AlertCursor, null, (row, outcome) => { progress.AlertCursor = row; Counted(outcome); }, cancellationToken);
+                            connection, progress.AlertCursor, key, reportsMayBeRaw: true,
+                            (row, outcome) => { progress.AlertCursor = row; Counted(outcome); }, cancellationToken);
                         progress.AlertCursor = next;
                         page = (next is null, e);
                     }
                     else if (ReferenceEquals(stage, progress.AlertKeys))
                     {
                         var (next, e, _, _) = await RemaskStoredAlertsAsync(
-                            connection, progress.AlertKeyCursor, key, (row, outcome) => { progress.AlertKeyCursor = row; Counted(outcome); }, cancellationToken);
+                            connection, progress.AlertKeyCursor, key, reportsMayBeRaw: false,
+                            (row, outcome) => { progress.AlertKeyCursor = row; Counted(outcome); }, cancellationToken);
                         progress.AlertKeyCursor = next;
                         page = (next is null, e);
                     }
