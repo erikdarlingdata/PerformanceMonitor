@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 
@@ -265,6 +267,11 @@ WITH svr AS
 ),
 latest AS
 (
+    -- #3902: the base table, not v_query_stats. The view resolves statement text for EVERY row it returns
+    -- by joining query_text_dim -- the whole fleet's text dimension -- and the window sort below then
+    -- carries each row's text, so this read paid for the window's worth of text to print five. The row
+    -- keeps the two halves the view would have COALESCEd (the inline legacy text and the digest) and the
+    -- final SELECT resolves them for the output rows only, with the view's own expression.
     SELECT
         database_name,
         query_hash,
@@ -278,37 +285,60 @@ latest AS
         min_spills,
         max_spills,
         query_text,
+        query_text_digest,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_hash, query_plan_hash
             ORDER BY collection_time DESC
         ) AS rn
-    FROM v_query_stats, svr
+    FROM query_stats, svr
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
+),
+offenders AS
+(
+    SELECT
+        database_name,
+        query_hash,
+        query_plan_hash,
+        execution_count,
+        min_worker_time,
+        max_worker_time,
+        max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
+        max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
+        CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+        query_text,
+        query_text_digest
+    FROM latest
+    WHERE rn = 1
+    AND   min_worker_time >= 10000
+    AND   max_worker_time >= 250000
+    AND   execution_count >= 20
+    AND   creation_time_utc <= $2
+    AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+    ORDER BY worker_ratio DESC
+    LIMIT 5
 )
 SELECT
-    database_name,
-    query_hash,
-    query_plan_hash,
-    execution_count,
-    min_worker_time,
-    max_worker_time,
-    max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
-    max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    LEFT(query_text, 500) AS query_text
-FROM latest
-WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time_utc <= $2
-AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 5";
+    o.database_name,
+    o.query_hash,
+    o.query_plan_hash,
+    o.execution_count,
+    o.min_worker_time,
+    o.max_worker_time,
+    o.worker_ratio,
+    o.grant_ratio,
+    o.spill_divergence,
+    -- v_query_stats' own text expression, applied to the five rows that print. One dimension row per
+    -- digest by primary key, so the LEFT JOIN cannot fan out and a digest with no dimension row yet still
+    -- reports its offender, exactly as the view did.
+    LEFT(COALESCE(o.query_text, qtd.query_text), 500) AS query_text
+FROM offenders AS o
+LEFT JOIN query_text_dim AS qtd
+  ON qtd.digest = o.query_text_digest
+ORDER BY o.worker_ratio DESC";
 
     /// <summary>
     /// Top parameter-sensitive plans behind a PARAMETER_SENSITIVITY finding.
@@ -449,6 +479,16 @@ deduped AS
     -- safety. query_store_stats is a hypertable partitioned on collection_time, so this lets TimescaleDB
     -- exclude whole chunks instead of decompress-then-filter as retained history grows.
     AND   collection_time >= $2 - interval '1 day'
+    -- #3902: the PLAN_REGRESSION fact's offenders when the fact ran this pass ($5/$6, from
+    -- AnalysisContext.PlanRegressionOffenders), otherwise every query ($5 NULL). The top five this read
+    -- returns are the head of the ranking the fact has already computed -- the same detection over the same
+    -- window -- so deduplicating the server's whole slice again to find them was the pass's most expensive
+    -- read run twice. The one way the two rankings can part: the fact folds each plan_id into one
+    -- query_plan_hash and this read folds rows by their own, so a plan_id whose snapshots carry two hashes
+    -- can score differently here (#2312 measured 0 of 38,420 plans changing hash in a day). The arrays are
+    -- matched independently, which admits every pairing of the listed databases and query ids: a superset
+    -- of the offenders, never a subset.
+    AND   ($5::text[] IS NULL OR (database_name = ANY($5::text[]) AND query_id = ANY($6::bigint[])))
 ),
 plan_dedup AS
 (
@@ -574,7 +614,9 @@ LIMIT 5";
     /// Top regressed queries behind a PLAN_REGRESSION finding.
     /// Re-runs Detector B's detection for the top 5 offenders. Uses the same 14-day
     /// last_execution_time comparison window as the detector — NOT the standard analysis
-    /// window — so the days-old "best plan" baseline is present.
+    /// window — so the days-old "best plan" baseline is present. Since #3902 it re-runs it over
+    /// the queries the fact reported this pass (<see cref="AnalysisContext.PlanRegressionOffenders"/>),
+    /// and over every query only when the fact did not run.
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -589,6 +631,22 @@ LIMIT 5";
            would report for this run. */
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+        /* $5/$6 (#3902): the fact's offenders, or NULL when it did not run, failed, or reported none — typed
+           explicitly, because a NULL carries no array type for the server to infer. An empty list is read as
+           unrestricted rather than as "nothing": a pass whose fact found no regression raises no
+           PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a fact. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text,
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.DatabaseName).ToArray()
+        });
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint,
+            Value = offenders is null ? DBNull.Value : offenders.Select(o => o.QueryId).ToArray()
+        });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
