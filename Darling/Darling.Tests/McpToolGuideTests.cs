@@ -72,7 +72,7 @@ public sealed class McpToolGuideTests
             Assert.Contains("over an event_time window ending at as_of, newest first.", served.Served, StringComparison.Ordinal);
             /* Zero is not a measurement here unless the witness says so (#3541 A12). */
             Assert.Contains("An empty answer is not a clean bill: read status, source_observed and last_captured_at.", served.Served, StringComparison.Ordinal);
-            Assert.EndsWith(McpToolGuide.Pointer, served.Served, StringComparison.Ordinal);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
             Assert.True(served.Served.Length <= 600, $"{tool}: served head {served.Served.Length} is over the 600 target");
         }
 
@@ -180,7 +180,7 @@ public sealed class McpToolGuideTests
         Assert.Equal(("Whole.", (string?)null), McpToolGuide.Split("Whole."));
         Assert.Equal("Whole.", McpToolGuide.Served("Whole."));
         Assert.Equal(("Head.", "Tail."), McpToolGuide.Split("Head. " + McpToolGuide.Marker + " Tail."));
-        Assert.Equal("Head." + McpToolGuide.Pointer, McpToolGuide.Served("Head. " + McpToolGuide.Marker + " Tail."));
+        Assert.Equal("Head." + McpToolGuide.GuidePointer, McpToolGuide.Served("Head. " + McpToolGuide.Marker + " Tail."));
         Assert.Throws<InvalidOperationException>(() => McpToolGuide.Split("A " + McpToolGuide.Marker + " B " + McpToolGuide.Marker + " C"));
         Assert.Throws<InvalidOperationException>(() => McpToolGuide.Split(McpToolGuide.Marker + " tail only"));
         Assert.Throws<InvalidOperationException>(() => McpToolGuide.Split("head only " + McpToolGuide.Marker));

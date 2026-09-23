@@ -41,7 +41,7 @@ public static class McpToolGuide
     /// Appended to every served head that has a tail, so a caller knows a guide exists and where it is. One
     /// sentence for every converted tool, added here rather than hand-written into each head.
     /// </summary>
-    public const string Pointer = " Reading guide: get_tool_guide.";
+    public const string GuidePointer = " Reading guide: get_tool_guide.";
 
     /// <summary>
     /// The most guide text (tails plus topics) one <see cref="ToolName"/> answer carries. Items that do not fit
@@ -87,13 +87,13 @@ public static class McpToolGuide
     }
 
     /// <summary>
-    /// The description <c>tools/list</c> serves: the head, plus <see cref="Pointer"/> when there is a tail; the
+    /// The description <c>tools/list</c> serves: the head, plus <see cref="GuidePointer"/> when there is a tail; the
     /// unchanged description when there is no marker.
     /// </summary>
     public static string Served(string description)
     {
         var (head, tail) = Split(description);
-        return tail is null ? description : head + Pointer;
+        return tail is null ? description : head + GuidePointer;
     }
 
     /// <summary>
