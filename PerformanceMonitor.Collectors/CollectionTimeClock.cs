@@ -46,19 +46,29 @@ public static class CollectionTimeClock
     private static readonly ConcurrentDictionary<(int ServerId, string CollectorName), long> s_lastTicks = new();
 
     /// <summary>
-    /// Returns <paramref name="now"/> unchanged unless it would not be STRICTLY greater than the last value
-    /// handed out for this (server, collector) pair, in which case it returns that last value plus one tick.
+    /// Returns <paramref name="now"/>, floored to the microsecond, unless that would not be STRICTLY greater than
+    /// the last value handed out for this (server, collector) pair, in which case it returns that last value plus
+    /// one microsecond (<see cref="StoredResolutionTicks"/>, what the stores keep).
     /// Thread-safe (a lock-free compare-and-swap via <see cref="ConcurrentDictionary{TKey,TValue}.AddOrUpdate{TArg}"/>)
     /// and never blocks — safe to call from every collector run, including the N=4 concurrent server bodies.
     /// </summary>
     public static DateTime NextStrictlyAfter(int serverId, string collectorName, DateTime now)
     {
+        var seedTicks = now.Ticks - now.Ticks % StoredResolutionTicks;
         var resultTicks = s_lastTicks.AddOrUpdate(
             (serverId, collectorName),
-            addValueFactory: static (_, seedTicks) => seedTicks,
-            updateValueFactory: static (_, lastTicks, seedTicks) => seedTicks > lastTicks ? seedTicks : lastTicks + 1,
-            factoryArgument: now.Ticks);
+            addValueFactory: static (_, seed) => seed,
+            updateValueFactory: static (_, lastTicks, seed) => seed > lastTicks ? seed : lastTicks + StoredResolutionTicks,
+            factoryArgument: seedTicks);
 
         return new DateTime(resultTicks, now.Kind);
     }
+
+    /// <summary>
+    /// The finest instant PostgreSQL's <c>timestamp</c> and DuckDB's <c>TIMESTAMP</c> keep: one microsecond, ten
+    /// .NET ticks. Both truncate anything finer on write, so a step of one tick left two runs on the SAME stored
+    /// <c>collection_time</c>, and so did two instants that differ only below the microsecond. Flooring first and
+    /// stepping by a whole microsecond is what makes "strictly after" hold in the store, not just in memory.
+    /// </summary>
+    private const long StoredResolutionTicks = TimeSpan.TicksPerMicrosecond;
 }

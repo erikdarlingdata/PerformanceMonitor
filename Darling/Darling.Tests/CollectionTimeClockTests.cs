@@ -51,7 +51,7 @@ public sealed class CollectionTimeClockTests
     /// both would stamp their row with an IDENTICAL collection_time, making "the newest reading" ambiguous.
     /// </summary>
     [Fact]
-    public void NextStrictlyAfter_NudgesForwardByOneTick_WhenItWouldCollideWithTheLastStamp()
+    public void NextStrictlyAfter_NudgesForwardByOneStoredMicrosecond_WhenItWouldCollideWithTheLastStamp()
     {
         const int serverId = -393603;
         const string collector = "cpu_scheduler_stats";
@@ -61,7 +61,7 @@ public sealed class CollectionTimeClockTests
         var secondRun = CollectionTimeClock.NextStrictlyAfter(serverId, collector, collidingInstant);
 
         Assert.Equal(collidingInstant, firstRun);
-        Assert.Equal(collidingInstant.AddTicks(1), secondRun);
+        Assert.Equal(collidingInstant.AddMicroseconds(1), secondRun);
         Assert.True(secondRun > firstRun, "two runs stamped with the same instant must not store the same collection_time");
     }
 
@@ -77,8 +77,8 @@ public sealed class CollectionTimeClockTests
         var run3 = CollectionTimeClock.NextStrictlyAfter(serverId, collector, collidingInstant);
 
         Assert.Equal(collidingInstant, run1);
-        Assert.Equal(collidingInstant.AddTicks(1), run2);
-        Assert.Equal(collidingInstant.AddTicks(2), run3);
+        Assert.Equal(collidingInstant.AddMicroseconds(1), run2);
+        Assert.Equal(collidingInstant.AddMicroseconds(2), run3);
     }
 
     /// <summary>A clock that appears to move backwards (NTP step, VM migration) must not un-advance the
@@ -94,7 +94,7 @@ public sealed class CollectionTimeClockTests
         CollectionTimeClock.NextStrictlyAfter(serverId, collector, later);
         var result = CollectionTimeClock.NextStrictlyAfter(serverId, collector, earlier);
 
-        Assert.Equal(later.AddTicks(1), result);
+        Assert.Equal(later.AddMicroseconds(1), result);
     }
 
     [Fact]
@@ -113,6 +113,26 @@ public sealed class CollectionTimeClockTests
         Assert.Equal(now, serverB);
         Assert.Equal(now, collectorA);
         Assert.Equal(now, collectorB);
+    }
+
+    /// <summary>
+    /// #3936: PostgreSQL and DuckDB keep collection_time to the microsecond and truncate below it, so two runs
+    /// whose instants differ only in ticks under one microsecond would still store ONE collection_time. The clock
+    /// floors to the stored microsecond first, so the second run steps a whole microsecond past the first.
+    /// </summary>
+    [Fact]
+    public void NextStrictlyAfter_SeparatesTwoInstantsThatShareAStoredMicrosecond()
+    {
+        const int serverId = -393611;
+        const string collector = "cpu_scheduler_stats";
+        var microsecond = new DateTime(2026, 9, 23, 6, 0, 0, DateTimeKind.Utc);
+        var firstRun = CollectionTimeClock.NextStrictlyAfter(serverId, collector, microsecond.AddTicks(3));
+        var secondRun = CollectionTimeClock.NextStrictlyAfter(serverId, collector, microsecond.AddTicks(7));
+
+        Assert.Equal(microsecond, firstRun);
+        Assert.Equal(microsecond.AddMicroseconds(1), secondRun);
+        Assert.Equal(0, firstRun.Ticks % TimeSpan.TicksPerMicrosecond);
+        Assert.Equal(0, secondRun.Ticks % TimeSpan.TicksPerMicrosecond);
     }
 
     [Theory]
