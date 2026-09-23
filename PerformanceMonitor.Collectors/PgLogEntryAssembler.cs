@@ -135,9 +135,13 @@ public static class PgLogEntryAssembler
 
     /* %e: five characters, digits and capitals, at least one digit (every SQLSTATE class or subclass
        carries one), not glued to an identifier character. The digit requirement is what keeps a
-       five-letter upper-case host name in %r from reading as an error code. */
+       five-letter upper-case host name in %r from reading as an error code. Nor is it %r's port: %r renders
+       `host(port)`, and a five-digit port in its parentheses read as the SQLSTATE of every event under the RDS
+       default `%t:%r:%u@%d:[%p]:` (#4047 review), an ephemeral port often in classes 53-58 (resources, operator
+       intervention, system errors). A bare five-digit %l, %x or %v still reads as one; only the target's own
+       log_line_prefix could tell those from %e (#4046). */
     private static readonly Regex s_sqlState = new(
-        @"(?<![A-Za-z0-9])(?=[0-9A-Z]{0,4}\d)(?<state>[0-9A-Z]{5})(?![A-Za-z0-9])",
+        @"(?<![A-Za-z0-9])(?!(?<=\()[0-9A-Z]{5}\))(?=[0-9A-Z]{0,4}\d)(?<state>[0-9A-Z]{5})(?![A-Za-z0-9])",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly HashSet<string> s_primaryLabels = new(StringComparer.Ordinal)

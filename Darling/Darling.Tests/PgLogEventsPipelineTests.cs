@@ -119,6 +119,21 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains(P + "[4102] STATEMENT:  UPDATE orders", lockWait.RawText, StringComparison.Ordinal);
     }
 
+    /// <summary>#4047 review: %r's port is never a SQLSTATE, under IPv4 or IPv6, while an %e beside it still is.</summary>
+    [Fact]
+    public void APortInPercentR_IsNotReadAsASqlState_ButAnPercentEBesideItIs()
+    {
+        var entries = PgLogEntryAssembler.Assemble(
+            "2026-09-18 03:07:12 UTC:fe80::1(53100):app_rw@app_db:[4102]:LOG:  connection authorized: user=app_rw database=app_db\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(57014):app_rw@app_db:[4103]:28P01:FATAL:  password authentication failed for user \"app_rw\"\n");
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(4102, entries[0].Pid);
+        Assert.Null(entries[0].SqlState);
+        Assert.Equal(4103, entries[1].Pid);
+        Assert.Equal("28P01", entries[1].SqlState);
+    }
+
     [Fact]
     public void TheAssembler_ReadsBothPrefixFamilies_AndLiftsUserDatabaseAndSqlStateFromThePrefix()
     {
@@ -129,6 +144,8 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(4102, managed[0].Pid);
         Assert.Equal(new DateTime(2026, 9, 18, 3, 7, 12, DateTimeKind.Utc), managed[0].OccurredAtUtc);
         Assert.StartsWith("SELECT count(*)", managed[0].Statement, StringComparison.Ordinal);
+        /* %r renders `host(port)`: the port 52345 is not a SQLSTATE, and this prefix carries no %e (#4047 review). */
+        Assert.Null(managed[0].SqlState);
         /* A background process renders `@` alone under %u@%d: neither half is a name. */
         Assert.Null(managed[1].UserName);
         Assert.Null(managed[1].DatabaseName);
