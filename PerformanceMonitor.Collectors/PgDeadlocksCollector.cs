@@ -110,7 +110,12 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        server: ReadAsync recognises it and throws PgLoggingCollectorOffException, which the runner records
        as a named non-fatal skip — the same not-collected-with-reason answer the store's own log read gives
        for an empty directory, rather than a failure or a silent zero. The marker is spelled here in this
-       query's own four columns, because a UNION ALL arm has to match the column list it joins. */
+       query's own one column, because a UNION ALL arm has to match the column list it joins.
+
+       A second marker arm (#3997) is the narrower gap: logging_collector on, but every file the shared tail
+       saw was a csvlog/jsonlog sibling (log_destination carries no stderr), so newest came back empty for a
+       different reason than the setting being off. ReadAsync throws PgNoStderrLogFileException for that one;
+       the two predicates cannot both hold, since one needs the setting off and the other needs it on. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
     m[1]    AS report_text
@@ -122,6 +127,9 @@ FROM tail,
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoStderrLogFileException.Marker + @"'
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 500";
 
     public override string Name => "pg_deadlocks";
@@ -176,6 +184,14 @@ LIMIT 500";
             if (string.Equals(firstColumn, PgLoggingCollectorOffException.Marker, System.StringComparison.Ordinal))
             {
                 throw new PgLoggingCollectorOffException();
+            }
+
+            /* The second marker row (#3997): logging_collector is on but the tail excluded every file as a
+               csvlog/jsonlog sibling, so there is no stderr-format file this cycle. Same reasoning as above;
+               a regexp capture of a literal-digit timestamp cannot equal this marker text by accident. */
+            if (string.Equals(firstColumn, PgNoStderrLogFileException.Marker, System.StringComparison.Ordinal))
+            {
+                throw new PgNoStderrLogFileException();
             }
 
             /* One column, the candidate's text (#4005). Reaching the parser is what makes the stamp's meaning
