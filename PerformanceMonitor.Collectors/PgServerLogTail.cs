@@ -49,6 +49,13 @@ namespace PerformanceMonitor.Collectors;
 /// log sweep made the identical call for the identical reason — so there is one rule for "is this file
 /// stderr-format" rather than two that could drift.</para>
 ///
+/// <para><b>And <c>newest</c> lists nothing unless <c>log_destination</c> includes <c>stderr</c></b> (#4019).
+/// Without stderr as a destination, whatever <c>.log</c> file the directory still holds is stale: the
+/// syslogger's one-off "ending log output to stderr" file, or output from before the setting changed. Reading
+/// it every cycle showed a quiet target, or a refusal about that stale file's timestamps. An empty
+/// <c>newest</c> sends the query to <see cref="NoStderrLogFileMarkerSql"/>'s named refusal instead. The value
+/// is compared case-insensitively with spaces removed, since PostgreSQL accepts <c>'Stderr, CSVlog'</c>.</para>
+///
 /// <para><b>The listing is GATED on <c>logging_collector</c></b> (#3410): off means the server logs to
 /// stderr, the log directory may legitimately not exist, and 58P01 every cycle on a deliberate
 /// configuration is the wrong report. The predicate is pseudoconstant, so the planner enforces it as a
@@ -107,6 +114,7 @@ WITH newest AS (
     FROM pg_catalog.pg_ls_logdir()
     WHERE pg_catalog.current_setting('logging_collector') = 'on'
       AND name !~* '\.(csv|json)$'
+      AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
     ORDER BY modification DESC
     LIMIT 1
 ),
@@ -128,13 +136,23 @@ tail AS (
 
     /// <summary>
     /// The predicate the second marker arm carries (#3997): true exactly when <c>logging_collector</c> is on
-    /// — so <see cref="LoggingCollectorOffMarkerSql"/> is false — and <c>newest</c> still came back empty,
-    /// which only the <c>.csv</c>/<c>.json</c> exclusion above can cause, since the collector process
-    /// guarantees a current file the moment it is on. References <c>newest</c> rather than re-listing the
-    /// directory, so a target where <c>pg_ls_logdir()</c> is itself expensive is not asked twice, and so the
-    /// two markers read from the exact same listing rather than two that could disagree about what is
-    /// there. Each consumer appends <c>UNION ALL SELECT &lt;marker in its own columns&gt; WHERE</c> + this,
-    /// same shape as the marker above.
+    /// — so <see cref="LoggingCollectorOffMarkerSql"/> is false — and <c>newest</c> came back empty.
+    ///
+    /// <para><b>The setting decides, not the directory (#4019).</b> <c>newest</c> is empty whenever
+    /// <c>log_destination</c> lacks <c>stderr</c>, because <see cref="TailCteSql"/> checks the setting before it
+    /// lists anything. A directory alone can't answer it: the syslogger writes one small "ending log output to
+    /// stderr" file the moment it determines stderr is not a destination (170 bytes on a fresh 18.6 target
+    /// started with <c>log_destination = 'csvlog'</c>), and a target that ever had stderr keeps its old
+    /// <c>.log</c> files. When only the directory decided, <c>newest</c> found that stale file, this marker
+    /// almost never fired, and the collectors read the file every cycle as a quiet target, or refused it for its
+    /// old timestamps' zone. Reading the setting is exact where a file size or a match on the file's text would
+    /// guess, and the text is also translated under a non-English <c>lc_messages</c>. Emptiness still covers a
+    /// directory that holds nothing but csvlog output while <c>stderr</c> is configured.</para>
+    ///
+    /// <para>References <c>newest</c> rather than re-listing the directory, so a target where
+    /// <c>pg_ls_logdir()</c> is itself expensive is not asked twice, and so the two markers read from the exact
+    /// same listing. Each consumer appends <c>UNION ALL SELECT &lt;marker in its own columns&gt; WHERE</c> +
+    /// this, the same shape as the marker above.</para>
     /// </summary>
     public const string NoStderrLogFileMarkerSql =
         "pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)";

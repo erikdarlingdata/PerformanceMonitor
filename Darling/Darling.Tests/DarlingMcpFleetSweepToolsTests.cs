@@ -109,6 +109,7 @@ public sealed class DarlingMcpFleetSweepToolsTests
         var description = ToolMethods().Single()
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
+        Assert.Contains("MUTE SEMANTICS", description, StringComparison.Ordinal);
         Assert.Contains("DELIVERY WAS OFF", description, StringComparison.Ordinal);
         Assert.Contains("would_have_paged", description, StringComparison.Ordinal);
         Assert.Contains("muted, and nothing would have paged", description, StringComparison.Ordinal);
@@ -118,6 +119,9 @@ public sealed class DarlingMcpFleetSweepToolsTests
         Assert.Contains("instrument_liveness", description, StringComparison.Ordinal);
         /* The knob's home is named, so an agent that wants the cadence goes to the settings read. */
         Assert.Contains("fleet_sweep", description, StringComparison.Ordinal);
+        /* #3898 Phase 2: the instructions' cross-server paragraph carried this cadence fact; once that
+           paragraph was cut, the description became the only place an agent could learn it. */
+        Assert.Contains("at most one daily rollup", description, StringComparison.Ordinal);
     }
 
     /// <summary>#3487's output side, stated where an agent reads: every sweep id the payload carries
@@ -240,18 +244,9 @@ public sealed class DarlingMcpFleetSweepToolsTests
             source, StringComparison.Ordinal);
     }
 
-    /// <summary>The house rule every tool suite applies: the instructions an MCP client plans against
-    /// must carry the tool — and for this one, the same two field contracts the description carries,
-    /// because the instructions' cross-server section is where an agent first meets the sweep.</summary>
-    [Fact]
-    public void TheInstructions_CarryTheTool_AndItsFieldContracts()
-    {
-        var text = DarlingMcpInstructions.Text;
-        Assert.Contains("get_sweep_reports", text, StringComparison.Ordinal);
-        Assert.Contains("MUTE SEMANTICS", text, StringComparison.Ordinal);
-        Assert.Contains("QUIET IS NOT CLEAN", text, StringComparison.Ordinal);
-        Assert.Contains("bounded at ONE daily rollup", text, StringComparison.Ordinal);
-    }
+    /* #3898 Phase 2 (D5): the instructions' duplicate cross-server paragraph naming this tool and its field
+       contracts is gone — Description_CarriesTheMuteSemantics_AndTheQuietIsNotCleanBlock above is now the
+       only pin on them, the tool's own description being the sole surface left to carry them. */
 
     /* ---------------- advertised MCP schema ---------------- */
 

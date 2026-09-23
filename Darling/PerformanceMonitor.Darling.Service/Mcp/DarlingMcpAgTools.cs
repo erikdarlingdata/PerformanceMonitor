@@ -39,7 +39,9 @@ public sealed class DarlingMcpAgTools
         "log-send and redo queue sizes in KB, send/redo rates in KB/s, estimated drain minutes, secondary lag " +
         "seconds, and whether data movement is suspended and why). Each group is one monitored server's VIEW of " +
         "an AG and names that server, so an AG with several monitored replicas appears once per replica — compare " +
-        "them to reconcile perspectives. Severities are computed server-side and restate the DMVs' OWN verdicts " +
+        "them to reconcile perspectives (operational_state and recovery_health are populated only for the LOCAL " +
+        "replica, connected_state only from the primary — the perspectives genuinely differ by design). " +
+        "Severities are computed server-side and restate the DMVs' OWN verdicts " +
         "(states and health strings) only: lag and queue depth are NOT banded, so a badly lagging asynchronous " +
         "secondary whose replica health still reads HEALTHY carries a healthy severity — read secondary_lag_seconds " +
         "and the queue sizes yourself, and read lag together with is_suspended (the DMV reports 0 lag while data " +
