@@ -1561,9 +1561,15 @@ public sealed class DarlingWorker : BackgroundService
             DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
                 true, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
                 null, outcome.Message, outcome.UsedLinkMode),
+            /* #3927: and what a failure actually put back is carried too. Leaving these at their defaults here
+               would hand the alert a clean revert whatever happened, the same dropped-at-the-seam shape the
+               success arm's warning once had. */
             DarlingStoreUpgrade.StoreUpgradeStatus.Failed => new DarlingSelfAlertEvaluator.StoreUpgradeReport(
                 false, outcome.FromMajor, outcome.ToMajor, outcome.FromTimescale, outcome.ToTimescale,
-                outcome.FailedStep, outcome.Message, false),
+                outcome.FailedStep, outcome.Message, false,
+                RuntimeReverted: outcome.RuntimeReverted,
+                ControlFileRestored: outcome.PreUpgradeData == DarlingStoreUpgrade.PreUpgradeDataDirectory.ControlFileRestored,
+                DataDirectoryNotRestored: outcome.PreUpgradeData == DarlingStoreUpgrade.PreUpgradeDataDirectory.NotRestored),
             _ => null,
         };
 

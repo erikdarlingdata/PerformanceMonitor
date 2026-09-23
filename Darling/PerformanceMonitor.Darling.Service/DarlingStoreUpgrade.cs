@@ -53,11 +53,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// — which is also what Timescale documents ("the version of TimescaleDB must be the same before and after
 /// the PostgreSQL upgrade"). Hence: bridge first, upgrade second.</para>
 ///
-/// <para><b>Failure isolation.</b> Copy mode leaves the old data directory byte-for-byte untouched, so
-/// every failure path reverts to the old runtime + old data directory and the store keeps running on its
-/// original major. A failure also RECORDS the failing zip's hash in <see cref="RuntimeBlockedFileName"/>
-/// so the next start does not retry the same known-bad package on a loop — a different zip clears it.
-/// Nothing here ever leaves the store down.</para>
+/// <para><b>Failure isolation.</b> Copy mode leaves the old data directory byte-for-byte untouched, and
+/// hard-link mode changes exactly one thing in it before the commit point, pg_upgrade's rename of
+/// <c>global\pg_control</c>, which every failure path undoes (#3927). So a failure puts the old data
+/// directory back, reverts to the old runtime, and the store keeps running on its original major. A failure
+/// also RECORDS the failing zip's hash in <see cref="RuntimeBlockedFileName"/> so the next start does not
+/// retry the same known-bad package on a loop — a different zip clears it. Nothing here leaves the store
+/// down by choice; when putting it back cannot be done (a file held open, a server that will not stop),
+/// the log and the outcome say so and name the manual step rather than claim a running store.</para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class DarlingStoreUpgrade
@@ -162,7 +165,15 @@ internal sealed class DarlingStoreUpgrade
         string? ToTimescale,
         string? FailedStep,
         string? Message,
-        bool UsedLinkMode)
+        bool UsedLinkMode,
+        /* #3927: what a FAILED upgrade actually managed to put back. Failed used to mean "reverted, and the
+           store keeps running" unconditionally, and in hard-link mode, or with a server the upgrade could not
+           stop, neither half was always true. A Failed outcome whose data directory was NOT put back is one
+           no alert ever carries (the store cannot start to send it), so the log is where that case is said
+           in full. The defaults are the clean revert, so every outcome built before these existed still
+           means what it meant. */
+        PreUpgradeDataDirectory PreUpgradeData = PreUpgradeDataDirectory.Untouched,
+        bool RuntimeReverted = true)
     {
         public static StoreUpgradeOutcome None { get; } =
             new(StoreUpgradeStatus.None, 0, 0, null, null, null, null, false);
@@ -1046,8 +1057,19 @@ internal sealed class DarlingStoreUpgrade
     /// revert to make sense — the pre-upgrade major. Compared against <c>PG_VERSION</c>, which needs no
     /// binaries to read, which matters because the situation that brings us here may be binaries that do not
     /// run.</para>
+    ///
+    /// <para><b>Refuses while a server is still running on the data directory (#3927).</b> A postmaster starts
+    /// every backend from its own binaries' path, and Windows lets a directory holding a RUNNING executable be
+    /// moved. So a revert under a server the upgrade could not stop moves the binaries out from under it.
+    /// Reproduced on a copy of a real store, the next connection was served by an 18.4 backend under an 18.6
+    /// postmaster, and the next service start adopted that postmaster (<c>pg_ctl status</c> answers "running"
+    /// for one on any port) and then could not connect on the configured one. Refusing leaves that server
+    /// whole and names what to stop.</para>
+    ///
+    /// <para>Returns whether the previous runtime is now in place. Every false has logged a CRITICAL saying what
+    /// to do by hand, and a caller must never report a revert this did not make.</para>
     /// </summary>
-    internal void RevertRuntime(string runtimeRoot, string zipHash, string dataDirectory, int expectedDataMajor)
+    internal bool RevertRuntime(string runtimeRoot, string zipHash, string dataDirectory, int expectedDataMajor)
     {
         var pgsqlDirectory = Path.Combine(runtimeRoot, "pgsql");
         var previousRoot = PreviousRuntimeRootFor(runtimeRoot);
@@ -1059,49 +1081,103 @@ internal sealed class DarlingStoreUpgrade
             _logger.LogCritical(
                 "REFUSING to revert the store runtime: the data directory {DataDirectory} is PostgreSQL {Actual}, not the PostgreSQL {Expected} this revert assumes. Restoring the older binaries now would leave them in front of a newer cluster and the store would not start. The current runtime is left in place. This is a bug in the caller — a revert was requested after the data directory had already moved forward.",
                 dataDirectory, actualDataMajor, expectedDataMajor);
-            return;
+            return false;
         }
 
+        var livePostmaster = FindLivePostmaster(dataDirectory);
+        if (livePostmaster is not null)
+        {
+            _logger.LogCritical(
+                "REFUSING to revert the store runtime: a PostgreSQL server (PID {Pid}) is still running on {DataDirectory}. Moving the runtime now would leave that server unable to start new backends, and the next service start would attach to it anyway. The runtime is left as it is. Stop that server first ({StopCommand}, or end the process), then move {Current} aside and move {Previous} into its place by hand before restarting the service.",
+                livePostmaster, dataDirectory,
+                $"\"{Path.Combine(previousPgsql, "bin", "pg_ctl.exe")}\" stop -D \"{dataDirectory}\" -m fast",
+                pgsqlDirectory, previousPgsql);
+            return false;
+        }
+
+        if (!Directory.Exists(previousPgsql))
+        {
+            _logger.LogCritical(
+                "Cannot revert the store runtime: the rescued copy {Previous} is gone. The service will start whatever is in {Current}.",
+                previousPgsql, pgsqlDirectory);
+            return false;
+        }
+
+        /* MOVE the failed runtime aside, never delete-then-move. A delete can partially succeed — a
+           postmaster that has not finished exiting still holds its binaries — and the swallowed
+           failure would leave a half-emptied pgsql directory that the following Move then refuses to
+           overwrite. The store is then left with a runtime missing pg_ctl.exe: a self-inflicted
+           unbootable install, produced by the very path that exists to make failure safe. A rename
+           either works completely or fails without touching anything. */
+        var failedRuntime = pgsqlDirectory + ".failed";
+        var movedAside = false;
         try
         {
-            if (!Directory.Exists(previousPgsql))
-            {
-                _logger.LogCritical(
-                    "Cannot revert the store runtime: the rescued copy {Previous} is gone. The service will start whatever is in {Current}.",
-                    previousPgsql, pgsqlDirectory);
-                return;
-            }
-
-            /* MOVE the failed runtime aside, never delete-then-move. A delete can partially succeed — a
-               postmaster that has not finished exiting still holds its binaries — and the swallowed
-               failure would leave a half-emptied pgsql directory that the following Move then refuses to
-               overwrite. The store is then left with a runtime missing pg_ctl.exe: a self-inflicted
-               unbootable install, produced by the very path that exists to make failure safe. A rename
-               either works completely or fails without touching anything. */
-            var failedRuntime = pgsqlDirectory + ".failed";
             TryDeleteDirectory(failedRuntime);
             if (Directory.Exists(pgsqlDirectory))
             {
                 Directory.Move(pgsqlDirectory, failedRuntime);
+                movedAside = true;
             }
 
             Directory.Move(previousPgsql, pgsqlDirectory);
-            TryDeleteDirectory(failedRuntime);
-            TryDeleteDirectory(previousRoot);
-
-            /* Record the failing package so the next start does not run the same doomed upgrade again, and
-               drop the stamp so the runtime on disk is not claimed to be the shipped one. */
-            File.WriteAllText(Path.Combine(runtimeRoot, RuntimeBlockedFileName), zipHash);
-            TryDeleteFile(Path.Combine(runtimeRoot, RuntimeStampFileName));
-
-            _logger.LogWarning("Reverted to the previous Postgres runtime — the store continues on its existing major.");
         }
         catch (Exception ex)
         {
-            _logger.LogCritical(
-                "Could not revert the store runtime ({Message}). Restore {Previous} over {Current} by hand before restarting the service.",
-                ex.Message, previousPgsql, pgsqlDirectory);
+            if (!movedAside)
+            {
+                _logger.LogCritical(
+                    "Could not revert the store runtime ({Message}). Restore {Previous} over {Current} by hand before restarting the service.",
+                    ex.Message, previousPgsql, pgsqlDirectory);
+                return false;
+            }
+
+            /* #3927: each rename is all-or-nothing, but the PAIR is not. The first one had happened, so there
+               is no runtime at pgsql at all, which is worse than either runtime, and this catch used to stop at
+               logging. Put back the one that was there: the store is then exactly as it was before the revert
+               was tried, and the rescued copy is still where a hand revert needs it. */
+            try
+            {
+                Directory.Move(failedRuntime, pgsqlDirectory);
+                _logger.LogCritical(
+                    "Could not revert the store runtime ({Message}), so the runtime it had moved aside was put back at {Current} rather than leave no runtime there at all. The revert did not happen: restore {Previous} over it by hand before restarting the service.",
+                    ex.Message, pgsqlDirectory, previousPgsql);
+            }
+            catch (Exception undo)
+            {
+                _logger.LogCritical(
+                    "Could not revert the store runtime ({Message}), and could not put back the runtime it had moved aside either ({UndoMessage}): there is NO runtime at {Current}. Move {Previous} to that path by hand before restarting the service; the runtime that was moved aside is at {Failed}.",
+                    ex.Message, undo.Message, pgsqlDirectory, previousPgsql, failedRuntime);
+            }
+
+            return false;
         }
+
+        TryDeleteDirectory(failedRuntime);
+        TryDeleteDirectory(previousRoot);
+
+        /* Record the failing package so the next start does not run the same doomed upgrade again, and
+           drop the stamp so the runtime on disk is not claimed to be the shipped one. #3927: this is
+           bookkeeping AFTER the revert, so a marker that will not write no longer reports the revert itself
+           as failed. It did not fail, and the hand restore that message named would have pointed at a
+           rescued copy that is already gone. The stamp stays in that case: it still names the package that
+           failed, which is what keeps the next start from retrying it. */
+        var blockedPath = Path.Combine(runtimeRoot, RuntimeBlockedFileName);
+        var stampPath = Path.Combine(runtimeRoot, RuntimeStampFileName);
+        try
+        {
+            File.WriteAllText(blockedPath, zipHash);
+            TryDeleteFile(stampPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Reverted the store runtime, but could not record the failed package at {Blocked} ({Message}). The runtime stamp is left in place instead, which also keeps the next start from retrying this package; delete {Stamp} to force a retry.",
+                blockedPath, ex.Message, stampPath);
+        }
+
+        _logger.LogWarning("Reverted to the previous Postgres runtime, for PostgreSQL {Major}.", expectedDataMajor);
+        return true;
     }
 
     /// <summary>
@@ -1546,10 +1622,13 @@ internal sealed class DarlingStoreUpgrade
         Action<string> AppendManagedConf);
 
     /// <summary>
-    /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure lands in one
-    /// place: revert the runtime, drop the half-built new cluster, leave the old data directory (untouched
-    /// in copy mode) exactly where it was, and return a Failed outcome so the caller keeps running the store
-    /// on its existing major. The one thing this must never do is leave the store down.
+    /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure before the commit
+    /// point lands in one place, <see cref="RecoverFromPreCommitFailureAsync"/>: drop the half-built new
+    /// cluster, put the old data directory back as the old runtime needs it (in hard-link mode that includes
+    /// undoing pg_upgrade's rename of <c>global\pg_control</c>), revert the runtime, and return a Failed
+    /// outcome so the caller keeps running the store on its existing major. The one thing this must never do
+    /// is leave the store down, and where some part of putting it back cannot be done, the outcome and the
+    /// log say so and name the manual step instead of claiming a running store (#3927).
     /// </summary>
     internal async Task<StoreUpgradeOutcome> UpgradeDataDirectoryAsync(UpgradeContext context, CancellationToken cancellationToken)
     {
@@ -1782,17 +1861,21 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (OperationCanceledException)
         {
-            /* Service shutdown mid-upgrade. Before the commit point the old data directory is untouched, so
-               the revert restores the previous runtime and the next start tries again. AFTER the commit point
-               the same revert would brick the store, so shutdown must leave the new runtime in place and let
-               the next start pick up an already-upgraded cluster — cancellation is not a licence to undo a
-               completed upgrade any more than an exception is. */
+            /* Service shutdown mid-upgrade. Before the commit point the old data directory is put back as it
+               was and the revert restores the previous runtime, so the next start tries again. "Put back"
+               used to be "untouched", which hard-link mode makes false once pg_upgrade begins linking and
+               renames global\pg_control (#3927); the same put-back runs here as on a failure, and before the
+               revert. AFTER the commit point the same revert would brick the store, so shutdown must leave the
+               new runtime in place and let the next start pick up an already-upgraded cluster — cancellation
+               is not a licence to undo a completed upgrade any more than an exception is. */
             await TryStopAsync(context, oldStarted);
 
             if (!swapped)
             {
                 TryDeleteDirectory(newDataDirectory);
-                RevertRuntimeForCancel(context);
+                var preUpgradeData = PutBackPreUpgradeDataDirectory(context, mode);
+                var reverted = RevertRuntimeForCancel(context);
+                ReportRecoveryBeforeCommit(context, preUpgradeData, reverted);
             }
             else
             {
@@ -1828,20 +1911,14 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex)
         {
-            /* PRE-COMMIT failure: the data directory has not been swapped, so the old one is exactly where
-               it was and reverting the runtime restores a working store. The "never modified" claim below is
-               only true on this path, which is why it lives here and not in a shared message. */
-            _logger.LogCritical(
-                "STORE UPGRADE FAILED at step '{Step}': {Message}. Reverting to PostgreSQL {Old} — the store keeps running on its existing major and NO data has been lost (the pre-upgrade data directory was never modified).",
-                step, ex.Message, context.OldMajor);
-
-            await TryStopAsync(context, oldStarted);
-            TryDeleteDirectory(newDataDirectory);
-            RevertRuntime(context.RuntimeRoot, context.ZipHash, context.DataDirectory, context.OldMajor);
-
-            return new StoreUpgradeOutcome(
-                StoreUpgradeStatus.Failed, context.OldMajor, context.NewMajor,
-                fromTimescale, context.BundledTimescaleVersion, step, ex.Message, false);
+            /* PRE-COMMIT failure: the swap has not committed, so the store goes back to its old cluster on its
+               old runtime. What that takes, and what may honestly be claimed once it is done, depends on how
+               far the upgrade got. "The pre-upgrade data directory was never modified" used to be logged here
+               before anything was put back; it is true in copy mode, and in hard-link mode only until
+               pg_upgrade begins linking (#3927). The recovery is its own method so a test can inject exactly
+               this failure. */
+            return await RecoverFromPreCommitFailureAsync(
+                context, mode, oldStarted, newDataDirectory, step, ex.Message, fromTimescale);
         }
         finally
         {
@@ -1862,17 +1939,251 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not stop the old cluster after a failed upgrade ({Message}); the next start adopts it.", ex.Message);
+            /* #3927: this used to end "the next start adopts it", as though that were the plan. It is the
+               problem: a start that adopts this server is running the old cluster on binaries the revert is
+               about to move, so RevertRuntime refuses while it is up and says what to stop. */
+            _logger.LogWarning(
+                "Could not stop the old cluster after a failed upgrade ({Message}). If it is still running on {DataDirectory} when the runtime is reverted, the revert is refused rather than moving binaries out from under it.",
+                ex.Message, context.DataDirectory);
         }
     }
 
-    private void RevertRuntimeForCancel(UpgradeContext context)
+    private bool RevertRuntimeForCancel(UpgradeContext context)
     {
         /* A cancelled upgrade is not a BAD package, so revert the binaries without recording the block —
            the next start should try again. */
         var blockedPath = Path.Combine(context.RuntimeRoot, RuntimeBlockedFileName);
-        RevertRuntime(context.RuntimeRoot, context.ZipHash, context.DataDirectory, context.OldMajor);
+        var reverted = RevertRuntime(context.RuntimeRoot, context.ZipHash, context.DataDirectory, context.OldMajor);
         TryDeleteFile(blockedPath);
+        return reverted;
+    }
+
+    /// <summary>What a failure before the commit point left of the pre-upgrade data directory (#3927).</summary>
+    internal enum PreUpgradeDataDirectory
+    {
+        /// <summary>Its contents needed nothing undone: copy mode never writes into it, or hard-link mode had not
+        /// yet begun linking. The store starts from it exactly as it did before the upgrade.</summary>
+        Untouched,
+
+        /// <summary>Hard-link mode had begun linking, and pg_upgrade's rename of <c>global\pg_control</c> was
+        /// undone. The new cluster that shared its files was never started outside pg_upgrade, so the old
+        /// cluster is intact.</summary>
+        ControlFileRestored,
+
+        /// <summary>It could not be put back. The store cannot start on either runtime until someone does it
+        /// by hand, and the log has named exactly what to move.</summary>
+        NotRestored,
+    }
+
+    /// <summary>
+    /// Everything a failure BEFORE the commit point does (#3927): stop the old cluster if this upgrade
+    /// started it, drop the half-built new cluster, put the pre-upgrade data directory back as the old runtime
+    /// needs it, revert the runtime, and return a Failed outcome that says how much of that actually worked.
+    ///
+    /// <para>The data directory is put back BEFORE the runtime is reverted, so the revert's own checks (the
+    /// data-major guard, the live-server refusal) read the directory the store will really start from. And
+    /// the claims come last, from what happened. They used to come first, as one CRITICAL line promising that
+    /// the store kept running and that the pre-upgrade data directory "was never modified", logged before
+    /// anything had been put back and false in hard-link mode.</para>
+    /// </summary>
+    internal async Task<StoreUpgradeOutcome> RecoverFromPreCommitFailureAsync(
+        UpgradeContext context,
+        FileTransferMode mode,
+        bool oldStarted,
+        string newDataDirectory,
+        string step,
+        string failure,
+        string? fromTimescale)
+    {
+        _logger.LogCritical(
+            "STORE UPGRADE FAILED at step '{Step}': {Message}. Putting the store back on PostgreSQL {Old}.",
+            step, failure, context.OldMajor);
+
+        await TryStopAsync(context, oldStarted);
+        TryDeleteDirectory(newDataDirectory);
+        var preUpgradeData = PutBackPreUpgradeDataDirectory(context, mode);
+        var reverted = RevertRuntime(context.RuntimeRoot, context.ZipHash, context.DataDirectory, context.OldMajor);
+        ReportRecoveryBeforeCommit(context, preUpgradeData, reverted);
+
+        return new StoreUpgradeOutcome(
+            StoreUpgradeStatus.Failed, context.OldMajor, context.NewMajor,
+            fromTimescale, context.BundledTimescaleVersion, step, failure, mode == FileTransferMode.Link,
+            preUpgradeData, reverted);
+    }
+
+    /// <summary>
+    /// Puts the pre-upgrade data directory back where, and as, the old runtime needs it (#3927). Two things
+    /// can stand in the way, and each is undone only when the evidence says this upgrade did it:
+    /// <list type="bullet">
+    /// <item>The directory swap moves it aside to its retained name, and moves it back when the second move
+    /// fails; that move back can fail too. Nothing at the configured path and a cluster under the retained
+    /// name is exactly that, and left alone it is the worst outcome available here: the next start finds no
+    /// cluster, initializes an EMPTY store in its place, and the retention sweep deletes the real one two
+    /// starts later. Moving it back is the swap's own undo, tried once more.</item>
+    /// <item>In hard-link mode pg_upgrade renames <c>global\pg_control</c> once linking starts; see
+    /// <see cref="RestoreLinkedControlFile"/>. Only in hard-link mode: copy mode never renames it, and a
+    /// renamed control file this upgrade did not produce is not this service's to rename back.</item>
+    /// </list>
+    /// </summary>
+    private PreUpgradeDataDirectory PutBackPreUpgradeDataDirectory(UpgradeContext context, FileTransferMode mode)
+    {
+        var retained = RetainedDataDirectoryFor(context.DataDirectory, context.OldMajor);
+        if (!File.Exists(Path.Combine(context.DataDirectory, "PG_VERSION"))
+            && File.Exists(Path.Combine(retained, "PG_VERSION")))
+        {
+            try
+            {
+                Directory.Move(retained, context.DataDirectory);
+                _logger.LogWarning(
+                    "Moved the pre-upgrade data directory back from {Retained} to {DataDirectory}: the directory swap had moved it aside and could not move it back itself.",
+                    retained, context.DataDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                var linkedControlFile = File.Exists(Path.Combine(retained, "global", "pg_control.old"))
+                    && !File.Exists(Path.Combine(retained, "global", "pg_control"));
+                _logger.LogCritical(
+                    "The store's data is at {Retained} and nothing is at {DataDirectory}: the directory swap moved it aside, and neither the swap nor this recovery could move it back ({Message}). Move it back by hand BEFORE restarting the service{ControlFileStep}. Do not restart first: a start that finds no cluster at the configured path initializes an EMPTY store there, and the real one is then deleted as an expired rollback copy two starts later.",
+                    retained, context.DataDirectory, ex.Message,
+                    linkedControlFile
+                        ? ", then rename global\\pg_control.old inside it back to global\\pg_control (pg_upgrade renamed it when hard-link mode began linking)"
+                        : string.Empty);
+                return PreUpgradeDataDirectory.NotRestored;
+            }
+        }
+
+        return mode == FileTransferMode.Link
+            ? RestoreLinkedControlFile(context.DataDirectory, _logger)
+            : PreUpgradeDataDirectory.Untouched;
+    }
+
+    /// <summary>
+    /// Undoes the one change pg_upgrade makes to the OLD cluster in hard-link mode (#3927). Once linking
+    /// starts it renames <c>global\pg_control</c> to <c>global\pg_control.old</c>, so that the old cluster
+    /// cannot be started by accident while it shares files with the new one. A failure after that point used
+    /// to leave the rename in place, and the store could not start on either runtime while the log said the
+    /// data directory had never been modified. PostgreSQL's pg_upgrade documentation gives the way back: if
+    /// the new cluster was never started, remove the suffix and the old cluster is usable again. This service
+    /// never starts the new cluster before the commit point, and a copy of a real 17.10 + TimescaleDB 2.28.1
+    /// store, taken through a full hard-link pg_upgrade and then restored this way, came back with every row
+    /// and chunk it had before.
+    ///
+    /// <para>Acts only on exactly pg_upgrade's rename, <c>pg_control.old</c> present and <c>pg_control</c>
+    /// absent, so it can never overwrite a control file. Static, with the logger passed in, so the rename is
+    /// pinned by tests on a planted directory.</para>
+    /// </summary>
+    internal static PreUpgradeDataDirectory RestoreLinkedControlFile(string dataDirectory, ILogger logger)
+    {
+        var controlFile = Path.Combine(dataDirectory, "global", "pg_control");
+        var renamed = controlFile + ".old";
+
+        if (File.Exists(controlFile) || !File.Exists(renamed))
+        {
+            logger.LogInformation(
+                "Nothing to restore in {Global}: pg_upgrade had not renamed the control file, so hard-link mode had not begun linking.",
+                Path.GetDirectoryName(controlFile));
+            return PreUpgradeDataDirectory.Untouched;
+        }
+
+        try
+        {
+            File.Move(renamed, controlFile);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogCritical(
+                "Could not rename {Renamed} back to {ControlFile} ({Message}). pg_upgrade renamed it when hard-link mode began linking, and until it is renamed back the store CANNOT start on either runtime. Rename it by hand before restarting the service. The new cluster that shared its files was never started outside pg_upgrade, so the old cluster is intact once the file is back.",
+                renamed, controlFile, ex.Message);
+            return PreUpgradeDataDirectory.NotRestored;
+        }
+
+        logger.LogWarning(
+            "Renamed {Renamed} back to {ControlFile}. pg_upgrade renames it when hard-link mode begins linking, so the old cluster cannot be started while it shares files with the new one. The new cluster was never started outside pg_upgrade, so the old cluster is intact and starts again.",
+            renamed, controlFile);
+        return PreUpgradeDataDirectory.ControlFileRestored;
+    }
+
+    /// <summary>
+    /// The last word on a failure before the commit point (#3927): what the store is left as, said only from
+    /// what actually happened. Only a store whose data directory is back and whose runtime reverted is
+    /// described as back, and only then is "no data has been lost" said without a condition. Every other
+    /// shape is CRITICAL, because it needs a person before the next start.
+    /// </summary>
+    private void ReportRecoveryBeforeCommit(UpgradeContext context, PreUpgradeDataDirectory preUpgradeData, bool runtimeReverted)
+    {
+        if (preUpgradeData == PreUpgradeDataDirectory.NotRestored)
+        {
+            _logger.LogCritical(
+                "The store CANNOT start on either runtime until its pre-upgrade data directory is put back by hand, as the CRITICAL entry above describes{RuntimeStep}. The data itself is intact on disk; nothing needs restoring from a backup.",
+                runtimeReverted ? string.Empty : ", and the previous runtime has to be put back by hand as well");
+            return;
+        }
+
+        if (!runtimeReverted)
+        {
+            _logger.LogCritical(
+                "The store was NOT put back on PostgreSQL {Old}: the previous runtime could not be restored, and the CRITICAL entry above says why and what to do. {Current} still holds the PostgreSQL {New} binaries, which cannot open this data directory, so the next service start fails until the runtime is put back by hand. The data directory itself is intact.",
+                context.OldMajor, Path.Combine(context.RuntimeRoot, "pgsql"), context.NewMajor);
+            return;
+        }
+
+        _logger.LogWarning(
+            "The store is back on PostgreSQL {Old}, and NO data has been lost: {Reason}.",
+            context.OldMajor,
+            preUpgradeData == PreUpgradeDataDirectory.ControlFileRestored
+                ? "hard-link mode had begun linking, and pg_upgrade's rename of global\\pg_control has been undone; the new cluster that shared the old cluster's files was never started outside pg_upgrade"
+                : "the pre-upgrade data directory was never modified");
+    }
+
+    /// <summary>
+    /// The PID of a PostgreSQL server still running on <paramref name="dataDirectory"/>, or null (#3927):
+    /// the PID on <c>postmaster.pid</c>'s first line, when that process is alive AND is a <c>postgres</c>
+    /// process. The name check is not decoration. Windows reuses PIDs, so the pid file a crashed postmaster
+    /// left behind can name an unrelated process by the time anyone reads it, and treating that as a live
+    /// server would refuse a revert that nothing is blocking. An unreadable or malformed file names no process
+    /// to check; PostgreSQL reports that itself when the store next starts.
+    /// </summary>
+    internal static int? FindLivePostmaster(string dataDirectory)
+    {
+        string? firstLine;
+        try
+        {
+            var pidFile = Path.Combine(dataDirectory, "postmaster.pid");
+            if (!File.Exists(pidFile))
+            {
+                return null;
+            }
+
+            /* Shared for writing and deletion too, so a postmaster updating the file never blocks the read. */
+            using var stream = new FileStream(pidFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            firstLine = reader.ReadLine();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        /* A standalone (single-user) backend records its PID negated, and holds the directory just the same. */
+        if (!long.TryParse(firstLine?.Trim(), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var recorded)
+            || recorded == 0
+            || recorded > int.MaxValue
+            || recorded < -int.MaxValue)
+        {
+            return null;
+        }
+
+        var pid = (int)Math.Abs(recorded);
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            return string.Equals(process.ProcessName, "postgres", StringComparison.OrdinalIgnoreCase) ? pid : null;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            /* Not running (ArgumentException), or it exited between the lookup and the name. */
+            return null;
+        }
     }
 
     /// <summary>
