@@ -11,9 +11,10 @@ using System;
 namespace PerformanceMonitor.Collectors;
 
 /// <summary>
-/// The PostgreSQL target's logging collector is on, but <c>log_directory</c> holds no stderr-format log file
-/// for the three log-reading collectors to parse (#3997) — only its <c>csvlog</c> and/or <c>jsonlog</c>
-/// siblings, or (rarer) nothing at all.
+/// The PostgreSQL target's logging collector is on, but <c>log_destination</c> does not include
+/// <c>stderr</c> (#4019), or <c>log_directory</c> holds no stderr-format log file anyway (#3997). Either way
+/// there is no current file for the three log-reading collectors to parse, only <c>csvlog</c> and/or
+/// <c>jsonlog</c> output.
 ///
 /// <para><b>Why this is a third state and not "logging is off".</b> <see cref="PgLoggingCollectorOffException"/>
 /// covers <c>logging_collector = off</c>: no server-managed log file exists anywhere. This is the opposite
@@ -51,20 +52,17 @@ namespace PerformanceMonitor.Collectors;
 /// resolves its own newest file independently (<c>RdsLogSource.NewestLogFileAsync</c>, filtered the same
 /// way) and raises its own named failure when nothing opens.</para>
 ///
-/// <para><b>Measured narrower than the name suggests (#4019).</b> This fires only when the directory holds
-/// literally ZERO non-csvlog/jsonlog files, which is rarer in practice than "this target has never had
-/// stderr configured": PostgreSQL's syslogger writes one small stderr-format file the moment it determines
-/// stderr is not among the final destinations — measured at 170 bytes on a fresh 18.6 instance started with
-/// <c>log_destination = 'csvlog'</c> from its very first start, opening with
-/// <c>LOG:  ending log output to stderr</c> / <c>HINT:  Future log output will go to log destination
-/// "csvlog"</c> and never appended to again. <c>newest</c> finds that file, this exception does not fire, and
-/// the three collectors instead read it every cycle and match nothing — quiet, not named. Recognising that
-/// breadcrumb-only file as equivalent to none is #4019's open question, deliberately not folded into this
-/// exception: a byte-size heuristic risks a false positive on a genuinely low-traffic stderr target, and a
-/// text match on the breadcrumb inherits the same <c>lc_messages</c> translation blind spot
-/// <c>pg_plan_capture_readiness</c>'s <c>message_locale</c> facet already tracks for every other log read
-/// here. This exception is not wrong for what it covers — a directory that really holds nothing but csvlog
-/// output, however that arises — only narrower than "csvlog-only" alone would suggest.</para>
+/// <para><b>Decided by the setting, not the directory (#4019).</b> The first version fired only when the
+/// directory held literally ZERO non-csvlog/jsonlog files, which almost never happens. PostgreSQL's
+/// syslogger writes one small stderr-format file the moment it determines stderr is not among the final
+/// destinations: measured at 170 bytes on a fresh 18.6 instance started with <c>log_destination = 'csvlog'</c>
+/// from its very first start, opening with <c>LOG:  ending log output to stderr</c> and never appended to
+/// again. A target that ever had stderr keeps its old <c>.log</c> files as well. <c>newest</c> found that
+/// file and the collectors read it every cycle as a quiet target. The marker now fires whenever
+/// <c>log_destination</c> lacks <c>stderr</c>
+/// (<see cref="PgServerLogTail.NoStderrLogFileMarkerSql"/>), which is exact. A byte-size rule would have
+/// misread a quiet stderr target, and a match on the file's text goes blind under a translated
+/// <c>lc_messages</c>.</para>
 /// </summary>
 public sealed class PgNoStderrLogFileException : Exception
 {

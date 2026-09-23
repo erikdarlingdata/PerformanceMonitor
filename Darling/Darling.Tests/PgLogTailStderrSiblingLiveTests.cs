@@ -177,15 +177,69 @@ public sealed class PgLogTailStderrSiblingLiveTests
         }
     }
 
-    /* PgNoStderrLogFileException's OWN "no live reproduction" case is not tested here — see its remarks
-       and #4019 for why: flipping log_destination on a target that has ANY prior stderr history leaves the
-       old .log file behind (PostgreSQL never deletes it), and even a target started with log_destination =
-       'csvlog' from its very first start still gets ONE small stderr-format file — the syslogger's own
-       "ending log output to stderr" breadcrumb, measured at 170 bytes on a fresh 18.6 instance — so newest
-       is essentially never actually empty in practice. The marker's C# recognition is still fully covered,
-       deterministically, by PgLoggingCollectorGateTests (ThePlanReadRefusesTheNoStderrMarkerRow,
-       TheDeadlockReadRefusesTheNoStderrMarkerRow) and PgLogEventsPipelineTests; what remains open, and is
-       #4019's subject, is teaching the SQL to recognise a breadcrumb-only file as equivalent to none. */
+    /// <summary>
+    /// #4019, against a REAL target started with <c>logging_collector = on</c> and
+    /// <c>log_destination = 'csvlog'</c> from its very first start. Its log directory still holds one small
+    /// stderr-format file, the syslogger's own "ending log output to stderr" breadcrumb, so <c>newest</c> is
+    /// not empty. Before #4019 the marker needed an empty <c>newest</c> and never fired: all three collectors
+    /// read that stale file every cycle as a quiet target. The marker now reads <c>log_destination</c>, so
+    /// every collector's production query must come back with it and its <c>ReadAsync</c> must refuse with
+    /// <see cref="PgNoStderrLogFileException"/>. Gated on <c>DARLING_TEST_PG_CSVLOG_ONLY</c>, a connection
+    /// string to such a target, which needs its own server for the same reason as the test above.
+    /// </summary>
+    [Fact]
+    public async Task ACsvlogOnlyTarget_IsRefusedByName_EvenWithTheSysloggerStderrFileInItsLogDirectory()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG_CSVLOG_ONLY");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG_CSVLOG_ONLY to a Postgres connection string for a target started with " +
+            "logging_collector = on, log_destination = 'csvlog' and log_timezone = 'UTC' from its first start " +
+            "to run the live csvlog-only test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        /* #4019's precondition, measured rather than assumed: the listing really holds a stderr-format file, so
+           an emptiness test alone could not have fired here. */
+        await using (var listing = new NpgsqlCommand(
+            @"SELECT count(*) FROM pg_catalog.pg_ls_logdir() WHERE name !~* '\.(csv|json)$'", connection))
+        {
+            Assert.True((long)(await listing.ExecuteScalarAsync(ct))! >= 1,
+                "this csvlog-only target's log directory holds no stderr-format file, so it is not #4019's shape");
+        }
+
+        var context = new CollectorContext
+        {
+            ServerId = 1,
+            ServerName = "live-rig-as-target",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = new CollectorDeltaCalculator(),
+            LogHashKey = TestLogHashKeys.Fixed,
+            Target = new CollectorTargetInfo
+            {
+                Engine = CollectorTargetEngine.PostgreSql,
+                PostgresMajorVersion = 18,
+                PostgresVersionNum = 180000,
+            },
+        };
+
+        await AssertRefusedAsync(connection, PgPlanCaptureCollector.Instance.BuildQuery(context).Text,
+            async (reader, token) => await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, token), ct);
+        await AssertRefusedAsync(connection, PgDeadlocksCollector.Instance.BuildQuery(context).Text,
+            async (reader, token) => await PgDeadlocksCollector.Instance.ReadAsync(reader, context, token), ct);
+        await AssertRefusedAsync(connection, PgLogEventsCollector.Instance.BuildQuery(context).Text,
+            async (reader, token) => await PgLogEventsCollector.Instance.ReadAsync(reader, context, token), ct);
+    }
+
+    private static async Task AssertRefusedAsync(
+        NpgsqlConnection connection, string sql,
+        Func<NpgsqlDataReader, System.Threading.CancellationToken, Task> read, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        await Assert.ThrowsAsync<PgNoStderrLogFileException>(() => read(reader, ct));
+    }
 
     /// <summary>Two sessions, reversed lock order on the two rows <c>log_tail_sibling_dl_3997</c> seeds.
     /// PostgreSQL's own deadlock detector aborts one side; that abort is expected and swallowed here, the
