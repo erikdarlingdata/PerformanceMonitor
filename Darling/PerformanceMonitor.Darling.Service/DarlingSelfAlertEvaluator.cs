@@ -4528,7 +4528,14 @@ internal sealed class DarlingSelfAlertEvaluator
         string? ToTimescale,
         string? FailedStep,
         string? FailureMessage,
-        bool WithoutRollbackCopy);
+        bool WithoutRollbackCopy,
+        /* #3927: what a FAILED upgrade actually put back, read only when Succeeded is false. The two data
+           directory flags are exclusive: pg_upgrade's hard-link rename of the old cluster's control file was
+           undone, or the directory could not be put back at all. The defaults are the clean revert, which is
+           what every failure report meant before these existed. */
+        bool RuntimeReverted = true,
+        bool ControlFileRestored = false,
+        bool DataDirectoryNotRestored = false);
 
     /// <summary>
     /// Reports the outcome of a store runtime upgrade, ONCE per service start (#1706). Unlike every sibling
@@ -4600,15 +4607,56 @@ internal sealed class DarlingSelfAlertEvaluator
                 return;
             }
 
+            /* #3927: a failure may claim only what it actually put back. This used to say "reverted ... collecting
+               normally, no data was lost, because the pre-upgrade data directory is never modified until the
+               upgrade succeeds" for every failure. In hard-link mode that last clause stops being true once
+               pg_upgrade begins linking and renames the old cluster's pg_control, and a revert refused under a
+               server the upgrade could not stop is not a revert. Each shape states its own facts and nothing
+               more. */
+            string aftermath;
+            string shortAftermath;
+            if (report.DataDirectoryNotRestored)
+            {
+                /* No store starts in this shape, so this text cannot actually reach anyone: the alert engine
+                   needs the store. It is written anyway, because a false claim that is only safe while it is
+                   unreachable is one refactor away from being delivered. */
+                aftermath =
+                    "The store CANNOT start on either runtime until its pre-upgrade data directory is put back by hand. The upgrade had changed it " +
+                    "(in hard-link mode pg_upgrade renames the old cluster's global\\pg_control to global\\pg_control.old, and a failed directory swap can leave the whole directory under its retained name), " +
+                    "and putting it back automatically failed. The data is intact on disk and nothing needs restoring from a backup. The service log's CRITICAL entries name the exact file or directory to move" +
+                    (report.RuntimeReverted ? "." : ", and the previous PostgreSQL runtime has to be put back by hand as well.");
+                shortAftermath = "the store CANNOT start until its data directory is put back by hand";
+            }
+            else if (!report.RuntimeReverted)
+            {
+                /* The one not-reverted shape that can deliver this at all: the service is up, so it attached to a
+                   server that was already running, because the binaries it would start itself cannot open the
+                   store. The next start has no such server to lean on. */
+                aftermath =
+                    $"The previous PostgreSQL {report.FromMajor} runtime could NOT be put back, so the service's pg-runtime\\pgsql still holds the PostgreSQL {report.ToMajor} binaries, which cannot open this store. The store's data is intact. " +
+                    "Collection is running only because a PostgreSQL server was already running on the store's data directory (most likely the old cluster this upgrade started and could not stop) and the service attached to it. The NEXT service start will fail. " +
+                    "Before restarting the service, stop that server, then move pg-runtime\\pgsql aside and move the rescued runtime in pg-runtime-prev\\pgsql into its place. The service log's CRITICAL entries name the exact paths.";
+                shortAftermath = "runtime NOT reverted, act before the next restart";
+            }
+            else
+            {
+                aftermath =
+                    $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally, and no data was lost" +
+                    (report.ControlFileRestored
+                        ? ". One thing had to be undone first: the upgrade ran in hard-link mode, and pg_upgrade had already renamed the old cluster's global\\pg_control to global\\pg_control.old, which it does so the old cluster cannot be started while the two share files. That rename was undone before the revert, and the new cluster was never started outside pg_upgrade, so the old cluster is intact. "
+                        : ", because the upgrade had not modified the pre-upgrade data directory. ") +
+                    "The service will NOT retry this same package automatically, so the store stays on its current major until someone acts. " +
+                    "Investigate before the next release: a store that cannot move forward accumulates the version drift this machinery exists to end.";
+                shortAftermath = "reverted, still running";
+            }
+
             await FireAsync(
                 StoreKey(StoreUpgradeKey), _storeLabel, StoreUpgradeMetric,
                 $"PostgreSQL {report.FromMajor} (upgrade failed)", $"PostgreSQL {report.ToMajor}",
                 detail: $"The monitor's own store FAILED to upgrade from PostgreSQL {report.FromMajor} to {report.ToMajor}, at step '{report.FailedStep}': {report.FailureMessage} " +
-                    $"The store reverted to PostgreSQL {report.FromMajor} and is collecting normally — no data was lost, because the pre-upgrade data directory is never modified until the upgrade succeeds. " +
-                    "The service will NOT retry this same package automatically, so the store stays on its current major until someone acts. " +
-                    "Investigate before the next release: a store that cannot move forward accumulates the version drift this machinery exists to end.",
+                    aftermath,
                 severity: AlertSeverityLevel.Critical,
-                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — reverted, still running",
+                shortMessage: $"store upgrade to PostgreSQL {report.ToMajor} FAILED at {report.FailedStep} — {shortAftermath}",
                 /* Versions again, on the failure path — see the success branch above. */
                 numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                 cancellationToken);
