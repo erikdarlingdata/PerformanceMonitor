@@ -231,13 +231,15 @@ public sealed class PgDeadlockNormalizationTests
         await DeleteRowsAsync(connection, ct);
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
+        var bodySucceeded = false;
         try
         {
             await body(connection, postgres, ct);
+            bodySucceeded = true;
         }
         finally
         {
-            await DeleteRowsAsync(connection, CancellationToken.None);
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, DeleteRowsAsync);
         }
     }
 
