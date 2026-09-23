@@ -84,6 +84,26 @@ AND   collection_time <= $2";
                   ?? context.TimeRangeEnd - AnalysisContext.LatestValueLookback;
         }
 
+        /* #3929: trace_flags mirrors Darling's PgLatestValueBounds — see its EnsureAsync for the reasoning. It
+           is on-load by default (frequency 0) but can't take the newest-capture anchor the other on-load
+           config facts use, because a capture that finds every flag off writes ZERO rows and MAX(capture_time)
+           would fall back to an older, stale-ON capture. The on-load-aware lookback always takes the interval
+           branch instead (EffectiveRecurringIntervalMinutes is never 0). */
+        int? traceFlagsConfigured = null;
+        try
+        {
+            traceFlagsConfigured = frequencyMinutes?.Invoke(context.ServerId, "trace_flags");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("LatestValueBounds",
+                $"Could not resolve the trace_flags schedule for {context.ServerName}; its latest-value read uses the default cadence this pass: {ex.Message}");
+        }
+
+        var traceFlagsFrequency = CollectorScheduleDefaults.ResolveFrequencyMinutes("trace_flags", traceFlagsConfigured, fleetOverride: null);
+        starts["trace_flags"] = context.TimeRangeEnd - AnalysisContext.LatestValueLookbackFor(
+            CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(traceFlagsFrequency))!.Value;
+
         context.LatestValueStarts = starts;
     }
 

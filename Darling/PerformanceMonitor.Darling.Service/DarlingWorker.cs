@@ -4049,12 +4049,13 @@ public sealed class DarlingWorker : BackgroundService
 
     /// <summary>
     /// Recomputes each CONNECTED server's per-collector NextDue from the current schedule overrides after a
-    /// reload: a disabled or on-load-only (freq 0) collector is dropped from the schedule; a newly-enabled one is
-    /// seeded from its persisted watermark (the #1575 <see cref="ComputeSeededNextDue"/> policy, one lazily
-    /// batched read per server that gains a new entry); an existing entry is pulled in to at most now + the
-    /// (possibly shortened) effective interval so a frequency change takes effect promptly without over-firing. A
-    /// server still connecting has no NextDue yet — <see cref="TryConnectAsync"/> seeds it from the same watermark
-    /// policy when it connects.
+    /// reload: a disabled collector is dropped from the schedule; a newly-enabled one (an on-load collector
+    /// included — #3929/#3930 give it <see cref="CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes"/>
+    /// rather than dropping it) is seeded from its persisted watermark (the #1575
+    /// <see cref="ComputeSeededNextDue"/> policy, one lazily batched read per server that gains a new entry); an
+    /// existing entry is pulled in to at most now + the (possibly shortened) effective interval so a frequency
+    /// change takes effect promptly without over-firing. A server still connecting has no NextDue yet —
+    /// <see cref="TryConnectAsync"/> seeds it from the same watermark policy when it connects.
     /// </summary>
     private async Task RecomputeNextDueAsync(List<ServerLoopState> servers, CancellationToken cancellationToken)
     {
@@ -4075,19 +4076,24 @@ public sealed class DarlingWorker : BackgroundService
             foreach (var name in CollectorScheduleDefaults.All.Keys)
             {
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
-                if (!effective.Enabled || effective.FrequencyMinutes == 0)
+                if (!effective.Enabled)
                 {
                     /* ConcurrentDictionary has no Remove(key) — TryRemove is the drop-in for the old Remove. */
                     server.NextDue.TryRemove(name, out _);
                     continue;
                 }
 
+                /* #3929/#3930: an on-load collector (frequency 0) is no longer dropped from the schedule here —
+                   it ALSO reruns on OnLoadRecaptureMinutes, exactly like the connect-time seed and the
+                   due-collector sweep below. */
+                var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
+
                 if (server.NextDue.TryGetValue(name, out var existing))
                 {
                     /* Existing entry KEEPS its already-applied phase, but is pulled in to at most now + the
                        (possibly shortened) interval so a frequency change takes effect promptly without
                        over-firing — unchanged from before. */
-                    var capped = now.AddMinutes(effective.FrequencyMinutes);
+                    var capped = now.AddMinutes(interval);
                     server.NextDue[name] = existing < capped ? existing : capped;
                 }
                 else
@@ -4098,8 +4104,8 @@ public sealed class DarlingWorker : BackgroundService
                        jitter still de-clusters an overdue / never-run fleet-wide enable. */
                     watermarks ??= await ReadCollectorWatermarksAsync(_postgres!, runtime.ServerId, _logger, cancellationToken);
                     var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
-                    var jitter = SeedJitter(runtime.ServerId, effective.FrequencyMinutes * 60);
-                    server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                    var jitter = SeedJitter(runtime.ServerId, interval * 60);
+                    server.NextDue[name] = ComputeSeededNextDue(lastRun, interval, now, jitter);
                 }
             }
         }
@@ -7932,6 +7938,18 @@ LIMIT 1";
                        never resets it, so folding it in would mix a previous body's bookkeeping
                        into these rows - the cross-body contamination the reset exists to prevent. */
                     await RunOneAsync(server, runner, name, peerMaxAtDispatchMs: null, cancellationToken);
+
+                    /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
+                       seeded from the SAME pre-dispatch watermark used below - the run just above updates it
+                       moments from now, but seeding from the watermark read at the top of this method means a
+                       collector that already ran recently (a quick reconnect) is not re-phased a full day
+                       forward. Without this, a long-lived connection never re-captures: its on-load config
+                       snapshot ages out of retention (#3930) and a cleared trace flag has nothing to overwrite
+                       its stale ON row (#3929) until the next reconnect. */
+                    var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
+                    var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
+                    var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
+                    server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
                 }
                 else
                 {
@@ -8066,18 +8084,23 @@ LIMIT 1";
                 }
 
                 /* Effective schedule = config_collector_schedules override layered on the code default.
-                   A disabled or on-load-only (freq 0) collector is skipped; the frequency the NextDue stamp
-                   advances by is the EFFECTIVE one, so an override takes effect immediately. */
+                   A disabled collector is skipped; the frequency the NextDue stamp advances by is the
+                   EFFECTIVE one, so an override takes effect immediately. An on-load collector (freq 0) is
+                   NOT skipped here (#3929/#3930): it also reruns on
+                   CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes, in addition to the immediate
+                   on-connect run TryConnectAsync's on-load loop still does — a long-lived connection would
+                   otherwise never refresh it again, aging its config snapshot out of retention (#3930) and
+                   leaving a cleared trace flag with no later row to overwrite its stale ON one (#3929). */
                 var effective = StoreConfigProvider.ResolveSchedule(name, runtime.ServerId, _scheduleOverrides);
                 if (!effective.Enabled
-                    || effective.FrequencyMinutes == 0
                     || !server.NextDue.TryGetValue(name, out var due)
                     || now < due)
                 {
                     continue;
                 }
 
-                server.NextDue[name] = now.AddMinutes(effective.FrequencyMinutes);
+                var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
+                server.NextDue[name] = now.AddMinutes(interval);
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
                    run time is bimodal — a heavy batch runs 100-230+ seconds against a ~5-35s mean, on its

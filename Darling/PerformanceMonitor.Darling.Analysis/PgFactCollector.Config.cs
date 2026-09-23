@@ -233,16 +233,32 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         }
     }
 
+    /* #3929: bounded by capture_time BETWEEN $2 AND $3 (the on-load-aware lookback PgLatestValueBounds stamps,
+       and the window's end), NOT unbounded across all retained history like before. Without the lower bound, a
+       flag's ROW_NUMBER partition never gets a fresh row once the flag is turned off (DBCC TRACESTATUS(-1)
+       lists only flags that are ON), so its last ON row stayed rn = 1 for the rest of the table's 30-day
+       retention. With it, a flag missing from every capture inside the window has no row there at all and
+       simply never appears - including a server with NO flags on, where the window can be entirely empty. The
+       upper bound matches every other latest-value read (#3896): a historical window (compare_analysis,
+       analyze_server's anchored mode) must read the state as it stood AT ITS END, not pick up a flag flipped
+       after it. The flags are the ones in the window's NEWEST capture, not each flag's own newest row: a flag
+       turned off while another stays on drops out at the next daily capture instead of lingering until its
+       last ON row leaves the window. Only a capture that finds every flag off, which writes no row, still
+       falls back to the capture before it, and the window bounds that too. */
     public const string TraceFlagsSql = @"
-WITH latest AS (
-    SELECT trace_flag, status,
-           ROW_NUMBER() OVER (PARTITION BY trace_flag ORDER BY capture_time DESC) AS rn
+SELECT trace_flag
+FROM trace_flags
+WHERE server_id = $1
+AND   is_global = true
+AND   status = true
+AND   capture_time =
+(
+    SELECT MAX(capture_time)
     FROM trace_flags
     WHERE server_id = $1
-    AND   is_global = true
+    AND   capture_time >= $2
+    AND   capture_time <= $3
 )
-SELECT trace_flag
-FROM latest WHERE rn = 1 AND status = true
 ORDER BY trace_flag";
 
     /// <summary>
@@ -256,6 +272,8 @@ ORDER BY trace_flag";
 
             using var cmd = new NpgsqlCommand(TraceFlagsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.LatestValueStartFor("trace_flags"), DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             var metadata = new Dictionary<string, double>();

@@ -193,6 +193,82 @@ public sealed class LatestValueLookbackTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(32_768, facts["MEMORY_TOTAL_PHYSICAL_MB"].Value, precision: 6);
     }
 
+    /// <summary>
+    /// #3929, Lite's half: mirrors Darling's TraceFlagTurnedOffAfterLastConnect live test. trace_flags is
+    /// on-load by default (frequency 0) but cannot take the newest-capture anchor AnOnLoadOnlyCollector above
+    /// uses - a capture that finds every flag off writes ZERO rows, so anchoring on the newest capture would
+    /// fall back to an older, stale-ON one. It takes the on-load-aware lookback instead (two
+    /// OnLoadRecaptureMinutes cycles - 48h at the shipped daily default): flag 3604's only row is 3 days old
+    /// (outside the window, and missing from the two most recent captures at -1 day and -6 hours) so it must
+    /// not appear; flag 2371, on 6 hours ago, must.
+    /// </summary>
+    [Fact]
+    public async Task TraceFlagTurnedOffAfterLastConnect_DropsOutOfTheOnLoadWindow_WhileAStillOnFlagStays()
+    {
+        const int ServerId = -389_612;
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        await SeedAsync(async connection =>
+        {
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-3), 3604, status: true);
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-1), 2371, status: true);
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddHours(-6), 2371, status: true);
+        });
+
+        var facts = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(ServerId, end)))
+            .ToDictionary(f => f.Key);
+
+        var traceFlags = facts["TRACE_FLAGS"];
+        Assert.Equal(1, traceFlags.Metadata["flag_count"]);
+        Assert.True(traceFlags.Metadata.ContainsKey("TF_2371"), "flag 2371 (still on 6 hours ago) should be reported");
+        Assert.False(traceFlags.Metadata.ContainsKey("TF_3604"), "flag 3604 (off for two full captures, last ON row 3 days old) should have cleared");
+    }
+
+    /// <summary>
+    /// #3929: the flags are the window's NEWEST capture, not each flag's newest row. Both flags were on in
+    /// yesterday's capture, inside the window; this morning's lists only 2371. A per-flag read would keep 3604
+    /// until yesterday's row left the window. The newest capture drops it now.
+    /// </summary>
+    [Fact]
+    public async Task AFlagTurnedOffWhileAnotherStaysOn_DropsOutAtTheNextCapture_NotWhenItsLastRowLeavesTheWindow()
+    {
+        const int ServerId = -389_613;
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        await SeedAsync(async connection =>
+        {
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-1), 3604, status: true);
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-1), 2371, status: true);
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddHours(-6), 2371, status: true);
+        });
+
+        var facts = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(ServerId, end)))
+            .ToDictionary(f => f.Key);
+
+        var traceFlags = facts["TRACE_FLAGS"];
+        Assert.Equal(1, traceFlags.Metadata["flag_count"]);
+        Assert.True(traceFlags.Metadata.ContainsKey("TF_2371"), "flag 2371 is on in the newest capture");
+        Assert.False(traceFlags.Metadata.ContainsKey("TF_3604"),
+            "flag 3604 is missing from the newest capture, so it is off, even though yesterday's ON row is still inside the window");
+    }
+
+    /// <summary>
+    /// #3929's sharpest edge case, Lite's half: a capture that finds every flag off writes ZERO rows, so a
+    /// MAX(capture_time) anchor would silently fall back to an older capture that still had one on. With every
+    /// row for this server older than the 48h window, the bounded read returns zero rows and no TRACE_FLAGS
+    /// fact is emitted at all.
+    /// </summary>
+    [Fact]
+    public async Task ServerWhoseOnlyTraceFlagRowIsOutsideTheWindow_EmitsNoTraceFlagsFact()
+    {
+        const int ServerId = -389_613;
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        await SeedAsync(connection => LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-3), 1222, status: true));
+
+        var facts = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(ServerId, end)))
+            .ToDictionary(f => f.Key);
+
+        Assert.False(facts.ContainsKey("TRACE_FLAGS"), "a flag last seen on 3 days ago, outside the 48h window, must not resurface as currently on");
+    }
+
     private async Task SeedAsync(Func<DuckDBConnection, Task> seed)
     {
         using var readLock = _duckDb.AcquireReadLock();
@@ -496,4 +572,11 @@ INSERT INTO database_config
      is_auto_update_stats_on, page_verify_option, is_query_store_on)
 VALUES ($1, $2, $3, 'latest-value-lookback', $4, 'FULL', $5, false, $6, true, true, 'CHECKSUM', true)",
             Interlocked.Decrement(ref s_nextId), capturedAt, serverId, database, autoShrink, rcsiOn);
+
+    public static Task InsertTraceFlagAsync(DuckDBConnection connection, int serverId, DateTime capturedAt, int traceFlag, bool status) =>
+        InsertAsync(connection, @"
+INSERT INTO trace_flags
+    (config_id, capture_time, server_id, server_name, trace_flag, status, is_global, is_session)
+VALUES ($1, $2, $3, 'latest-value-lookback', $4, $5, true, false)",
+            Interlocked.Decrement(ref s_nextId), capturedAt, serverId, traceFlag, status);
 }

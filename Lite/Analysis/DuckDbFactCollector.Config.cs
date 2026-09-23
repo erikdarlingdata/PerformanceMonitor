@@ -247,19 +247,36 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* #3929: bounded by capture_time BETWEEN $2 AND $3 (the on-load-aware lookback LatestValueBounds
+               stamps, and the window's end), NOT unbounded across all retained history like before - see
+               Darling's PgFactCollector.Config.cs TraceFlagsSql for the full reasoning. Without the lower bound
+               a flag never gets a fresh row once turned off (DBCC TRACESTATUS(-1) lists only flags that are
+               ON), so its last ON row stayed rn = 1 indefinitely; with it, a flag missing from the whole window
+               simply never appears. The upper bound matches every other latest-value read: a historical window
+               must read the state as it stood AT ITS END. The flags are the ones in the window's NEWEST capture,
+               not each flag's own newest row: a flag turned off while another stays on drops out at the next
+               daily capture instead of lingering until its last ON row leaves the window. Only a capture that
+               finds every flag off, which writes no row, still falls back to the capture before it, and the
+               window bounds that too. */
             cmd.CommandText = @"
-WITH latest AS (
-    SELECT trace_flag, status,
-           ROW_NUMBER() OVER (PARTITION BY trace_flag ORDER BY capture_time DESC) AS rn
+SELECT trace_flag
+FROM v_trace_flags
+WHERE server_id = $1
+AND   is_global = true
+AND   status = true
+AND   capture_time =
+(
+    SELECT MAX(capture_time)
     FROM v_trace_flags
     WHERE server_id = $1
-    AND   is_global = true
+    AND   capture_time >= $2
+    AND   capture_time <= $3
 )
-SELECT trace_flag
-FROM latest WHERE rn = 1 AND status = true
 ORDER BY trace_flag";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.LatestValueStartFor("trace_flags") });
+            cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             var metadata = new Dictionary<string, double>();
