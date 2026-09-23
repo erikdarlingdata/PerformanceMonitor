@@ -228,6 +228,33 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// The <c>empty</c> answer for a <c>module_name</c> filter (#4057) that matched nothing while the same read
+    /// without the filters returns rows: Query Store is collecting and the window has rows, just none from that
+    /// module, so it is a measured zero rather than the "may not be enabled" guess. Names an <c>execution_type</c>
+    /// filter too when one rode along, since either can be why nothing matched. Shared so both SKUs say it in the
+    /// same words. Darling passes its window floor (<paramref name="windowTruncated"/> and the served window as
+    /// <paramref name="hints"/>), because the raw tier can stop short of the window asked for; Lite has no floor.
+    /// </summary>
+    public static string QueryStoreModuleEmpty(
+        string moduleName, string? executionType, int hoursBack, string? databaseName,
+        bool windowTruncated = false, object? hints = null)
+    {
+        var outcome = executionType is null ? "" : $" with execution_type {executionType}";
+        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        return Status(
+            "empty",
+            $"No Query Store rows matched module_name '{moduleName}'{outcome}{scope} in the {hoursBack}-hour window "
+            + "searched. The same read without the filters returns rows, so Query Store is collecting and this is a "
+            + "measured zero. The match is exact and case-sensitive on the schema-qualified name the collector records "
+            + "(the full_name get_top_procedures_by_cpu returns), applied after interval deduplication and before ranking."
+            + (windowTruncated
+                ? " The raw tier did not reach the whole window (window_truncated), so the module may have run before "
+                  + "effective_start."
+                : ""),
+            hints);
+    }
+
+    /// <summary>
     /// Validates an optional ENUMERATED filter — a parameter whose usable values are a closed set the
     /// caller cannot see. Returns null when the caller sent nothing or a member of the set, the refusal
     /// naming the whole set when not. The match is case-insensitive, and the caller is expected to use the

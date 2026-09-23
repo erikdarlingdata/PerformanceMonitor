@@ -230,7 +230,7 @@ internal static class DarlingDataReader
     /// did not attribute the row (pre-2022, or a 2022 standalone).
     /// </summary>
     public sealed record QueryStoreRow(
-        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string ExecutionTypeDesc,
+        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string ExecutionTypeDesc, string? ModuleName,
         long TotalExecutions, double AvgDurationMs, double AvgCpuTimeMs, double AvgLogicalReads,
         double AvgLogicalWrites, double AvgPhysicalReads, double AvgRowcount, DateTime? LastExecutionTime, string QueryText,
         string? ReplicaRole);
@@ -1330,7 +1330,8 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
-    /// reports as "nothing was read" rather than as an absence of activity.
+    /// reports as "nothing was read" rather than as an absence of activity. Deliberately unfiltered: the floor is
+    /// a property of the tier, so a database or module filter on the top read does not narrow it.
     /// </summary>
     public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
@@ -1353,7 +1354,8 @@ internal static class DarlingDataReader
     /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
     /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
     /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
-    /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way).
+    /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
+    /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
     /// </summary>
     public const string QueryStoreTopSql = """
         WITH deduped AS (
@@ -1396,6 +1398,7 @@ internal static class DarlingDataReader
                    executions of one plan in separate runtime-stats rows, and averaging them together would
                    blend a timeout's duration into the plan's normal cost. One row per outcome instead. */
                 execution_type_desc,
+                MAX(module_name) AS module_name,
                 /* A GROUP BY key, not MAX(): an AG's Query Store for secondary replicas (2022+) keeps ONE
                    shared store on the primary holding every replica's rows, so grouping without it would
                    average primary and secondary workload into a single blended row. No-op on a
@@ -1412,6 +1415,7 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
+            AND   ($7::text IS NULL OR module_name = $7)
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
@@ -1423,6 +1427,7 @@ internal static class DarlingDataReader
             r.query_hash,
             r.query_plan_hash,
             r.execution_type_desc,
+            r.module_name,
             r.total_executions,
             r.avg_duration_ms,
             r.avg_cpu_time_ms,
@@ -1468,11 +1473,11 @@ internal static class DarlingDataReader
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         CancellationToken cancellationToken = default) =>
-        GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, cancellationToken);
+        GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, moduleName: null, cancellationToken);
 
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
-        string? executionType, CancellationToken cancellationToken = default)
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
@@ -1481,6 +1486,7 @@ internal static class DarlingDataReader
         AddInt(command, top);
         AddNullableText(command, databaseName);
         AddNullableText(command, executionType);
+        AddNullableText(command, moduleName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1491,16 +1497,17 @@ internal static class DarlingDataReader
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
                 reader.IsDBNull(4) ? "" : reader.GetString(4),
                 reader.IsDBNull(5) ? "" : reader.GetString(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
                 reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
                 reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
                 reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
-                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
-                reader.IsDBNull(14) ? "" : reader.GetString(14),
-                reader.IsDBNull(15) ? null : reader.GetString(15)));
+                reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
+                reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+                reader.IsDBNull(15) ? "" : reader.GetString(15),
+                reader.IsDBNull(16) ? null : reader.GetString(16)));
         }
 
         return rows;

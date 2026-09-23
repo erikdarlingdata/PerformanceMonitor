@@ -135,7 +135,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
     [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]
     [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
-    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of,execution_type")]
+    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of,execution_type,module_name")]
     [InlineData("get_collection_health", "server_name")]
     /* #3287 gave this read two filters, on BOTH SKUs and in the same relative order, so it joins the theory
        rather than sitting outside it. The two are LAST because as_of and collector_name are both `string?`:
@@ -681,7 +681,35 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
         Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
         Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
+        Assert.Contains("$7::text IS NULL OR module_name = $7", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(module_name) AS module_name", sql, StringComparison.Ordinal);
+        Assert.Contains("r.module_name", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(execution_count)", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void QueryStoreSql_AppliesModuleFilterAfterDedupAndBeforeRankingLimit()
+    {
+        var sql = DarlingDataReader.QueryStoreTopSql;
+        var rankedCte = sql.IndexOf("ranked AS", StringComparison.Ordinal);
+        var dedupSurvivor = sql.IndexOf("WHERE rn = 1", rankedCte, StringComparison.Ordinal);
+        var moduleFilter = sql.IndexOf("$7::text IS NULL OR module_name = $7", StringComparison.Ordinal);
+        var firstLimit = sql.IndexOf("LIMIT $4 + 5", StringComparison.Ordinal);
+
+        Assert.True(dedupSurvivor > rankedCte && moduleFilter > dedupSurvivor,
+            "module_name must filter only the latest cumulative interval snapshots");
+        Assert.True(moduleFilter < firstLimit,
+            "the deduped, filtered population must be ranked before the result cap");
+    }
+
+    [Fact]
+    public void QueryStoreWindowFloor_RemainsACheapUnfilteredRetentionProbe()
+    {
+        var sql = DarlingDataReader.QueryStoreWindowFloorSql;
+        Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]
