@@ -131,10 +131,14 @@ public sealed class McpDescriptionTruthPinTests
 
     /* ---------------- plumbing ---------------- */
 
-    private static string Description(Type toolType, string toolName) => toolType
+    /// <summary>The SERVED head (#3898 D3, re-pointed deliberately from the whole description): each fragment
+    /// pinned here is a guardrail a caller needs from tools/list itself (the edition is not consulted; the
+    /// operator cut and its basis; create_statement is corroboration, with its caveat), so it may not move into
+    /// get_tool_guide's tail. Unconverted, the head is the whole description.</summary>
+    private static string Description(Type toolType, string toolName) => PerformanceMonitor.Common.McpToolGuide.Split(toolType
         .GetMethods(BindingFlags.Public | BindingFlags.Static)
         .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName)
-        .GetCustomAttribute<DescriptionAttribute>()!.Description;
+        .GetCustomAttribute<DescriptionAttribute>()!.Description).Head;
 
     private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
 

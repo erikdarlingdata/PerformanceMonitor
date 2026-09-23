@@ -125,6 +125,10 @@ public sealed class McpHostService : BackgroundService
                 .WithGeminiCompatibleTools<McpDefaultTraceTools>()
                 .WithGeminiCompatibleTools<McpHealthParserTools>()
                 .WithGeminiCompatibleTools<McpAnalysisTools>()
+                /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
+                   at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Darling twin:
+                   DarlingMcpToolGuideTools. */
+                .WithGeminiCompatibleTools<McpToolGuideTools>()
                 /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
                    every tool with no per-tool change. A call carrying an argument no tool parameter
                    declares is refused before dispatch — the refusal names the key and lists what the

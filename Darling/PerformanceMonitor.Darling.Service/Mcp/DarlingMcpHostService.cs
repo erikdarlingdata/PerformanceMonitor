@@ -814,6 +814,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                    config.config_monitored_servers (the encrypted_password column stays SELECT-carved) — never the
                    config pivot or a schema-wide write. */
                 .WithGeminiCompatibleTools<DarlingMcpServerAdminTools>()
+                /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
+                   at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
+                   McpToolGuideTools. */
+                .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
                 /* Two call-tool filters, each registered ONCE and each covering every tool with no
                    per-tool change — the seam that exists precisely so a decision about all ~147 reads
                    is made in one place.

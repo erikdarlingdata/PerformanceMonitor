@@ -1957,7 +1957,14 @@ public sealed class McpPayloadContractCensusTests
         foreach (var (file, tool) in WindowFloorTools.Where(t => t.File.StartsWith("Darling", StringComparison.Ordinal)))
         {
             Assert.True(darling.TryGetValue(tool, out var description), $"{tool} ({file}) is not a Darling MCP tool");
+            /* #3898 D3/D4, re-pointed deliberately: the whole clause may span head and guide, because its
+               "spelled truncated before #3653" WIRE CHANGE notice leaves the wire for the guide tail (D4). What
+               a caller needs to read the payload (the key, and that it is a retention floor, not a page cut)
+               is a guardrail and must be served in the head. Unconverted, the head is the whole description. */
             Assert.Contains(clause, description!, StringComparison.Ordinal);
+            var head = McpToolGuide.Split(description!).Head;
+            Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
+            Assert.Contains("not a page cut", head, StringComparison.Ordinal);
             Assert.DoesNotContain("read truncated", description!, StringComparison.Ordinal);
         }
     }

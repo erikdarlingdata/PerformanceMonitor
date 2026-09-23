@@ -100,9 +100,10 @@ public sealed class McpUnknownArgumentGuardTests
     /// A tool parameter is DI-injected (and excluded from the advertised schema) when its type is not a
     /// simple model-facing value — the same predicate the schema-compat census uses, for the same reason.
     /// </summary>
-    private static bool IsServiceParameter(Type t) =>
-        !t.IsPrimitive && t != typeof(string) && !t.IsEnum && t != typeof(decimal) &&
-        t != typeof(DateTime) && t != typeof(DateTimeOffset) && t != typeof(Guid) && t != typeof(TimeSpan);
+    /// <remarks>#3898: the shared <see cref="McpServedSchema"/> predicate, which also keeps nullable value types
+    /// and arrays (get_tool_guide's <c>string[]</c>) model-facing; the old inline one called both services and
+    /// dropped them from the schemas this census checks.</remarks>
+    private static bool IsServiceParameter(Type t) => McpServedSchema.IsServiceParameter(t) && t != typeof(McpToolGuideCatalog);
 
     private static CallToolRequestParams Call(string toolName, Dictionary<string, JsonElement> arguments) =>
         new() { Name = toolName, Arguments = arguments };

@@ -7,11 +7,13 @@
  */
 
 using System;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -33,6 +35,10 @@ namespace Microsoft.Extensions.DependencyInjection;
 /// Optionality is still conveyed by the parameter's absence from the schema's <c>required</c> array,
 /// and the .NET default value still applies at invocation time, so nothing changes for lenient
 /// clients — the tool surface and call behavior are unchanged.
+///
+/// <para>It is also where the two-tier description split happens (#3898 D1/D3): a description carrying
+/// <see cref="McpToolGuide.Marker"/> is served as its head, and its tail is recorded in the
+/// <see cref="McpToolGuideCatalog"/> that <c>get_tool_guide</c> reads. See <see cref="McpToolGuide"/>.</para>
 /// </summary>
 public static class McpSchemaCompat
 {
@@ -60,10 +66,12 @@ public static class McpSchemaCompat
     {
         ArgumentNullException.ThrowIfNull(builder);
 
+        var catalog = GuideCatalogOf(builder.Services);
+
         foreach (var toolMethod in typeof(TToolType).GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
         {
-            if (toolMethod.GetCustomAttribute<McpServerToolAttribute>() is null)
+            if (toolMethod.GetCustomAttribute<McpServerToolAttribute>() is not { } toolAttribute)
             {
                 continue;
             }
@@ -78,9 +86,17 @@ public static class McpSchemaCompat
                     $"{nameof(WithGeminiCompatibleTools)} only supports static tool methods.");
             }
 
+            /* #3898 D1/D3: the ONE place the two-tier split happens, for every tool on every SKU. tools/list
+               serves the head (plus the guide pointer) of a description carrying McpToolGuide.Marker, and the
+               whole description of one that does not. The tail goes to the catalog get_tool_guide reads.
+               Split throws on a malformed marker, so a bad conversion fails at registration, not on the wire. */
+            var description = toolMethod.GetCustomAttribute<DescriptionAttribute>()?.Description;
+            var served = description is null ? null : McpToolGuide.Served(description);
+            catalog.Register(toolAttribute.Name ?? toolMethod.Name, description);
+
             /* Mirror the SDK's static-method registration (McpServerBuilderExtensions.WithTools<T>):
                Services = the DI provider so service-typed parameters are excluded from the schema and
-               resolved per-request. The only addition is SchemaCreateOptions. */
+               resolved per-request. The additions are SchemaCreateOptions and the served Description. */
             builder.Services.AddSingleton((Func<IServiceProvider, McpServerTool>)(services =>
                 McpServerTool.Create(
                     toolMethod,
@@ -88,11 +104,34 @@ public static class McpSchemaCompat
                     options: new McpServerToolCreateOptions
                     {
                         Services = services,
-                        SchemaCreateOptions = GeminiCompatSchemaOptions
+                        SchemaCreateOptions = GeminiCompatSchemaOptions,
+                        Description = served
                     })));
         }
 
         return builder;
+    }
+
+    /// <summary>
+    /// The one <see cref="McpToolGuideCatalog"/> per service collection: found if an earlier registration
+    /// added it, added as a singleton instance otherwise. Registered as a service, so <c>get_tool_guide</c>
+    /// receives it by injection and it never appears in that tool's advertised schema.
+    /// </summary>
+    private static McpToolGuideCatalog GuideCatalogOf(IServiceCollection services)
+    {
+        foreach (var descriptor in services)
+        {
+            if (descriptor.ServiceType == typeof(McpToolGuideCatalog)
+                && !descriptor.IsKeyedService
+                && descriptor.ImplementationInstance is McpToolGuideCatalog existing)
+            {
+                return existing;
+            }
+        }
+
+        var catalog = new McpToolGuideCatalog();
+        services.AddSingleton(catalog);
+        return catalog;
     }
 
     /// <summary>
