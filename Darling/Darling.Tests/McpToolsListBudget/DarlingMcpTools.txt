@@ -26,7 +26,7 @@ param get_analysis_findings.hours_back 49
 param get_analysis_findings.include_drilldown 122
 param get_analysis_findings.server_name 28
 
-tool mute_analysis_finding 612
+tool mute_analysis_finding 597
 param mute_analysis_finding.reason 27
 param mute_analysis_finding.server_name 50
 param mute_analysis_finding.story_path_hash 45

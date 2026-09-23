@@ -76,7 +76,7 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         ("mute_analysis_finding", "already_muted: the scope already held the hash; nothing was written"),
         ("mute_analysis_finding", "matched_now: retained findings in scope carrying the hash now"),
         ("mute_analysis_finding", "muted_unmatched (registered, matched_now 0; maybe a mistyped hash)"),
-        ("mute_analysis_finding", "Darling can also return status error; Lite raises instead"),
+        ("mute_analysis_finding", "error (the write failed; nothing is muted)"),
     ];
 
     [Fact]
@@ -121,18 +121,18 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         }
     }
 
-    /// <summary>D6: <c>mute_analysis_finding</c>'s and <c>audit_config</c>'s facts differ by product (Darling's
-    /// write can fail and report <c>status: "error"</c>, where Lite's throws instead; Darling additionally audits
-    /// PostgreSQL targets, which Lite never does), so their shared, byte-identical heads name both products in
-    /// one clause instead of picking a side. Each clause is true regardless of which SKU serves it.</summary>
+    /// <summary>D6: a failed mute write reports <c>status: \"error\"</c> on both products (Darling in its own
+    /// payload, Lite through <c>McpHelpers.FormatError</c>), so the shared head states it once. Only
+    /// <c>audit_config</c>'s fact differs by product (Darling also audits PostgreSQL targets), so its
+    /// byte-identical head names Darling in one clause that is true whichever SKU serves it.</summary>
     [Fact]
-    public void MuteAndAuditHeads_NameBothProductsInOneClause_WhereTheFactDiffers()
+    public void MuteHeadStatesTheSharedErrorStatus_AuditHeadNamesDarlingInOneClause()
     {
-        Assert.Contains("Darling can also return status error; Lite raises instead.", McpToolGuideTests.Served("mute_analysis_finding").Served, StringComparison.Ordinal);
+        Assert.Contains("error (the write failed; nothing is muted).", McpToolGuideTests.Served("mute_analysis_finding").Served, StringComparison.Ordinal);
         Assert.Contains("Darling also audits PostgreSQL targets.", McpToolGuideTests.Served("audit_config").Served, StringComparison.Ordinal);
     }
 
-    /// <summary>The head's "Darling can also return status error" points at Darling's own tail, which still
+    /// <summary>The head's "error (the write failed; nothing is muted)" is backed by Darling's own tail, which still
     /// carries the original sentence in full: what triggers it and that nothing is muted when it does.</summary>
     [Fact]
     public void MuteAnalysisFinding_DarlingTailNamesTheErrorStatusInFull()
