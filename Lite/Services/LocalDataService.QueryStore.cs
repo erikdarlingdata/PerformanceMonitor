@@ -160,6 +160,38 @@ ORDER BY bucket";
         return items;
     }
 
+    /// <summary>
+    /// <see cref="HasAnyQueryStoreStatAsync"/> bounded to one window: does this server hold ANY Query Store row
+    /// in it? <c>get_query_store_top</c> asks it only when a <c>module_name</c> filter matched nothing,
+    /// to tell "nothing in the window matched" (a true negative) from "the window held nothing to match" (the
+    /// unfiltered read's miss). The window is resolved exactly as <see cref="GetQueryStoreTopQueriesAsync"/>
+    /// resolves it, so the two answer for the same stretch. Deliberately NOT deduped per interval (#1841): an
+    /// existence test is the same over one snapshot of an interval as over all of them.
+    /// <para>It lives in this file, not beside <see cref="HasAnyQueryStoreStatAsync"/>: a <c>FROM
+    /// v_query_store_stats</c> in <c>LocalDataService.QueryStats.cs</c> makes that file's row types read as able
+    /// to reach Query Store, and the timestamp columns the two tables share in different clock frames then stop
+    /// resolving for <c>ConsumedTimestampFrameDisciplineTests</c> (#4057 measured three).</para>
+    /// </summary>
+    public async Task<bool> HasQueryStoreRowsInWindowAsync(int serverId, int hoursBack, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        command.CommandText = @"
+SELECT 1
+FROM v_query_store_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+LIMIT 1";
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
     public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? moduleName = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");

@@ -1385,34 +1385,6 @@ ORDER BY collection_time";
     /// </summary>
     public Task<bool> HasAnyQueryStoreStatAsync(int serverId) => HasAnyRowAsync("v_query_store_stats", serverId);
 
-    /// <summary>
-    /// The same probe over <c>v_query_store_stats</c>, bounded to one window: does this server hold ANY Query
-    /// Store row in it? <c>get_query_store_top</c> asks it only when a <c>module_name</c> filter matched nothing,
-    /// to tell "nothing in the window matched" (a true negative) from "the window held nothing to match" (the
-    /// unfiltered read's miss). The window is resolved exactly as <see cref="GetQueryStoreTopQueriesAsync"/>
-    /// resolves it, so the two answer for the same stretch. Deliberately NOT deduped per interval (#1841): an
-    /// existence test is the same over one snapshot of an interval as over all of them.
-    /// </summary>
-    public async Task<bool> HasQueryStoreRowsInWindowAsync(int serverId, int hoursBack, DateTime? asOfUtc = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-
-        command.CommandText = @"
-SELECT 1
-FROM v_query_store_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-LIMIT 1";
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-        return await command.ExecuteScalarAsync() is not null and not DBNull;
-    }
-
     /*
         The view name is interpolated because DuckDB cannot parameterize a FROM target. Every caller is one
         of the two literals above -- no caller-supplied string reaches this -- and the server id stays a
