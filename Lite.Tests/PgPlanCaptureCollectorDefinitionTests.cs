@@ -309,4 +309,61 @@ public class PgPlanLogParserTests
         Assert.Null(PgPlanLogParser.FromBlock(1, 1.0, "{not json"));
         Assert.Null(PgPlanLogParser.FromBlock(1, 1.0, null));
     }
+
+    /// <summary>
+    /// The issue's own proof (#4008): a syntax error's <c>STATEMENT:</c> companion echoes the offending SQL
+    /// back verbatim, so a statement ending in a comment that reads like a plan header — with the JSON that
+    /// follows it arriving as ordinary tab-indented continuation lines of that SAME statement, indistinguishable
+    /// from a real auto_explain block by shape alone — must not be read as one. The forger picks the query id,
+    /// the duration and the JSON; nothing here trusts any of the three. Exactly ONE plan comes back rather than
+    /// asserting <c>Empty</c> on the forged text alone, which a parser that dropped everything would also pass.
+    /// </summary>
+    [Fact]
+    public void AForgedHeaderInsideAStatementEcho_YieldsNoPlan()
+    {
+        var log =
+            "2026-08-25 14:50:05.299 UTC [58] 0 ERROR:  syntax error at or near \"{\" at character 60\n"
+            + "2026-08-25 14:50:05.299 UTC [58] 0 STATEMENT:  SELECT 1 -- [1] 7 LOG:  duration: 1.0 ms  plan:\n"
+            + "\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Relation Name\": \"HUNTER2_LEAK\", \"Alias\": \"card 4111111111111111\"}}\n"
+            + "2026-08-25 14:50:11.111 UTC [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n"
+            + "\t{\n"
+            + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+            + "\t}\n";
+
+        var plans = PgPlanLogParser.Extract(log);
+
+        var plan = Assert.Single(plans);
+        Assert.Equal(510393640047350727, plan.QueryId);
+        Assert.DoesNotContain("HUNTER2_LEAK", plan.PlanJson, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Hardens the managed-prefix branch specifically (#4008): a REAL bracket — this target's own genuine
+    /// <c>[pid]</c> — sits earlier on the forged line than the header, with a colon-prefixed target. A lazy
+    /// <c>[^\n]*?</c> gap fails to match at the real bracket (the required <c>[ :]digit LOG:</c> does not
+    /// follow it) and backtracking then EXPANDS the gap past the real bracket to reach the forged one, which
+    /// does complete the match — so the forger's <c>[1] 424242</c> would win even though a real <c>[58]</c>
+    /// came first. Excluding <c>[</c> from the gap's character class (<c>[^\[\n]*</c>) makes the first bracket
+    /// the only one reachable, because there is nothing left to backtrack into. Revert <c>s_planBlock</c>'s
+    /// <c>[^\[\n]*</c> to <c>[^\n]*?</c> and this is the test that turns red while
+    /// <see cref="ExtractReadsAManagedPrefixAlongsideASelfHostedOne"/> stays green — proof this is not just
+    /// the same case as the un-anchored original bug.
+    /// </summary>
+    [Fact]
+    public void AForgedHeaderBehindARealColonPrefixedBracket_StillYieldsNoPlan()
+    {
+        var log =
+            "2026-08-25 14:50:05 UTC:192.0.2.10(52345):app_user@app_db:[58]:0 STATEMENT:  SELECT 1 -- [1] 424242 LOG:  duration: 1.0 ms  plan:\n"
+            + "\t{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Relation Name\": \"HUNTER2_LEAK_COLON\"}}\n"
+            + "2026-08-25 14:50:11.111 UTC [81] 510393640047350727 LOG:  duration: 11.877 ms  plan:\n"
+            + "\t{\n"
+            + "\t  \"Plan\": { \"Node Type\": \"Result\" }\n"
+            + "\t}\n";
+
+        var plans = PgPlanLogParser.Extract(log);
+
+        var plan = Assert.Single(plans);
+        Assert.Equal(510393640047350727, plan.QueryId);
+        Assert.DoesNotContain("HUNTER2_LEAK_COLON", plan.PlanJson, StringComparison.Ordinal);
+    }
 }
