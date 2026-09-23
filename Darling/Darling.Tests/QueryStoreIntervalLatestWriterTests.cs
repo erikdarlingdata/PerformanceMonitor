@@ -321,6 +321,36 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.Equal(0, context.QueryStoreIntervalMisses);
     }
 
+    [Fact]
+    public async Task Retention_DropsIntervalsPastFifteenDays_AndStalePendingRows_AndKeepsTheRest()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 retention test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var context = NewContext();
+
+        var now = TruncateToSeconds(DateTime.UtcNow);
+        await WriteAsync(runner, now.AddDays(-16), context, ct,
+            Row("qsA", 1, 11, 100, now.AddDays(-16).AddHours(-2), now.AddDays(-16).AddHours(-1), 10, 500));
+        await WriteAsync(runner, now.AddDays(-2), context, ct,
+            Row("qsA", 1, 11, 101, now.AddDays(-2).AddHours(-2), now.AddDays(-2).AddHours(-1), 10, 500));
+        await ExecAsync(connection,
+            "INSERT INTO collect.query_store_interval_latest_pending (server_id, collection_time, database_name, recorded_at) " +
+            "VALUES (@server_id, '2026-01-01', 'old', '2026-01-01'), (@server_id, '2026-01-02', 'new', now() AT TIME ZONE 'UTC')", ct);
+
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, logger: null, ct);
+
+        Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest WHERE server_id = @server_id", ct));
+        Assert.Equal(101, await ScalarLongAsync(connection, "SELECT runtime_stats_interval_id FROM collect.query_store_interval_latest WHERE server_id = @server_id", ct));
+        Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending WHERE server_id = @server_id AND database_name = 'new'", ct));
+        Assert.Equal(1, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_latest_pending WHERE server_id = @server_id", ct));
+    }
+
     /* ---- helpers ----------------------------------------------------------------------------------------- */
 
     private static DateTime TruncateToSeconds(DateTime value) =>
