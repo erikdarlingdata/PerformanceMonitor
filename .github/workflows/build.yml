@@ -984,9 +984,13 @@ jobs:
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
         run: |
           $ErrorActionPreference = 'Stop'
-          $raw = dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json | Out-String
+          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
           if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
-          $classes = @($raw | ConvertFrom-Json)
+          # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
+          # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+          $classes = @($json[0] | ConvertFrom-Json)
           if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
           $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -1441,9 +1445,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $raw = dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json | Out-String
+          $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json)
           if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
-          $classes = @($raw | ConvertFrom-Json)
+          # Only the runner's one-line JSON array is parsed; see the Darling shard step (a CLI notice on stdout).
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+          $classes = @($json[0] | ConvertFrom-Json)
           if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
           $sha = [System.Security.Cryptography.SHA256]::Create()
