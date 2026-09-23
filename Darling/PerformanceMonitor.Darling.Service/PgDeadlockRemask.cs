@@ -16,7 +16,9 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
@@ -49,6 +51,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// (<see cref="DarlingWorker.BuildPgDeadlockIncident"/>, the live alert's own builder). Once a report is
 /// rewritten its raw hash is gone, so the report pass starts only after the alert pass reached the log's
 /// end.</para>
+///
+/// <para><b>Stored analysis findings</b> are the third copy: a finding persists its deadlock drill-down and prose
+/// for 30 days, and one written before #4005 kept its exemplars' SQL raw. They are rewritten between the two, by
+/// the read's own normalization (<see cref="RemaskFinding"/>).</para>
 /// </summary>
 public static class PgDeadlockRemask
 {
@@ -572,6 +578,106 @@ AND   detail_text IS NOT DISTINCT FROM $5";
         {
             return new List<string>();
         }
+    }
+
+    /// <summary>How many stored analysis findings one slice examines.</summary>
+    public const int MaxFindingRowsPerPass = 500;
+
+    /// <summary>One page of stored analysis findings that carry a deadlock exemplar section, in physical order after
+    /// <c>$1</c> (null for the start). A section this build wrote, or one the pass already rewrote, says
+    /// <c>sql_normalized</c> and is not read.</summary>
+    public const string FindingPageSql = @"
+SELECT
+    f.ctid::text,
+    f.drill_down_json,
+    f.story_text
+FROM analysis_findings AS f
+WHERE ($1::tid IS NULL OR f.ctid > $1::tid)
+AND   strpos(f.drill_down_json, '""" + PgTargetDrillDownCollector.DeadlockExemplarsSection + @"""') > 0
+AND   strpos(f.drill_down_json, '""sql_normalized"":true') = 0
+ORDER BY f.ctid
+LIMIT $2";
+
+    /// <summary>Writes one finding's normalized drill-down and prose back, only while the row still holds exactly
+    /// what the page read.</summary>
+    public const string FindingUpdateSql = @"
+UPDATE analysis_findings
+SET drill_down_json = $1,
+    story_text = $2
+WHERE ctid = $3::tid
+AND   drill_down_json = $4
+AND   story_text = $5";
+
+    /// <summary>
+    /// A stored analysis finding's deadlock exemplars brought to #4005's rules and stamped so, or null when it has
+    /// none to rewrite (#4012). Findings persist their drill-down and prose for 30 days, and one written before
+    /// #4005 kept each exemplar's victim statement, its fingerprint and graph raw, with a hash that may be over the
+    /// raw graph. This is the read's own normalization
+    /// (<see cref="PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars"/>), so the rewritten finding reads
+    /// exactly as it read before, and the stamp is what the read and a later pass leave it as it is by. Pure.
+    /// </summary>
+    public static (string DrillDownJson, string StoryText)? RemaskFinding(string drillDownJson, string storyText)
+    {
+        var finding = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(drillDownJson), StoryText = storyText };
+        return PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding, markNormalized: true)
+            && DrillDownSerializer.Serialize(finding.DrillDown) is { } json
+                ? (json, finding.StoryText)
+                : null;
+    }
+
+    /// <summary>
+    /// Examines one slice of stored analysis findings and rewrites the ones whose deadlock exemplars predate #4005
+    /// (#4012). Returns the cursor to resume from, null once the table's end is reached, and how many rows changed
+    /// between the read and the write, which were left as they were and need the table read again.
+    /// </summary>
+    public static async Task<(string? NextCursor, int Examined, int Rewritten, int Raced)> RemaskStoredFindingsAsync(
+        NpgsqlConnection connection, string? afterCursor, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var page = new List<(string Ctid, string DrillDown, string Story)>();
+        await using (var transaction = await BeginBoundedAsync(connection, cancellationToken))
+        {
+            await using (var select = new NpgsqlCommand(FindingPageSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            {
+                select.Parameters.Add(new NpgsqlParameter { Value = (object?)afterCursor ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
+                select.Parameters.AddWithValue(MaxFindingRowsPerPass);
+                await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    page.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                }
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        int rewritten = 0, raced = 0;
+        foreach (var row in page)
+        {
+            if (RemaskFinding(row.DrillDown, row.Story) is not { } finding)
+            {
+                continue;
+            }
+
+            await using var transaction = await BeginBoundedAsync(connection, cancellationToken);
+            await using (var update = new NpgsqlCommand(FindingUpdateSql, connection, transaction) { CommandTimeout = CommandBackstopSeconds })
+            {
+                update.Parameters.Add(new NpgsqlParameter { Value = finding.DrillDownJson, NpgsqlDbType = NpgsqlDbType.Text });
+                update.Parameters.Add(new NpgsqlParameter { Value = finding.StoryText, NpgsqlDbType = NpgsqlDbType.Text });
+                update.Parameters.Add(new NpgsqlParameter { Value = row.Ctid, NpgsqlDbType = NpgsqlDbType.Text });
+                update.Parameters.Add(new NpgsqlParameter { Value = row.DrillDown, NpgsqlDbType = NpgsqlDbType.Text });
+                update.Parameters.Add(new NpgsqlParameter { Value = row.Story, NpgsqlDbType = NpgsqlDbType.Text });
+                var written = await update.ExecuteNonQueryAsync(cancellationToken);
+                rewritten += written;
+                raced += written == 0 ? 1 : 0;
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        var next = page.Count < MaxFindingRowsPerPass ? null : page[^1].Ctid;
+        return (next, page.Count, rewritten, raced);
     }
 
     /// <summary>A transaction whose statements run under <see cref="StatementTimeoutSeconds"/>, set LOCAL so

@@ -851,8 +851,8 @@ public sealed class DarlingWorker : BackgroundService
 
     private bool _storeLogRemaskDone;
 
-    /* #4012: the re-mask of PostgreSQL deadlock alerts, then deadlock reports, stored before #4005 with their SQL
-       raw. The alerts go first because they are found through the reports' raw hashes, which the report pass
+    /* #4012: the re-mask of PostgreSQL deadlock alerts, then stored analysis findings' deadlock exemplars, then
+       deadlock reports, stored before #4005 with their SQL raw. The alerts go first because they are found through the reports' raw hashes, which the report pass
        replaces. Each has a cursor and is done once a slice reaches its table's end; a scan that left rows raw
        (a row that changed under its write, a report whose rewrite failed) reads its table through again, at
        most PgDeadlockRemask.MaxRescansPerProcess times, and the next process's pass is a no-op re-read. */
@@ -861,6 +861,12 @@ public sealed class DarlingWorker : BackgroundService
     private bool _pgDeadlockAlertRemaskLeftRows;
 
     private bool _pgDeadlockAlertRemaskDone;
+
+    private string? _pgDeadlockFindingRemaskCursor;
+
+    private bool _pgDeadlockFindingRemaskLeftRows;
+
+    private bool _pgDeadlockFindingRemaskDone;
 
     private PgDeadlockRemask.ReportCursor? _pgDeadlockRemaskCursor;
 
@@ -6992,8 +6998,8 @@ LIMIT 1";
 
             /* #4012: PostgreSQL deadlock reports stored before #4005 keep their SQL raw, with a hash over the raw
                graph, for pg_deadlocks' 90 days, and a deadlock alert fired before it keeps the same in its history
-               row. Every read normalizes them; a direct SELECT does not. One bounded slice per tick, the alerts'
-               until they are done and then the reports', with the store-log slice's own-catch, own-cap posture:
+               row, and an analysis finding its exemplars. Every read normalizes them; a direct SELECT does not. One
+               bounded slice per tick, the alerts' until they are done, then the findings', then the reports', with the store-log slice's own-catch, own-cap posture:
                neither a failure nor a slow slice may cost the collector-cost flush below. */
             if (!_pgDeadlockRemaskDone)
             {
@@ -7024,6 +7030,26 @@ LIMIT 1";
                         {
                             _logger.LogInformation(
                                 "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} deadlock alert(s) fired before this build, so their SQL literals and raw report hashes no longer sit in the alert history{Remaining}.",
+                                rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
+                        }
+                    }
+                    else if (!_pgDeadlockFindingRemaskDone)
+                    {
+                        var (next, examined, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(
+                            connection, _pgDeadlockFindingRemaskCursor, remaskBudget.Token);
+                        _pgDeadlockFindingRemaskCursor = next;
+                        _pgDeadlockFindingRemaskLeftRows |= raced > 0;
+                        if (next is null)
+                        {
+                            _pgDeadlockFindingRemaskDone = !_pgDeadlockFindingRemaskLeftRows
+                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
+                            _pgDeadlockFindingRemaskLeftRows = false;
+                        }
+
+                        if (rewritten > 0)
+                        {
+                            _logger.LogInformation(
+                                "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} stored analysis finding(s) written before this build, so their deadlock exemplars' SQL literals no longer sit in the findings store{Remaining}.",
                                 rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
                         }
                     }

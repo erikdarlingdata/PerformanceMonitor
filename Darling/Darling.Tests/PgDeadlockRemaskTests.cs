@@ -10,10 +10,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
@@ -25,8 +27,9 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4012: the deadlock reports and deadlock alerts stored before #4005 are rewritten in place, once, to #4005's
-/// rules, so a direct <c>SELECT</c> finds no literal and no hash over a raw graph in either table.
+/// #4012: the deadlock reports, deadlock alerts and analysis findings' deadlock exemplars stored before #4005 are
+/// rewritten in place, once, to #4005's rules, so a direct <c>SELECT</c> finds no literal and no hash over a raw graph
+/// in any of the three tables.
 ///
 /// <para>#4005 normalized what the collector stores and what every read returns; this pins the rewrite of what was
 /// already stored (<see cref="PgDeadlockRemask"/>): only rows still raw change, they read back exactly as every read
@@ -191,6 +194,37 @@ public sealed class PgDeadlockRemaskTests
         Assert.Null(PgDeadlockRemask.RemaskAlert("{ not json", null, Gone));
     }
 
+    /// <summary>
+    /// A finding written before #4005 is rewritten to what every read of it already showed
+    /// (<see cref="PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars"/>) and stamped, so the read leaves the
+    /// rewritten row as it is and a second pass finds nothing. A finding with no deadlock section is not touched.
+    /// </summary>
+    [Fact]
+    public void ALegacyFinding_BecomesWhatEveryReadShows_AndIsStampedSo()
+    {
+        var (drillDown, story) = LegacyFinding();
+        var read = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(drillDown), StoryText = story };
+        Assert.True(PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(read));
+
+        var rewritten = PgDeadlockRemask.RemaskFinding(drillDown, story);
+        Assert.NotNull(rewritten);
+        foreach (var text in new[] { rewritten.Value.DrillDownJson, rewritten.Value.StoryText })
+        {
+            AssertNoSecret(text);
+            Assert.DoesNotContain(PgDeadlockLogParser.HashOf(LegacyGraph), text, StringComparison.Ordinal);
+        }
+
+        var persisted = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(rewritten.Value.DrillDownJson), StoryText = rewritten.Value.StoryText };
+        Assert.False(PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(persisted));
+        Assert.Equal(read.StoryText, persisted.StoryText);
+        Assert.Equal(ExemplarsOf(read), ExemplarsOf(persisted));
+
+        Assert.Null(PgDeadlockRemask.RemaskFinding(rewritten.Value.DrillDownJson, rewritten.Value.StoryText));
+        Assert.Null(PgDeadlockRemask.RemaskFinding(
+            DrillDownSerializer.Serialize(new Dictionary<string, object> { ["top_waits"] = JsonSerializer.SerializeToElement(new { wait = "LCK_M_X" }) })!,
+            story));
+    }
+
     /* ───────────────────────── live ───────────────────────── */
 
     /// <summary>
@@ -268,6 +302,15 @@ public sealed class PgDeadlockRemaskTests
         });
         await PlantAlertAsync(connection, atA.AddMinutes(4), null, sqlServerJson, ct);
 
+        /* A finding the analysis stored before #4005, its exemplar raw, and one it stored with no deadlock section. */
+        var (legacyDrillDown, legacyStory) = LegacyFinding();
+        await PlantFindingAsync(connection, 1, now.AddDays(-2), legacyDrillDown, legacyStory, ct);
+        var otherDrillDown = DrillDownSerializer.Serialize(new Dictionary<string, object> { ["top_waits"] = JsonSerializer.SerializeToElement(new { wait = "LCK_M_X" }) })!;
+        var otherStory = FactAdvice.SerializeForStoryText(new AdviceBlock("Waits", "Investigate the lock waits.", "Fix the order."));
+        await PlantFindingAsync(connection, 2, now.AddDays(-2), otherDrillDown, otherStory, ct);
+        var legacyRead = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(legacyDrillDown), StoryText = legacyStory };
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(legacyRead);
+
         if (timescale)
         {
             await ExecuteAsync(connection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('pg_deadlocks') AS c", ct);
@@ -278,15 +321,17 @@ public sealed class PgDeadlockRemaskTests
         Assert.Equal(5, readsBefore.Summary.Count);
 
         /* The pass, as the worker runs it: the alerts to their end, then the reports. */
-        var (alertsRewritten, reportsRewritten, failed) = await RunPassAsync(connection, ct);
+        var (alertsRewritten, findingsRewritten, reportsRewritten, failed) = await RunPassAsync(connection, ct);
         Assert.Equal(3, alertsRewritten);
+        Assert.Equal(1, findingsRewritten);
         Assert.Equal(4, reportsRewritten);
         Assert.Equal(0, failed);
 
         /* No literal and no raw hash left in either table, whatever reads them. */
         var deadlockDump = await DumpAsync(connection, "SELECT concat_ws('|', deadlock_hash, victim_statement, graph_text) FROM pg_deadlocks", ct);
         var alertDump = await DumpAsync(connection, $"SELECT concat_ws('|', detail_text, context_json) FROM config_alert_log WHERE context_json <> '{sqlServerJson.Replace("'", "''", StringComparison.Ordinal)}'", ct);
-        foreach (var text in new[] { deadlockDump, alertDump })
+        var findingDump = await DumpAsync(connection, "SELECT concat_ws('|', drill_down_json, story_text) FROM analysis_findings", ct);
+        foreach (var text in new[] { deadlockDump, alertDump, findingDump })
         {
             AssertNoSecret(text);
             foreach (var raw in new[] { LegacyGraph, graphB, graphD })
@@ -343,12 +388,19 @@ public sealed class PgDeadlockRemaskTests
         Assert.Contains((sqlServerJson, (string?)null), alertsAfter);
         Assert.Contains(alertsAfter, a => a.Context.Contains(goneHash, StringComparison.Ordinal) && a.Context.Contains("WHERE id = ?", StringComparison.Ordinal));
 
+        /* The finding reads as every read showed it before; the one with no deadlock section is as planted. */
+        var findingsAfter = await ReadFindingsAsync(connection, ct);
+        var rewrittenFinding = new AnalysisFinding { DrillDown = DrillDownSerializer.Deserialize(findingsAfter[1].DrillDown), StoryText = findingsAfter[1].Story };
+        Assert.False(PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(rewrittenFinding));
+        Assert.Equal(legacyRead.StoryText, rewrittenFinding.StoryText);
+        Assert.Equal(ExemplarsOf(legacyRead), ExemplarsOf(rewrittenFinding));
+        Assert.Equal((otherDrillDown, otherStory), findingsAfter[2]);
+
         /* A second pass finds nothing to do and changes nothing. */
-        var tablesBefore = deadlockDump + "\n" + await DumpAsync(connection, "SELECT concat_ws('|', detail_text, context_json) FROM config_alert_log", ct);
+        var tablesBefore = await DumpTablesAsync(connection, ct);
         var second = await RunPassAsync(connection, ct);
-        Assert.Equal((0, 0, 0), second);
-        Assert.Equal(tablesBefore, await DumpAsync(connection, "SELECT concat_ws('|', deadlock_hash, victim_statement, graph_text) FROM pg_deadlocks", ct)
-            + "\n" + await DumpAsync(connection, "SELECT concat_ws('|', detail_text, context_json) FROM config_alert_log", ct));
+        Assert.Equal((0, 0, 0, 0), second);
+        Assert.Equal(tablesBefore, await DumpTablesAsync(connection, ct));
     }
 
     /* ───────────────────────── helpers ───────────────────────── */
@@ -391,9 +443,9 @@ public sealed class PgDeadlockRemaskTests
         return new Reads(summary, details, string.Join("\n", drill));
     }
 
-    private static async Task<(int Alerts, int Reports, int Failed)> RunPassAsync(NpgsqlConnection connection, CancellationToken ct)
+    private static async Task<(int Alerts, int Findings, int Reports, int Failed)> RunPassAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        int alerts = 0, reports = 0, failed = 0;
+        int alerts = 0, findings = 0, reports = 0, failed = 0;
         string? alertCursor = null;
         do
         {
@@ -403,6 +455,16 @@ public sealed class PgDeadlockRemaskTests
             alertCursor = next;
         }
         while (alertCursor is not null);
+
+        string? findingCursor = null;
+        do
+        {
+            var (next, _, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(connection, findingCursor, ct);
+            Assert.Equal(0, raced);
+            findings += rewritten;
+            findingCursor = next;
+        }
+        while (findingCursor is not null);
 
         PgDeadlockRemask.ReportCursor? reportCursor = null;
         do
@@ -414,7 +476,7 @@ public sealed class PgDeadlockRemaskTests
         }
         while (reportCursor is not null);
 
-        return (alerts, reports, failed);
+        return (alerts, findings, reports, failed);
     }
 
     private static async Task<List<(string Context, string? Detail)>> ReadAlertsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -429,6 +491,75 @@ public sealed class PgDeadlockRemaskTests
         }
 
         return rows;
+    }
+
+    private static async Task<string> DumpTablesAsync(NpgsqlConnection connection, CancellationToken ct) =>
+        await DumpAsync(connection, "SELECT concat_ws('|', deadlock_hash, victim_statement, graph_text) FROM pg_deadlocks", ct)
+        + "\n" + await DumpAsync(connection, "SELECT concat_ws('|', detail_text, context_json) FROM config_alert_log", ct)
+        + "\n" + await DumpAsync(connection, "SELECT concat_ws('|', finding_id, drill_down_json, story_text) FROM analysis_findings", ct);
+
+    private static async Task<Dictionary<long, (string DrillDown, string Story)>> ReadFindingsAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var rows = new Dictionary<long, (string, string)>();
+        await using var command = new NpgsqlCommand("SELECT finding_id, drill_down_json, story_text FROM analysis_findings", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows[reader.GetInt64(0)] = (reader.GetString(1), reader.GetString(2));
+        }
+
+        return rows;
+    }
+
+    /* A finding as the analysis stored it before #4005: the exemplar's statement, fingerprint and graph raw, the
+       fingerprint in its prose, and a hash over the raw graph (PgTargetDeadlockDrillDownTests' shape). */
+    private static (string DrillDown, string Story) LegacyFinding()
+    {
+        var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
+        var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{LegacyVictimStatement}`, seen 1 time.";
+        var section = JsonSerializer.SerializeToElement(new
+        {
+            engine_counted = 1,
+            exemplars = new[]
+            {
+                new
+                {
+                    rank = 1,
+                    last_seen = lastSeen.ToString("o", CultureInfo.InvariantCulture),
+                    deadlock_hash = PgDeadlockLogParser.HashOf(LegacyGraph),
+                    victim_pid = 3101,
+                    victim_statement_fingerprint = LegacyVictimStatement,
+                    victim_statement = LegacyVictimStatement,
+                    graph_text = LegacyGraph,
+                },
+            },
+            note = sentence,
+        });
+        return (
+            DrillDownSerializer.Serialize(new Dictionary<string, object> { [PgTargetDrillDownCollector.DeadlockExemplarsSection] = section })!,
+            FactAdvice.SerializeForStoryText(new AdviceBlock("Deadlocks", "Investigate. " + sentence, "Fix the order.")));
+    }
+
+    private static string ExemplarsOf(AnalysisFinding finding)
+    {
+        var section = (JsonElement)finding.DrillDown![PgTargetDrillDownCollector.DeadlockExemplarsSection];
+        return section.GetProperty("exemplars").GetRawText() + "\n" + section.GetProperty("note").GetString();
+    }
+
+    private static async Task PlantFindingAsync(
+        NpgsqlConnection connection, long findingId, DateTime analysisTime, string drillDown, string story, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+INSERT INTO analysis_findings
+    (finding_id, analysis_time, server_id, server_name, severity, confidence, category, story_path, story_path_hash, story_text, root_fact_key, fact_count, drill_down_json)
+VALUES ($1, $2, $3, $4, 0.6, 1, 'deadlocks', 'PG_DEADLOCK_RATE', 'h', $5, 'PG_DEADLOCK_RATE', 1, $6)", connection);
+        command.Parameters.AddWithValue(findingId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(analysisTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(ServerId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(story);
+        command.Parameters.AddWithValue(drillDown);
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<string> DumpAsync(NpgsqlConnection connection, string sql, CancellationToken ct)

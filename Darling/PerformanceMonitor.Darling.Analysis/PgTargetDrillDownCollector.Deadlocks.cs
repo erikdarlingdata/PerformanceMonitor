@@ -337,8 +337,11 @@ LIMIT $4";
     /// every one is replaced by the <see cref="PgDeadlockLogParser.ReportIdentity"/> of the exemplar's latest
     /// report, which <c>get_pg_deadlock_detail</c> takes. Idempotent, and a no-op on a finding with no exemplars
     /// and on one this build wrote, whose section says <c>sql_normalized</c>.
+    /// <para>Returns whether it rewrote the section. <paramref name="markNormalized"/> stamps the rewritten section
+    /// <c>sql_normalized</c>, for the pass that writes it back to the store (#4012): its text is then what this
+    /// build writes, and a read or a later pass leaves it as it is.</para>
     /// </summary>
-    internal static void NormalizeStoredDeadlockExemplars(AnalysisFinding finding)
+    internal static bool NormalizeStoredDeadlockExemplars(AnalysisFinding finding, bool markNormalized = false)
     {
         if (finding.DrillDown is null
             || !finding.DrillDown.TryGetValue(DeadlockExemplarsSection, out var section)
@@ -346,7 +349,7 @@ LIMIT $4";
             || JsonNode.Parse(element.GetRawText()) is not JsonObject node
             || node["exemplars"] is not JsonArray exemplars
             || (node["sql_normalized"] is JsonValue marker && marker.TryGetValue<bool>(out var normalized) && normalized))
-            return;
+            return false;
 
         var fingerprints = new List<(string Stored, string Normalized)>();
         foreach (var exemplar in exemplars.OfType<JsonObject>())
@@ -374,6 +377,9 @@ LIMIT $4";
         if (StringOf(node["note"]) is { } note)
             node["note"] = Replace(note, fingerprints);
 
+        if (markNormalized)
+            node["sql_normalized"] = true;
+
         finding.DrillDown[DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(node);
 
         if (fingerprints.Count > 0 && FactAdvice.TryReadStoryText(finding.StoryText) is { } advice)
@@ -385,6 +391,8 @@ LIMIT $4";
                 Remediation = Replace(advice.Remediation, fingerprints),
             });
         }
+
+        return true;
 
         static string? StringOf(JsonNode? value) =>
             value is JsonValue text && text.TryGetValue<string>(out var s) ? s : null;
