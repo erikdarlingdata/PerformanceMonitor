@@ -41,7 +41,7 @@ public sealed class HostObjectRollupLiveTests
 {
     private const string ServerName = "darling-host-rollup-e2e";
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
-    private const string Db = "apex";
+    private const string Db = "inventory";
 
     [Fact]
     public async Task HostObjectRollup_CollapsesProcFragments_ButNeverPoolsAdHoc_AgainstDevPostgres()

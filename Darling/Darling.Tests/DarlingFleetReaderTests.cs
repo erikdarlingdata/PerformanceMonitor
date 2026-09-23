@@ -194,7 +194,7 @@ public sealed class DarlingFleetReaderSqlTests
     }
 
     /// <summary>
-    /// Regression pin for a fleet false-Offline (found live on prod-pos-use1-monitor-01, 2026-08-30): this
+    /// Regression pin for a fleet false-Offline (found live on the use1 monitoring host, 2026-08-30): this
     /// query used to be a bare `GROUP BY server_id` with no bound at all — a full scan of the server's ENTIRE
     /// collection_log history on every fleet-overview call, exactly the pattern already fixed elsewhere the same
     /// day (pg_statement_stats #2691, pg_wait_stats #2695). It must stay windowed like every other fleet read
@@ -743,7 +743,7 @@ public sealed class DarlingFleetReaderLivePostgresTests
     private const string NoHistoryName = "fleet-reader-e2e-no-history";
 
     /// <summary>
-    /// Regression test for a fleet false-Offline found live on prod-pos-use1-monitor-01 (2026-08-30): a server
+    /// Regression test for a fleet false-Offline found live on the use1 monitoring host (2026-08-30): a server
     /// with NO row in <c>collection_log</c> at all — the "never collected" bootstrap state — must band Warning
     /// with <c>IsOnline = null</c> and <c>AwaitingFirstCollection = true</c>
     /// (<see cref="ServerCollectionStatusRules.FlagsFor"/>), never <c>FleetHealthBand.Offline</c> with

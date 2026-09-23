@@ -734,8 +734,10 @@ public sealed class PgDeadlockLogParserTests
         Assert.Contains("EST", ex.Message, StringComparison.Ordinal);
 
         /* The sentence that stops the row being read as an empty log. A refusal whose message does not say
-           so is the same silent nothing one layer over. */
-        Assert.Contains("NOT 'no deadlocks were detected'", ex.Message, StringComparison.Ordinal);
+           so is the same silent nothing one layer over. It names the log, not deadlocks: pg_log_events
+           throws this same message through PgLogEntryAssembler. */
+        Assert.Contains("this is NOT an empty log", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("deadlock", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

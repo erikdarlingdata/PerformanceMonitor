@@ -159,7 +159,7 @@ public sealed class QueryStoreBackfillTests
     public void AdaptiveSpan_HalvesPerFailure_FloorsAtFifteenMinutes_AndResetsAtZero()
     {
         /* #2111 promoted from reserve on field evidence: a member whose 1h window intermittently
-           exceeds the command timeout stayed stuck for hours (Redstone, 3+ hours flat overnight) —
+           exceeds the command timeout stayed stuck for hours (one catalog, 3+ hours flat overnight) —
            halving toward a floor gives it a window that fits, and the skipped range rides the same
            hole records the clamp writes. Zero failures = full width, success resets the counter at
            every call site, and the exponent cap keeps the shift math from wrapping. */

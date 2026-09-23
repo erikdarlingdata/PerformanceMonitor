@@ -26,9 +26,16 @@ Before dispatch:
 - Rank the queue and get the OK the guardrails require.
 - Post every ruling on its issue AND put it in the first prompt.
 - Pre-approve any store migration by name. Every other lane stops and reports instead.
+- Fast-forward the main checkout's local `dev`. A `lane` agent loads this skill from that checkout, and a stale
+  checkout can lack it.
 
 At dispatch:
-- Run code-editing lanes with worktree isolation (Claude Code: `isolation: "worktree"`).
+- Dispatch each lane as a `lane` agent (Claude Code: `subagent_type: "lane"`) where the harness defines that
+  type. It runs on the default tier (Sonnet) in its own worktree, with this skill loaded and a context watchdog
+  attached. Where the type does not exist, use a general agent on the default tier with worktree isolation
+  (Claude Code: `isolation: "worktree"`). Put these orders in its brief.
+- A lane that fixes review findings also runs on the default tier. The top tier reviews, and the default tier
+  fixes what the review found.
 - Give each lane its own rig port.
 - Set a wall-clock check at each lane's deadline; don't wait on notifications.
 - Label each issue the lane takes `in-progress` (`gh issue edit <n> --add-label in-progress`), so the board shows
