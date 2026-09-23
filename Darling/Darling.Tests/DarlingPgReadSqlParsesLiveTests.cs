@@ -116,6 +116,12 @@ public sealed class DarlingPgReadSqlParsesLiveTests
            mapping share one spelling. A fragment, not a statement; the query it is spliced into IS in the
            parse-checked population, so the fragment is verified where it is used. */
         "DarlingPgLogEventReader.SeverityRankSql",
+        /* #3937: the change feed's three change_kind spellings, which ScopedConfigChangesSql projects as
+           literals and PgConfigChangeRow.ChangeKind carries. Values, not statements; the read that spells them
+           IS in the parse-checked population. */
+        "PgConfigChangeKind.Changed",
+        "PgConfigChangeKind.Set",
+        "PgConfigChangeKind.Reset",
     };
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
