@@ -658,9 +658,6 @@ public sealed class McpPayloadContractCensusTests
         Assert.All(CoalesceOperands(LastAssignmentOf(code, "chained", guards[3].Index)!), o => Assert.Matches(SharedPassThroughProducer, o));
     }
 
-    /// <summary>The right-hand side of the LAST assignment to <paramref name="name"/> that precedes
-    /// <paramref name="before"/> in <paramref name="code"/> (strings and comments blanked): a declaration, a
-    /// re-assignment, or a tuple destructure naming it in any position. Null when none precedes it.</summary>
     /// <summary>The operands of a <c>??</c> chain at parenthesis depth zero — the whole expression when it has
     /// none. Read off code whose strings and comments are blanked, so a <c>??</c> inside a literal cannot split it;
     /// a conditional's single <c>?</c> and a null-conditional <c>?.</c> are not the operator.</summary>
@@ -692,6 +689,9 @@ public sealed class McpPayloadContractCensusTests
         return operands;
     }
 
+    /// <summary>The right-hand side of the LAST assignment to <paramref name="name"/> that precedes
+    /// <paramref name="before"/> in <paramref name="code"/> (strings and comments blanked): a declaration, a
+    /// re-assignment, or a tuple destructure naming it in any position. Null when none precedes it.</summary>
     private static string? LastAssignmentOf(string code, string name, int before)
     {
         var escaped = Regex.Escape(name);
