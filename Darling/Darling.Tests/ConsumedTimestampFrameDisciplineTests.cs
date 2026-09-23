@@ -73,12 +73,13 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /* Floors, so a broken walk cannot report a clean bill of health. Measured on dev at cb208f6a4:
        66 Timestamp columns over 69 catalog definitions, 49 of them on SqlServer definitions and 17 on
        PostgreSql ones; #3601 added pg_log_events.occurred_at, so 67 over 70, 18 PostgreSql; V134 (#3653
-       item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer. Pinned exactly
-       rather than as a floor because the whole point is a closed census — a floor would let a column
-       vanish. */
-    private const int TimestampColumnCount = 68;
+       item 13) added cpu_utilization_stats.sample_time_utc, so 68 over 70, 50 SqlServer; V139 (#3955)
+       added pg_write_stats.postmaster_start_time (AT TIME ZONE 'UTC' inline), so 69 over 71, 19 PostgreSql.
+       Pinned exactly rather than as a floor because the whole point is a closed census — a floor would let
+       a column vanish. */
+    private const int TimestampColumnCount = 69;
     private const int SqlServerTimestampColumnCount = 50;
-    private const int PostgresTimestampColumnCount = 18;
+    private const int PostgresTimestampColumnCount = 19;
 
     private static IReadOnlyList<(string Table, string Column, string Collector, CollectorTargetEngine Engine)>
         TimestampColumns() =>
@@ -94,7 +95,7 @@ public sealed class ConsumedTimestampFrameDisciplineTests
     /// The census is the catalog's own <see cref="CollectorColumnType.Timestamp"/> columns, and the engine
     /// split is <see cref="ICollectorSchemaInfo.TargetEngine"/> rather than a name prefix or a hand list.
     ///
-    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 18 PostgreSQL columns are a
+    /// <para>The T-SQL classifier below reaches the SqlServer arm ONLY. The 19 PostgreSQL columns are a
     /// different provenance mechanism, not a shortfall of this one: PostgreSQL has no
     /// <c>column = expression</c> alias form at all (there it is a boolean comparison), so those collectors
     /// write <c>expression AS column</c>, and their timestamps arrive as <c>timestamptz</c> normalised in

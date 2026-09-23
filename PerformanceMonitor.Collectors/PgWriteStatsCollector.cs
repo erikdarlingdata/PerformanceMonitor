@@ -67,6 +67,16 @@ namespace PerformanceMonitor.Collectors;
 /// <para>Runs on standbys deliberately. <c>pg_stat_checkpointer</c>'s <c>restartpoints_*</c> columns exist
 /// precisely to describe a replica, and a standby that cannot keep up with restartpoints is exactly the
 /// thing nobody is watching.</para>
+///
+/// <para><b>Which postmaster produced the row (#3955).</b> The last column is <c>pg_postmaster_start_time()</c>,
+/// naive UTC. A counter reset is visible in the three <c>stats_reset</c> stamps; a CLEAN restart is not, because
+/// the statistics survive it, and it adds a requested checkpoint that WAL did not force: PostgreSQL counts the
+/// shutdown checkpoint in <c>num_requested</c> (<c>checkpoints_req</c> through 16), measured +1 per fast stop on
+/// 18.6. The reads difference these rows, so without the start time a monitored server's restart read as WAL
+/// pressure. With it, they apply one rule (<c>PostmasterRestart</c> in the Darling store) and treat a
+/// restart-spanning interval's requested figure as unknown. The function is readable by any login, Aurora
+/// included, and it is the same instant on every row one postmaster writes, so it costs one scalar per
+/// snapshot. Appended LAST, so every earlier ordinal and an upgraded store's column order are unchanged.</para>
 /// </summary>
 public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWriteStatsCollector.Row>
 {
@@ -82,6 +92,8 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
     /// <param name="NumDone">Checkpoints completed (18+; NULL below).</param>
     /// <param name="BuffersBackend">Buffers written by a backend itself (≤16; NULL from 17, where the fact
     /// moved to <c>pg_stat_io</c> rather than to the checkpointer).</param>
+    /// <param name="PostmasterStartTime"><c>pg_postmaster_start_time()</c>, naive UTC: which postmaster produced the
+    /// row, so a read can tell an interval that spans a restart (#3955).</param>
     public readonly record struct Row(
         long? NumTimed,
         long? NumRequested,
@@ -108,7 +120,8 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
         long? WalSync,
         double? WalWriteTimeMs,
         double? WalSyncTimeMs,
-        DateTime? WalStatsReset);
+        DateTime? WalStatsReset,
+        DateTime? PostmasterStartTime);
 
     /* The CHECKPOINTER columns are joinless scalar subqueries; pg_stat_bgwriter and pg_stat_wal are
        CROSS JOINed below as b and w. Each of the three views is a guaranteed single row, so the result
@@ -204,6 +217,11 @@ public sealed class PgWriteStatsCollector : PostgresCollectorDefinitionBase<PgWr
            decidable, and carried through C# as decimal rather than long for the same reason. */
         var walBytes = isAurora ? "NULL::numeric(38,0)" : "w.wal_bytes::numeric(38,0)";
 
+        /* #3955: which postmaster produced this snapshot. Not version- or flavour-gated: the function is core,
+           readable by any login, and present on every major this collector applies to and on Aurora. AT TIME ZONE
+           'UTC' for the stats_reset stamps' reason, and schema-qualified like every catalog read here. */
+        const string postmasterStart = "(pg_catalog.pg_postmaster_start_time() AT TIME ZONE 'UTC')";
+
         /* Naming the view in FROM is itself the 0A000, so the join has to go rather than just its
            columns. The two-line literal keeps the repository's CRLF instead of hardcoding a newline. */
         var fromClause = isAurora
@@ -238,7 +256,8 @@ SELECT
     {walSync}                               AS wal_sync,
     {walWriteTime}                          AS wal_write_time_ms,
     {walSyncTime}                           AS wal_sync_time_ms,
-    {walStatsReset}                         AS wal_stats_reset
+    {walStatsReset}                         AS wal_stats_reset,
+    {postmasterStart} AS postmaster_start_time
 {fromClause}";
     }
 
@@ -299,6 +318,12 @@ SELECT
         new CollectorColumn("wal_write_time_ms", CollectorColumnType.Double),
         new CollectorColumn("wal_sync_time_ms", CollectorColumnType.Double),
         new CollectorColumn("wal_stats_reset", CollectorColumnType.Timestamp),
+
+        /* ---- the postmaster (#3955) ---- */
+        /* Which postmaster produced the row. A clean restart keeps the counters and adds the shutdown checkpoint
+           to num_requested, so the reads compare this across consecutive rows to tell a restart-spanning interval.
+           LAST, so the positional COPY and an upgraded store's V139 ALTER agree on where it sits. */
+        new CollectorColumn("postmaster_start_time", CollectorColumnType.Timestamp),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -333,7 +358,8 @@ SELECT
                 WalSync: Long(reader, 22),
                 WalWriteTimeMs: Double(reader, 23),
                 WalSyncTimeMs: Double(reader, 24),
-                WalStatsReset: Stamp(reader, 25)));
+                WalStatsReset: Stamp(reader, 25),
+                PostmasterStartTime: Stamp(reader, 26)));
         }
 
         return rows;
@@ -350,7 +376,8 @@ SELECT
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {
         /* No stored deltas. Every column is a cumulative counter, and the windowed change is computed at
-           read time against the recorded stats_reset - which is why all three resets are stored. */
+           read time against the recorded stats_reset - which is why all three resets are stored - and the
+           recorded postmaster start, which is what tells a read a clean restart happened in between (#3955). */
         writer
             .Value(row.NumTimed)
             .Value(row.NumRequested)
@@ -377,6 +404,7 @@ SELECT
             .Value(row.WalSync)
             .Value(row.WalWriteTimeMs)
             .Value(row.WalSyncTimeMs)
-            .Value(row.WalStatsReset);
+            .Value(row.WalStatsReset)
+            .Value(row.PostmasterStartTime);
     }
 }

@@ -37,19 +37,36 @@ namespace PerformanceMonitor.Darling.Storage;
 /// version does not expose it" instead of "it was zero". On a fleet holding both 16 and 18 targets those are
 /// completely different statements — 16 has no <c>num_done</c>, 18 has no <c>wal_write_time</c>.</para>
 ///
+/// <para><b>A restart is the second discontinuity, and it moves one column (#3955).</b> A CLEAN restart leaves all
+/// three <c>stats_reset</c> stamps where they were, so the reset guard cannot see it, and it ADDS to
+/// <c>num_requested</c>: PostgreSQL counts the shutdown checkpoint as requested and keeps the count across the
+/// restart. Across a window holding one, last-minus-first on that column is WAL-forced checkpoints plus shutdowns
+/// in unknown proportion, so <c>checkpoints_requested</c> is NULL there, the same answer the reset guard gives a
+/// family, and <see cref="PgWriteStatsRow.PostmasterRestartedDuringWindow"/> says why. The restarts are found by
+/// <see cref="PostmasterRestart.SpansSql"/> over consecutive rows' <c>postmaster_start_time</c> (V139). Every
+/// other figure is still stated: the timed count does not move on a restart, and the write and sync time do
+/// include the shutdown checkpoint's own phases, which is real work it did and which the tool's note says.</para>
+///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
 public static class DarlingPgWriteStatsReader
 {
     /// <param name="CheckpointsTimed">Checkpoints begun on <c>checkpoint_timeout</c> during the window.</param>
     /// <param name="CheckpointsRequested">Checkpoints begun because WAL volume demanded one. Climbing
-    /// against <paramref name="CheckpointsTimed"/> is the <c>max_wal_size</c>-too-small signal.</param>
+    /// against <paramref name="CheckpointsTimed"/> is the <c>max_wal_size</c>-too-small signal. NULL when the
+    /// window holds a postmaster restart (<paramref name="PostmasterRestartedDuringWindow"/>), because the shutdown
+    /// checkpoint is counted here too.</param>
     /// <param name="BuffersBackend">Buffers a backend wrote itself. NULL on PostgreSQL 17+, where the fact
     /// moved to <c>pg_stat_io</c> rather than to the checkpointer — NOT zero, which would read as "backends
     /// never had to write", the opposite of unknown.</param>
     /// <param name="WalWriteTimeMs">NULL on PostgreSQL 18+, which removed the WAL timing columns.</param>
     /// <param name="ResetDuringWindow">True when at least one of the three <c>stats_reset</c> stamps moved
     /// inside the window, so the affected families report NULL rather than a difference across the reset.</param>
+    /// <param name="PostmasterRestartedDuringWindow">True when two consecutive samples inside the window came from
+    /// different postmasters by <see cref="PostmasterRestart.SpansSql"/> (#3955), so
+    /// <paramref name="CheckpointsRequested"/> is NULL.</param>
+    /// <param name="PostmasterStartTimeUtc">When the postmaster that produced the window's LAST sample started, UTC;
+    /// NULL when that sample predates V139.</param>
     public sealed record PgWriteStatsRow(
         DateTime WindowStartUtc,
         DateTime WindowEndUtc,
@@ -76,7 +93,9 @@ public static class DarlingPgWriteStatsReader
         long? WalSync,
         double? WalWriteTimeMs,
         double? WalSyncTimeMs,
-        bool ResetDuringWindow);
+        bool ResetDuringWindow,
+        bool PostmasterRestartedDuringWindow,
+        DateTime? PostmasterStartTimeUtc);
 
     /* first_value/last_value over the window, then one subtraction — rather than MAX-MIN, which is wrong the
        moment a reset happens (MIN would come from AFTER the reset and MAX from before it, producing a
@@ -88,8 +107,14 @@ public static class DarlingPgWriteStatsReader
 
        Each family's reset is compared first_value vs last_value on its own stamp. IS DISTINCT FROM rather
        than <>, so a NULL stamp on both ends counts as unchanged instead of poisoning the comparison to NULL
-       and blanking a perfectly good difference. */
-    public const string PgWriteStatsSql = """
+       and blanking a perfectly good difference.
+
+       #3955: restarted_here is the shared restart rule over consecutive rows (it needs the series window, so
+       bounded carries one), and edges folds it into one flag. A restart anywhere inside the window blanks the
+       requested count alone: num_timed does not move on a restart, and the other columns the shutdown checkpoint
+       touches (its write and sync time, the buffers it wrote) measure work it really did, which the tool's note
+       says, whereas counting it as REQUESTED is what would read it as WAL pressure. */
+    public const string PgWriteStatsSql = $$"""
         WITH bounded AS (
             SELECT
                 collection_time,
@@ -100,17 +125,21 @@ public static class DarlingPgWriteStatsReader
                 buffers_clean, maxwritten_clean, buffers_alloc,
                 buffers_backend, buffers_backend_fsync, bgwriter_stats_reset,
                 wal_records, wal_fpi, wal_bytes, wal_buffers_full,
-                wal_write, wal_sync, wal_write_time_ms, wal_sync_time_ms, wal_stats_reset
+                wal_write, wal_sync, wal_write_time_ms, wal_sync_time_ms, wal_stats_reset,
+                postmaster_start_time,
+                {{PostmasterRestart.SpansSql}} AS restarted_here
             FROM pg_write_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            WINDOW series AS (ORDER BY collection_time)
         ),
         edges AS (
             SELECT
-                min(collection_time) AS window_start,
-                max(collection_time) AS window_end,
-                count(*)             AS samples
+                min(collection_time)    AS window_start,
+                max(collection_time)    AS window_end,
+                count(*)                AS samples,
+                bool_or(restarted_here) AS restarted
             FROM bounded
         ),
         firsts AS (
@@ -122,9 +151,10 @@ public static class DarlingPgWriteStatsReader
         SELECT
             e.window_start,
             e.window_end,
-            /* Checkpointer family: differenced only when its own reset stamp held still. */
+            /* Checkpointer family: differenced only when its own reset stamp held still. Requested also needs
+               the window to hold no postmaster restart (#3955). */
             CASE WHEN ck_reset THEN l.num_timed          - f.num_timed          END AS checkpoints_timed,
-            CASE WHEN ck_reset THEN l.num_requested      - f.num_requested      END AS checkpoints_requested,
+            CASE WHEN ck_reset AND NOT e.restarted THEN l.num_requested - f.num_requested END AS checkpoints_requested,
             CASE WHEN ck_reset THEN l.num_done           - f.num_done           END AS checkpoints_done,
             CASE WHEN ck_reset THEN l.restartpoints_timed - f.restartpoints_timed END AS restartpoints_timed,
             CASE WHEN ck_reset THEN l.restartpoints_req  - f.restartpoints_req  END AS restartpoints_requested,
@@ -148,7 +178,9 @@ public static class DarlingPgWriteStatsReader
             CASE WHEN wal_reset THEN l.wal_sync          - f.wal_sync           END AS wal_sync,
             CASE WHEN wal_reset THEN l.wal_write_time_ms - f.wal_write_time_ms  END AS wal_write_time_ms,
             CASE WHEN wal_reset THEN l.wal_sync_time_ms  - f.wal_sync_time_ms   END AS wal_sync_time_ms,
-            NOT (ck_reset AND bg_reset AND wal_reset)                            AS reset_during_window
+            NOT (ck_reset AND bg_reset AND wal_reset)                            AS reset_during_window,
+            e.restarted                                                          AS postmaster_restarted,
+            l.postmaster_start_time                                              AS postmaster_start_time
         FROM edges AS e
         CROSS JOIN firsts AS f
         CROSS JOIN lasts AS l
@@ -212,7 +244,9 @@ public static class DarlingPgWriteStatsReader
             WalSync: Long(reader, 22),
             WalWriteTimeMs: Double(reader, 23),
             WalSyncTimeMs: Double(reader, 24),
-            ResetDuringWindow: !reader.IsDBNull(25) && reader.GetBoolean(25));
+            ResetDuringWindow: !reader.IsDBNull(25) && reader.GetBoolean(25),
+            PostmasterRestartedDuringWindow: !reader.IsDBNull(26) && reader.GetBoolean(26),
+            PostmasterStartTimeUtc: reader.IsDBNull(27) ? null : DateTime.SpecifyKind(reader.GetDateTime(27), DateTimeKind.Utc));
 
         static long? Long(Npgsql.NpgsqlDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetInt64(ordinal);
         static double? Double(Npgsql.NpgsqlDataReader r, int ordinal) => r.IsDBNull(ordinal) ? null : r.GetDouble(ordinal);
