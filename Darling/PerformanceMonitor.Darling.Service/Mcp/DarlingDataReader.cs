@@ -1321,48 +1321,26 @@ internal static class DarlingDataReader
     /// row rather than reading the window. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
     public const string QueryStoreWindowFloorSql = """
-        WITH deduped AS (
-            SELECT
-                collection_time,
-                module_name,
-                ROW_NUMBER() OVER
-                (
-                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-                    ORDER BY collection_time DESC, execution_count DESC
-                ) AS rn
-            FROM query_store_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   ($4::text IS NULL OR database_name = $4)
-        )
         SELECT MIN(collection_time)
-        FROM deduped
-        WHERE rn = 1
-        AND   ($5::text IS NULL OR module_name = $5)
+        FROM query_store_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
         """;
 
     /// <summary>
     /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the filtered window holds nothing at all, which
     /// the caller reports as "nothing was read" rather than as an absence of activity.
     /// </summary>
-    public static Task<DateTime?> GetQueryStoreWindowFloorAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default) =>
-        GetQueryStoreWindowFloorAsync(
-            postgres, serverId, startUtc, endUtc, databaseName: null, moduleName: null, cancellationToken);
-
     public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? databaseName, string? moduleName, CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(QueryStoreWindowFloorSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        DarlingMcpReadParameters.AddNullableText(command, databaseName);
-        DarlingMcpReadParameters.AddNullableText(command, moduleName);
         var value = await command.ExecuteScalarAsync(cancellationToken);
         return value is DateTime dt ? dt : null;
     }

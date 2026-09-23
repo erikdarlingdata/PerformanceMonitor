@@ -784,7 +784,7 @@ public sealed class DarlingMcpDataTools
                and this tool has no rollup to fall back to (the corrected CAGGs carry no query_id or plan_id,
                and plan identity is the whole point of this tool). So the honest move is to report the window
                that was served rather than echo the one that was asked for. */
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, databaseName: database_name, moduleName: module_name);
+            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
             var effectiveStart = floor ?? requestedStart;
             var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
 

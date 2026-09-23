@@ -701,14 +701,13 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     }
 
     [Fact]
-    public void QueryStoreWindowFloor_UsesTheSameDedupedDatabaseAndModuleScope()
+    public void QueryStoreWindowFloor_RemainsACheapUnfilteredRetentionProbe()
     {
         var sql = DarlingDataReader.QueryStoreWindowFloorSql;
-        var dedupSurvivor = sql.IndexOf("WHERE rn = 1", StringComparison.Ordinal);
-        var moduleFilter = sql.IndexOf("$5::text IS NULL OR module_name = $5", StringComparison.Ordinal);
-        Assert.Contains("$4::text IS NULL OR database_name = $4", sql, StringComparison.Ordinal);
-        Assert.True(dedupSurvivor > 0 && moduleFilter > dedupSurvivor,
-            "the floor must ignore stale module attribution from older interval snapshots");
+        Assert.Contains("SELECT MIN(collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("module_name", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("database_name", sql, StringComparison.Ordinal);
     }
 
     [Fact]
