@@ -326,17 +326,17 @@ bind IP to `listen_addresses`, generates a self-signed TLS certificate with an I
 Then, still elevated:
 
 ```powershell
-.\PerformanceMonitor.Darling.Service.exe --configure-firewall
+& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --configure-firewall
 ```
 
 **Proof:** `Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling store (port 5641)'` returns a rule
 with `Enabled=True, Action=Allow`. Reading firewall rules needs no elevation, so this check works from any
 shell.
 
-**Then export the seat:**
+**Then export the seat.** Stay elevated, because the command writes into the install folder:
 
 ```powershell
-.\PerformanceMonitor.Darling.Service.exe --export-viewer-config
+& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --export-viewer-config
 ```
 
 It writes a `viewer-config\` folder holding three files — `darling.json` (connection string resolved,
@@ -682,7 +682,7 @@ about.
 **You can reprint it.** Losing the plaintext no longer means regenerating and re-onboarding every client:
 
 ```powershell
-.\PerformanceMonitor.Darling.Service.exe --print-web-token
+& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --print-web-token
 ```
 
 Run it **elevated, on the box that encrypted it** — DPAPI is `LocalMachine`-scoped, so the blob only opens
