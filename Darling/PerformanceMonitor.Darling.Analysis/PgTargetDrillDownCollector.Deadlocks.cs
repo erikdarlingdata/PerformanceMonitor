@@ -14,6 +14,8 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -66,8 +68,9 @@ public sealed partial class PgTargetDrillDownCollector
     /// statement text cap, <c>$6</c> the graph text cap.
     ///
     /// <para><b>A shape is <c>(participant_count, lock_modes, resources)</c>, not <c>deadlock_hash</c>.</b>
-    /// The hash is <c>PgDeadlockLogParser.HashOf(graph)</c> — SHA-256 over the DETAIL block, pids included —
-    /// and exists so the same REPORT re-read from an overlapping log tail is stored once. Two deadlocks of
+    /// The hash is <c>PgDeadlockLogParser.IdentityOf</c> — SHA-256 over the timestamp and the DETAIL block, pids
+    /// included (over the raw block alone before #4005) — and exists so the same REPORT re-read from an
+    /// overlapping log tail is stored once. Two deadlocks of
     /// the same two statements on the same two tables carry different pids and therefore different hashes:
     /// counting distinct hashes counts reports, and would call a shape that fired forty times "forty
     /// one-offs". <c>lock_modes</c> and <c>resources</c> are the parser's sorted, de-duplicated edge labels
@@ -81,7 +84,9 @@ public sealed partial class PgTargetDrillDownCollector
     /// <c>occurred_at</c> for a browsing panel; the drill-down's job is to explain THIS pass's count.</para>
     ///
     /// <para>The exemplar of each shape is its LATEST report (<c>array_agg(… ORDER BY occurred_at DESC NULLS
-    /// LAST)</c> — the first element), with its hash so <c>get_pg_deadlock_detail</c> can be pointed at it.
+    /// LAST)</c> — the first element), with its identity so <c>get_pg_deadlock_detail</c> can be pointed at it:
+    /// the hash, or the <c>PgDeadlockLogParser.LegacyIdentity</c> of a report whose hash is over its raw graph
+    /// (#4005), which the read tells apart by <c>latest_hash_is_raw</c>.
     /// The statement and graph are cut in the read to their caps and the untruncated lengths ride beside them
     /// for the flags. <c>count(*) OVER ()</c> and the two <c>SUM(…) OVER ()</c> put the window totals on every
     /// row of the capped result, so the shape count is known even though only <c>$4</c> shapes return.</para>
@@ -99,7 +104,8 @@ WITH shapes AS (
         (array_agg(deadlock_hash     ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_hash,
         (array_agg(victim_pid        ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_victim_pid,
         (array_agg(victim_statement  ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_victim_statement,
-        (array_agg(graph_text        ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_graph_text
+        (array_agg(graph_text        ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_graph_text,
+        (array_agg(occurred_at       ORDER BY occurred_at DESC NULLS LAST, collection_time DESC))[1] AS latest_occurred_at
     FROM pg_deadlocks
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -122,7 +128,12 @@ SELECT
     length(latest_graph_text)                            AS graph_text_length,
     CAST(count(*) OVER () AS integer)                    AS distinct_shapes,
     CAST(SUM(reports) OVER () AS integer)                AS total_reports,
-    CAST(SUM(rows_captured) OVER () AS integer)          AS total_rows
+    CAST(SUM(rows_captured) OVER () AS integer)          AS total_rows,
+    latest_occurred_at,
+    /* Whether the latest report's hash is over its raw graph (#4005), tested on the whole graph before the
+       cut: PgDeadlockLogParser.RawGraphHashSql, spelled out because this is a constant; a test holds the two
+       equal. */
+    (upper(left(encode(sha256(convert_to(latest_graph_text, 'UTF8')), 'hex'), 32)) = latest_hash) AS latest_hash_is_raw
 FROM shapes
 ORDER BY reports DESC, last_seen DESC NULLS LAST, participant_count DESC
 LIMIT $4";
@@ -186,11 +197,19 @@ LIMIT $4";
                 totalReports = reader.IsDBNull(14) ? 0 : Convert.ToInt32(reader.GetValue(14));
                 totalRows = reader.IsDBNull(15) ? 0 : Convert.ToInt32(reader.GetValue(15));
 
-                var victimStatement = reader.IsDBNull(9) ? null : reader.GetString(9);
+                /* Normalized after the read's cut (#4005), as DarlingPgDeadlockReader normalizes every read: a row
+                   stored before #4005 holds its SQL raw. A cut inside a literal withholds that statement rather
+                   than keep what the cut left of it. The flags compare against what the read returned, before it
+                   was normalized, so a statement shortened by its literals is not called cut. */
+                var victimRead = reader.IsDBNull(9) ? null : reader.GetString(9);
                 var victimLength = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
-                var graphText = reader.IsDBNull(11) ? null : reader.GetString(11);
+                var victimStatement = PgDeadlockLogParser.NormalizeStatement(victimRead);
+                var graphRead = reader.IsDBNull(11) ? null : reader.GetString(11);
                 var graphLength = reader.IsDBNull(12) ? 0 : Convert.ToInt32(reader.GetValue(12));
-                var (boundedGraph, graphLines, graphTruncated) = BoundGraphText(graphText, graphLength);
+                var (boundedGraph, graphLines, graphTruncated) = BoundGraphText(
+                    PgDeadlockLogParser.NormalizeGraph(graphRead), readCut: graphRead is not null && graphLength > graphRead.Length);
+                var latestPid = reader.IsDBNull(8) ? (int?)null : Convert.ToInt32(reader.GetValue(8));
+                var latestHash = reader.IsDBNull(7) ? null : reader.GetString(7);
 
                 exemplars.Add(new PgTargetDeadlockExemplar(
                     Rank: exemplars.Count + 1,
@@ -201,10 +220,17 @@ LIMIT $4";
                     RowsCaptured: reader.IsDBNull(3) ? 0 : Convert.ToInt32(reader.GetValue(3)),
                     FirstSeen: reader.IsDBNull(5) ? null : reader.GetDateTime(5),
                     LastSeen: reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                    DeadlockHash: reader.IsDBNull(7) ? null : reader.GetString(7),
-                    VictimPid: reader.IsDBNull(8) ? null : Convert.ToInt32(reader.GetValue(8)),
+                    /* Never a hash over a raw graph (#4005, #4004): the identity get_pg_deadlock_detail takes. */
+                    DeadlockHash: latestHash is null
+                        ? null
+                        : DarlingPgDeadlockReader.IdentityOf(
+                            latestHash,
+                            !reader.IsDBNull(17) && reader.GetBoolean(17),
+                            reader.IsDBNull(16) ? default : reader.GetDateTime(16),
+                            latestPid ?? 0),
+                    VictimPid: latestPid,
                     VictimStatement: victimStatement,
-                    VictimStatementMayBeTruncated: victimStatement is not null && victimLength > victimStatement.Length,
+                    VictimStatementMayBeTruncated: victimRead is not null && victimLength > victimRead.Length,
                     VictimStatementFingerprint: Fingerprint(victimStatement),
                     GraphText: boundedGraph,
                     GraphTextLinesTotal: graphLines,
@@ -275,15 +301,15 @@ LIMIT $4";
 
     /// <summary>
     /// The graph, cut at <see cref="GraphTextLineCap"/> lines; the total line count and whether either bound
-    /// (the read's characters, this method's lines) cut it. Tabs were stripped at capture; line ends are
-    /// normalised here because the two log transports differ.
+    /// (the read's characters, which <paramref name="readCut"/> says, this method's lines) cut it. Tab
+    /// indenting was stripped at capture; line ends are normalised here because the two log transports differ.
     /// </summary>
-    internal static (string? Text, int Lines, bool Truncated) BoundGraphText(string? graphText, int untruncatedLength)
+    internal static (string? Text, int Lines, bool Truncated) BoundGraphText(string? graphText, bool readCut)
     {
         if (string.IsNullOrEmpty(graphText))
             return (graphText, 0, false);
 
-        var charTruncated = untruncatedLength > graphText.Length;
+        var charTruncated = readCut;
         var lines = graphText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
         if (lines.Length <= GraphTextLineCap)
             return (string.Join('\n', lines), lines.Length, charTruncated);

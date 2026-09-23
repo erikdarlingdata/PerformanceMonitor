@@ -112,25 +112,26 @@ public sealed class PgTargetDeadlockDrillDownTests
     [Fact]
     public void BoundGraphText_CutsAtTheLineCap_ReportsTheTotal_AndFlagsEitherBound()
     {
-        Assert.Equal((null, 0, false), PgTargetDrillDownCollector.BoundGraphText(null, 0));
-        Assert.Equal(("", 0, false), PgTargetDrillDownCollector.BoundGraphText("", 0));
+        Assert.Equal((null, 0, false), PgTargetDrillDownCollector.BoundGraphText(null, readCut: false));
+        Assert.Equal(("", 0, false), PgTargetDrillDownCollector.BoundGraphText("", readCut: false));
 
         var four = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\r\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\r\nProcess 11: UPDATE a SET x = 1\r\nProcess 12: UPDATE b SET y = 2";
-        var (text, lines, truncated) = PgTargetDrillDownCollector.BoundGraphText(four, four.Length);
+        var (text, lines, truncated) = PgTargetDrillDownCollector.BoundGraphText(four, readCut: false);
         Assert.Equal(4, lines);
         Assert.False(truncated);
         Assert.Equal(four.Replace("\r\n", "\n", StringComparison.Ordinal), text);
 
         /* Thirty lines: cut to 24, total 30, flagged. */
         var thirty = string.Join('\n', Enumerable.Range(1, 30).Select(i => $"line {i}"));
-        var (cut, total, cutFlag) = PgTargetDrillDownCollector.BoundGraphText(thirty, thirty.Length);
+        var (cut, total, cutFlag) = PgTargetDrillDownCollector.BoundGraphText(thirty, readCut: false);
         Assert.Equal(30, total);
         Assert.True(cutFlag);
         Assert.Equal(24, cut!.Split('\n').Length);
         Assert.EndsWith("line 24", cut, StringComparison.Ordinal);
 
-        /* The READ cut it (untruncated length longer than what arrived): flagged even under the line cap. */
-        var (_, shortLines, readCut) = PgTargetDrillDownCollector.BoundGraphText("one\ntwo", 4000);
+        /* The READ cut it (untruncated length longer than what arrived, which the caller measures before it
+           normalizes the graph, #4005): flagged even under the line cap. */
+        var (_, shortLines, readCut) = PgTargetDrillDownCollector.BoundGraphText("one\ntwo", readCut: true);
         Assert.Equal(2, shortLines);
         Assert.True(readCut);
     }
@@ -288,9 +289,12 @@ public sealed class PgTargetDeadlockDrillDownTests
 
             const string modesA = "RowExclusiveLock, ShareLock";
             const string resourcesA = "relation orders, tuple orders";
-            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = $1 WHERE id = $2";
+            /* The later report of shape A as a build before #4005 stored it: a literal in the graph, and a hash
+               over that raw graph. The exemplar carries neither (#4005). */
+            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = 'held-4721' WHERE id = 7";
+            var rawHashA2 = PgDeadlockLogParser.HashOf(graphA);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(10), "hash-a1", 2, modesA, resourcesA, "UPDATE orders SET status = $1 WHERE id = $2", graphA, ct);
-            await PlantDeadlockAsync(connection, windowStart.AddMinutes(45), "hash-a2", 2, modesA, resourcesA, "UPDATE   orders\n SET status = $1 WHERE id = $2", graphA, ct);
+            await PlantDeadlockAsync(connection, windowStart.AddMinutes(45), rawHashA2, 2, modesA, resourcesA, "UPDATE   orders\n SET status = $1 WHERE id = $2", graphA, ct);
 
             /* Shape B: a three-way chain with a statement past the text cap and a graph past the line cap, stored
                twice under ONE hash (the overlapping tail re-read). */
@@ -331,12 +335,14 @@ public sealed class PgTargetDeadlockDrillDownTests
                 Assert.Equal(resourcesA, a.GetProperty("resources").GetString());
                 Assert.Equal(2, a.GetProperty("reports").GetInt32());
                 Assert.Equal(2, a.GetProperty("rows_captured").GetInt32());
-                Assert.Equal("hash-a2", a.GetProperty("deadlock_hash").GetString());
+                Assert.Equal(PgDeadlockLogParser.LegacyIdentity(windowStart.AddMinutes(45), 4242), a.GetProperty("deadlock_hash").GetString());
                 Assert.Equal("UPDATE orders SET status = $1 WHERE id = $2", a.GetProperty("victim_statement_fingerprint").GetString());
                 Assert.False(a.GetProperty("victim_statement_may_be_truncated").GetBoolean());
                 Assert.Equal(4, a.GetProperty("graph_text_lines_total").GetInt32());
                 Assert.False(a.GetProperty("graph_text_truncated").GetBoolean());
-                Assert.Equal(graphA, a.GetProperty("graph_text").GetString());
+                Assert.Equal(graphA.Replace("'held-4721' WHERE id = 7", "'?' WHERE id = ?", StringComparison.Ordinal), a.GetProperty("graph_text").GetString());
+                Assert.DoesNotContain(rawHashA2, analysis, StringComparison.Ordinal);
+                Assert.DoesNotContain("4721", analysis, StringComparison.Ordinal);
 
                 /* Shape B: one report seen twice; both bounds cut and both say so. */
                 var b = shapes[1];

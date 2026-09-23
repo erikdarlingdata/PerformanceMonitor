@@ -89,9 +89,15 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
          because a zone with no abbreviation renders as a numeric offset (+07) that \w+ cannot match, so
          the block matched nothing and the server reported no deadlocks.
 
-       The 'n' flag makes ^ match at line starts. Parsing of the block itself is C#, in
-       PgDeadlockLogParser, so the RDS transport — which receives log TEXT and runs no SQL — shares it, and
-       both routes get the same zone refusal from the same code.
+         The line after the DETAIL block, when it carries a prefix and does not open another report
+         (#4005): DeadLockReport always writes a HINT there, and that line is the proof the DETAIL arrived
+         whole, which the query normalization needs to trust a query after one that does not read to its end.
+
+       The 'n' flag makes ^ match at line starts. The pattern finds CANDIDATES and returns each one's text
+       whole; what a candidate is, is decided in C# by PgDeadlockLogParser.FromReport, through the log reader
+       every family shares (PgLogEntryAssembler). So the RDS transport — which receives log TEXT and runs no
+       SQL — shares it, both routes get the same zone refusal from the same code, and a statement's literal
+       holding `ERROR:  deadlock detected` is never read as a report (#4005).
 
        The listing is GATED on logging_collector, and the gate carries a marker row out the other side
        (#3410). With the setting off the server writes to stderr and there may be no log directory at all,
@@ -107,17 +113,14 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        query's own four columns, because a UNION ALL arm has to match the column list it joins. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
-    m[1]    AS occurred_at_text,
-    m[2]    AS log_zone_text,
-    m[3]    AS victim_pid_text,
-    m[4]    AS detail_body
+    m[1]    AS report_text
 FROM tail,
      regexp_matches(
          tail.body,
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+) ([^ \n]+) \[(\d+)\][^\n]*ERROR:  deadlock detected\s*\n[^\n]*DETAIL:  ((?:[^\n]*\n)(?:\t[^\n]*\n)*)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ [^ \n]+ \[\d+\][^\n]*ERROR:  deadlock detected\s*\n[^\n]*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL, NULL, NULL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 LIMIT 500";
 
@@ -152,8 +155,8 @@ LIMIT 500";
         new CollectorColumn("lock_modes", CollectorColumnType.Varchar),
         new CollectorColumn("resources", CollectorColumnType.Varchar),
         new CollectorColumn("victim_statement", CollectorColumnType.Varchar),
-        /* The DETAIL block verbatim. The parsed columns are an interpretation; this is the evidence, and a
-           report shape the parser does not recognise yet is still readable by a person. */
+        /* The DETAIL block, its queries normalized (#4005). The parsed columns are an interpretation; this is
+           the evidence, and a report shape the parser does not recognise yet is still readable by a person. */
         new CollectorColumn("graph_text", CollectorColumnType.Varchar),
     };
 
@@ -175,18 +178,13 @@ LIMIT 500";
                 throw new PgLoggingCollectorOffException();
             }
 
-            /* Ordinals track the query's four columns: stamp, zone, victim pid, DETAIL. The zone is
-               ordinal 1 and reaching the parser is what makes the stamp's meaning checked rather than
-               assumed; a non-zero-offset one throws out of here, and the worker records the refusal
-               against log_timezone instead of storing a shifted occurred_at. The throw abandons rows
-               already read in this batch, which is the trade PgDeadlockLogParser.Extract's remarks argue
+            /* One column, the candidate's text (#4005). Reaching the parser is what makes the stamp's meaning
+               checked rather than assumed: a non-zero-offset zone throws out of here, and the worker records
+               the refusal against log_timezone instead of storing a shifted occurred_at. The throw abandons
+               rows already read in this batch, which is the trade PgDeadlockLogParser.Extract's remarks argue
                for: a partial history from a target declared unreadable is worse for the reader than a
                refusal that says one thing. */
-            var parsed = PgDeadlockLogParser.FromBlock(
-                firstColumn,
-                reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3));
+            var parsed = PgDeadlockLogParser.FromReport(firstColumn);
 
             /* A block that will not parse is skipped rather than reported. The window is bounded, so a
                report cut in half at its edge is ordinary and is read whole on the next overlapping pass. */
