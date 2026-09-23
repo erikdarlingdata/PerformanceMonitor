@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -81,7 +82,7 @@ LIMIT 50";
 
     /// <summary>
     /// Lists the large (>= 10 GB) data/log files on PERCENTAGE autogrowth (WS3), latest
-    /// snapshot per file within <see cref="AnalysisContext.LatestValueLookback"/> of the window's
+    /// snapshot per file within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's
     /// end (#3896), excluding system databases — and attaches a copy-paste
     /// ALTER DATABASE ... MODIFY FILE fix per file (FILEGROWTH set to a size-tiered fixed MB).
     /// Same structured fields + SHARED renderer as the Lite/Dashboard collectors so the
@@ -89,11 +90,14 @@ LIMIT 50";
     /// </summary>
     private async Task CollectAutogrowthPercentFiles(AnalysisFinding finding, AnalysisContext context)
     {
+        /* #3896: a no-op in the pass, whose fact collector stamped the bounds on this context already. */
+        await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
+
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(AutogrowthPercentFilesSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         var items = new List<object>();

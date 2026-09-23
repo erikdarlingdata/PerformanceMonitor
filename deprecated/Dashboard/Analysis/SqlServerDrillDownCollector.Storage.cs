@@ -72,6 +72,9 @@ ORDER BY AVG(io_stall_read_ms_delta * 1.0 / NULLIF(num_of_reads_delta, 0)) DESC;
     /// </summary>
     private async Task CollectAutogrowthPercentFiles(AnalysisFinding finding, AnalysisContext context)
     {
+        /* #3896: a no-op in the pass, whose fact collector stamped the bounds on this context already. */
+        await SqlServerLatestValueBounds.EnsureAsync(_connectionString, context);
+
         using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync();
 
@@ -109,7 +112,7 @@ ORDER BY total_size_mb DESC;";
         cmd.Parameters.Add(new SqlParameter("@minSizeMb", 10240.0)); /* 10 GB */
         /* #3896: the same bounds as the FILE_AUTOGROWTH_PERCENT fact, so the list names exactly the files it
            counted — unbounded, a dropped database's file was listed with an ALTER for a database that is gone. */
-        cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+        cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStartFor(SqlServerLatestValueBounds.DatabaseSizeStats)));
         cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
         var items = new List<object>();

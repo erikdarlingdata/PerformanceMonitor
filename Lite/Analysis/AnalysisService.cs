@@ -110,18 +110,23 @@ public class AnalysisService
     /// <param name="retentionDaysForCollector">#1757: resolves a collector's configured retention so the
     /// baseline provider can warn when a source table is retained for less than the baseline window. Optional
     /// — null simply disables that warning, which is why every existing caller keeps working unchanged.</param>
+    /// <param name="collectorFrequencyMinutes">#3896: resolves (server id, collector) to the cadence that
+    /// collector runs at on that server, so a latest-value read looks back twice the interval of a collector
+    /// an operator slowed past twice a day instead of losing its fact between runs. Optional — null bounds
+    /// every read by the shipped default cadence.</param>
     public AnalysisService(
         DuckDbInitializer duckDb,
         IPlanFetcher? planFetcher = null,
-        Func<string, int?>? retentionDaysForCollector = null)
+        Func<string, int?>? retentionDaysForCollector = null,
+        Func<int, string, int?>? collectorFrequencyMinutes = null)
     {
         _duckDb = duckDb;
         _findingStore = new FindingStore(duckDb);
-        _collector = new DuckDbFactCollector(duckDb);
+        _collector = new DuckDbFactCollector(duckDb, collectorFrequencyMinutes);
         _scorer = new FactScorer();
         _graph = new RelationshipGraph();
         _engine = new InferenceEngine(_graph);
-        _drillDown = new DrillDownCollector(duckDb, planFetcher);
+        _drillDown = new DrillDownCollector(duckDb, planFetcher, collectorFrequencyMinutes);
         _baselineProvider = new BaselineProvider(duckDb, retentionDaysForCollector);
         _anomalyDetector = new AnomalyDetector(duckDb, _baselineProvider);
     }

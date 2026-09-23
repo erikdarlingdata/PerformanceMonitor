@@ -27,6 +27,10 @@ public partial class SqlServerFactCollector : IFactCollector
     {
         var facts = new List<Fact>();
 
+        /* #3896: every latest-value read below binds its collector's lower bound, resolved once from the
+           cadence config.collection_schedule runs it at. */
+        await SqlServerLatestValueBounds.EnsureAsync(_connectionString, context);
+
         await CollectWaitStatsFactsAsync(context, facts);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
         FactCollectorHelpers.GroupParallelismWaits(facts, context);
