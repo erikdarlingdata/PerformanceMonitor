@@ -955,7 +955,9 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
             },
         };
 
-        await TickAsTheWorkerAsync(connection, progress, s_key, NullLoggerFor(), ct);
+        /* No key, so the alert-key stage waits and cannot rescue a row the alert stage missed: the alert stage alone
+           must reach it. */
+        await TickAsTheWorkerAsync(connection, progress, null, NullLoggerFor(), ct);
         Assert.True(moved);
 
         /* Behind every row the walk's first page read. */
@@ -963,10 +965,11 @@ VALUES ('{now.AddDays(-1):yyyy-MM-dd HH:mm:ss}', 1, 'first', '{AlertEngine.Deadl
         Assert.True(progress.Alerts.Done);
         Assert.False(progress.Alerts.GaveUp);
 
+        /* The walk that met it rewrote it, so a second, clean walk was needed; a walk that missed it is clean at once. */
+        Assert.Equal(2, progress.Alerts.Walks);
         var dump = await DumpAsync(connection, "SELECT context_json FROM config_alert_log WHERE server_id = 1", ct);
-        Assert.DoesNotContain(goneHash, dump, StringComparison.Ordinal);
-        Assert.Contains(s_key.DeadlockAlertKey(goneHash), dump, StringComparison.Ordinal);
         AssertNoSecret(dump);
+        Assert.Contains("WHERE id = ?", dump, StringComparison.Ordinal);
     }
 
     /* The expected context of a rewritten alert: its incidents at the given positions carry the rebuilt marker,
