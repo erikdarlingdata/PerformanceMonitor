@@ -211,6 +211,14 @@ public class ScheduleManager
 
     /// <summary>
     /// Gets collectors that are due to run for a specific server, using per-server run state.
+    ///
+    /// <para>#3929/#3930: an on-load collector (<c>!IsScheduled</c>, FrequencyMinutes 0) is no longer excluded
+    /// here — it becomes due on <see cref="CollectorScheduleDefaults.OnLoadRecaptureMinutes"/> too, the same
+    /// substitution Darling's worker makes, so a server tab left open for weeks still re-captures its config
+    /// snapshot (#3930) and a trace flag turned off since the last connect eventually clears (#3929) instead of
+    /// only on the next reconnect. The tab-open path (<see cref="RemoteCollectorService.RunAllCollectorsForServerAsync"/>)
+    /// still runs every enabled collector unconditionally (on-load included), so the on-connect capture is
+    /// unchanged.</para>
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
     {
@@ -225,8 +233,10 @@ public class ScheduleManager
             var due = new List<CollectorSchedule>();
             foreach (var s in schedules)
             {
-                if (!s.Enabled || !s.IsScheduled)
+                if (!s.Enabled)
                     continue;
+
+                var intervalMinutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(s.FrequencyMinutes);
 
                 if (runState == null || !runState.TryGetValue(s.Name, out var lastRun))
                 {
@@ -235,7 +245,7 @@ public class ScheduleManager
                 }
 
                 var elapsed = DateTime.UtcNow - lastRun;
-                if (elapsed.TotalMinutes >= s.FrequencyMinutes)
+                if (elapsed.TotalMinutes >= intervalMinutes)
                 {
                     due.Add(s);
                 }

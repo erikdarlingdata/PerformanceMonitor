@@ -216,6 +216,26 @@ public sealed class LatestValueLookbackSqlTests
     }
 
     /// <summary>
+    /// #3929: unlike database_config's exact-capture-time anchor above, trace_flags CANNOT anchor on
+    /// MAX(capture_time) - a capture that finds every flag off writes ZERO rows, so MAX would silently fall
+    /// back to an older, stale-ON capture. It takes the same cadence-aware lookback the six collection_time
+    /// reads do instead, just spelled over capture_time (the config-snapshot family's time column, shared with
+    /// database_config above) and fed by CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes rather
+    /// than the raw resolved frequency, since trace_flags's own resolved frequency is 0 (on-load).
+    /// </summary>
+    [Fact]
+    public void TheTraceFlagsRead_IsBoundedByCaptureTime_BothBelowAndAboveTheWindow()
+    {
+        var sql = PgFactCollector.TraceFlagsSql;
+
+        Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
+        Assert.Contains("capture_time >= $2", sql, StringComparison.Ordinal);
+        Assert.Contains("capture_time <= $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"INTERVAL", RegexOptions.IgnoreCase), sql);
+    }
+
+    /// <summary>
     /// The enforcement for the NEXT read of this shape. Every statement in the fact collector that picks a
     /// series' newest row — a window function ordered on <c>collection_time DESC</c>, or an
     /// <c>ORDER BY collection_time DESC LIMIT 1</c> — over a CADENCED collector's table must bound
@@ -362,11 +382,14 @@ public sealed class LatestValueLookbackLivePostgresTests
     private const int FleetServerId = -389_609;
     private const int FleetOverriddenServerId = -389_610;
     private const int PlanShapeDailyServerId = -389_611;
+    private const int TraceFlagClearServerId = -389_612;
+    private const int TraceFlagAllOffServerId = -389_613;
 
     private static readonly int[] s_serverIds =
     {
         LiveServerId, StaleServerId, PlanShapeServerId, DailyServerId, DailyStaleServerId, DefaultCadenceServerId,
         OnLoadServerId, FleetServerId, FleetOverriddenServerId, PlanShapeDailyServerId,
+        TraceFlagClearServerId, TraceFlagAllOffServerId,
     };
 
     /// <summary>The collector the fleet-wide override test takes over for the whole store, and hands back.</summary>
@@ -375,6 +398,7 @@ public sealed class LatestValueLookbackLivePostgresTests
     private static readonly string[] s_tables =
     {
         "file_io_stats", "database_size_stats", "memory_clerks", "plan_cache_stats", "memory_stats", "database_config",
+        "trace_flags",
     };
 
     [Fact]
@@ -484,6 +508,94 @@ public sealed class LatestValueLookbackLivePostgresTests
 
             /* The on-load config is not a latest-value read: its newest capture is as old as the last connect. */
             Assert.Equal(1, facts["DB_CONFIG"].Metadata["database_count"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>
+    /// #3929: a trace flag turned off drops out once it is missing from the whole on-load-aware lookback
+    /// window (two OnLoadRecaptureMinutes cycles - 48h at the shipped daily default), NOT after the full
+    /// 30-day retention the OLD unbounded-per-flag read waited out. Plants three captures: 3 days ago (flag
+    /// 3604 on - before the window, so its stale ON row must not resurface), 1 day ago (3604 already off -
+    /// DBCC TRACESTATUS omits it, so no row is written for it at all; flag 2371 is on), and 6 hours ago
+    /// (2371 still on). 3604 has been missing from two consecutive captures (1 day ago and 6 hours ago) and
+    /// its only row is older than the 48h bound, so it must not appear; 2371 must.
+    /// </summary>
+    [Fact]
+    public async Task TraceFlagTurnedOffAfterLastConnect_DropsOutOfTheOnLoadWindow_WhileAStillOnFlagStays_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value lookback test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-3), 3604, status: true, ct);
+            await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-1), 2371, status: true, ct);
+            await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddHours(-6), 2371, status: true, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var facts = (await new PgFactCollector(postgres).CollectFactsAsync(Context(TraceFlagClearServerId, end))).ToDictionary(f => f.Key);
+
+            var traceFlags = facts["TRACE_FLAGS"];
+            Assert.Equal(1, traceFlags.Value);
+            Assert.Equal(1, traceFlags.Metadata["flag_count"]);
+            Assert.True(traceFlags.Metadata.ContainsKey("TF_2371"), "flag 2371 (still on 6 hours ago) should be reported");
+            Assert.False(traceFlags.Metadata.ContainsKey("TF_3604"), "flag 3604 (off for two full captures, last ON row 3 days old) should have cleared");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>
+    /// #3929's sharpest edge case: a capture that finds EVERY flag off writes ZERO rows (DBCC TRACESTATUS(-1)
+    /// only ever lists flags that are on), so a naive MAX(capture_time) anchor - the fix DB_CONFIG uses - would
+    /// silently fall back to the older capture that still had one on, reporting a flag that is actually off.
+    /// The bounded read has no such fallback: with every row for this server older than the 48h window, the
+    /// read returns zero rows and no TRACE_FLAGS fact is emitted at all - a real "nothing is on", not a stale one.
+    /// </summary>
+    [Fact]
+    public async Task ServerWhoseOnlyTraceFlagRowIsOutsideTheWindow_EmitsNoTraceFlagsFact_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value lookback test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertTraceFlagAsync(connection, TraceFlagAllOffServerId, end.AddDays(-3), 1222, status: true, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var facts = (await new PgFactCollector(postgres).CollectFactsAsync(Context(TraceFlagAllOffServerId, end))).ToDictionary(f => f.Key);
+
+            Assert.False(facts.ContainsKey("TRACE_FLAGS"), "a flag last seen on 3 days ago, outside the 48h window, must not resurface as currently on");
 
             bodySucceeded = true;
         }
@@ -1077,6 +1189,21 @@ VALUES ($1, $2, $3, 'latest-value-lookback-e2e', $4, 'FULL', $5, false, $6, true
         command.Parameters.AddWithValue(database);
         command.Parameters.AddWithValue(autoShrink);
         command.Parameters.AddWithValue(rcsiOn);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task InsertTraceFlagAsync(NpgsqlConnection connection, int serverId, DateTime capturedAt,
+        int traceFlag, bool status, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO trace_flags
+    (config_id, capture_time, server_id, server_name, trace_flag, status, is_global, is_session)
+VALUES ($1, $2, $3, 'latest-value-lookback-e2e', $4, $5, true, false)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(capturedAt);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(traceFlag);
+        command.Parameters.AddWithValue(status);
         await command.ExecuteNonQueryAsync(ct);
     }
 
