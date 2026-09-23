@@ -237,7 +237,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering.")]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome; when it matches nothing but the same read without it has rows, the answer is empty (a measured zero), not a Query Store precondition.")]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -245,7 +245,8 @@ public sealed class McpQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -257,10 +258,26 @@ public sealed class McpQueryTools
 
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
+            /* A closed set, refused by name rather than applied (#3541 A13): an unknown outcome can never match,
+               and the empty answer under it would read as "no such executions". Downstream filters on the
+               canonical spelling, which is how the collector stores it. */
+            var executionTypeError = McpHelpers.ValidateChoice(execution_type, McpHelpers.QueryStoreExecutionTypes, "execution_type");
+            if (executionTypeError != null) return executionTypeError;
+            execution_type = string.IsNullOrWhiteSpace(execution_type)
+                ? null
+                : McpHelpers.QueryStoreExecutionTypes.First(t => string.Equals(t, execution_type.Trim(), StringComparison.OrdinalIgnoreCase));
 
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
+            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, executionType: execution_type);
             if (rows.Count == 0)
             {
+                /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
+                   so an Aborted or Exception filter is empty far more often than not, and falling through to the
+                   chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
+                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path. */
+                if (execution_type != null
+                    && (await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, 1, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd)).Count > 0)
+                    return McpHelpers.QueryStoreExecutionTypeEmpty(execution_type, hours_back, database_name);
+
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
                        read had no way to find out. The store has known all along — query_store_health
@@ -281,6 +298,7 @@ public sealed class McpQueryTools
                 plan_id = r.PlanId,
                 query_hash = r.QueryHash,
                 query_plan_hash = r.QueryPlanHash,
+                execution_type = r.ExecutionTypeDesc,
                 execution_count = r.TotalExecutions,
                 avg_duration_ms = r.AvgDurationMs,
                 avg_cpu_ms = r.AvgCpuTimeMs,

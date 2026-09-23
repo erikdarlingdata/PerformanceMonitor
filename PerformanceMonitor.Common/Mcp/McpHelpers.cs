@@ -203,6 +203,31 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// Query Store's execution outcomes, spelled as <c>sys.query_store_runtime_stats.execution_type_desc</c>
+    /// reports them and as both SKUs' collectors store them. <c>get_query_store_top</c>'s <c>execution_type</c>
+    /// filter validates against this set through <see cref="ValidateChoice"/> and then filters on the canonical
+    /// spelling, so a caller's "aborted" compares equal to the stored "Aborted".
+    /// </summary>
+    public static readonly IReadOnlyList<string> QueryStoreExecutionTypes = new[] { "Regular", "Aborted", "Exception" };
+
+    /// <summary>
+    /// The <c>empty</c> answer for an <c>execution_type</c> filter that matched nothing while the same read
+    /// without it returns rows. Most queries never abort, so this is the common answer to an Aborted or
+    /// Exception filter, and it is a measured zero: Query Store is collecting and the window has rows, just none
+    /// with that outcome. Without it the read fell through to the "Query Store may not be enabled" guess, which
+    /// is the one thing the unfiltered rows prove false. Shared so both SKUs say it in the same words.
+    /// </summary>
+    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName)
+    {
+        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        return Status(
+            "empty",
+            $"No {executionType} executions{scope} in the {hoursBack}-hour window searched. The same read without "
+            + "execution_type returns rows, so Query Store is collecting and this is a measured zero, not missing "
+            + "data. Omit execution_type to see the other outcomes.");
+    }
+
+    /// <summary>
     /// Validates an optional ENUMERATED filter — a parameter whose usable values are a closed set the
     /// caller cannot see. Returns null when the caller sent nothing or a member of the set, the refusal
     /// naming the whole set when not. The match is case-insensitive, and the caller is expected to use the

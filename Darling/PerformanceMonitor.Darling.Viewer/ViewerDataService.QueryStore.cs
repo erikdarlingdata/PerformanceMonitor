@@ -17,8 +17,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
 /// One Query-Store-by-Duration grid row — the viewer copy of Lite's <c>QueryStoreRow</c>
-/// (LocalDataService.QueryStore.cs). A (database, query_id, plan_id, query_hash) group's interval
-/// averages + min/max spreads over the window, with the latest captured query text.
+/// (LocalDataService.QueryStore.cs). A (database, query_id, plan_id, query_hash, execution outcome, replica
+/// role) group's interval averages + min/max spreads over the window, with the latest captured query text.
 /// Duration / CPU / CLR are converted to ms (from us) in SQL; memory-grant pages are converted to MB
 /// in SQL; reads/writes/rows/tempdb pages / log bytes stay raw. The View-Plan surface is deferred, so
 /// unlike Lite there is no QueryPlanText/HasQueryPlan (the collected query_plan_text is not read).
@@ -176,6 +176,11 @@ public sealed partial class ViewerDataService
                    standalone/non-AG server every row shares one value (NULL, or 'Primary' on 2025), so the
                    grouping is a no-op and the grid is unchanged. Twins Lite's QueryStore reader. */
                 replica_role,
+                /* A GROUP BY key too, for the same reason: Query Store keeps Regular, Aborted and Exception
+                   executions of one plan in separate runtime-stats rows. MAX() showed "Regular" for any mixed
+                   group (it sorts last) while the averages blended a timeout's duration into the plan's normal
+                   cost. One row per outcome, matching Lite's grid and both SKUs' get_query_store_top. */
+                execution_type_desc,
                 MAX(module_name) AS module_name,
                 CAST(SUM(execution_count) AS bigint) AS total_executions,
                 AVG(CAST(avg_duration_us AS double precision)) / 1000.0 AS avg_duration_ms,
@@ -190,7 +195,6 @@ public sealed partial class ViewerDataService
                 MAX(query_plan_hash) AS query_plan_hash,
                 bool_or(is_forced_plan) AS is_forced_plan,
                 MAX(plan_forcing_type) AS plan_forcing_type,
-                MAX(execution_type_desc) AS execution_type_desc,
                 MIN(first_execution_time) AS first_execution_time,
                 AVG(CAST(avg_clr_time_us AS double precision)) / 1000.0 AS avg_clr_time_ms,
                 AVG(CAST(avg_tempdb_space_used AS double precision)) AS avg_tempdb_space_used,
@@ -225,7 +229,7 @@ public sealed partial class ViewerDataService
                 MAX(CAST(max_num_physical_io_reads AS double precision)) AS max_num_physical_io_reads
             FROM deduped
             WHERE rn = 1
-            GROUP BY database_name, query_id, plan_id, query_hash, replica_role
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
         )

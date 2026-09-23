@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -96,7 +97,8 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         long? intervalId = null,
         DateTime? intervalStart = null,
         long avgWrites = 0,
-        long avgPhysicalReads = 0)
+        long avgPhysicalReads = 0,
+        string executionType = "Regular")
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -117,7 +119,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = Db });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = planId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)firstExecutionTime ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT {queryId}" });
@@ -250,6 +252,57 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(2.0, a.AvgDurationMs, precision: 6);
         Assert.Equal(7.0, b.AvgDurationMs, precision: 6);
         Assert.Equal(0.3, b.AvgCpuTimeMs, precision: 6);
+    }
+
+    [Fact]
+    public async Task TopQueries_ExecutionTypeFilterSeparatesOutcomesBeforeRanking()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 201, 2001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xREG", intervalId: 9401, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(6), 202, 2002, FirstExecB, 3, 200, 500, 1,
+            "0xABORT", intervalId: 9402, intervalStart: BucketStart, executionType: "Aborted");
+        await SeedAsync(BucketStart.AddMinutes(7), 203, 2003, FirstExecB.AddMinutes(1), 2, 300, 700, 1,
+            "0xEX", intervalId: 9403, intervalStart: BucketStart, executionType: "Exception");
+
+        var service = new LocalDataService(_duckDb);
+        var aborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        var exception = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Exception"));
+
+        Assert.Equal("Aborted", aborted.ExecutionTypeDesc);
+        Assert.Equal("Exception", exception.ExecutionTypeDesc);
+    }
+
+    /// <summary>
+    /// The case the outcome split exists for: ONE plan, ONE interval, two outcomes. Query Store writes a
+    /// runtime-stats row per (plan, interval, execution type), and the grouping used to MAX() the outcome, so
+    /// this pair came back as one "Regular" row of 103 executions whose average blended the aborted executions'
+    /// 30-second duration into the plan's 2 ms one. The test above seeds one outcome per query and cannot see
+    /// that; this one fails on the old grouping.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_OnePlanWithTwoOutcomes_ReturnsOneRowPerOutcome()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 301, 3001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xMIXED", intervalId: 9501, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(5), 301, 3001, FirstExecA, 3, 30_000, 30_000_000, 1,
+            "0xMIXED", intervalId: 9501, intervalStart: BucketStart, executionType: "Aborted");
+
+        var service = new LocalDataService(_duckDb);
+        var rows = (await service.GetQueryStoreTopQueriesAsync(ServerId, 24)).Where(r => r.QueryId == 301).ToList();
+
+        Assert.Equal(2, rows.Count);
+        var regular = Assert.Single(rows, r => r.ExecutionTypeDesc == "Regular");
+        var abortedRow = Assert.Single(rows, r => r.ExecutionTypeDesc == "Aborted");
+        Assert.Equal(100L, regular.TotalExecutions);
+        Assert.Equal(2.0, regular.AvgDurationMs, precision: 6);
+        Assert.Equal(3L, abortedRow.TotalExecutions);
+        Assert.Equal(30_000.0, abortedRow.AvgDurationMs, precision: 6);
+
+        /* Filtered, the plan's aborted executions alone: the filter runs before the dedup's ROW_NUMBER, which
+           cannot change the winner because the outcome is in the partition. */
+        var onlyAborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        Assert.Equal(3001L, onlyAborted.PlanId);
+        Assert.Equal(3L, onlyAborted.TotalExecutions);
     }
 
     [Fact]
