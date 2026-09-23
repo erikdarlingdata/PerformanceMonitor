@@ -61,9 +61,10 @@ public sealed class PgLoggingCollectorGateTests
         "WHERE pg_catalog.current_setting('logging_collector') <> 'on'";
 
     /// <summary>The second marker's predicate (#3997): true only when the gate above is OPEN
-    /// (<c>logging_collector = 'on'</c>) and <c>newest</c> still came back empty — the csvlog/jsonlog-only
-    /// gap, which <see cref="EmitsTheMarker"/>'s complement cannot express because that one requires the
-    /// setting to be OFF. The two predicates cannot both be satisfied on the same server.</summary>
+    /// (<c>logging_collector = 'on'</c>) and <c>newest</c> still came back empty. That's the csvlog/jsonlog-only
+    /// gap, which <see cref="EmitsTheMarker"/>'s complement cannot express because that one requires the setting
+    /// to be OFF; since #4019 <c>newest</c> is empty whenever <c>log_destination</c> lacks <c>stderr</c>. The two
+    /// predicates cannot both be satisfied on the same server.</summary>
     private const string EmitsTheNoStderrMarker =
         "WHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)";
 

@@ -1209,10 +1209,11 @@ public sealed class PgLogEventsPipelineTests
     [Fact]
     public void TheTailerExtraction_LeftBothSiblingsSqlByteIdentical()
     {
-        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n      AND name !~* '\\.(csv|json)$'\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
+        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n      AND name !~* '\\.(csv|json)$'\n      AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
 
         /* Both siblings, #3997: logging_collector = off (the original marker) and logging_collector = on
-           with no stderr-format file left after the newest CTE's own exclusion (the new one). The two
+           with no stderr-format file left after the newest CTE's own exclusion, which since #4019 also leaves
+           newest empty whenever log_destination lacks stderr (the new one). The two
            WHERE clauses cannot both be true — one needs the setting off, the other needs it on — which is
            the mutual-exclusion PgServerLogTail's own remarks argue for. The regexp itself is #4016's fixed
            pattern (merged from dev after this branch started), not #3997's own change — the extra
