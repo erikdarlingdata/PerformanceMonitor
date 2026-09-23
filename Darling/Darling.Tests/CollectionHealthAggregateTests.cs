@@ -102,10 +102,10 @@ public class CollectionHealthAggregateTests
     /// scheduler launches its first run the moment the ensure path commits it, before any park can land. That
     /// launch collided with the test's <c>CALL run_job</c> (55P03, #3972's CI run), or refreshed while the test
     /// was still planting and moved the watermark under rows a pre-run assertion then missed (342 of 360). So
-    /// the scratch database's scheduler is stopped before the ensure path runs: measured on TimescaleDB 2.30.1,
-    /// <c>stop_background_workers()</c> stops only the current database's scheduler, it stays down, the policy
-    /// never runs on its own, and <c>CALL run_job</c> still runs in the test's session. The park stays as a
-    /// second guard.</para></summary>
+    /// the scratch database's scheduler is stopped before the ensure path runs. Measured on TimescaleDB 2.28.1,
+    /// and holding on CI's 2.30.1 runtime: <c>stop_background_workers()</c> stops only the current database's
+    /// scheduler, it stays down, the policy never runs on its own, and <c>CALL run_job</c> still runs in the
+    /// test's session. The park stays as a second guard.</para></summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, int JobId)?> OpenStoreAsync(CancellationToken ct)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
