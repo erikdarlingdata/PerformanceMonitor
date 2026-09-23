@@ -61,10 +61,17 @@ namespace PerformanceMonitor.Collectors;
 /// every other double-quoted run — including the <c>: "…"</c> and <c>at or near "…"</c> value shapes,
 /// which are taken greedily to the closing quote because a JSON value carries quotes of its own — becomes
 /// <c>"?"</c>. An unknown shape is over-redacted, never leaked. The one unquoted value shape beside the
-/// key tuple, <c>Failing row contains (…)</c>, goes whole for the same reason.</para>
+/// key tuple, <c>Failing row contains (…)</c>, goes whole for the same reason. Every value shape also FAILS
+/// CLOSED: a value whose close never arrived (a read boundary, a newline inside it, a cap) is masked to the
+/// end of the text rather than kept (#3920's fourth review).</para>
 /// </summary>
 public static class PgLogTextRedactor
 {
+    /* How long one prose pattern may run on one text (#3920's fourth review, M3). Every pattern here is linear or
+       near it on text PostgreSQL writes; this is the backstop for a shape nobody has found yet, and a text that
+       runs it out is withheld whole rather than kept. */
+    private static readonly TimeSpan s_proseTimeout = TimeSpan.FromMilliseconds(500);
+
     /* `Key (col, col)=(val, val)` — the unique/exclusion/foreign-key-violation DETAIL. The left tuple is
        column names and stays; the right tuple is the row's values, unquoted whatever their type, and goes
        whole.
@@ -79,7 +86,9 @@ public static class PgLogTextRedactor
        future sentence ever did carry one: it would redact the sentence too, never leak the value.
 
        The KEY tuple is matched lazily so an expression key — `Key (lower(email))=(...)` — is read whole: the
-       lazy run extends past the inner `)` until `=(` follows.
+       lazy run extends past the inner `)` until `=(` follows. It is ATOMIC: the key is the first such run and is
+       never re-tried longer. #3920's fourth review found the pair pattern, re-trying every longer key against
+       every value, took 7 s on 27 KB of `Key (a)=(` and minutes on 90 KB; atomic, 19 ms.
 
        The exclusion-violation DETAIL carries TWO tuples — `Key (during)=(...) conflicts with existing key
        (during)=(...).` — and the greedy rule alone would fold the second key's name and the sentence
@@ -89,42 +98,51 @@ public static class PgLogTextRedactor
        runs are greedy too, so a value that happened to contain the sentence is consumed rather than split.
        Both patterns refuse a value that is already the redaction mark `(?)`, which is what stops the general
        rule from re-reading the exclusion rule's output — `Key (a)=(?) conflicts with existing key (a)=(?).` —
-       as one tuple whose value runs to the final `)`, and folding the kept sentence back into a value. */
+       as one tuple whose value runs to the final `)`, and folding the kept sentence back into a value.
+
+       The general rule's close is the LAST `)` that one of those sentences follows, or that ends the text. A
+       value cut before its close has neither, and is masked to the end rather than kept (#3920's fourth review:
+       `Key (email)=(bob@exam` matched nothing and stayed whole). `[Kk]ey`, so an exclusion violation's second
+       tuple, `... existing key (a)=(...`, is read the same way when the pair pattern could not take both. */
     private static readonly Regex s_exclusionTupleValues = new(
-        @"(?<key>\bKey \(.*?\))=\((?!\?\)).*\) conflicts with existing key (?<key2>\(.*?\))=\((?!\?\)).*\)(?=[^)]*$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        @"(?<key>\bKey \((?>.*?\)(?==\()))=\((?!\?\)).*\) conflicts with existing key (?<key2>\((?>.*?\)(?==\()))=\((?!\?\)).*\)(?=[^)]*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline, s_proseTimeout);
 
     private static readonly Regex s_keyTupleValue = new(
-        @"(?<key>\bKey \(.*?\))=\((?!\?\)).*\)(?=[^)]*$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        @"(?<key>\b[Kk]ey \((?>.*?\)(?==\()))=\((?!\?\))(?:.*\)(?= (?:already exists|is duplicated|is still referenced|is not present|conflicts with))|.*\)(?=\.?\s*$)|.*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline, s_proseTimeout);
 
     /* `: "value"` and `at or near "fragment"` — PostgreSQL's two ways of quoting the thing the client sent.
        Greedy to the LAST quote in the text, because the value can carry quotes of its own (`malformed array
        literal: "{"a"}"`) and a first-quote match would leave its middle standing; both shapes end the
-       message, so the last quote is the value's close. */
+       message, so the value's close is a quote that ends the text, or that the log's cursor position
+       (` at character N`) follows. A value cut before its close is masked to the end (#3920's fourth review:
+       `json: "{"card": 4111` closed at the key's quote and kept the number after it). */
     private static readonly Regex s_quotedValueShape = new(
-        @"(?<=:\s|\bat or near\s)"".*""(?=[^""]*$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        @"(?<=:\s|\bat or near\s)""(?:.*""(?=(?: at character [0-9]+)?\s*$)|.*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline, s_proseTimeout);
 
     /* `Failing row contains (1, abc, 2026-01-01).` — the NOT NULL / CHECK violation DETAIL, the row's
-       values unquoted whatever their type. Greedy to the last `)` for the key tuple's reason. */
+       values unquoted whatever their type. Greedy to the last `)` for the key tuple's reason, which must end
+       the text; otherwise masked to the end (#3920's fourth review). */
     private static readonly Regex s_failingRow = new(
-        @"\bFailing row contains \(.*\)(?=[^)]*$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        @"\bFailing row contains \((?:.*\)(?=\.?\s*$)|.*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline, s_proseTimeout);
 
     /* `Partition key of the failing row contains (tenant_email) = (bob@example.com).` - the no-partition-found
        DETAIL, its values unquoted like a key tuple's and taken whole for the key tuple's reasons (#3920's
-       review): the key list stays, the value list goes, greedy to the last `)`. */
+       review): the key list stays, the value list goes, greedy to a last `)` that ends the text, and to the end
+       when there is none. */
     private static readonly Regex s_partitionKeyValue = new(
-        @"(?<key>\bPartition key of the failing row contains \(.*?\)) = \((?!\?\)).*\)(?=[^)]*$)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        @"(?<key>\bPartition key of the failing row contains \((?>.*?\)(?= = \())) = \((?!\?\))(?:.*\)(?=\.?\s*$)|.*$)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline, s_proseTimeout);
 
     /* `JSON data, line 1: {"card": 4111111111111111, ...` - the json parser's CONTEXT, which quotes the input
        line up to the error with nothing escaped (#3920's review). Everything after the lead goes, to the end of
        the line the parser wrote it on. */
     private static readonly Regex s_jsonDataLine = new(
         @"(?<lead>\bJSON data, line [0-9]+: )[^\n]*",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, s_proseTimeout);
 
     /* A double-quoted run or a single-quoted literal, whichever opens first, so an apostrophe inside a quoted
        name (`"o'k"`) never pairs with one outside it (#3920's review). Only the single-quoted kind is masked
@@ -132,20 +150,38 @@ public static class PgLogTextRedactor
        parser's pattern, not a copy of it. */
     private static readonly Regex s_quotedRun = new(
         @"""[^""]*""|" + PgPlanLogParser.s_quotedLiteral,
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, s_proseTimeout);
+
+    /* The DETAIL shapes that carry SQL (#3920). A deadlock report opens with its wait-for lines, "Process N
+       waits for <lock> on <object>; blocked by process M.", then writes each process's query as "Process N:
+       <query>" (errdetail_log, each cut at track_activity_query_size). A crashed backend's report is one query,
+       "Failed process was running: <query>", and a logged EXECUTE names its PREPARE as "prepare: <statement>"
+       (errdetail_execute). A tab leads each continuation line in a stderr log, nothing in csvlog. Any other
+       DETAIL is prose: round 3 split at any line shaped like a head, inside a value included, which kept a
+       literal's middle and cut a key tuple from its close (#3920's fourth review). */
+    private static readonly Regex s_deadlockWaitFor = new(
+        @"^\t?Process (?<pid>[0-9]+) waits for .*; blocked by process (?<blocker>[0-9]+)\.$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /* The two DETAIL shapes that carry another session's SQL (#3920's review): the deadlock report's
-       `Process N: <query>` lines, one per process after the wait-for lines (errdetail_log, each query cut at
-       track_activity_query_size), and the postmaster's `Failed process was running: <query>` after a backend
-       crash, cut the same way. A tab leads each in a stderr log's continuation lines, nothing in csvlog. */
-    private static readonly Regex s_detailQueryHead = new(
-        @"^\t?(?:Process [0-9]+: |Failed process was running: )",
+    private static readonly Regex s_deadlockQueryHead = new(
+        @"^\t?Process (?<pid>[0-9]+): ",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_singleQueryHead = new(
+        @"^(?:Failed process was running: |prepare: )",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* A CONTEXT frame that quotes the statement it was running, unescaped (#3920's review): SPI's
        `SQL statement "..."` and PL/pgSQL's expression and assignment frames. */
     private static readonly Regex s_contextSqlFrame = new(
         @"^\t?(?:SQL statement|SQL expression|PL/pgSQL expression|PL/pgSQL assignment) """,
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* A one-line CONTEXT frame with no free text of its own: the line after one may open an SQL frame, where a
+       line after another frame's value may not (#3920's fourth review: a COPY value running onto a line shaped
+       like `SQL statement "..."` had that line read as SQL). */
+    private static readonly Regex s_contextOneLineFrame = new(
+        @"^\t?(?:PL/pgSQL function |SQL function ""|while |JSON data, line [0-9]+: |parallel worker|automatic (?:vacuum|analyze) of table "")",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* What can follow such a frame: the line after its closing quote starts one of these, or the field ends. */
@@ -158,6 +194,25 @@ public static class PgLogTextRedactor
     /// the cut hid, so no statement is kept at all.</summary>
     public const string WithheldStatement = "<statement withheld: it could not be read to its end>";
 
+    /// <summary>What prose becomes when masking it runs a pattern past its time budget: no mask can be trusted to
+    /// have finished, so none of the text is kept.</summary>
+    public const string WithheldProse = "<text withheld: it could not be masked in time>";
+
+    /// <summary>PostgreSQL 18's normalized IN-list marker, <c>IN ($1 /*, ... */)</c>: a comment that is part of what
+    /// a normalized statement says, and carries no value.</summary>
+    public const string NormalizedInListMarker = "/*, ... */";
+
+    /// <summary>The longest SQL-bearing field (a DETAIL's queries, a CONTEXT) masked at all (#3920's fourth
+    /// review); a longer one is withheld. PostgreSQL cuts each query it writes there at
+    /// <c>track_activity_query_size</c>, 1 kB by default, so this is far past any field it writes itself.</summary>
+    internal const int MaxSqlFieldLength = 64 * 1024;
+
+    /// <summary>How many candidate query boundaries one field may test (#3920's fourth review). Each test re-reads
+    /// the text so far, so an unbounded count made a hostile field quadratic: a 180 KB CONTEXT took 21 s, and the
+    /// self-hosted tail re-reads its overlap window every cycle. Past the cap the boundary is not taken, which
+    /// leaves the text to be withheld or masked whole.</summary>
+    internal const int MaxBoundaryTests = 32;
+
     /* Every remaining double-quoted run, with what precedes it captured so the allowlist can be asked. The
        word-and-space lead is tried first so `relation "x"` reaches the allowlist with its noun; the fallback
        is ANY single character — a bare space, a newline at the head of a tab-continuation, punctuation — so
@@ -165,8 +220,8 @@ public static class PgLogTextRedactor
        skipped. Review found the first draft's fallback matched non-space only, which left a quote after two
        spaces or after a newline neither redacted nor allowlisted. */
     private static readonly Regex s_doubleQuoted = new(
-        @"(?<lead>(?:[A-Za-z_]+=|\b[A-Za-z_]+\s|^|.))(?<quoted>""[^""]*"")",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+        @"(?<lead>(?:[A-Za-z_]+=|\b[A-Za-z_]+\s|^|.))(?<quoted>""(?:[^""]*""|[^""]*$))",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline, s_proseTimeout);
 
     /* The words PostgreSQL puts before a double-quoted IDENTIFIER. A run preceded by one of these is a
        name and stays; a run preceded by anything else is treated as a value. Enumerated rather than
@@ -176,9 +231,9 @@ public static class PgLogTextRedactor
        #3602 reads. */
     private static readonly Regex s_identifierNoun = new(
         @"(?:^|\b)(?:relation|table|column|constraint|index|sequence|view|function|procedure|routine|type|schema|database|role|user|extension|parameter|tablespace|trigger|rule|policy|language|domain|collation|operator|aggregate|publication|subscription|server|wrapper|mapping|file|directory|path|option|setting|slot|partition|attribute|object|library|module|record|conversion|dictionary|template|configuration|statistics|method|namespace|catalog|cursor|portal|savepoint|prepared statement|access method|event trigger|foreign table|materialized view|composite type|enum type|range type|base type|text search configuration|text search dictionary|text search parser|text search template|application_name=|identity=|method=)\s?$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, s_proseTimeout);
 
-    /// <summary>Prose: quoted values out (single-quoted, double-quoted after a value shape or an unknown lead, key tuples, failing rows), identifiers and bare numbers kept. Null in, null out.</summary>
+    /// <summary>Prose: quoted values out (single-quoted, double-quoted after a value shape or an unknown lead, key tuples, failing rows), identifiers and bare numbers kept; a value cut before its close is masked to the end, and a text that runs a pattern past its time budget comes back as <see cref="WithheldProse"/> (#3920's fourth review). Null in, null out.</summary>
     public static string? RedactMessage(string? text)
     {
         if (string.IsNullOrEmpty(text))
@@ -186,6 +241,18 @@ public static class PgLogTextRedactor
             return text;
         }
 
+        try
+        {
+            return MaskProse(text);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return WithheldProse;
+        }
+    }
+
+    private static string MaskProse(string text)
+    {
         /* The value shapes before the single-quote pass (#3920's review): a key tuple's value, a partition key's,
            a JSON line, is taken whole before an apostrophe inside it, or inside the quoted column name beside it,
            can pair with another one and leave the value's middle standing. */
@@ -198,19 +265,49 @@ public static class PgLogTextRedactor
         scrubbed = s_quotedRun.Replace(scrubbed, m => m.Value[0] == '\'' ? "'?'" : m.Value);
 
         return s_doubleQuoted.Replace(scrubbed, m =>
-            s_identifierNoun.IsMatch(m.Groups["lead"].Value)
+            s_identifierNoun.IsMatch(m.Groups["lead"].Value) && ReadsAsAName(m.Groups["quoted"].Value)
                 ? m.Value
                 : m.Groups["lead"].Value + "\"?\"");
     }
 
     /// <summary>
-    /// A DETAIL field (#3920): prose through <see cref="RedactMessage"/>, except the SQL PostgreSQL writes into
-    /// it, a deadlock's <c>Process N: query</c> lines and a crash's <c>Failed process was running: query</c>.
-    /// That is masked as a statement is (<see cref="RedactStoredStatement"/>), and withheld when it cannot be
-    /// read to its end, which is common: the server cuts each query at <c>track_activity_query_size</c>. Each
-    /// query runs to the next <c>Process N:</c> line or the end of the field. Prose masking kept bare numbers
-    /// and dollar-quoted strings, so before this a deadlock kept both sessions' values. Null in, null out;
-    /// idempotent.
+    /// Whether a double-quoted run after an identifier noun reads as a NAME (#3920's fourth review): closed, with
+    /// a letter in it, and no non-ASCII character that is not a letter. <c>column "&lt;NBSP&gt;4111..."</c> and
+    /// <c>column "4111..."</c> are values a client typed where a name was expected, and the noun alone kept them.
+    /// </summary>
+    private static bool ReadsAsAName(string quoted)
+    {
+        if (quoted.Length < 2 || quoted[^1] != '"')
+        {
+            return false;
+        }
+
+        var letter = false;
+        for (var i = 1; i < quoted.Length - 1; i++)
+        {
+            var c = quoted[i];
+            if (c >= '\u0080' && !char.IsLetter(c))
+            {
+                return false;
+            }
+
+            letter |= char.IsLetter(c);
+        }
+
+        return letter;
+    }
+
+    /// <summary>
+    /// A DETAIL field (#3920). The SQL PostgreSQL writes into one is masked as a statement is
+    /// (<see cref="RedactStoredStatement"/>), and withheld when it cannot be read to its end, which is common: the
+    /// server cuts each query at <c>track_activity_query_size</c>. Prose masking kept bare numbers and
+    /// dollar-quoted strings, so before #3920 a deadlock kept both sessions' values. Only three shapes carry SQL:
+    /// a crash's <c>Failed process was running: query</c> and a logged EXECUTE's <c>prepare: statement</c>, each
+    /// one query to the end of the field, and a deadlock report. A deadlock report's wait-for lines are prose,
+    /// then each process's <c>Process N: query</c>. A <c>Process N:</c> line starts the next query only when N is
+    /// one of the deadlock's own processes AND the query before it reads to its end; any other line, one a literal
+    /// carries included, belongs to the query it follows (#3920's fourth review). Every other DETAIL is prose,
+    /// read whole. Null in, null out; idempotent.
     /// </summary>
     public static string? RedactDetail(string? detail)
     {
@@ -219,36 +316,68 @@ public static class PgLogTextRedactor
             return detail;
         }
 
-        var lines = detail.Split('\n');
-        var output = new List<string>(lines.Length);
-        var prose = new List<string>();
-        var i = 0;
-        while (i < lines.Length)
+        var single = s_singleQueryHead.Match(detail);
+        if (single.Success)
         {
-            var head = s_detailQueryHead.Match(lines[i]);
-            if (!head.Success)
+            return single.Value + MaskQuery(detail[single.Length..]);
+        }
+
+        var lines = detail.Split('\n');
+        var waits = 0;
+        var pids = new HashSet<string>(StringComparer.Ordinal);
+        while (waits < lines.Length && s_deadlockWaitFor.Match(lines[waits]) is { Success: true } wait)
+        {
+            pids.Add(wait.Groups["pid"].Value);
+            pids.Add(wait.Groups["blocker"].Value);
+            waits++;
+        }
+
+        if (waits == 0)
+        {
+            return RedactMessage(detail);
+        }
+
+        var output = new List<string>(lines.Length) { RedactMessage(string.Join('\n', lines, 0, waits)) ?? string.Empty };
+        if (waits == lines.Length)
+        {
+            return output[0];
+        }
+
+        var head = s_deadlockQueryHead.Match(lines[waits]);
+        if (!head.Success || !pids.Contains(head.Groups["pid"].Value) || detail.Length > MaxSqlFieldLength)
+        {
+            output.Add((head.Success ? head.Value : lines[waits].StartsWith('\t') ? "\t" : string.Empty) + WithheldStatement);
+            return string.Join('\n', output);
+        }
+
+        var currentHead = head.Value;
+        var query = new StringBuilder(lines[waits], head.Length, lines[waits].Length - head.Length, detail.Length);
+        var tests = 0;
+        for (var k = waits + 1; k < lines.Length; k++)
+        {
+            var next = s_deadlockQueryHead.Match(lines[k]);
+            if (next.Success
+                && pids.Contains(next.Groups["pid"].Value)
+                && tests++ < MaxBoundaryTests
+                && RedactStoredStatement(query.ToString()) is { } masked)
             {
-                prose.Add(lines[i]);
-                i++;
+                output.Add(currentHead + masked);
+                currentHead = next.Value;
+                query.Clear().Append(lines[k], next.Length, lines[k].Length - next.Length);
                 continue;
             }
 
-            FlushProse(prose, output);
-            var query = new StringBuilder(lines[i][head.Length..]);
-            var next = i + 1;
-            while (next < lines.Length && !s_detailQueryHead.IsMatch(lines[next]))
-            {
-                query.Append('\n').Append(lines[next]);
-                next++;
-            }
-
-            output.Add(head.Value + (RedactStoredStatement(query.ToString()) ?? WithheldStatement));
-            i = next;
+            query.Append('\n').Append(lines[k]);
         }
 
-        FlushProse(prose, output);
+        output.Add(currentHead + MaskQuery(query.ToString()));
         return string.Join('\n', output);
     }
+
+    /// <summary>One query a DETAIL carries, masked, or withheld when it cannot be read to its end or is too long
+    /// to read at all.</summary>
+    private static string MaskQuery(string query) =>
+        query.Length > MaxSqlFieldLength ? WithheldStatement : RedactStoredStatement(query) ?? WithheldStatement;
 
     /// <summary>
     /// A CONTEXT field (#3920): prose through <see cref="RedactMessage"/>, except a frame that quotes the
@@ -258,6 +387,15 @@ public static class PgLogTextRedactor
     /// which the text reads to its end (<see cref="RedactStoredStatement"/>) and after which the next line starts
     /// another frame, or the field ends. A frame that no closing quote satisfies is withheld, with everything
     /// after it. Null in, null out; idempotent.
+    ///
+    /// <para><b>Where a frame starts</b> (#3920's fourth review). An SQL frame is read as SQL only on the field's
+    /// first line, after a closed SQL frame, or after a one-line frame (<c>PL/pgSQL function ...</c>,
+    /// <c>while ... in relation ...</c>, <c>JSON data, line N: ...</c>) that no open value precedes. Any other
+    /// frame (a COPY row, say) is a value whose text can run onto the next line, so the lines after it are its
+    /// content until another one-line frame starts on even quotes, and the run is masked as one prose block.
+    /// Round 3 took any line shaped like a frame for one, so a COPY value holding such a line had its content
+    /// read as SQL. A field longer than <see cref="MaxSqlFieldLength"/> is withheld whole, and a frame tests at
+    /// most <see cref="MaxBoundaryTests"/> closes.</para>
     /// </summary>
     public static string? RedactContext(string? context)
     {
@@ -266,56 +404,107 @@ public static class PgLogTextRedactor
             return context;
         }
 
+        if (context.Length > MaxSqlFieldLength)
+        {
+            return WithheldStatement;
+        }
+
         var lines = context.Split('\n');
         var output = new List<string>(lines.Length);
-        var prose = new List<string>();
+        var value = new List<string>();
+        var valueQuotes = 0;
+        var frameMayStart = true;
         var i = 0;
         while (i < lines.Length)
         {
-            var frame = s_contextSqlFrame.Match(lines[i]);
-            if (!frame.Success)
+            var line = lines[i];
+            var sqlFrame = frameMayStart ? s_contextSqlFrame.Match(line) : Match.Empty;
+            if (sqlFrame.Success)
             {
-                prose.Add(lines[i]);
+                FlushProse(value, output);
+                valueQuotes = 0;
+                var (masked, close) = CloseSqlFrame(lines, i, sqlFrame.Length);
+                if (masked is null)
+                {
+                    output.Add(sqlFrame.Value + WithheldStatement + "\"");
+                    return string.Join('\n', output);
+                }
+
+                output.Add(sqlFrame.Value + masked + "\"");
+                i = close + 1;
+                frameMayStart = true;
+                continue;
+            }
+
+            if (valueQuotes % 2 == 0 && s_contextOneLineFrame.IsMatch(line))
+            {
+                FlushProse(value, output);
+                valueQuotes = 0;
+                output.Add(RedactMessage(line) ?? string.Empty);
+                frameMayStart = true;
                 i++;
                 continue;
             }
 
-            FlushProse(prose, output);
-            string? masked = null;
-            var close = -1;
-            for (var end = i; end < lines.Length && masked is null; end++)
-            {
-                var closesHere = lines[end].EndsWith('"')
-                    && (end > i || lines[end].Length > frame.Length)
-                    && (end + 1 == lines.Length || s_contextFrameStart.IsMatch(lines[end + 1]));
-                if (!closesHere)
-                {
-                    continue;
-                }
-
-                var body = new StringBuilder(lines[i][frame.Length..]);
-                for (var k = i + 1; k <= end; k++)
-                {
-                    body.Append('\n').Append(lines[k]);
-                }
-
-                body.Length--;
-                masked = RedactStoredStatement(body.ToString());
-                close = end;
-            }
-
-            if (masked is null)
-            {
-                output.Add(frame.Value + WithheldStatement + "\"");
-                return string.Join('\n', output);
-            }
-
-            output.Add(frame.Value + masked + "\"");
-            i = close + 1;
+            value.Add(line);
+            valueQuotes += CountQuotes(line);
+            frameMayStart = false;
+            i++;
         }
 
-        FlushProse(prose, output);
+        FlushProse(value, output);
         return string.Join('\n', output);
+    }
+
+    /// <summary>Where the SQL frame opening on <paramref name="start"/> ends: its statement masked and the line of
+    /// its closing quote, testing at most <see cref="MaxBoundaryTests"/> candidate closes; (null, -1) when none
+    /// reads to its end.</summary>
+    private static (string? Masked, int Close) CloseSqlFrame(string[] lines, int start, int headLength)
+    {
+        var tests = 0;
+        for (var end = start; end < lines.Length; end++)
+        {
+            var closesHere = lines[end].EndsWith('"')
+                && (end > start || lines[end].Length > headLength)
+                && (end + 1 == lines.Length || s_contextFrameStart.IsMatch(lines[end + 1]));
+            if (!closesHere)
+            {
+                continue;
+            }
+
+            if (++tests > MaxBoundaryTests)
+            {
+                return (null, -1);
+            }
+
+            var body = new StringBuilder(lines[start], headLength, lines[start].Length - headLength, MaxSqlFieldLength);
+            for (var k = start + 1; k <= end; k++)
+            {
+                body.Append('\n').Append(lines[k]);
+            }
+
+            body.Length--;
+            if (RedactStoredStatement(body.ToString()) is { } masked)
+            {
+                return (masked, end);
+            }
+        }
+
+        return (null, -1);
+    }
+
+    private static int CountQuotes(string line)
+    {
+        var count = 0;
+        foreach (var c in line)
+        {
+            if (c == '"')
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static void FlushProse(List<string> prose, List<string> output)
@@ -360,7 +549,9 @@ public static class PgLogTextRedactor
     ///
     /// <para>Whitespace and comments follow PostgreSQL's lexer, not .NET's: only
     /// <c>space \t \n \r \f \v</c> separate tokens (a non-ASCII character is part of an identifier), and a
-    /// line comment ends at <c>\r</c> as well as <c>\n</c>.</para>
+    /// line comment ends at <c>\r</c> as well as <c>\n</c>. An identifier holding a non-ASCII character that is
+    /// not a letter is masked like a number, and PostgreSQL 18's normalized IN-list marker, the one comment that
+    /// is part of a statement's text, is kept (#3920's fourth review).</para>
     ///
     /// <para><b>Fails closed.</b> Null when the text ends inside a literal, a quoted identifier or a block
     /// comment, which is what a statement cut at a cap or a read boundary looks like: no mask can be trusted
@@ -417,6 +608,16 @@ public static class PgLogTextRedactor
 
             if (c == '/' && next == '*')
             {
+                /* PostgreSQL 18's normalized IN-list marker is part of what a normalized statement says, and carries
+                   no value: kept, so a normalized IN list does not read as a one-element list once the statement
+                   reader's text passes through here (#3920's fourth review). */
+                if (string.CompareOrdinal(text, i, NormalizedInListMarker, 0, NormalizedInListMarker.Length) == 0)
+                {
+                    Emit(NormalizedInListMarker);
+                    i += NormalizedInListMarker.Length;
+                    continue;
+                }
+
                 var depth = 1;
                 i += 2;
                 while (i < text.Length && depth > 0)
@@ -623,12 +824,18 @@ public static class PgLogTextRedactor
             if (IsIdentifierChar(c, first: true))
             {
                 var end = i + 1;
+                var foreign = c >= '\u0080' && !char.IsLetter(c);
                 while (end < text.Length && (IsIdentifierChar(text[end], first: false) || text[end] == '$'))
                 {
+                    foreign |= text[end] >= '\u0080' && !char.IsLetter(text[end]);
                     end++;
                 }
 
-                Emit(text[i..end]);
+                /* A non-ASCII character that is not a letter (a no-break space, a full-width digit, a zero-width
+                   mark) is part of an identifier to PostgreSQL, so `=<NBSP>4111...` is one token to the server. It
+                   is also how a value pasted from a web page or typed through an IME reads, and keeping the token
+                   kept the value (#3920's fourth review). It goes; a non-ASCII LETTER is still a name. */
+                Emit(foreign ? "?" : text[i..end]);
                 i = end;
                 continue;
             }
