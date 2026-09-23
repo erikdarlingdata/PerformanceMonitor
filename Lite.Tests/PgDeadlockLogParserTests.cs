@@ -558,7 +558,7 @@ public sealed class PgDeadlockLogParserTests
     ///
     /// <para>Cut immediately after the first wait edge, which is where a boundary lands most cheaply — the
     /// line is complete and newline-terminated, so the pattern's <c>(?:\t[^\n]*\n)*</c> continuation
-    /// group is satisfied by taking none of them. The block MATCHES, <c>FromBlock</c> finds an edge, and a
+    /// group is satisfied by taking none of them. The block MATCHES, <c>FromReport</c> finds an edge, and a
     /// row lands naming one of the two locked resources and neither participant's SQL. Absence would at
     /// least be absence; this is a stored deadlock that is quietly smaller than the one that happened.</para>
     ///

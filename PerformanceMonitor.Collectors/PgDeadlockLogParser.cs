@@ -102,12 +102,11 @@ public static class PgDeadlockLogParser
        itself contain newlines, and each continuation arrives tab-indented, so a line-count rule or a
        blank-line rule would truncate multi-line SQL silently.
 
-       The zone is captured and READ (#2993). PostgreSQL renders the stamp in log_timezone and prints that
-       zone's abbreviation beside it, so this token is the setting's own rendered value for THIS line, and
-       it is what decides whether the naive timestamp next to it is already UTC. See IsZeroOffsetLogZone
-       for why that question is answerable from an abbreviation when "which zone is this" is not. Both
-       families name the group `zone` and the group `pid`, which .NET allows across alternatives and which
-       keeps the reads below indifferent to which family matched.
+       The zone is READ (#2993), by the assembler FromReport hands the candidate to, which splits the same
+       two families the same way. PostgreSQL renders the stamp in log_timezone and prints that zone's
+       abbreviation beside it, so this token is the setting's own rendered value for THIS line, and it is
+       what decides whether the naive timestamp next to it is already UTC. See IsZeroOffsetLogZone for why
+       that question is answerable from an abbreviation when "which zone is this" is not.
 
        Not \w+ for either zone: \w matches neither a sign nor a colon, and a prefix the pattern cannot
        match produces no block at all, which reads as a server with no deadlocks.
@@ -179,7 +178,7 @@ public static class PgDeadlockLogParser
     /// <para><b>Two shapes on that route, and the second is the dangerous one.</b> A chunk ending before
     /// <c>DETAIL:</c> matches nothing, because the pattern requires that group, and the report is lost
     /// whole. A chunk ending mid-DETAIL still MATCHES — <c>(?:\t[^\n]*\n)*</c> takes however many
-    /// continuation lines arrived, including none — so <see cref="FromBlock"/> finds a wait edge and
+    /// continuation lines arrived, including none — so <see cref="FromReport"/> finds a wait edge and
     /// stores a row carrying only the participants, resources and statements that were inside the chunk.
     /// That row is indistinguishable from a genuinely smaller deadlock, which is worse than the absence.
     /// It cannot be checked against its own graph either: <c>ParticipantCount</c> is derived from the same
@@ -188,7 +187,7 @@ public static class PgDeadlockLogParser
     /// count EXCEEDING the edge count is a shape the server never writes.</para>
     ///
     /// <para>The one exception is a log stamped in a non-UTC zone, which throws
-    /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromBlock"/>.</para>
+    /// <see cref="PgLogTimezoneUnsupportedException"/> instead: see <see cref="FromReport"/>.</para>
     ///
     /// <para><b>That throw abandons the WHOLE read, siblings included.</b> One log has one
     /// <c>log_timezone</c> at any instant, so a window holding both a non-UTC and a UTC stamp only

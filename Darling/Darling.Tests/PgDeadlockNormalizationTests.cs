@@ -31,6 +31,7 @@ namespace Darling.Tests;
 /// alert built from the same read) normalizes them on the way out. Such a row's hash is over its raw graph, so
 /// it is a test for the literals the read removed (#4004): it is neither returned nor found by.</para>
 /// </summary>
+[Collection("live-postgres")]
 public sealed class PgDeadlockNormalizationTests
 {
     private const string ServerName = "darling-pg-deadlock-normalization-4005";
