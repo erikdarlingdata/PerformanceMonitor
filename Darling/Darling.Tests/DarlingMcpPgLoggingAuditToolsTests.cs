@@ -503,7 +503,7 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
 
         Assert.Equal("srv", root.GetProperty("server").GetString());
         Assert.Equal("logging_audit", root.GetProperty("status").GetString());
-        Assert.Equal(Stamp.ToString("o"), root.GetProperty("captured_at").GetString());
+        Assert.Equal(Stamp.ToString("o"), root.GetProperty("captured_at").GetString());
         Assert.False(root.TryGetProperty("as_of", out _));
         Assert.Contains("not the live server", root.GetProperty("source").GetString(), StringComparison.Ordinal);
         Assert.Equal("self-hosted", root.GetProperty("hosting").GetString());
@@ -588,6 +588,14 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
     /// The description is what an agent plans against, so the claims it must keep making are pinned: it
     /// reads the STORED snapshot and not the live server, it names all seven settings, it defers plan
     /// capture's settings to the readiness read, it defines <c>partial</c>, and it says PostgreSQL-only.
+    ///
+    /// <para>#3898 D3 re-pointed this deliberately, split by whether the fact is a guardrail (misreading the
+    /// verdict) or narrative (the full setting roster, the hosting-specific remedy syntax, the cross-tool
+    /// hand-off): guardrail facts are asserted against the SERVED head (what <c>tools/list</c> actually
+    /// hands a caller), narrative facts against the tail <c>get_tool_guide</c> serves on request. Both halves
+    /// are read off the same <c>McpToolGuide.Split</c> this repo's own registration path uses, so a future
+    /// re-wording that moves a fact across the marker is caught here rather than passing by accident because
+    /// the old assertions read the raw, unsplit literal.</para>
     /// </summary>
     [Fact]
     public void TheToolDescription_StatesWhatItJudges_AndThatItReadsStoredConfig()
@@ -596,21 +604,31 @@ public sealed class DarlingMcpPgLoggingAuditToolsTests
 
         Assert.Equal("get_pg_logging_audit", method.GetCustomAttribute<McpServerToolAttribute>()!.Name);
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+        var (head, tail) = McpToolGuide.Split(description);
 
+        /* Narrative: the full seven-setting roster and the hosting-specific remedy live in the tail: a
+           caller decides whether to open the guide from the head's shorter "logging settings" without
+           needing every name up front, but nothing here is dropped, only moved. */
         foreach (var setting in DarlingPgLoggingAudit.JudgedSettings)
         {
-            Assert.Contains(setting, description, StringComparison.Ordinal);
+            Assert.Contains(setting, tail, StringComparison.Ordinal);
         }
 
-        Assert.Contains("STORED configuration snapshot", description, StringComparison.Ordinal);
-        Assert.Contains("never the live server", description, StringComparison.Ordinal);
-        Assert.Contains("LATEST IS A TIME", description, StringComparison.Ordinal);
-        Assert.Contains("captured_at", description, StringComparison.Ordinal);
-        Assert.Contains("get_pg_plan_capture_readiness", description, StringComparison.Ordinal);
-        Assert.Contains("partial means a THRESHOLD is filtering", description, StringComparison.Ordinal);
-        Assert.Contains("PLANNED", description, StringComparison.Ordinal);
-        Assert.Contains("parameter group on RDS/Aurora", description, StringComparison.Ordinal);
-        Assert.EndsWith("PostgreSQL-only.", description, StringComparison.Ordinal);
+        /* Guardrail: what this reads, when it was taken, and how to tell "off" from "not observed" apart -
+           the facts a caller needs before trusting a verdict, so they must reach tools/list without a
+           second call. */
+        Assert.Contains("STORED configuration snapshot", head, StringComparison.Ordinal);
+        Assert.Contains("never the live server", head, StringComparison.Ordinal);
+        Assert.Contains("LATEST IS A TIME", head, StringComparison.Ordinal);
+        Assert.Contains("captured_at", head, StringComparison.Ordinal);
+        Assert.Contains("partial means a THRESHOLD is filtering", head, StringComparison.Ordinal);
+
+        /* Narrative: the readiness hand-off, the PLANNED-consumer caveat and the hosting-specific remedy
+           syntax are detail an agent reads once it has already decided this tool is relevant. */
+        Assert.Contains("get_pg_plan_capture_readiness", tail, StringComparison.Ordinal);
+        Assert.Contains("PLANNED", tail, StringComparison.Ordinal);
+        Assert.Contains("parameter group on RDS/Aurora", tail, StringComparison.Ordinal);
+        Assert.EndsWith("PostgreSQL-only.", tail, StringComparison.Ordinal);
 
         /* A latest-snapshot read: no window and no anchor, the get_pg_server_config convention. The
            AsOfWindowAnchorTests pins hold the catalog to the same fact from the other side. */
