@@ -21,6 +21,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -74,7 +75,7 @@ public sealed class LatestValueLookbackSqlTests
     /// <summary>
     /// $2 is the lookback start and $3 the window end, and nothing else binds. A bare parameter on each side is
     /// the form TimescaleDB excludes chunks on reliably (the <c>PlanRegressionSql</c> lesson), and it keeps the
-    /// lookback in C#, on <see cref="AnalysisContext.LatestValueStart"/>, where its reason is written down.
+    /// lookback in C#, on <see cref="AnalysisContext.LatestValueStartFor"/>, where its reason is written down.
     /// </summary>
     [Theory]
     [MemberData(nameof(LatestValueReadNames))]
@@ -91,20 +92,107 @@ public sealed class LatestValueLookbackSqlTests
         Assert.DoesNotMatch(new Regex(@"INTERVAL", RegexOptions.IgnoreCase), sql);
     }
 
+    /// <summary>
+    /// A day, or twice the collector's interval if that is longer. Cadences are operator-editable and a
+    /// steady-state collection advances by exactly the interval, so a flat day would drop a daily collector's
+    /// fact on every pass between the day and its next run — a flap that resolves, then re-fires, the findings
+    /// built on it. Every shipped cadence is under twelve hours, so the default behavior is the flat day.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 24 * 60)]
+    [InlineData(60, 24 * 60)]
+    [InlineData(720, 24 * 60)]
+    [InlineData(721, 2 * 721)]
+    [InlineData(1440, 48 * 60)]
+    [InlineData(10_080, 2 * 10_080)]
+    public void TheLookback_IsADayOrTwiceTheInterval(int frequencyMinutes, int expectedMinutes)
+    {
+        Assert.Equal(TimeSpan.FromMinutes(expectedMinutes), AnalysisContext.LatestValueLookbackFor(frequencyMinutes));
+    }
+
     [Fact]
-    public void TheLookback_IsADay_AnchoredOnTheWindowsEnd_NotOnNow()
+    public void AnOnLoadCollector_TakesNoLookback_AndEveryShippedCadenceTakesTheFlatDay()
+    {
+        /* On load only (0): the read anchors on the newest capture instead, however old. */
+        Assert.Null(AnalysisContext.LatestValueLookbackFor(0));
+
+        foreach (var collector in PgLatestValueBounds.Collectors)
+        {
+            var shipped = CollectorScheduleDefaults.All[collector.Name].FrequencyMinutes;
+            Assert.Equal(AnalysisContext.LatestValueLookback, AnalysisContext.LatestValueLookbackFor(shipped));
+        }
+    }
+
+    [Fact]
+    public void TheBound_IsAnchoredOnTheWindowsEnd_AndTheStampWins()
     {
         Assert.Equal(TimeSpan.FromHours(24), AnalysisContext.LatestValueLookback);
 
         /* A historical window reads the state as it stood at ITS end — the anchored analyze_server and
-           compare_analysis's baseline window both depend on that. */
+           compare_analysis's baseline window both depend on that. Unstamped, every read takes the day. */
         var end = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Unspecified);
         var context = new AnalysisContext { TimeRangeStart = end.AddHours(-4), TimeRangeEnd = end };
-        Assert.Equal(end.AddHours(-24), context.LatestValueStart);
+        Assert.Equal(end.AddHours(-24), context.LatestValueStartFor("database_size_stats"));
+
+        context.LatestValueStarts = new Dictionary<string, DateTime> { ["database_size_stats"] = end.AddHours(-48) };
+        Assert.Equal(end.AddHours(-48), context.LatestValueStartFor("database_size_stats"));
+        Assert.Equal(end.AddHours(-24), context.LatestValueStartFor("memory_stats"));
 
         /* The lookback reaches further back than the analyze_server default window, so a series sampled once
            in the window is never lost to the bound. */
         Assert.True(AnalysisContext.LatestValueLookback > TimeSpan.FromHours(4));
+    }
+
+    /// <summary>
+    /// The analysis pass must bound a read by the cadence the scheduler RUNS the collector at, or it bounds a
+    /// daily collector by a day and flaps. One rule serves both: <c>StoreConfigProvider.ResolveSchedule</c>
+    /// delegates to <see cref="CollectorScheduleDefaults.ResolveFrequencyMinutes"/>, so they cannot drift.
+    /// </summary>
+    [Theory]
+    [InlineData("database_size_stats", null, null, 60)]
+    [InlineData("database_size_stats", 1440, null, 1440)]
+    [InlineData("database_size_stats", null, 720, 720)]
+    [InlineData("database_size_stats", 1440, 720, 1440)]
+    [InlineData("database_size_stats", -5, 720, 720)]
+    [InlineData("memory_stats", 0, null, 0)]
+    [InlineData("file_io_stats", 1440, null, 1)]
+    [InlineData("file_io_stats", 30, null, 30)]
+    public void TheSchedulerAndTheAnalysis_ResolveOneCadence(string collector, int? perServer, int? fleet, int expected)
+    {
+        Assert.Equal(expected, CollectorScheduleDefaults.ResolveFrequencyMinutes(collector, perServer, fleet));
+
+        const int ServerId = 7;
+        var overrides = new List<ScheduleOverride>();
+        if (perServer is not null) overrides.Add(new ScheduleOverride(ServerId, collector, perServer, null, true));
+        if (fleet is not null) overrides.Add(new ScheduleOverride(null, collector, fleet, null, true));
+        Assert.Equal(expected, StoreConfigProvider.ResolveSchedule(collector, ServerId, overrides).FrequencyMinutes);
+    }
+
+    /// <summary>
+    /// The seam between a read and its bound: each latest-value command binds the lower bound of the collector
+    /// whose table its SQL reads. Bound by the wrong collector, a daily database_size_stats override would widen
+    /// the memory_stats read and leave the size reads at a day — both wrong, and invisible on default cadences.
+    /// </summary>
+    [Theory]
+    [InlineData("PgFactCollector.Storage.cs", nameof(PgFactCollector.DatabaseSizeSql))]
+    [InlineData("PgFactCollector.Storage.cs", nameof(PgFactCollector.FileAutogrowthSql))]
+    [InlineData("PgFactCollector.Storage.cs", nameof(PgFactCollector.DiskSpaceSql))]
+    [InlineData("PgFactCollector.Resources.cs", nameof(PgFactCollector.MemoryClerkSql))]
+    [InlineData("PgFactCollector.Resources.cs", nameof(PgFactCollector.PlanCacheStatsSql))]
+    [InlineData("PgFactCollector.Resources.cs", nameof(PgFactCollector.MemoryStatsSql))]
+    [InlineData("PgDrillDownCollector.Storage.cs", nameof(PgDrillDownCollector.AutogrowthPercentFilesSql))]
+    public void EachRead_BindsTheBoundOfTheCollectorWhoseTableItReads(string file, string name)
+    {
+        var table = Assert.Single(TablesRead(StripComments(SqlFor(name))), t => t != "latest" && t != "ranked");
+        var collector = Assert.Single(PgLatestValueBounds.Collectors, c => c.TargetTable == table);
+
+        var source = File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Analysis", file));
+        var construction = source.IndexOf($"new NpgsqlCommand({name}, connection)", StringComparison.Ordinal);
+        Assert.True(construction >= 0, $"{name}'s command construction was not found in {file}");
+        var bindings = source[construction..source.IndexOf("ExecuteReaderAsync", construction, StringComparison.Ordinal)];
+
+        Assert.Contains($"context.LatestValueStartFor({collector.GetType().Name}.Instance.Name)", bindings, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(bindings, @"LatestValueStartFor\("));
     }
 
     /// <summary>
@@ -158,7 +246,7 @@ public sealed class LatestValueLookbackSqlTests
                 Regex.IsMatch(sql, @"\bcollection_time\s*>=?\s*\$\d"),
                 $"A newest-per-series read of {string.Join(", ", cadenced)} carries no lower bound on collection_time, "
                 + "so it numbers the server's whole retained history and keeps series that stopped reporting (#3896). "
-                + $"Bind AnalysisContext.LatestValueStart:\n{sql}");
+                + $"Bind AnalysisContext.LatestValueStartFor:\n{sql}");
         }
 
         Assert.True(checkedCount >= 9, $"only {checkedCount} cadenced newest-per-series reads were checked");
@@ -267,8 +355,22 @@ public sealed class LatestValueLookbackLivePostgresTests
     private const int LiveServerId = -389_601;
     private const int StaleServerId = -389_602;
     private const int PlanShapeServerId = -389_603;
+    private const int DailyServerId = -389_605;
+    private const int DailyStaleServerId = -389_606;
+    private const int DefaultCadenceServerId = -389_607;
+    private const int OnLoadServerId = -389_608;
+    private const int FleetServerId = -389_609;
+    private const int FleetOverriddenServerId = -389_610;
+    private const int PlanShapeDailyServerId = -389_611;
 
-    private static readonly int[] s_serverIds = { LiveServerId, StaleServerId, PlanShapeServerId };
+    private static readonly int[] s_serverIds =
+    {
+        LiveServerId, StaleServerId, PlanShapeServerId, DailyServerId, DailyStaleServerId, DefaultCadenceServerId,
+        OnLoadServerId, FleetServerId, FleetOverriddenServerId, PlanShapeDailyServerId,
+    };
+
+    /// <summary>The collector the fleet-wide override test takes over for the whole store, and hands back.</summary>
+    private const string FleetOverrideCollector = "memory_clerks";
 
     private static readonly string[] s_tables =
     {
@@ -486,7 +588,7 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
 
             var context = Context(PlanShapeServerId, end);
             var shipped = await ExplainAsync(connection, PgFactCollector.DatabaseSizeSql,
-                [PlanShapeServerId, context.LatestValueStart, context.TimeRangeEnd], ct);
+                [PlanShapeServerId, context.LatestValueStartFor(FileIoStatsCollector.Instance.Name), context.TimeRangeEnd], ct);
             var oracle = await ExplainAsync(connection, UnboundedDatabaseSizeSql,
                 [PlanShapeServerId, context.TimeRangeEnd], ct);
 
@@ -512,6 +614,268 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
         }
     }
+
+    /// <summary>
+    /// The cadence-aware half: an operator schedules database_size_stats once a day. A flat day would lose its
+    /// facts on every pass between the day and the next run; twice the interval keeps them — a sample 25 hours
+    /// old still counts, one 49 hours old does not — while a server left at the hourly default loses the same
+    /// 25-hour-old sample exactly as before. The drill-down, handed the fact collector's context, lists the same
+    /// file the count counted.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorSlowedToDaily_KeepsItsFactForTwoIntervals_ThenLosesIt_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value cadence test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertOverrideAsync(connection, DailyServerId, "database_size_stats", 1440, ct);
+            await InsertOverrideAsync(connection, DailyStaleServerId, "database_size_stats", 1440, ct);
+
+            foreach (var (serverId, age) in new[]
+                     {
+                         (DailyServerId, TimeSpan.FromHours(25)),
+                         (DailyStaleServerId, TimeSpan.FromHours(49)),
+                         (DefaultCadenceServerId, TimeSpan.FromHours(25)),
+                     })
+            {
+                await InsertSizeAsync(connection, serverId, end - age, "LiveDb", 1, "ROWS", "LiveDb_data", 20_480, percentGrowth: true, "D:\\", 1_000_000, 150_000, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var collector = new PgFactCollector(postgres);
+
+            var dailyContext = Context(DailyServerId, end);
+            var daily = (await collector.CollectFactsAsync(dailyContext)).ToDictionary(f => f.Key);
+            Assert.Equal(end.AddHours(-48), dailyContext.LatestValueStartFor("database_size_stats"));
+            Assert.Equal(end.AddHours(-24), dailyContext.LatestValueStartFor("memory_stats"));
+            Assert.Equal(1, daily["FILE_AUTOGROWTH_PERCENT"].Value);
+            Assert.Equal(0.15, daily["DISK_SPACE"].Value, precision: 6);
+            var file = Assert.Single(await AutogrowthFilesAsync(postgres, dailyContext));
+            Assert.Equal("LiveDb_data", file.GetProperty("logical_file_name").GetString());
+
+            var stale = (await collector.CollectFactsAsync(Context(DailyStaleServerId, end))).ToDictionary(f => f.Key);
+            Assert.False(stale.ContainsKey("FILE_AUTOGROWTH_PERCENT"), "a daily collector's sample two intervals and an hour old was counted");
+            Assert.False(stale.ContainsKey("DISK_SPACE"));
+            Assert.Empty(await AutogrowthFilesAsync(postgres, Context(DailyStaleServerId, end)));
+
+            var defaults = (await collector.CollectFactsAsync(Context(DefaultCadenceServerId, end))).ToDictionary(f => f.Key);
+            Assert.False(defaults.ContainsKey("FILE_AUTOGROWTH_PERCENT"), "the hourly default no longer takes the flat day");
+            Assert.False(defaults.ContainsKey("DISK_SPACE"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>
+    /// A collector an operator moved to on-load only (frequency 0) writes one capture per connect, so its newest
+    /// capture can be days old on a healthy server. Its reads anchor on that capture — the files present at the
+    /// last connect, the dropped database's file from the capture before excluded — rather than on a lookback
+    /// that would lose the fact a day after every connect; a capture after the window's end stays out.
+    /// </summary>
+    [Fact]
+    public async Task AnOnLoadOnlyCollector_AnchorsOnItsNewestCapture_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value on-load test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertOverrideAsync(connection, OnLoadServerId, "file_io_stats", 0, ct);
+            await InsertOverrideAsync(connection, OnLoadServerId, "memory_stats", 0, ct);
+
+            var older = end.AddDays(-5);
+            var newest = end.AddDays(-3);
+            await InsertFileIoAsync(connection, OnLoadServerId, older, "LiveDb", "LiveDb_data", 1000, ct);
+            await InsertFileIoAsync(connection, OnLoadServerId, older, "GhostDb", "GhostDb_data", 50_000, ct);
+            await InsertFileIoAsync(connection, OnLoadServerId, newest, "LiveDb", "LiveDb_data", 1100, ct);
+            await InsertFileIoAsync(connection, OnLoadServerId, newest, "LiveDb", "LiveDb_log", 200, ct);
+            await InsertFileIoAsync(connection, OnLoadServerId, end.AddHours(1), "LiveDb", "LiveDb_data", 7777, ct);
+            await InsertMemoryStatsAsync(connection, OnLoadServerId, newest, 32_768, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var context = Context(OnLoadServerId, end);
+            var facts = (await new PgFactCollector(postgres).CollectFactsAsync(context)).ToDictionary(f => f.Key);
+
+            Assert.Equal(newest, context.LatestValueStartFor("file_io_stats"));
+            Assert.Equal(1300.0, facts["DATABASE_TOTAL_SIZE_MB"].Value, precision: 6);
+            Assert.Equal(32_768, facts["MEMORY_TOTAL_PHYSICAL_MB"].Value, precision: 6);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>
+    /// The override read takes both levels the scheduler layers: a fleet-wide row reaches every server, and a
+    /// server's own row wins over it — the rule <c>StoreConfigProvider.ResolveSchedule</c> runs the collectors by.
+    /// </summary>
+    [Fact]
+    public async Task AFleetWideOverride_WidensEveryServer_AndAServersOwnRowWins_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value fleet-override test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertOverrideAsync(connection, null, FleetOverrideCollector, 1440, ct);
+            await InsertOverrideAsync(connection, FleetOverriddenServerId, FleetOverrideCollector, 60, ct);
+            await InsertClerkAsync(connection, FleetServerId, end.AddHours(-30), "MEMORYCLERK_SQLBUFFERPOOL", 800, ct);
+            await InsertClerkAsync(connection, FleetOverriddenServerId, end.AddHours(-30), "MEMORYCLERK_SQLBUFFERPOOL", 800, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var collector = new PgFactCollector(postgres);
+
+            var fleet = (await collector.CollectFactsAsync(Context(FleetServerId, end))).ToDictionary(f => f.Key);
+            Assert.Equal(800, fleet["MEMORY_CLERKS"].Value, precision: 6);
+
+            var own = (await collector.CollectFactsAsync(Context(FleetOverriddenServerId, end))).ToDictionary(f => f.Key);
+            Assert.False(own.ContainsKey("MEMORY_CLERKS"), "the fleet-wide row outranked the server's own");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>
+    /// The plan shape at a non-default lookback: database_size_stats scheduled daily, seeded hourly over ten days,
+    /// and the shipped read EXPLAINed with the bound the pass stamped — twice the interval, still a plain bound
+    /// parameter, so TimescaleDB still excludes every chunk outside it at plan time. Two days span at most three
+    /// one-day chunks; the pre-#3896 read, which had no time bound at all, plans every one.
+    /// </summary>
+    [Fact]
+    public async Task ADailyCollectorsRead_StillPlansOnlyTheChunksItsLookbackSpans_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value plan-shape test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(connectionString!, ct);
+        if (timescaleEnabled)
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertOverrideAsync(connection, PlanShapeDailyServerId, "database_size_stats", 1440, ct);
+            using (var seed = new NpgsqlCommand(@"
+INSERT INTO database_size_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_id, file_type_desc, file_name,
+     total_size_mb, is_percent_growth, growth_pct, volume_mount_point, volume_total_mb, volume_free_mb)
+SELECT 9_389_611_000 + (EXTRACT(EPOCH FROM t)::bigint % 1_000_000) * 10 + f, t, $1, 'latest-value-plan-shape',
+       'Db' || f, f, 'ROWS', 'Db' || f || '_data', 20480, true, 10, 'D:\', 1000000, 150000
+FROM generate_series($2::timestamp - interval '10 days', $2::timestamp, interval '1 hour') AS t
+CROSS JOIN generate_series(1, 3) AS f", connection))
+            {
+                seed.Parameters.AddWithValue(PlanShapeDailyServerId);
+                seed.Parameters.AddWithValue(end);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            using (var analyze = new NpgsqlCommand("ANALYZE collect.database_size_stats", connection))
+            {
+                await analyze.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var context = Context(PlanShapeDailyServerId, end);
+            await PgLatestValueBounds.EnsureAsync(postgres, context, null);
+            var start = context.LatestValueStartFor("database_size_stats");
+            Assert.Equal(end.AddHours(-48), start);
+
+            var shipped = await ExplainAsync(connection, PgFactCollector.FileAutogrowthSql,
+                [PlanShapeDailyServerId, start, context.TimeRangeEnd], ct);
+            var oracle = await ExplainAsync(connection, UnboundedFileAutogrowthSql, [PlanShapeDailyServerId], ct);
+
+            if (timescaleEnabled)
+            {
+                var shippedChunks = ChunkScans(shipped);
+                var oracleChunks = ChunkScans(oracle);
+                Assert.True(oracleChunks >= 11,
+                    $"the pre-#3896 read should plan every seeded chunk (eleven days of data), planned {oracleChunks}:\n{oracle}");
+                Assert.True(shippedChunks is >= 1 and <= 3,
+                    $"the shipped read planned {shippedChunks} chunks; a 48-hour lookback touches at most three:\n{shipped}");
+            }
+
+            var facts = await new PgFactCollector(postgres).CollectFactsAsync(context);
+            Assert.Equal(3, Assert.Single(facts, f => f.Key == "FILE_AUTOGROWTH_PERCENT").Value);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>The autogrowth read as shipped before #3896 — no time bound at all. An oracle, never run by the
+    /// product.</summary>
+    private const string UnboundedFileAutogrowthSql = @"
+WITH latest AS (
+    SELECT database_name, file_id, total_size_mb, is_percent_growth,
+           ROW_NUMBER() OVER (PARTITION BY database_name, file_id ORDER BY collection_time DESC) AS rn
+    FROM database_size_stats
+    WHERE server_id = $1
+)
+SELECT
+    COUNT(*) AS file_count,
+    COUNT(DISTINCT database_name) AS database_count
+FROM latest
+WHERE rn = 1
+AND   is_percent_growth = true
+AND   total_size_mb >= 10240
+AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 
     /// <summary>The read as shipped before #3896 — capped at the window's end, bounded nowhere else. The oracle
     /// the plan-shape test compares against, never a read the product runs.</summary>
@@ -583,8 +947,8 @@ WHERE rn = 1";
 
         await new PgDrillDownCollector(postgres).EnrichFindingsAsync([finding], context);
 
-        Assert.NotNull(finding.DrillDown);
-        if (!finding.DrillDown.TryGetValue("autogrowth_percent_files", out var raw))
+        /* An enrichment that found nothing leaves DrillDown null, which is the empty list here. */
+        if (finding.DrillDown is null || !finding.DrillDown.TryGetValue("autogrowth_percent_files", out var raw))
         {
             return [];
         }
@@ -716,9 +1080,32 @@ VALUES ($1, $2, $3, 'latest-value-lookback-e2e', $4, 'FULL', $5, false, $6, true
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>A sparse schedule override row — <paramref name="serverId"/> null is the fleet-wide one.</summary>
+    private static async Task InsertOverrideAsync(NpgsqlConnection connection, int? serverId, string collector,
+        int frequencyMinutes, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes)
+VALUES ($1, $2, $3)", connection);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)serverId ?? DBNull.Value });
+        command.Parameters.AddWithValue(collector);
+        command.Parameters.AddWithValue(frequencyMinutes);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteSentinelsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var ids = string.Join(", ", s_serverIds.Select(id => id.ToString(CultureInfo.InvariantCulture)));
+
+        /* The sentinels' own schedule rows, and the one fleet-wide row the fleet test takes over: darlingtest
+           belongs to the suite, and a fleet row left behind would widen that collector for every server. */
+        using (var schedules = new NpgsqlCommand(
+            $"DELETE FROM config_collector_schedules WHERE server_id IN ({ids}) OR (server_id IS NULL AND collector_name = '{FleetOverrideCollector}')",
+            connection))
+        {
+            await schedules.ExecuteNonQueryAsync(ct);
+        }
+
         foreach (var table in s_tables)
         {
             using var cleanup = new NpgsqlCommand($"DELETE FROM {table} WHERE server_id IN ({ids})", connection);

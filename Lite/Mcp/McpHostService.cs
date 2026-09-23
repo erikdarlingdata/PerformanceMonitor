@@ -24,6 +24,7 @@ public sealed class McpHostService : BackgroundService
     private readonly ServerManager _serverManager;
     private readonly MuteRuleService _muteRuleService;
     private readonly DuckDbInitializer _duckDb;
+    private readonly ScheduleManager? _scheduleManager;
     private readonly int _port;
     private WebApplication? _app;
 
@@ -34,13 +35,16 @@ public sealed class McpHostService : BackgroundService
     /// </summary>
     public int Port => _port;
 
-    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port)
+    /// <param name="scheduleManager">#3896: the collector schedules, so the analysis tools bound each
+    /// latest-value read by the cadence its collector runs at. Null bounds by the shipped defaults.</param>
+    public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, ScheduleManager? scheduleManager = null)
     {
         _dataService = dataService;
         _serverManager = serverManager;
         _muteRuleService = muteRuleService;
         _duckDb = duckDb;
         _port = port;
+        _scheduleManager = scheduleManager;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -63,7 +67,13 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
             var planFetcher = new SqlPlanFetcher(_serverManager);
-            builder.Services.AddSingleton(new AnalysisService(_duckDb, planFetcher));
+            var schedules = _scheduleManager;
+            builder.Services.AddSingleton(new AnalysisService(
+                _duckDb,
+                planFetcher,
+                collectorFrequencyMinutes: schedules is null
+                    ? null
+                    : (serverId, collector) => schedules.GetFrequencyForStorageServer(_serverManager, serverId, collector)));
 
             /* Register MCP server with all tool classes */
             builder.Services

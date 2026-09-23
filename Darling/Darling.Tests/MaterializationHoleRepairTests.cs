@@ -106,23 +106,26 @@ public sealed class MaterializationHoleRepairTests
         Assert.Throws<ArgumentNullException>(() => TimescaleSupport.MaterializationHoleSourceFilterFor(null!));
 
         /* And the scan SQL carries it on the SOURCE probe only, with both probes present and the width bound
-           once as $3. */
+           once as $3. The candidate buckets are the fenced subquery c (#3933, MaterializationHoleScanShapeSqlTests
+           pins the fences), so the source probe reads c.bucket. */
         var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsIntervalHourlyView);
-        var sql = TimescaleSupport.MaterializationHoleScanSql(target, ("_timescaledb_internal", "_materialized_hypertable_42"));
+        var sql = TimescaleSupport.MaterializationHoleScanSql(target, ("_timescaledb_internal", "_materialized_hypertable_42"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("generate_series($1::timestamp, $2::timestamp, $3::interval)", sql, StringComparison.Ordinal);
-        Assert.Contains("NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket = b.bucket)", sql, StringComparison.Ordinal);
+        Assert.Contains("NOT EXISTS (SELECT 1 FROM \"_timescaledb_internal\".\"_materialized_hypertable_42\" AS m WHERE m.bucket = b.bucket OFFSET 0)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_stats AS s", sql, StringComparison.Ordinal);
-        Assert.Contains("s.collection_time >= b.bucket", sql, StringComparison.Ordinal);
-        Assert.Contains("s.collection_time < b.bucket + $3::interval", sql, StringComparison.Ordinal);
-        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0)", sql, StringComparison.Ordinal);
-        Assert.EndsWith("ORDER BY b.bucket", sql.TrimEnd(), StringComparison.Ordinal);
+        Assert.Contains("s.collection_time >= c.bucket", sql, StringComparison.Ordinal);
+        Assert.Contains("s.collection_time < c.bucket + $3::interval", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0\n    OFFSET 0)", sql, StringComparison.Ordinal);
+        Assert.EndsWith("ORDER BY c.bucket", sql.TrimEnd(), StringComparison.Ordinal);
 
         var unfiltered = TimescaleSupport.MaterializationHoleScanSql(
-            TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsDailyView), ("s", "m"));
+            TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsDailyView), ("s", "m"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("FROM collect.query_stats_hourly AS s", unfiltered, StringComparison.Ordinal);
-        Assert.Contains("s.bucket >= b.bucket", unfiltered, StringComparison.Ordinal);
-        /* No filter: the source probe closes straight after the width bound. */
-        Assert.Contains("s.bucket < b.bucket + $3::interval)", unfiltered, StringComparison.Ordinal);
+        Assert.Contains("s.bucket >= c.bucket", unfiltered, StringComparison.Ordinal);
+        /* No filter: the source probe's fence follows straight after the width bound. */
+        Assert.Contains("s.bucket < c.bucket + $3::interval\n    OFFSET 0)", unfiltered, StringComparison.Ordinal);
     }
 
     [Fact]

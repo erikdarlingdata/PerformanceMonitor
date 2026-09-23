@@ -17,6 +17,8 @@ using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -116,12 +118,136 @@ public sealed class LatestValueLookbackTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal("GhostDb", file.GetProperty("database").GetString());
     }
 
+    /// <summary>
+    /// The cadence-aware half, through the resolver production wires (<see cref="ScheduleManager.GetFrequencyForStorageServer"/>
+    /// over a real <see cref="ServerManager"/>, so the storage-hash to connection-GUID match is under test too).
+    /// A server whose database_size_stats an operator scheduled daily keeps its facts for two intervals — a
+    /// sample 25 hours old still counts, one 49 hours old does not — while a server left at the hourly default
+    /// loses the 25-hour-old sample exactly as before.
+    /// </summary>
+    [Fact]
+    public async Task ACollectorSlowedToDaily_KeepsItsFactForTwoIntervals_ThenLosesIt()
+    {
+        using var schedules = new ScheduleFixture();
+        var daily = schedules.AddServer("DailyServer", ("database_size_stats", 1440));
+        var dailyStale = schedules.AddServer("DailyStaleServer", ("database_size_stats", 1440));
+        var defaults = schedules.AddServer("DefaultCadenceServer");
+
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        await SeedAsync(async connection =>
+        {
+            await LatestValueSeed.SeedSizeAsync(connection, daily, end.AddHours(-25));
+            await LatestValueSeed.SeedSizeAsync(connection, dailyStale, end.AddHours(-49));
+            await LatestValueSeed.SeedSizeAsync(connection, defaults, end.AddHours(-25));
+        });
+
+        var collector = new DuckDbFactCollector(_duckDb, schedules.Resolver);
+
+        var dailyContext = LatestValueSeed.Context(daily, end);
+        var dailyFacts = (await collector.CollectFactsAsync(dailyContext)).ToDictionary(f => f.Key);
+        Assert.Equal(end.AddHours(-48), dailyContext.LatestValueStartFor("database_size_stats"));
+        Assert.Equal(end.AddHours(-24), dailyContext.LatestValueStartFor("memory_stats"));
+        Assert.Equal(1, dailyFacts["FILE_AUTOGROWTH_PERCENT"].Value);
+        Assert.Equal(0.15, dailyFacts["DISK_SPACE"].Value, precision: 6);
+        var file = Assert.Single(await LatestValueSeed.AutogrowthFilesAsync(new DrillDownCollector(_duckDb, null, schedules.Resolver), dailyContext));
+        Assert.Equal("LiveDb_data", file.GetProperty("logical_file_name").GetString());
+
+        var staleFacts = (await collector.CollectFactsAsync(LatestValueSeed.Context(dailyStale, end))).ToDictionary(f => f.Key);
+        Assert.False(staleFacts.ContainsKey("FILE_AUTOGROWTH_PERCENT"), "a daily collector's sample two intervals and an hour old was counted");
+        Assert.False(staleFacts.ContainsKey("DISK_SPACE"));
+
+        var defaultFacts = (await collector.CollectFactsAsync(LatestValueSeed.Context(defaults, end))).ToDictionary(f => f.Key);
+        Assert.False(defaultFacts.ContainsKey("FILE_AUTOGROWTH_PERCENT"), "the hourly default no longer takes the flat day");
+        Assert.False(defaultFacts.ContainsKey("DISK_SPACE"));
+    }
+
+    /// <summary>
+    /// A collector moved to on-load only (frequency 0) anchors on its newest capture at or before the window's
+    /// end, however old: the files present at the last connect, not a ghost from the capture before, and not
+    /// "no fact" a day after every connect.
+    /// </summary>
+    [Fact]
+    public async Task AnOnLoadOnlyCollector_AnchorsOnItsNewestCapture()
+    {
+        using var schedules = new ScheduleFixture();
+        var onLoad = schedules.AddServer("OnLoadServer", ("file_io_stats", 0), ("memory_stats", 0));
+
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        var older = end.AddDays(-5);
+        var newest = end.AddDays(-3);
+        await SeedAsync(async connection =>
+        {
+            await LatestValueSeed.InsertFileIoAsync(connection, onLoad, older, "LiveDb", "LiveDb_data", 1000);
+            await LatestValueSeed.InsertFileIoAsync(connection, onLoad, older, "GhostDb", "GhostDb_data", 50_000);
+            await LatestValueSeed.InsertFileIoAsync(connection, onLoad, newest, "LiveDb", "LiveDb_data", 1100);
+            await LatestValueSeed.InsertFileIoAsync(connection, onLoad, newest, "LiveDb", "LiveDb_log", 200);
+            await LatestValueSeed.InsertFileIoAsync(connection, onLoad, end.AddHours(1), "LiveDb", "LiveDb_data", 7777);
+            await LatestValueSeed.InsertMemoryStatsAsync(connection, onLoad, newest, 32_768);
+        });
+
+        var context = LatestValueSeed.Context(onLoad, end);
+        var facts = (await new DuckDbFactCollector(_duckDb, schedules.Resolver).CollectFactsAsync(context)).ToDictionary(f => f.Key);
+
+        Assert.Equal(newest, context.LatestValueStartFor("file_io_stats"));
+        Assert.Equal(1300.0, facts["DATABASE_TOTAL_SIZE_MB"].Value, precision: 6);
+        Assert.Equal(32_768, facts["MEMORY_TOTAL_PHYSICAL_MB"].Value, precision: 6);
+    }
+
     private async Task SeedAsync(Func<DuckDBConnection, Task> seed)
     {
         using var readLock = _duckDb.AcquireReadLock();
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         await seed(connection);
+    }
+
+    /// <summary>
+    /// A throwaway config directory holding a real <see cref="ServerManager"/> and <see cref="ScheduleManager"/>,
+    /// and the resolver production builds over them. Windows-auth servers, so nothing touches the credential store.
+    /// </summary>
+    private sealed class ScheduleFixture : IDisposable
+    {
+        private readonly string _configDir;
+        private readonly ServerManager _servers;
+        private readonly ScheduleManager _schedules;
+
+        public ScheduleFixture()
+        {
+            _configDir = Path.Combine(Path.GetTempPath(), "LatestValueCadence_" + Guid.NewGuid().ToString("N")[..8]);
+            Directory.CreateDirectory(_configDir);
+            _servers = new ServerManager(_configDir);
+            _schedules = new ScheduleManager(_configDir);
+            Resolver = (serverId, collector) => _schedules.GetFrequencyForStorageServer(_servers, serverId, collector);
+        }
+
+        public Func<int, string, int?> Resolver { get; }
+
+        /// <summary>Adds a server, with a per-server schedule when any cadence is overridden, and returns the
+        /// storage id the analysis keys it by.</summary>
+        public int AddServer(string name, params (string Collector, int FrequencyMinutes)[] overrides)
+        {
+            var server = new ServerConnection { ServerName = name, DisplayName = name };
+            _servers.AddServer(server);
+
+            if (overrides.Length > 0)
+            {
+                var schedule = ScheduleManager.GetDefaultSchedules();
+                foreach (var (collector, frequency) in overrides)
+                {
+                    schedule.First(s => s.Name == collector).FrequencyMinutes = frequency;
+                }
+
+                _schedules.SetScheduleForServer(server.Id, schedule);
+            }
+
+            return RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+        }
+
+        public void Dispose()
+        {
+            try { if (Directory.Exists(_configDir)) Directory.Delete(_configDir, recursive: true); }
+            catch { /* best-effort cleanup */ }
+        }
     }
 }
 
@@ -259,6 +385,10 @@ internal static class LatestValueSeed
         await InsertDatabaseConfigAsync(connection, serverId, end.AddDays(-5), "master", autoShrink: false, rcsiOn: false);
     }
 
+    /// <summary>One large percent-growth file on a 15%-free volume, sampled at <paramref name="at"/>.</summary>
+    public static Task SeedSizeAsync(DuckDBConnection connection, int serverId, DateTime at) =>
+        InsertSizeAsync(connection, serverId, at, "LiveDb", 1, "ROWS", "LiveDb_data", 20_480, true, "D:\\", 1_000_000, 150_000);
+
     /// <summary>Every cadenced series last sampled 25 hours before the window's end, and an on-load capture from
     /// five days before it.</summary>
     public static async Task SeedStaleAsync(DuckDBConnection connection, int serverId, DateTime end)
@@ -285,8 +415,8 @@ internal static class LatestValueSeed
 
         await collector.EnrichFindingsAsync([finding], context);
 
-        Assert.NotNull(finding.DrillDown);
-        if (!finding.DrillDown.TryGetValue("autogrowth_percent_files", out var raw))
+        /* An enrichment that found nothing leaves DrillDown null, which is the empty list here. */
+        if (finding.DrillDown is null || !finding.DrillDown.TryGetValue("autogrowth_percent_files", out var raw))
         {
             return [];
         }
@@ -316,7 +446,7 @@ internal static class LatestValueSeed
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
-    private static Task InsertFileIoAsync(DuckDBConnection connection, int serverId, DateTime at,
+    public static Task InsertFileIoAsync(DuckDBConnection connection, int serverId, DateTime at,
         string database, string file, decimal sizeMb) =>
         InsertAsync(connection, @"
 INSERT INTO file_io_stats
@@ -349,7 +479,7 @@ INSERT INTO plan_cache_stats
 VALUES ($1, $2, $3, 'latest-value-lookback', 'Compiled Plan', 'Adhoc', $4, $5, 400, 300)",
             Interlocked.Decrement(ref s_nextId), at, serverId, totalPlans, singleUse);
 
-    private static Task InsertMemoryStatsAsync(DuckDBConnection connection, int serverId, DateTime at, decimal physicalMb) =>
+    public static Task InsertMemoryStatsAsync(DuckDBConnection connection, int serverId, DateTime at, decimal physicalMb) =>
         InsertAsync(connection, @"
 INSERT INTO memory_stats
     (collection_id, collection_time, server_id, server_name,

@@ -31,6 +31,10 @@ public class CollectionBackgroundService : BackgroundService
     private readonly RemoteCollectorService _collectorService;
     private readonly DuckDbInitializer? _duckDb;
     private readonly ServerManager? _serverManager;
+
+    /// <summary>#3896: the collector schedules, so a scheduled pass bounds each latest-value read by the
+    /// cadence its collector runs at. Null bounds by the shipped defaults.</summary>
+    private readonly ScheduleManager? _scheduleManager;
     private readonly ArchiveService? _archiveService;
     private readonly RetentionService? _retentionService;
     private readonly AnalysisNotificationService? _notificationService;
@@ -144,11 +148,13 @@ public class CollectionBackgroundService : BackgroundService
         RetentionService? retentionService = null,
         ServerManager? serverManager = null,
         AnalysisNotificationService? notificationService = null,
-        ILogger<CollectionBackgroundService>? logger = null)
+        ILogger<CollectionBackgroundService>? logger = null,
+        ScheduleManager? scheduleManager = null)
     {
         _collectorService = collectorService;
         _duckDb = duckDb;
         _serverManager = serverManager;
+        _scheduleManager = scheduleManager;
         _archiveService = archiveService;
         _retentionService = retentionService;
         _notificationService = notificationService;
@@ -646,7 +652,17 @@ public class CollectionBackgroundService : BackgroundService
                 /* Fresh AnalysisService per server: IsAnalyzing is a single instance
                    flag, so a shared instance whose task is abandoned on timeout would
                    block analysis for every other server. */
-                var analysisService = new AnalysisService(_duckDb, planFetcher);
+                /* #3896: this server's collector cadences, so a collector an operator slowed past twice a
+                   day keeps its latest-value facts between runs instead of flapping them pass to pass —
+                   which would resolve, then re-fire, the findings and notifications built on them. */
+                var schedules = _scheduleManager;
+                var servers = _serverManager;
+                var analysisService = new AnalysisService(
+                    _duckDb,
+                    planFetcher,
+                    collectorFrequencyMinutes: schedules is null
+                        ? null
+                        : (id, collector) => schedules.GetFrequencyForStorageServer(servers, id, collector));
 
                 /* #2412: the TOKEN is the timeout now; the Task.Delay below is only this loop's
                    patience. Two things had to change for the budget to mean anything.
