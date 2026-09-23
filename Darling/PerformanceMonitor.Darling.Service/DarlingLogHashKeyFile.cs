@@ -179,6 +179,16 @@ public static class DarlingLogHashKeyFile
                     return Refuse(path, untrusted);
                 }
 
+                /* #4028: the shared check above only refuses a key Users, Authenticated Users or Everyone can read,
+                   since the credential files it also judges were built against that denylist. The key is read by
+                   the service alone, so on Windows it is held to an allowlist: a reader beyond SYSTEM,
+                   Administrators and the service account (INTERACTIVE, Domain Users, one named user) has the key,
+                   and with it the literals the keyed hashes hide. */
+                if (OperatingSystem.IsWindows() && DarlingFileSecurity.ReadersBeyondTrusted(path) is { } readers)
+                {
+                    return Refuse(path, $"accounts beyond SYSTEM, Administrators and the service account can read it: {readers}");
+                }
+
                 return Read(path, logger);
             }
 
@@ -274,13 +284,15 @@ public static class DarlingLogHashKeyFile
                     DarlingManagedRoles.FlushToDisk(writer, stream);
                 }
 
-                if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                /* The same allowlist a key is loaded under (#4028), so a key is never written that its next start
+                   would refuse. */
+                if (DarlingFileSecurity.ReadersBeyondTrusted(temporary) is not null)
                 {
                     DarlingFileSecurity.HardenFile(temporary, allowInteractiveRead: false);
-                    if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                    if (DarlingFileSecurity.ReadersBeyondTrusted(temporary) is { } readers)
                     {
                         throw new InvalidOperationException(
-                            "ordinary local users could read it even after it was created owner-only and hardened again"
+                            $"accounts beyond SYSTEM, Administrators and the service account could read it even after it was created owner-only and hardened again: {readers}"
                             + DarlingFileSecurity.DescribeOwnerAndExposure(temporary));
                     }
                 }

@@ -274,6 +274,43 @@ public sealed class PgLogHashKeyTests
         }
     }
 
+    /// <summary>
+    /// #4028: on Windows the key is held to an allowlist. The credential check it shares refuses only a key Users,
+    /// Authenticated Users or Everyone can read, so INTERACTIVE, Domain Users or one named user holding ReadData
+    /// passed it, and whoever can read the key can test guesses at every literal the keyed hashes hide.
+    /// </summary>
+    [Fact]
+    public void AKeyAnyoneBeyondTheServiceCanRead_IsRefused_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the allowlist is the Windows DACL check");
+        var directory = NewDirectory();
+        try
+        {
+            var path = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance).Path;
+            Assert.Null(DarlingFileSecurity.ReadersBeyondTrusted(path));
+
+            var file = new FileInfo(path);
+            var security = file.GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.InteractiveSid, null), FileSystemRights.Read, AccessControlType.Allow));
+            file.SetAccessControl(security);
+            var before = File.ReadAllBytes(path);
+
+            var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+            Assert.Null(load.Key);
+            Assert.False(load.Generated);
+            Assert.Contains("INTERACTIVE", load.Refusal, StringComparison.Ordinal);
+            Assert.Equal(before, File.ReadAllBytes(path));
+            /* The shared check alone would have loaded it: INTERACTIVE is not one of its three groups. */
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(path));
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
     [Fact]
     public void AKeyOthersCanRead_IsRefused_AndNeverReplaced()
     {

@@ -448,6 +448,55 @@ public static class DarlingFileSecurity
     }
 
     /// <summary>
+    /// The accounts beyond SYSTEM, Administrators and the service account that can read <paramref name="path"/>'s
+    /// bytes, as one line for a refusal, or null when there are none (#4028). An ALLOWLIST, where
+    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the three broad groups, which INTERACTIVE, Domain
+    /// Users or one named user holding <see cref="FileSystemRights.ReadData"/> all pass. For the log-hash key, which
+    /// nothing but the service reads; the credential files keep the denylist their existing DACLs were built
+    /// against, so this cannot newly refuse an install's credentials. Unlike the denylist, a DACL that cannot be
+    /// read is reported, not passed: this is the check a key is trusted on.
+    /// </summary>
+    public static string? ReadersBeyondTrusted(string path)
+    {
+        try
+        {
+            var readers = new List<string>();
+            var rules = new FileInfo(path).GetAccessControl().GetAccessRules(true, true, typeof(SecurityIdentifier));
+            foreach (FileSystemAccessRule rule in rules)
+            {
+                if (rule.AccessControlType != AccessControlType.Allow
+                    || (rule.FileSystemRights & FileSystemRights.ReadData) != FileSystemRights.ReadData
+                    || rule.IdentityReference is not SecurityIdentifier sid
+                    || sid.Equals(LocalSystem) || sid.Equals(Administrators) || sid.Equals(ServiceAccount))
+                {
+                    continue;
+                }
+
+                string name;
+                try
+                {
+                    name = sid.Translate(typeof(NTAccount)).Value;
+                }
+                catch (IdentityNotMappedException)
+                {
+                    name = sid.Value;
+                }
+
+                if (!readers.Contains(name))
+                {
+                    readers.Add(name);
+                }
+            }
+
+            return readers.Count == 0 ? null : string.Join(", ", readers);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    /// <summary>
     /// Can an ordinary local user READ this file's bytes? True when the effective DACL carries an Allow ACE
     /// granting <see cref="FileSystemRights.ReadData"/> to <c>Users</c>, <c>Authenticated Users</c>, or
     /// <c>Everyone</c> — explicit or inherited. The verification half of <see cref="HardenFile"/>: for
