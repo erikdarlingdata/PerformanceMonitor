@@ -947,11 +947,16 @@ public sealed class McpPageContractTests
             /* And the payload publishes what was observed, under the one key. */
             Assert.Matches(new Regex(@"\n\s+truncated,"), observing);
 
-            /* The parameter says what it bounds and names the flag, in the #3679 wording. */
+            /* The parameter says what it bounds and names the flag, in the #3679 wording — or, for a tool
+               #3898 converted (marker present), the parameter carries only the guardrail sentence and a
+               pointer, and the #3679 wording moved verbatim into the tool's own reading guide (D2). Re-pointed
+               deliberately for get_pg_deadlocks and get_pg_index_bloat, both converted in the pgA lane. */
             var limit = ToolMethod(type, name).GetParameters().Single(p => p.Name == "limit");
             var description = limit.GetCustomAttribute<DescriptionAttribute>()!.Description;
-            Assert.Contains("This is what bounds the page", description, StringComparison.Ordinal);
-            Assert.Contains("truncated", description, StringComparison.Ordinal);
+            var toolDescription = ToolMethod(type, name).GetCustomAttribute<DescriptionAttribute>()!.Description;
+            var pageContractText = McpToolGuide.Split(toolDescription).Tail ?? description;
+            Assert.Contains("This is what bounds the page", pageContractText, StringComparison.Ordinal);
+            Assert.Contains("truncated", pageContractText, StringComparison.Ordinal);
         }
     }
 
