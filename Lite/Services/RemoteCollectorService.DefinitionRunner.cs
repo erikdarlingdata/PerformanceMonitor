@@ -36,7 +36,12 @@ public partial class RemoteCollectorService
         CancellationToken cancellationToken)
     {
         var serverId = GetServerId(server);
-        var collectionTime = DateTime.UtcNow;
+        /* #3936: nudged forward (by, in practice, a handful of ticks) rather than a bare DateTime.UtcNow
+           when it would collide with this SAME (server, collector) pair's last stamp — see
+           CollectionTimeClock's own remarks for the run-overlap and clock-resolution cases that used to
+           store two different snapshots under one collection_time, making "the newest reading" ambiguous
+           for every reader downstream. Darling's twin is DarlingCollectorRunner.RunAsync. */
+        var collectionTime = CollectionTimeClock.NextStrictlyAfter(serverId, definition.Name, DateTime.UtcNow);
 
         /* This server's slot, not a shared field: servers collect in parallel (see RunTelemetry). */
         var telemetry = TelemetryFor(serverId);

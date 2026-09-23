@@ -95,7 +95,7 @@ public sealed class DarlingFleetReaderSqlTests
     [Theory]
     [InlineData(nameof(DarlingFleetReader.FleetCpuSql), "FROM v_cpu_utilization_stats", "ORDER BY collection_time DESC, sample_time DESC")]
     [InlineData(nameof(DarlingFleetReader.FleetMemorySql), "FROM v_memory_stats", "ORDER BY collection_time DESC")]
-    [InlineData(nameof(DarlingFleetReader.FleetThreadsSql), "FROM v_cpu_scheduler_stats", "ORDER BY collection_time DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetThreadsSql), "FROM v_cpu_scheduler_stats", "ORDER BY collection_time DESC, collection_id DESC")]
     [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql), "FROM v_memory_grant_stats", "ORDER BY collection_time DESC")]
     public void LatestSnapshotReads_AreOnePerServerProbeFromTheRegistry(string constName, string source, string ordering)
     {
