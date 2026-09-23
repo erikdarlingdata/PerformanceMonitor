@@ -851,6 +851,25 @@ public sealed class DarlingWorker : BackgroundService
 
     private bool _storeLogRemaskDone;
 
+    /* #4012: the re-mask of PostgreSQL deadlock alerts, then deadlock reports, stored before #4005 with their SQL
+       raw. The alerts go first because they are found through the reports' raw hashes, which the report pass
+       replaces. Each has a cursor and is done once a slice reaches its table's end; a scan that left rows raw
+       (a row that changed under its write, a report whose rewrite failed) reads its table through again, at
+       most PgDeadlockRemask.MaxRescansPerProcess times, and the next process's pass is a no-op re-read. */
+    private string? _pgDeadlockAlertRemaskCursor;
+
+    private bool _pgDeadlockAlertRemaskLeftRows;
+
+    private bool _pgDeadlockAlertRemaskDone;
+
+    private PgDeadlockRemask.ReportCursor? _pgDeadlockRemaskCursor;
+
+    private bool _pgDeadlockRemaskLeftRows;
+
+    private bool _pgDeadlockRemaskDone;
+
+    private int _pgDeadlockRemaskRescans;
+
     /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
        process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
        none), and 42501, a login without the log read. get_store_log already reports the gap on the read
@@ -6969,6 +6988,80 @@ LIMIT 1";
                         "Store log: re-masking rows captured before this build failed, and is retried next hour: {Message}",
                         ex.Message);
                 }
+            }
+
+            /* #4012: PostgreSQL deadlock reports stored before #4005 keep their SQL raw, with a hash over the raw
+               graph, for pg_deadlocks' 90 days, and a deadlock alert fired before it keeps the same in its history
+               row. Every read normalizes them; a direct SELECT does not. One bounded slice per tick, the alerts'
+               until they are done and then the reports', with the store-log slice's own-catch, own-cap posture:
+               neither a failure nor a slow slice may cost the collector-cost flush below. */
+            if (!_pgDeadlockRemaskDone)
+            {
+                if (connection.State != ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
+                }
+
+                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
+                try
+                {
+                    if (!_pgDeadlockAlertRemaskDone)
+                    {
+                        var (next, examined, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(
+                            connection, _pgDeadlockAlertRemaskCursor, remaskBudget.Token);
+                        _pgDeadlockAlertRemaskCursor = next;
+                        _pgDeadlockAlertRemaskLeftRows |= raced > 0;
+                        if (next is null)
+                        {
+                            _pgDeadlockAlertRemaskDone = !_pgDeadlockAlertRemaskLeftRows
+                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
+                            _pgDeadlockAlertRemaskLeftRows = false;
+                        }
+
+                        if (rewritten > 0)
+                        {
+                            _logger.LogInformation(
+                                "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} deadlock alert(s) fired before this build, so their SQL literals and raw report hashes no longer sit in the alert history{Remaining}.",
+                                rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
+                        }
+                    }
+                    else
+                    {
+                        var (next, examined, rewritten, failed) = await PgDeadlockRemask.RemaskStoredReportsAsync(
+                            connection, _pgDeadlockRemaskCursor, remaskBudget.Token);
+                        _pgDeadlockRemaskCursor = next;
+                        _pgDeadlockRemaskLeftRows |= failed > 0;
+                        if (next is null)
+                        {
+                            _pgDeadlockRemaskDone = !_pgDeadlockRemaskLeftRows
+                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
+                            _pgDeadlockRemaskLeftRows = false;
+                        }
+
+                        if (rewritten > 0 || failed > 0)
+                        {
+                            _logger.LogInformation(
+                                "PostgreSQL deadlocks: re-masked {Rewritten} stored report row(s) of {Examined} examined, captured before this build, so their SQL literals and raw report hashes no longer sit in pg_deadlocks; {Failed} report(s) could not be rewritten and are retried{Remaining}.",
+                                rewritten, examined, failed, next is null ? "" : "; the rest follow on the next hourly passes");
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                {
+                    _logger.LogWarning(
+                        "PostgreSQL deadlocks: re-masking alerts and reports stored before this build failed, and is retried next hour: {Message}",
+                        ex.Message);
+                }
+            }
+
+            /* The flush runs on this same connection, which a canceled slice above can leave closed. */
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
             }
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
