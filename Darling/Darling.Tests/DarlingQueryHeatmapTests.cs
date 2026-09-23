@@ -503,11 +503,16 @@ public sealed class DarlingQueryHeatmapLiveTests
             var refusedRows = await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, null, null, 5, 5000);
             Assert.Contains("exceeds maximum of 1000", refusedRows, StringComparison.Ordinal);
 
+            /* #3897: both are the shared refusal envelope — `invalid`, naming the parameter — not bare sentences. */
             var refusedBucket = await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, null, null, 0);
-            Assert.Contains("Must be between 1 and 1440", refusedBucket, StringComparison.Ordinal);
+            Assert.True(McpHelpers.IsRefusalEnvelope(refusedBucket));
+            Assert.Equal("bucket_minutes", Root(refusedBucket).GetProperty("hints").GetProperty("parameter").GetString());
+            Assert.Contains("Must be between 1 and 1440", McpHelpers.ErrorMessageOf(refusedBucket), StringComparison.Ordinal);
 
             var refusedMetric = await DarlingMcpQueryHeatmapTools.GetQueryHeatmap(postgres, ServerName, 24, "reads");
-            Assert.Contains("Invalid metric 'reads'", refusedMetric, StringComparison.Ordinal);
+            Assert.True(McpHelpers.IsRefusalEnvelope(refusedMetric));
+            Assert.Equal("metric", Root(refusedMetric).GetProperty("hints").GetProperty("parameter").GetString());
+            Assert.Contains("Invalid metric 'reads'", McpHelpers.ErrorMessageOf(refusedMetric), StringComparison.Ordinal);
 
             /*
                 ── truncation keeps the RECENT end, and hands back no partial column ──

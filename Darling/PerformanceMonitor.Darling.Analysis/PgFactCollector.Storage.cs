@@ -11,12 +11,13 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
 public sealed partial class PgFactCollector
 {
-    /* #3896: $2 is the LOOKBACK start (AnalysisContext.LatestValueStart), not the window start. Without it
+    /* #3896: $2 is the LOOKBACK start (AnalysisContext.LatestValueStartFor), not the window start. Without it
        the window function numbered every file row the server has retained, and a dropped database's files
        stayed in the sum until retention aged them out. */
     public const string DatabaseSizeSql = @"
@@ -35,8 +36,8 @@ WHERE rn = 1";
 
     /// <summary>
     /// Collects total database data size from file_io_stats.
-    /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookback"/>
-    /// of the window's end (#3896) — a file not seen in a day belongs to a database that no longer exists.
+    /// Sums the latest size_mb across the database files seen within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see>
+    /// of the window's end (#3896) — a file not seen in that span belongs to a database that no longer exists.
     /// </summary>
     private async Task CollectDatabaseSizeFactAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -46,7 +47,7 @@ WHERE rn = 1";
 
             using var cmd = new NpgsqlCommand(DatabaseSizeSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(FileIoStatsCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -256,7 +257,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
     /// Collects the percent-autogrowth-on-large-files config fact (WS3): data/log files set
     /// to grow in PERCENTAGE steps that are also large (>= 10 GB), where a single growth is a
     /// huge, stalling allocation. Reads the latest snapshot per file from database_size_stats
-    /// within <see cref="AnalysisContext.LatestValueLookback"/> of the window's end (#3896),
+    /// within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896),
     /// excludes system databases, and emits ONE aggregate FILE_AUTOGROWTH_PERCENT fact carrying
     /// the offending-file/database counts (the per-file detail + copy-paste fix is attached
     /// later by the drill-down collector).
@@ -269,7 +270,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
 
             using var cmd = new NpgsqlCommand(FileAutogrowthSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -302,7 +303,7 @@ AND   database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         }
     }
 
-    /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStart). */
+    /* #3896: $2 is the lookback start (AnalysisContext.LatestValueStartFor). */
     public const string DiskSpaceSql = @"
 WITH latest AS (
     SELECT volume_mount_point, volume_total_mb, volume_free_mb,
@@ -323,7 +324,7 @@ FROM latest WHERE rn = 1";
 
     /// <summary>
     /// Collects disk space facts from database_size_stats: volume free space, file sizes. Each volume's
-    /// latest sample within <see cref="AnalysisContext.LatestValueLookback"/> of the window's end (#3896).
+    /// latest sample within <see cref="AnalysisContext.LatestValueLookbackFor">its collector's lookback</see> of the window's end (#3896).
     /// </summary>
     private async Task CollectDiskSpaceFactsAsync(AnalysisContext context, List<Fact> facts)
     {
@@ -333,7 +334,7 @@ FROM latest WHERE rn = 1";
 
             using var cmd = new NpgsqlCommand(DiskSpaceSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStart));
+            cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

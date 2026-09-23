@@ -639,8 +639,8 @@ GROUP BY server_id";
             var windowStart = now.AddHours(-1);
             var floored = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + DarlingFleetReader.FleetDeadlockSql, new object[] { windowStart, now, EventWindowFloor.For(windowStart) }, ct);
             var unfloored = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + OldDeadlockSql, new object[] { windowStart, now }, ct);
-            var flooredChunks = ChunkScans(floored);
-            var unflooredChunks = ChunkScans(unfloored);
+            var flooredChunks = PlanChunkScans.Count(floored);
+            var unflooredChunks = PlanChunkScans.Count(unfloored);
             Assert.True(unflooredChunks >= 7, $"the seeded week should put the oracle across at least seven chunks:\n{unfloored}");
             Assert.True(flooredChunks <= unflooredChunks - 5,
                 $"the floored count planned {flooredChunks} of the oracle's {unflooredChunks} chunks for a one-hour window:\n{floored}");
@@ -651,9 +651,9 @@ GROUP BY server_id";
                goes red here: the windowed read plans only the window's chunks. */
             var windowedLast = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + DarlingFleetReader.FleetLastCollectionSql, new object[] { DarlingFleetReader.LastCollectionWindowStart(now) }, ct);
             var unwindowedLast = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + UnwindowedLastCollectionSql(), Array.Empty<object>(), ct);
-            Assert.True(ChunkScans(unwindowedLast) >= 7, $"the seeded week should put the unwindowed probe across at least seven chunks:\n{unwindowedLast}");
-            Assert.True(ChunkScans(windowedLast) <= ChunkScans(unwindowedLast) - 5,
-                $"the last-collection read planned {ChunkScans(windowedLast)} of the unwindowed probe's {ChunkScans(unwindowedLast)} chunks for a two-day window:\n{windowedLast}");
+            Assert.True(PlanChunkScans.Count(unwindowedLast) >= 7, $"the seeded week should put the unwindowed probe across at least seven chunks:\n{unwindowedLast}");
+            Assert.True(PlanChunkScans.Count(windowedLast) <= PlanChunkScans.Count(unwindowedLast) - 5,
+                $"the last-collection read planned {PlanChunkScans.Count(windowedLast)} of the unwindowed probe's {PlanChunkScans.Count(unwindowedLast)} chunks for a two-day window:\n{windowedLast}");
 
             bodySucceeded = true;
         }
@@ -947,10 +947,6 @@ GROUP BY server_id";
     private static double LeafRows(string plan) =>
         Regex.Matches(plan, @"Scan[^\n]*\(actual rows=([\d.]+) loops=(\d+)\)")
             .Sum(m => double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) * double.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture));
-
-    /// <summary>How many chunk scans the plan carries at all — a chunk excluded at plan time is simply absent.</summary>
-    private static int ChunkScans(string plan) =>
-        plan.Split('\n').Count(l => Regex.IsMatch(l, @"Scan\b.*\bon _hyper_\d+_\d+_chunk"));
 
     /// <summary>The store the way the service builds it: hypertables where TimescaleDB is present. #1922: the
     /// probe runs on its own connection.</summary>

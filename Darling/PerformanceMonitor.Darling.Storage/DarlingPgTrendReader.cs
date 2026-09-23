@@ -320,10 +320,18 @@ public static class DarlingPgTrendReader
     /// <paramref name="BytesEstimable"/> is the pre-18 alternative — <c>op_bytes</c>, the block size, times
     /// the operation count. Exactly one of the two is true on any given server, and they are different
     /// quantities: 18 moves several blocks per operation, so the older estimate undercounts there.</param>
+    /// <param name="CounterResets">How many of the point's intervals spanned a reset (#3897): a bucketed point
+    /// holds several, and the tool's <c>counter_reset_count</c> is their sum.</param>
+    /// <param name="Intervals">How many differenced intervals the point summarizes (#3897).</param>
+    /// <param name="PeakReadsPerSecond">The point's busiest single interval's read rate (#3897).</param>
+    /// <param name="PeakReadMs">The point's worst single interval's average read latency (#3897); like
+    /// <paramref name="AvgReadMs"/>, nulled by the tool when the server does not time I/O.</param>
     /// <remarks>A <c>sealed record</c>, not the <c>readonly record struct</c> the two trend points above
     /// are, on the size rule <see cref="DarlingPgIoReader.PgIoRow"/> already follows: those carry five
-    /// fields and this carries twenty-four, and a struct that wide is copied whole by every LINQ pass over
-    /// a thousand-point series.</remarks>
+    /// fields and this carries twenty-eight, and a struct that wide is copied whole by every LINQ pass over
+    /// a thousand-point series. Since #3897 a point is a BUCKET of intervals: the counts are its sums, the
+    /// rates and ratios are recomputed from them, and <see cref="IntervalSeconds"/> is the seconds its
+    /// intervals covered.</remarks>
     public sealed record PgIoTrendPoint(
         DateTime CollectionTimeUtc,
         double IntervalSeconds,
@@ -348,7 +356,11 @@ public static class DarlingPgTrendReader
         bool WriteCountersTracked,
         bool BytesMeasured,
         bool BytesEstimable,
-        bool CounterReset);
+        bool CounterReset,
+        long CounterResets = 0,
+        long Intervals = 1,
+        double? PeakReadsPerSecond = null,
+        double? PeakReadMs = null);
 
     /// <param name="RollbackPct">Null rather than zero for an interval with no completed transactions: a
     /// ratio over nothing is absent, and a zero would draw a healthy-looking floor at exactly the intervals
@@ -360,8 +372,16 @@ public static class DarlingPgTrendReader
     /// <param name="Deadlocks">A COUNT for the interval, deliberately not a rate. Deadlocks are discrete
     /// server-recorded events a few per hour at worst, and per-second would render every real one as a
     /// number with four leading zeros.</param>
+    /// <param name="CounterResets">How many of the point's intervals spanned a reset (#3897).</param>
+    /// <param name="Intervals">How many differenced intervals the point summarizes (#3897).</param>
+    /// <param name="IntervalsWithTempFiles">How many of them spilled at least one temp file (#3897).</param>
+    /// <param name="PeakTempBytesPerSecond">The point's biggest single-interval spill rate (#3897).</param>
+    /// <param name="WorstCacheHitPct">The point's worst single interval's hit ratio (#3897) — the cliff the
+    /// bucket's pooled ratio would soften.</param>
+    /// <param name="WorstCacheHitAt">When that worst interval was, the earliest on a tie (#3897).</param>
     /// <remarks>A <c>sealed record</c> for the same reason as <see cref="PgIoTrendPoint"/>, and so the two
-    /// reads this PR adds do not differ in a way that means nothing.</remarks>
+    /// reads this PR adds do not differ in a way that means nothing. Since #3897 a point is a BUCKET of
+    /// intervals, as on the I/O trend.</remarks>
     public sealed record PgDatabaseTrendPoint(
         DateTime CollectionTimeUtc,
         long XactCommit,
@@ -375,7 +395,13 @@ public static class DarlingPgTrendReader
         long TempBytes,
         double? TempBytesPerSecond,
         long Deadlocks,
-        bool CounterReset);
+        bool CounterReset,
+        long CounterResets = 0,
+        long Intervals = 1,
+        long IntervalsWithTempFiles = 0,
+        double? PeakTempBytesPerSecond = null,
+        double? WorstCacheHitPct = null,
+        DateTime? WorstCacheHitAt = null);
 
     /// <summary>
     /// One (backend_type, context) pair from <c>pg_io_stats</c> over time, summed across object types.
@@ -407,9 +433,13 @@ public static class DarlingPgTrendReader
     /// its cumulative value, which is everything since server start and would be a spike made of history.
     /// Verified against controlled rows: a series arriving with 5,000,000 reads added 100, not 5,000,100.</para>
     ///
-    /// <para>$1 server_id, $2 backend_type, $3 context, $4/$5 window (naive UTC).</para>
+    /// <para><b>Bucketed since #3897.</b> <c>per_interval</c> is the statement this read returned until then, one
+    /// row per differenced snapshot; the final SELECT gathers those rows into buckets of <c>$6</c> minutes (see its
+    /// comment for how each figure is rolled up). A week of one pair was 9,984 rows and 3.2 MB of MCP payload.</para>
+    ///
+    /// <para>$1 server_id, $2 backend_type, $3 context, $4/$5 window (naive UTC), $6 bucket width in minutes.</para>
     /// </summary>
-    public const string IoTrendSql = """
+    public const string IoTrendSql = $"""
         WITH bounded AS (
             SELECT
                 collection_time,
@@ -553,7 +583,8 @@ public static class DarlingPgTrendReader
                in the single-window read, where an all-zero combination is only noise in a ranked grid. */
             WHERE s.interval_seconds IS NOT NULL
             GROUP BY d.collection_time, s.interval_seconds
-        )
+        ),
+        per_interval AS (
         SELECT
             collection_time,
             interval_seconds,
@@ -600,7 +631,49 @@ public static class DarlingPgTrendReader
             bytes_estimable,
             counter_reset
         FROM per_snapshot
-        ORDER BY collection_time
+        )
+        /* #3897: the intervals above, gathered into buckets of $6 minutes. Every count is summed; every rate is
+           the bucket's summed count over the seconds its intervals covered (interval_seconds, now that sum) and
+           every ratio the ratio of the bucket's sums - never an average of the per-interval figures, which would
+           weight a nearly idle interval the same as a busy one. The peaks keep the worst single interval, so a
+           one-minute burst survives an hour-wide bucket. counter_resets and intervals carry what the tool's
+           window figures were counted from, so those figures are the same with or without buckets. Each point is
+           stamped at its bucket's start, the first at the window's start. */
+        SELECT
+            GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $4) AS bucket_start,
+            SUM(interval_seconds) AS interval_seconds,
+            CAST(SUM(reads) AS bigint) AS reads,
+            SUM(read_time_ms) AS read_time_ms,
+            CAST(SUM(writes) AS bigint) AS writes,
+            SUM(write_time_ms) AS write_time_ms,
+            CAST(SUM(extends) AS bigint) AS extends,
+            CAST(SUM(hits) AS bigint) AS hits,
+            CAST(SUM(evictions) AS bigint) AS evictions,
+            SUM(read_bytes) AS read_bytes,
+            SUM(write_bytes) AS write_bytes,
+            CASE WHEN SUM(interval_seconds) > 0 THEN SUM(reads)::double precision / SUM(interval_seconds) END AS reads_per_second,
+            CASE WHEN SUM(interval_seconds) > 0 THEN SUM(writes)::double precision / SUM(interval_seconds) END AS writes_per_second,
+            CASE WHEN SUM(interval_seconds) > 0 THEN SUM(extends)::double precision / SUM(interval_seconds) END AS extends_per_second,
+            CASE WHEN SUM(interval_seconds) > 0 THEN SUM(hits)::double precision / SUM(interval_seconds) END AS hits_per_second,
+            CASE WHEN SUM(interval_seconds) > 0 THEN SUM(read_bytes)::double precision / SUM(interval_seconds) END AS read_bytes_per_second,
+            CASE WHEN SUM(interval_seconds) > 0 THEN SUM(write_bytes)::double precision / SUM(interval_seconds) END AS write_bytes_per_second,
+            CASE WHEN SUM(reads) > 0 THEN SUM(read_time_ms) / SUM(reads) ELSE NULL END AS avg_read_ms,
+            CASE WHEN SUM(writes) > 0 THEN SUM(write_time_ms) / SUM(writes) ELSE NULL END AS avg_write_ms,
+            CASE WHEN SUM(hits) + SUM(reads) > 0
+                 THEN SUM(hits)::double precision / (SUM(hits) + SUM(reads)) * 100
+                 ELSE NULL
+            END AS cache_hit_pct,
+            bool_or(write_counters_tracked) AS write_counters_tracked,
+            bool_or(bytes_measured) AS bytes_measured,
+            bool_or(bytes_estimable) AS bytes_estimable,
+            bool_or(counter_reset) AS counter_reset,
+            COUNT(*) FILTER (WHERE counter_reset) AS counter_resets,
+            COUNT(*) AS intervals,
+            MAX(reads_per_second) AS peak_reads_per_second,
+            MAX(avg_read_ms) AS peak_read_ms
+        FROM per_interval
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -615,9 +688,14 @@ public static class DarlingPgTrendReader
     /// no database — and that NULL is a real value, not missing data. An equality test would make it the one
     /// series this read could never follow.</para>
     ///
-    /// <para>$1 server_id, $2 database_name (NULL = shared relations), $3/$4 window (naive UTC).</para>
+    /// <para><b>Bucketed since #3897.</b> <c>per_interval</c> is the statement this read returned until then, one
+    /// row per differenced snapshot; the final SELECT gathers those rows into buckets of <c>$5</c> minutes (see its
+    /// comment for how each figure is rolled up).</para>
+    ///
+    /// <para>$1 server_id, $2 database_name (NULL = shared relations), $3/$4 window (naive UTC), $5 bucket width
+    /// in minutes.</para>
     /// </summary>
-    public const string DatabaseTrendSql = """
+    public const string DatabaseTrendSql = $"""
         WITH sampled AS (
             SELECT
                 collection_time,
@@ -664,9 +742,11 @@ public static class DarlingPgTrendReader
                           raw_temp_files, raw_temp_bytes, raw_deadlocks) < 0) AS counter_reset
             FROM sampled
             WHERE interval_seconds IS NOT NULL
-        )
+        ),
+        per_interval AS (
         SELECT
             collection_time,
+            interval_seconds,
             coalesce(d_xact_commit, 0)   AS xact_commit,
             coalesce(d_xact_rollback, 0) AS xact_rollback,
             /* Null, not zero, for an interval with no completed transactions - a ratio over nothing is
@@ -704,7 +784,50 @@ public static class DarlingPgTrendReader
             coalesce(d_deadlocks, 0)     AS deadlocks,
             coalesce(counter_reset, false) AS counter_reset
         FROM differenced
-        ORDER BY collection_time
+        )
+        /* #3897: the intervals above, gathered into buckets of $5 minutes. Counts (commits, rollbacks, block
+           accesses, temp files and bytes, deadlocks) are summed; the rates are the bucket's summed counts over the
+           seconds its intervals covered and the ratios the ratio of the bucket's sums - never an average of
+           per-interval ratios, which would let an interval with two block accesses weigh as much as one with two
+           million. worst_cache_hit_pct keeps the bucket's worst single interval (and worst_cache_hit_at when it
+           was, the earliest on a tie) and peak_temp_bytes_per_second its biggest spill rate, so the cliff this read
+           exists to show survives the bucket. counter_resets, intervals and intervals_with_temp_files carry what
+           the tool's window figures were counted from, so those figures are the same with or without buckets.
+           Each point is stamped at its bucket's start, the first at the window's start. */
+        SELECT
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            CAST(SUM(xact_commit) AS bigint)   AS xact_commit,
+            CAST(SUM(xact_rollback) AS bigint) AS xact_rollback,
+            CASE WHEN SUM(xact_commit) + SUM(xact_rollback) > 0
+                 THEN SUM(xact_rollback)::double precision / (SUM(xact_commit) + SUM(xact_rollback)) * 100
+                 ELSE NULL
+            END                                AS rollback_pct,
+            CASE WHEN SUM(interval_seconds) > 0
+                 THEN (SUM(xact_commit) + SUM(xact_rollback))::double precision / SUM(interval_seconds)
+            END                                AS transactions_per_second,
+            CAST(SUM(blks_read) AS bigint)     AS blks_read,
+            CAST(SUM(blks_hit) AS bigint)      AS blks_hit,
+            CASE WHEN SUM(blks_hit) + SUM(blks_read) > 0
+                 THEN SUM(blks_hit)::double precision / (SUM(blks_hit) + SUM(blks_read)) * 100
+                 ELSE NULL
+            END                                AS cache_hit_pct,
+            CAST(SUM(temp_files) AS bigint)    AS temp_files,
+            CAST(SUM(temp_bytes) AS bigint)    AS temp_bytes,
+            CASE WHEN SUM(interval_seconds) > 0
+                 THEN SUM(temp_bytes)::double precision / SUM(interval_seconds)
+            END                                AS temp_bytes_per_second,
+            CAST(SUM(deadlocks) AS bigint)     AS deadlocks,
+            bool_or(counter_reset)             AS counter_reset,
+            COUNT(*) FILTER (WHERE counter_reset)  AS counter_resets,
+            COUNT(*)                               AS intervals,
+            COUNT(*) FILTER (WHERE temp_files > 0) AS intervals_with_temp_files,
+            MAX(temp_bytes_per_second)             AS peak_temp_bytes_per_second,
+            MIN(cache_hit_pct)                     AS worst_cache_hit_pct,
+            (array_agg(collection_time ORDER BY cache_hit_pct, collection_time)
+                FILTER (WHERE cache_hit_pct IS NOT NULL))[1] AS worst_cache_hit_at
+        FROM per_interval
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -944,7 +1067,7 @@ public static class DarlingPgTrendReader
 
     public static async Task<List<PgIoTrendPoint>> GetIoTrendAsync(
         NpgsqlDataSource postgres, int serverId, string backendType, string context,
-        DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
     {
         var points = new List<PgIoTrendPoint>();
         await using var command = postgres.CreateCommand(IoTrendSql);
@@ -957,6 +1080,7 @@ public static class DarlingPgTrendReader
            TimeZone, which silently empties the window east of UTC. */
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -990,7 +1114,12 @@ public static class DarlingPgTrendReader
                 !reader.IsDBNull(20) && reader.GetBoolean(20),
                 !reader.IsDBNull(21) && reader.GetBoolean(21),
                 !reader.IsDBNull(22) && reader.GetBoolean(22),
-                !reader.IsDBNull(23) && reader.GetBoolean(23)));
+                !reader.IsDBNull(23) && reader.GetBoolean(23),
+                /* #3897: the bucket's own counts and peaks, appended after the pre-bucketing ordinals. */
+                reader.IsDBNull(24) ? 0 : reader.GetInt64(24),
+                reader.IsDBNull(25) ? 0 : reader.GetInt64(25),
+                reader.IsDBNull(26) ? (double?)null : reader.GetDouble(26),
+                reader.IsDBNull(27) ? (double?)null : reader.GetDouble(27)));
         }
 
         return points;
@@ -998,7 +1127,7 @@ public static class DarlingPgTrendReader
 
     public static async Task<List<PgDatabaseTrendPoint>> GetDatabaseTrendAsync(
         NpgsqlDataSource postgres, int serverId, string? databaseName,
-        DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
     {
         var points = new List<PgDatabaseTrendPoint>();
         await using var command = postgres.CreateCommand(DatabaseTrendSql);
@@ -1007,6 +1136,7 @@ public static class DarlingPgTrendReader
         command.Parameters.Add(TextOrNull(databaseName));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1024,7 +1154,14 @@ public static class DarlingPgTrendReader
                 reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
                 reader.IsDBNull(10) ? (double?)null : reader.GetDouble(10),
                 reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                !reader.IsDBNull(12) && reader.GetBoolean(12)));
+                !reader.IsDBNull(12) && reader.GetBoolean(12),
+                /* #3897: the bucket's own counts, peak and worst, appended after the pre-bucketing ordinals. */
+                reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+                reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
+                reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
+                reader.IsDBNull(16) ? (double?)null : reader.GetDouble(16),
+                reader.IsDBNull(17) ? (double?)null : reader.GetDouble(17),
+                reader.IsDBNull(18) ? (DateTime?)null : reader.GetDateTime(18)));
         }
 
         return points;

@@ -281,6 +281,27 @@ public sealed class DarlingWebEndpointsTests
     }
 
     /// <summary>
+    /// The integer twin (#3897), for <c>bucket_minutes</c>: absent means "let the read size the points", so an
+    /// unreadable width falling back to that would chart a different width than the one asked for. A fraction is
+    /// unreadable here, not rounded; zero and a negative bind, and the tool's range refusal answers them.
+    /// </summary>
+    [Theory]
+    [InlineData(null, true, null)]
+    [InlineData("15", true, 15)]
+    [InlineData("0", true, 0)]
+    [InlineData("-5", true, -5)]
+    [InlineData("1.5", false, null)]
+    [InlineData("abc", false, null)]
+    [InlineData("99999999999", false, null)]
+    public void TryParseOptionalInt_RefusesGarbageRatherThanChoosingAWidth(string? raw, bool expectedOk, int? expectedValue)
+    {
+        var ok = DarlingWebEndpoints.TryParseOptionalInt(raw, out var value);
+
+        Assert.Equal(expectedOk, ok);
+        Assert.Equal(expectedValue, value);
+    }
+
+    /// <summary>
     /// And the sibling this is NOT: <c>ParseDouble</c> really does swallow the same garbage, so the theory
     /// above is pinning a difference rather than restating shared behaviour.
     /// </summary>

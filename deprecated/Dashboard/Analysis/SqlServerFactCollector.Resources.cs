@@ -35,8 +35,8 @@ WHERE collection_time >= @lookbackStart
 AND   collection_time <= @endTime
 ORDER BY collection_time DESC";
 
-            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStart), the Darling/Lite twins' bound. */
-            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStartFor), the Darling/Lite twins' bound. */
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStartFor(SqlServerLatestValueBounds.MemoryStats)));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
@@ -318,8 +318,8 @@ SELECT TOP 10 clerk_type, memory_mb
 FROM latest WHERE rn = 1 AND memory_mb > 0
 ORDER BY memory_mb DESC";
 
-            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStart), the Darling/Lite twins' bound. */
-            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStartFor), the Darling/Lite twins' bound. */
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStartFor(SqlServerLatestValueBounds.MemoryClerks)));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();

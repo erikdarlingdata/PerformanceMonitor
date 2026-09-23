@@ -41,9 +41,9 @@ SELECT SUM(size_on_disk_bytes / 1048576.0) AS total_size_mb
 FROM latest
 WHERE rn = 1";
 
-            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStart), the Darling/Lite twins' bound —
+            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStartFor), the Darling/Lite twins' bound —
                unbounded, a dropped database's files stayed in the sum for the whole file_io_stats retention. */
-            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStartFor(SqlServerLatestValueBounds.FileIoStats)));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
@@ -248,7 +248,7 @@ AND   total_size_mb >= @minSizeMb;";
 
             cmd.Parameters.Add(new SqlParameter("@minSizeMb", 10240.0)); /* 10 GB */
             /* #3896: the latest-value lookback, and the same bounds as the drill-down that lists these files. */
-            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStartFor(SqlServerLatestValueBounds.DatabaseSizeStats)));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();
@@ -311,8 +311,8 @@ SELECT
     SUM(volume_free_mb) AS total_free_mb
 FROM latest WHERE rn = 1";
 
-            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStart), the Darling/Lite twins' bound. */
-            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStart));
+            /* #3896: the latest-value lookback (AnalysisContext.LatestValueStartFor), the Darling/Lite twins' bound. */
+            cmd.Parameters.Add(new SqlParameter("@lookbackStart", context.LatestValueStartFor(SqlServerLatestValueBounds.DatabaseSizeStats)));
             cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
 
             using var reader = await cmd.ExecuteReaderAsync();

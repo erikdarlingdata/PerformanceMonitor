@@ -19,7 +19,8 @@ public sealed partial class PgTargetFactCollector
 {
     /// <summary>
     /// The three durability settings from the LATEST <c>pg_server_config</c> snapshot, joined to the registry
-    /// for the engine kind. <c>$1</c> server_id. This family is filled by lane 8 (#3542 step 8, D6).
+    /// for the engine kind. <c>$1</c> server_id, <c>$2</c> the lower bound
+    /// <see cref="ConfigSnapshotLowerBounds"/> hands it (#3928). This family is filled by lane 8 (#3542 step 8, D6).
     ///
     /// <para><b>Why a second read of a snapshot lane 2 also reads.</b> The config family and the posture family
     /// read the same hourly <c>pg_server_config</c> rows, and the plan considered letting the config read emit
@@ -35,7 +36,10 @@ public sealed partial class PgTargetFactCollector
     /// <c>DarlingPgServerConfigReader.CurrentConfigSql</c> shape verbatim, including its reasoning that an
     /// hours filter would return nothing on a server whose hourly collector last ran just outside the window,
     /// which reads as "this server has no durability settings". The age of the snapshot travels on the fact
-    /// (<c>snapshot_age_minutes</c>) so the advice can say how current its statement is.</para>
+    /// (<c>snapshot_age_minutes</c>) so the advice can say how current its statement is. The lower bound does
+    /// not change that answer (#3928): the read first looks only at snapshots taken from a day before the
+    /// window's end onward, and at every retained snapshot only when there are none, so it still takes the
+    /// newest snapshot however old, and the bound only spares the planner a year of chunks.</para>
     ///
     /// <para><b>The three-source exclusion</b> (<c>client</c>, <c>session</c>, <c>override</c>) is the reader's
     /// too, for the reader's reason: <c>pg_settings</c> is a per-backend view, and a row whose source is the
@@ -61,10 +65,12 @@ public sealed partial class PgTargetFactCollector
         JOIN servers AS s
           ON s.server_id = c.server_id
         WHERE c.server_id = $1
+        AND   c.collection_time >= $2
         AND   c.collection_time = (
                   SELECT MAX(collection_time)
                   FROM pg_server_config
-                  WHERE server_id = $1)
+                  WHERE server_id = $1
+                  AND   collection_time >= $2)
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
         /* V138 (#3691): server-wide rows only. pg_server_config now also holds the per-database and
            per-role overrides, which repeat a setting's NAME under a different scope, and a posture fact is
@@ -110,43 +116,52 @@ public sealed partial class PgTargetFactCollector
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(PgTargetPostureSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            while (await reader.ReadAsync(context.CancellationToken))
+            /* #3928: the day first, and every retained snapshot only when that found nothing. */
+            foreach (var lowerBound in ConfigSnapshotLowerBounds(context.TimeRangeEnd))
             {
-                var name = reader.GetString(0);
-                var setting = reader.IsDBNull(1) ? null : reader.GetString(1);
-                var settingContext = reader.IsDBNull(2) ? null : reader.GetString(2);
-                var source = reader.GetString(3);
-                var pendingRestart = reader.GetBoolean(4);
-                var collectedAt = reader.GetDateTime(5);
-                var engineKind = reader.IsDBNull(6) ? null : reader.GetString(6);
+                using var cmd = new NpgsqlCommand(PgTargetPostureSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+                cmd.Parameters.AddWithValue(context.ServerId);
+                cmd.Parameters.AddWithValue(lowerBound);
 
-                var key = PostureKeyFor(name);
-                if (key is null) continue;
-
-                var isAurora = MonitoredEngineKind.IsAurora(engineKind);
-                var managedByPlatform = isAurora && key != PgTargetFactKeys.PostureSynchronousCommit;
-
-                facts.Add(new Fact
+                var found = false;
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
-                    Source = PgTargetSources.PostureSource,
-                    Key = key,
-                    Value = IsOff(setting) ? 1 : 0,
-                    ServerId = context.ServerId,
-                    Metadata =
+                    found = true;
+                    var name = reader.GetString(0);
+                    var setting = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    var settingContext = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    var source = reader.GetString(3);
+                    var pendingRestart = reader.GetBoolean(4);
+                    var collectedAt = reader.GetDateTime(5);
+                    var engineKind = reader.IsDBNull(6) ? null : reader.GetString(6);
+
+                    var key = PostureKeyFor(name);
+                    if (key is null) continue;
+
+                    var isAurora = MonitoredEngineKind.IsAurora(engineKind);
+                    var managedByPlatform = isAurora && key != PgTargetFactKeys.PostureSynchronousCommit;
+
+                    facts.Add(new Fact
                     {
-                        ["managed_by_platform"] = managedByPlatform ? 1 : 0,
-                        ["is_aurora"] = isAurora ? 1 : 0,
-                        ["requires_restart"] = string.Equals(settingContext, "postmaster", StringComparison.Ordinal) ? 1 : 0,
-                        ["session_settable"] = settingContext is "user" or "superuser" or "backend" ? 1 : 0,
-                        ["pending_restart"] = pendingRestart ? 1 : 0,
-                        ["is_default"] = string.Equals(source, "default", StringComparison.Ordinal) ? 1 : 0,
-                        ["snapshot_age_minutes"] = Math.Max(0, (context.TimeRangeEnd - collectedAt).TotalMinutes),
-                    },
-                });
+                        Source = PgTargetSources.PostureSource,
+                        Key = key,
+                        Value = IsOff(setting) ? 1 : 0,
+                        ServerId = context.ServerId,
+                        Metadata =
+                        {
+                            ["managed_by_platform"] = managedByPlatform ? 1 : 0,
+                            ["is_aurora"] = isAurora ? 1 : 0,
+                            ["requires_restart"] = string.Equals(settingContext, "postmaster", StringComparison.Ordinal) ? 1 : 0,
+                            ["session_settable"] = settingContext is "user" or "superuser" or "backend" ? 1 : 0,
+                            ["pending_restart"] = pendingRestart ? 1 : 0,
+                            ["is_default"] = string.Equals(source, "default", StringComparison.Ordinal) ? 1 : 0,
+                            ["snapshot_age_minutes"] = Math.Max(0, (context.TimeRangeEnd - collectedAt).TotalMinutes),
+                        },
+                    });
+                }
+
+                if (found) break;
             }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))

@@ -143,7 +143,7 @@ public sealed class CaptureDownChunkOrderTests
                    DeferredChunkAppend (on by default), which lists only the chunks it visited and counts them,
                    so there the proof is one visited chunk per arm (#3908, measured on 2.30.1). */
                 var lines = plan.Split('\n');
-                var chunkScans = lines.Where(l => Regex.IsMatch(l, @"Scan .* on _hyper_\d+_\d+_chunk")).ToList();
+                var chunkScans = lines.Where(PlanChunkScans.IsChunkScan).ToList();
                 var visited = lines
                     .Select(l => Regex.Match(l, @"Chunks Visited: (\d+)"))
                     .Where(m => m.Success)

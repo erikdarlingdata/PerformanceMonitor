@@ -116,7 +116,11 @@ public sealed class DarlingPerformanceTrendsReadTests
                GLOBAL oldest raw row, and on the shared fixture that is whatever another live test left
                behind — the scratch-store class below pins it against a store it owns. */
             Assert.Equal("per-interval", neverStore.GetProperty("bucket").GetString());
-            Assert.Equal("per-collection", quietQueries.GetProperty("bucket").GetString());
+            Assert.Equal(JsonValueKind.Null, neverStore.GetProperty("bucket_minutes").ValueKind);
+            /* #3897: a one-hour window buckets at one minute (61 points, inside the 200 budget); the empty answer
+               names the width it would have served. */
+            Assert.Equal("1 minute", quietQueries.GetProperty("bucket").GetString());
+            Assert.Equal(1, quietQueries.GetProperty("bucket_minutes").GetInt32());
 
             /*
                 ── the procedure series, at a rate BELOW one execution per second ──
@@ -131,7 +135,8 @@ public sealed class DarlingPerformanceTrendsReadTests
                 held; never the fabricated 0.0 it was before #3540), the envelope counting it and saying
                 why, and the second carrying the rate under test.
             */
-            await SeedProcedureAsync(connection, ct, MinutesAgo(20), executions: 0, elapsedUs: 0);
+            var firstProcedureCollection = MinutesAgo(20);
+            await SeedProcedureAsync(connection, ct, firstProcedureCollection, executions: 0, elapsedUs: 0);
             await SeedProcedureAsync(connection, ct, MinutesAgo(15), executions: 2, elapsedUs: 600_000);
 
             var procs = JsonDocument.Parse(
@@ -145,6 +150,9 @@ public sealed class DarlingPerformanceTrendsReadTests
             Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
             Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
             Assert.Equal(1, procs.GetProperty("unrated_points").GetInt32());
+            /* #3897: the unrated COLLECTION is counted apart from the points, because a bucket can fold one into
+               an otherwise rated point; here its bucket held nothing else, so the two counts agree. */
+            Assert.Equal(1, procs.GetProperty("unrated_collections").GetInt32());
             /* #3653: the note names both unrated reasons — the first-in-window LAG this seed exercises and the
                stored-0 restart it does not — in the one sentence Lite carries byte-identical. */
             var unratedNote = procs.GetProperty("unrated_note").GetString()!;
@@ -172,10 +180,16 @@ public sealed class DarlingPerformanceTrendsReadTests
                 the request.
             */
             Assert.Equal("raw", procs.GetProperty("source").GetString());
-            Assert.Equal("per-collection", procs.GetProperty("bucket").GetString());
-            Assert.Equal(JsonValueKind.Null, procs.GetProperty("aggregate_note").ValueKind);
+            /* #3897: four hours bucket at two minutes (121 points), and the note says a point is a bucket. */
+            Assert.Equal("2 minutes", procs.GetProperty("bucket").GetString());
+            Assert.Equal(2, procs.GetProperty("bucket_minutes").GetInt32());
+            Assert.Contains("one 2-minute bucket", procs.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
             Assert.False(procs.TryGetProperty("routing", out _));
-            Assert.Equal(procTrend[0].GetProperty("time").GetString(), procs.GetProperty("effective_start").GetString());
+            /* effective_start is the first COLLECTION the store held, not the bucket boundary the point is stamped
+               at: the point sits at the start of the two-minute bucket that collection fell in. */
+            Assert.Equal(DateTime.SpecifyKind(firstProcedureCollection, DateTimeKind.Unspecified).ToString("o"), procs.GetProperty("effective_start").GetString());
+            var firstPointTime = DateTime.Parse(procTrend[0].GetProperty("time").GetString()!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+            Assert.InRange(firstProcedureCollection - firstPointTime, TimeSpan.Zero, TimeSpan.FromMinutes(2));
             Assert.True(procs.GetProperty("window_truncated").GetBoolean());
             var effectiveHours = procs.GetProperty("effective_hours_back").GetDouble();
             Assert.InRange(effectiveHours, 0.2, 0.5);
@@ -224,6 +238,10 @@ public sealed class DarlingPerformanceTrendsReadTests
             AssertDisclosureBlock(store);
             Assert.Equal("raw", store.GetProperty("source").GetString());
             Assert.Equal("per-interval", store.GetProperty("bucket").GetString());
+            /* #3897: the Query Store series is not time-bucketed, so it says so rather than claiming a width, and
+               its points carry the shared peak key as null — there is no finer grain inside an interval. */
+            Assert.Equal(JsonValueKind.Null, store.GetProperty("bucket_minutes").ValueKind);
+            Assert.Equal(JsonValueKind.Null, storeTrend[1].GetProperty("peak_elapsed_ms_per_second").ValueKind);
             Assert.False(store.TryGetProperty("routing", out _));
             Assert.Equal(storeTrend[0].GetProperty("time").GetString(), store.GetProperty("effective_start").GetString());
 
@@ -236,12 +254,13 @@ public sealed class DarlingPerformanceTrendsReadTests
         }
     }
 
-    /// <summary>The six keys every Performance-Trends envelope carries since #3541 A2, in the order they are
-    /// written — the same order on the data path, the empty path, and on Lite.</summary>
+    /// <summary>The keys every Performance-Trends envelope carries — six since #3541 A2, seven since #3897 added
+    /// <c>bucket_minutes</c> beside its word — in the order they are written: the same order on the data path, the
+    /// empty path, and on Lite.</summary>
     internal static void AssertDisclosureBlock(JsonElement envelope)
     {
         var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
-        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "aggregate_note" };
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "bucket_minutes", "aggregate_note" };
         var at = Array.IndexOf(keys, "source");
         Assert.True(at >= 0, "the envelope has no `source`");
         Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());
@@ -401,6 +420,35 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
         Assert.Equal(0.5, queryTrend[1].GetProperty("value").GetDouble(), 9);
         Assert.Equal(0.005, queryTrend[1].GetProperty("executions_per_second").GetDouble(), 9);
 
+        /* #3897: a six-hour window would bucket at two minutes on raw, but this one is served by the rollup, whose
+           grain is the hour — the automatic width is raised to it, never finer. At that width each point's peak
+           is its own hour (the finest grain the rollup holds). */
+        Assert.Equal(60, queries.GetProperty("bucket_minutes").GetInt32());
+        Assert.Equal(3.0, queryTrend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
+
+        /* An explicit two-hour width gathers the rollup's hours: 10:00 and 11:00 fall in the 10:00 bucket, whose
+           rate is their summed work over 3,600 s per hour the rollup holds — (10,800 + 1,800) ms / 7,200 s =
+           1.75 ms/s and 126 / 7,200 exec/s — never an average of the two hourly rates weighted as equals by
+           accident of arithmetic, and its peak is the busier hour, 3.0. */
+        var wide = JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryDurationTrend(
+            postgres, ServerName, hours_back: 6, as_of: "2026-03-04T12:00:00Z", bucket_minutes: 120)).RootElement;
+        Assert.Equal("2 hours", wide.GetProperty("bucket").GetString());
+        var wideTrend = wide.GetProperty("trend");
+        Assert.Equal(1, wideTrend.GetArrayLength());
+        Assert.StartsWith("2026-03-04T10:00:00", wideTrend[0].GetProperty("time").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(1.75, wideTrend[0].GetProperty("elapsed_ms_per_second").GetDouble(), 9);
+        Assert.Equal(126d / 7200d, wideTrend[0].GetProperty("executions_per_second").GetDouble(), 9);
+        Assert.Equal(3.0, wideTrend[0].GetProperty("peak_elapsed_ms_per_second").GetDouble(), 9);
+        Assert.Contains("one 2-hour bucket", wide.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+        Assert.StartsWith("2026-03-04T10:00:00", wide.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
+
+        /* A width the rollup cannot serve is refused, naming why — not quietly answered at the hour. */
+        var finer = JsonDocument.Parse(await DarlingMcpTrendTools.GetQueryDurationTrend(
+            postgres, ServerName, hours_back: 6, as_of: "2026-03-04T12:00:00Z", bucket_minutes: 30)).RootElement;
+        Assert.Equal("invalid", finer.GetProperty("status").GetString());
+        Assert.Equal("bucket_minutes", finer.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains("whole hours", finer.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
         /* ── the procedure trend, same window, its own pair ── */
         var procedures = JsonDocument.Parse(await DarlingMcpTrendTools.GetProcedureDurationTrend(
             postgres, ServerName, hours_back: 6, as_of: "2026-03-04T12:00:00Z")).RootElement;
@@ -420,7 +468,7 @@ public sealed class DarlingPerformanceTrendsTierRoutingLiveTests
               read unconditionally fails the count, the rates and the `source` word above, not just a
               routing flag; restoring the ELSE 0 fails the null here. ── */
         var rawRoute = route with { Tier = RetentionTier.Raw };
-        var raw = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, ServerId, hour10.AddHours(-4), hour12, rawRoute, ct);
+        var raw = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, ServerId, hour10.AddHours(-4), hour12, rawRoute, 1, ct);
 
         Assert.Equal(3, raw.Points.Count);
         Assert.Equal(hour10.AddMinutes(5), raw.Points[0].CollectionTime);

@@ -209,6 +209,11 @@ public sealed partial class PgFactCollector : IFactCollector
            it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no
            denominator, and the only "safe" fallback (the nominal window) is the defect being fixed. */
         await CollectObservedCoverageAsync(context, facts);
+
+        /* #3896: every latest-value read below binds its collector's lower bound, resolved once from the
+           cadence that collector actually runs at. Emits no fact, so it cannot disturb the stamp above. */
+        await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
+
         await CollectWaitStatsFactsAsync(context, facts);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
         FactCollectorHelpers.GroupParallelismWaits(facts, context);

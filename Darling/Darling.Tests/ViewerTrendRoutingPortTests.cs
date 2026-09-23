@@ -47,19 +47,25 @@ public sealed class ViewerTrendRoutingPortTests
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     /// <summary>The MCP reader's hourly SQL is the Storage builder's output, byte for byte (line endings aside).
-    /// Since #3653 that is true by alias; what this still pins is the alias's argument — the MCP text is the
-    /// builder's output WITHOUT the viewer's <c>$4</c> filter, which a source pin on the declaration names but
-    /// only a value comparison proves the builder honours.</summary>
+    /// Since #3653 that is true by alias, and since #3897 the builder is the BUCKETED one
+    /// (<see cref="DurationTrendRouting.BuildBucketedHourlyTrendSql"/>, which gathers the rollup's hours into the
+    /// tool's width); what this still pins is the alias's argument — the legacy view, no database filter — which a
+    /// source pin on the declaration names but only a value comparison proves the builder honours.</summary>
     [Fact]
     public void McpHourlySql_IsTheStorageBuilder_WithoutTheDatabaseFilter()
     {
-        Assert.Equal(Lf(DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: false)), Lf(DarlingTrendReader.QueryDurationTrendHourlySql));
-        Assert.Equal(Lf(DurationTrendRouting.ProcedureDurationTrendHourlySql(withDatabaseFilter: false)), Lf(DarlingTrendReader.ProcedureDurationTrendHourlySql));
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView)), Lf(DarlingTrendReader.QueryDurationTrendHourlySql));
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView)), Lf(DarlingTrendReader.ProcedureDurationTrendHourlySql));
+        Assert.DoesNotContain("$4::text[]", DarlingTrendReader.QueryDurationTrendHourlySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4::text[]", DarlingTrendReader.ProcedureDurationTrendHourlySql, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The viewer's hourly SQL is the MCP's plus exactly one line — the #1319 database filter, the same guarded
-    /// <c>$4::text[]</c> shape its raw reads carry — so the desktop chart and the tool run one statement.
+    /// The viewer's hourly SQL reads the rollup rows the MCP's buckets are built from, plus exactly one line —
+    /// the #1319 database filter, the same guarded <c>$4::text[]</c> shape its raw reads carry. Until #3897 the
+    /// two were one statement; now the tool gathers the hours into its own width (the chart plots every hour), so
+    /// what must stay one is the READ of the rollup: the same relation, the same window and the same per-hour
+    /// grouping, the viewer's plus its filter.
     /// </summary>
     [Theory]
     [InlineData(nameof(ViewerDataService.QueryDurationTrendHourlySql))]
@@ -76,7 +82,18 @@ public sealed class ViewerTrendRoutingPortTests
         var filterLines = viewerLines.Where(l => l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray();
         var filter = Assert.Single(filterLines);
         Assert.Equal("AND   ($4::text[] IS NULL OR database_name = ANY($4))", filter.Trim());
-        Assert.Equal(Lf(mcp), string.Join('\n', viewerLines.Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal))));
+
+        /* The rollup read, FROM through GROUP BY bucket: the viewer's minus its filter line IS the MCP's hourly CTE. */
+        static string[] RollupRead(IEnumerable<string> lines) => lines
+            .Select(l => l.Trim())
+            .SkipWhile(l => !l.StartsWith("FROM ", StringComparison.Ordinal))
+            .TakeWhile(l => l != "GROUP BY bucket")
+            .Append("GROUP BY bucket")
+            .ToArray();
+        Assert.Equal(
+            RollupRead(viewerLines.Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal))),
+            RollupRead(Lf(mcp).Split('\n')));
+        Assert.Contains("GROUP BY bucket", Lf(mcp), StringComparison.Ordinal);
 
         /* The filter sits inside the WHERE, before the GROUP BY — a filter after the aggregate would be a HAVING
            on a column the rollup groups by, which parses and silently filters nothing. */
@@ -133,8 +150,8 @@ public sealed class ViewerTrendRoutingPortTests
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs");
 
         Assert.Contains("public const string HourlyBucketSecondsSql = DurationTrendRouting.HourlyBucketSecondsSql;", source, StringComparison.Ordinal);
-        Assert.Contains("public static readonly string QueryDurationTrendHourlySql =\n        DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: false);", Lf(source), StringComparison.Ordinal);
-        Assert.Contains("public static readonly string ProcedureDurationTrendHourlySql =\n        DurationTrendRouting.ProcedureDurationTrendHourlySql(withDatabaseFilter: false);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendHourlySql =\n        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView);", Lf(source), StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendHourlySql =\n        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView);", Lf(source), StringComparison.Ordinal);
         Assert.Contains("public static readonly TimeSpan RawTierMargin = DurationTrendRouting.RawTierMargin;", source, StringComparison.Ordinal);
         Assert.Contains("public static readonly TimeSpan TruncationSlack = DurationTrendRouting.TruncationSlack;", source, StringComparison.Ordinal);
         Assert.Contains("public static bool ShouldUseRawTier(DateTime startUtc, DateTime nowUtc) =>\n        DurationTrendRouting.ShouldUseRawTier(startUtc, nowUtc);", Lf(source), StringComparison.Ordinal);

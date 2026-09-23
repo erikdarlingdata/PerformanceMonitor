@@ -50,8 +50,9 @@ public sealed class PgTargetMemoryTests
         Assert.Contains(PgTargetFactCollector.PgTargetMemoryHostSql, PgTargetFactCollector.AllSql);
 
         var config = PgTargetFactCollector.PgTargetMemoryConfigSql;
-        /* The config family's anchor and its three-value exclusion, copied not narrowed. */
+        /* The config family's anchor, lower bound (#3928) and three-value exclusion, copied not narrowed. */
         Assert.Contains("collection_time <= $2", config, StringComparison.Ordinal);
+        Assert.Equal(2, config.Split("collection_time >= $3").Length - 1);
         Assert.Contains("NOT IN ('client', 'session', 'override')", config, StringComparison.Ordinal);
         foreach (var name in new[] { "shared_buffers", "work_mem", "max_connections", "max_parallel_workers_per_gather", "maintenance_work_mem", "autovacuum_work_mem", "autovacuum_max_workers", "wal_buffers", "effective_cache_size" })
             Assert.Contains($"'{name}'", config, StringComparison.Ordinal);

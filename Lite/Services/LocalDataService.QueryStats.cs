@@ -1562,8 +1562,21 @@ public class QueryTrendPoint
     public double? ExecutionsPerSecond { get; set; }
 
     /// <summary>Whether this point carries a rate at all — false for the window's first differenced
-    /// collection and for one landing in the same second as its predecessor (no denominator).</summary>
+    /// collection and for one landing in the same second as its predecessor (no denominator). On a bucketed
+    /// point (#3897), false only when every collection in the bucket was one of those.</summary>
     public bool HasRate => Value.HasValue;
+
+    /// <summary>The bucket's worst single collection's elapsed ms per second (#3897). Null on a point that is not a
+    /// bucket of collections (the desktop reads, the Query Store trend).</summary>
+    public double? PeakElapsedMsPerSecond { get; set; }
+
+    /// <summary>The first collection inside a bucketed point (#3897) — what <c>effective_start</c> reports, since
+    /// the point is stamped at its bucket's start. Null on an unbucketed point, whose own time is its collection.</summary>
+    public DateTime? FirstCollectionTime { get; set; }
+
+    /// <summary>How many of a bucketed point's collections had no knowable rate and were left out of it (#3897).
+    /// Null on an unbucketed point, which is its own single collection — unrated or not, per <see cref="HasRate"/>.</summary>
+    public long? UnratedInBucket { get; set; }
 }
 
 public class QueryStatsRow
