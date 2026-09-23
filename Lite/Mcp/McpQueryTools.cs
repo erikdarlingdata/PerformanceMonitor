@@ -281,7 +281,7 @@ public sealed class McpQueryTools
                        Query Store rows for it to match; when it held none, the filter is not the reason and the answer
                        is the unfiltered read's "unavailable". Darling tells the two apart with its window floor; the
                        probe here is the same question, asked only on this miss. */
-                    ?? (module_name is null || !await dataService.HasQueryStoreRowsInWindowAsync(resolved.ServerId, hours_back, windowEnd)
+                    ?? (module_name is null || !await dataService.HasQueryStoreRowsInWindowAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd)
                         ? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.")
                         : McpHelpers.Status(
                             "empty",
