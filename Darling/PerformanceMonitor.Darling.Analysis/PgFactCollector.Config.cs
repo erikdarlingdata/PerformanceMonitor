@@ -241,19 +241,24 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
        simply never appears - including a server with NO flags on, where the window can be entirely empty. The
        upper bound matches every other latest-value read (#3896): a historical window (compare_analysis,
        analyze_server's anchored mode) must read the state as it stood AT ITS END, not pick up a flag flipped
-       after it. */
+       after it. The flags are the ones in the window's NEWEST capture, not each flag's own newest row: a flag
+       turned off while another stays on drops out at the next daily capture instead of lingering until its
+       last ON row leaves the window. Only a capture that finds every flag off, which writes no row, still
+       falls back to the capture before it, and the window bounds that too. */
     public const string TraceFlagsSql = @"
-WITH latest AS (
-    SELECT trace_flag, status,
-           ROW_NUMBER() OVER (PARTITION BY trace_flag ORDER BY capture_time DESC) AS rn
+SELECT trace_flag
+FROM trace_flags
+WHERE server_id = $1
+AND   is_global = true
+AND   status = true
+AND   capture_time =
+(
+    SELECT MAX(capture_time)
     FROM trace_flags
     WHERE server_id = $1
-    AND   is_global = true
     AND   capture_time >= $2
     AND   capture_time <= $3
 )
-SELECT trace_flag
-FROM latest WHERE rn = 1 AND status = true
 ORDER BY trace_flag";
 
     /// <summary>

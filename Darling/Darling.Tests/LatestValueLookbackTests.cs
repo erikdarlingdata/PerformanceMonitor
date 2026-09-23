@@ -566,6 +566,50 @@ public sealed class LatestValueLookbackLivePostgresTests
     }
 
     /// <summary>
+    /// #3929: the flags are the window's NEWEST capture, not each flag's newest row. Both flags were on in
+    /// yesterday's capture, inside the window; this morning's lists only 2371. A per-flag read would keep 3604
+    /// until yesterday's row left the window, for up to two more days. The newest capture drops it now.
+    /// </summary>
+    [Fact]
+    public async Task AFlagTurnedOffWhileAnotherStaysOn_DropsOutAtTheNextCapture_NotWhenItsLastRowLeavesTheWindow_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live latest-value lookback test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DeleteSentinelsAsync(connection, ct);
+
+            var end = TruncateToSeconds(DateTime.UtcNow);
+            await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-1), 3604, status: true, ct);
+            await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddDays(-1), 2371, status: true, ct);
+            await InsertTraceFlagAsync(connection, TraceFlagClearServerId, end.AddHours(-6), 2371, status: true, ct);
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var facts = (await new PgFactCollector(postgres).CollectFactsAsync(Context(TraceFlagClearServerId, end))).ToDictionary(f => f.Key);
+
+            var traceFlags = facts["TRACE_FLAGS"];
+            Assert.Equal(1, traceFlags.Metadata["flag_count"]);
+            Assert.True(traceFlags.Metadata.ContainsKey("TF_2371"), "flag 2371 is on in the newest capture");
+            Assert.False(traceFlags.Metadata.ContainsKey("TF_3604"),
+                "flag 3604 is missing from the newest capture, so it is off, even though yesterday's ON row is still inside the window");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteSentinelsAsync);
+        }
+    }
+
+    /// <summary>
     /// #3929's sharpest edge case: a capture that finds EVERY flag off writes ZERO rows (DBCC TRACESTATUS(-1)
     /// only ever lists flags that are on), so a naive MAX(capture_time) anchor - the fix DB_CONFIG uses - would
     /// silently fall back to the older capture that still had one on, reporting a flag that is actually off.

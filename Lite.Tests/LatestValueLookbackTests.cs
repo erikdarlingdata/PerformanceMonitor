@@ -224,6 +224,33 @@ public sealed class LatestValueLookbackTests : IClassFixture<SharedDuckDbFixture
     }
 
     /// <summary>
+    /// #3929: the flags are the window's NEWEST capture, not each flag's newest row. Both flags were on in
+    /// yesterday's capture, inside the window; this morning's lists only 2371. A per-flag read would keep 3604
+    /// until yesterday's row left the window. The newest capture drops it now.
+    /// </summary>
+    [Fact]
+    public async Task AFlagTurnedOffWhileAnotherStaysOn_DropsOutAtTheNextCapture_NotWhenItsLastRowLeavesTheWindow()
+    {
+        const int ServerId = -389_613;
+        var end = LatestValueSeed.TruncateToSeconds(DateTime.UtcNow);
+        await SeedAsync(async connection =>
+        {
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-1), 3604, status: true);
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddDays(-1), 2371, status: true);
+            await LatestValueSeed.InsertTraceFlagAsync(connection, ServerId, end.AddHours(-6), 2371, status: true);
+        });
+
+        var facts = (await new DuckDbFactCollector(_duckDb).CollectFactsAsync(LatestValueSeed.Context(ServerId, end)))
+            .ToDictionary(f => f.Key);
+
+        var traceFlags = facts["TRACE_FLAGS"];
+        Assert.Equal(1, traceFlags.Metadata["flag_count"]);
+        Assert.True(traceFlags.Metadata.ContainsKey("TF_2371"), "flag 2371 is on in the newest capture");
+        Assert.False(traceFlags.Metadata.ContainsKey("TF_3604"),
+            "flag 3604 is missing from the newest capture, so it is off, even though yesterday's ON row is still inside the window");
+    }
+
+    /// <summary>
     /// #3929's sharpest edge case, Lite's half: a capture that finds every flag off writes ZERO rows, so a
     /// MAX(capture_time) anchor would silently fall back to an older capture that still had one on. With every
     /// row for this server older than the 48h window, the bounded read returns zero rows and no TRACE_FLAGS
