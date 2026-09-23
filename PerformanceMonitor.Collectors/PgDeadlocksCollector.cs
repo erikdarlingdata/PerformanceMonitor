@@ -97,7 +97,10 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        whole; what a candidate is, is decided in C# by PgDeadlockLogParser.FromReport, through the log reader
        every family shares (PgLogEntryAssembler). So the RDS transport — which receives log TEXT and runs no
        SQL — shares it, both routes get the same zone refusal from the same code, and a statement's literal
-       holding `ERROR:  deadlock detected` is never read as a report (#4005).
+       holding `ERROR:  deadlock detected` is never read as a report (#4005). The pattern is narrowed to the
+       same rule as PgDeadlockLogParser's C# twin (#4014): the gaps before ERROR: and DETAIL: may not cross a
+       field label's ":  ", so the ERROR: matched is the line's own. Measured on PostgreSQL 18.6: the old
+       pattern matched a STATEMENT line echoing a report (the assembler then refused it); this one does not.
 
        The listing is GATED on logging_collector, and the gate carries a marker row out the other side
        (#3410). With the setting off the server writes to stderr and there may be no log directory at all,
@@ -122,7 +125,7 @@ SELECT
 FROM tail,
      regexp_matches(
          tail.body,
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ [^ \n]+ \[\d+\][^\n]*ERROR:  deadlock detected\s*\n[^\n]*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ [^ \n]+ \[\d+\](?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"'

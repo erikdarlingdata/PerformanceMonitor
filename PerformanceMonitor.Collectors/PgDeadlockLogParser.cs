@@ -95,7 +95,8 @@ public static class PgDeadlockLogParser
 
        %Q puts the query id immediately before the severity with NO separator — measured output reads
        `[1549] 322048460535975151ERROR:  deadlock detected` — so this must not require whitespace there.
-       [^\n]* between the pid and ERROR: covers the query id whether the prefix carries one or not.
+       The gap between the pid and ERROR: covers the query id whether the prefix carries one or not (it may
+       not cross a field label; see the narrowing below).
 
        The DETAIL block is the first line plus every TAB-INDENTED line after it. It ends at the next line
        carrying a log prefix, which is what (?:\t[^\n]*\n)* expresses: a statement inside the block can
@@ -124,12 +125,23 @@ public static class PgDeadlockLogParser
        The candidate runs one line past the DETAIL, when that line carries a prefix: DeadLockReport always
        writes a HINT after the DETAIL, and that line is the proof the DETAIL arrived whole, which
        PgLogTextRedactor.RedactDetail needs to trust a query after one that does not read to its end. Never a
-       line that opens another report, so a candidate cannot take the next report's first line from it. */
+       line that opens another report, so a candidate cannot take the next report's first line from it.
+
+       The candidate is narrowed to the assembler's own rule as well (#4014), so the pattern does not hand it
+       text a real report never looks like:
+       - Between the pid and ERROR:, and before DETAIL:, the gap may not contain a field label's ":  ". Every
+         real line carries exactly one label, so the ERROR: matched is the line's own and never an echo inside a
+         STATEMENT or a LOG line's text. The %Q query id directly before ERROR: has no ":  ", so it still fits.
+         A prefix that itself renders ":  " (an application_name holding one, under %a) would hide that
+         line's report; that is the rare side, and it can only hide a report, never forge one.
+       - The managed family's gap to the pid bracket excludes '[', as plan capture's does since #4008, so it
+         cannot slide past the line's real bracket to one inside the text. The lazy '[^\n]*?' it replaces
+         could, when the rest of the pattern failed at the real one. */
     private static readonly Regex s_deadlockBlock = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
-        + @"(?:[^ \n]+ \[\d+\]|[^ :\n]+:[^\n]*?\[\d+\])"
-        + @"[^\n]*ERROR:  deadlock detected\s*\n"
-        + @"[^\n]*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*"
+        + @"(?:[^ \n]+ \[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n"
+        + @"(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*"
         + @"(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
