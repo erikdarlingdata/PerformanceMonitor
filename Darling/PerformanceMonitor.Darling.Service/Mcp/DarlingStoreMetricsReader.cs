@@ -1587,11 +1587,55 @@ LIMIT $1";
     /// not a rate).</summary>
     public sealed record DailyGrowthPoint(DateTime Day, long DeltaBytes, double? PerServerBytes);
 
+    /// <summary>
+    /// The index <see cref="StoreMetricsLatestSql"/>'s skip-scan walks (#3934), created by the Tuning stage
+    /// (<c>PgTableTuning</c>), not by a migration.
+    /// </summary>
+    public const string StoreMetricsLatestIndexName = "idx_store_metrics_kind_name_time";
+
+    /// <summary>Whether that index exists: <c>to_regclass</c>, a catalog lookup with no table scan.</summary>
+    public const string StoreMetricsLatestIndexProbeSql =
+        "SELECT pg_catalog.to_regclass('collect." + StoreMetricsLatestIndexName + "') IS NOT NULL";
+
+    /// <summary>
+    /// The pre-#3934 read, kept for a store that does not have <see cref="StoreMetricsLatestIndexName"/> yet:
+    /// the Tuning stage has not run since the upgrade, or could not create it. Without the index, every step of
+    /// the skip-scan re-reads the table, so its cost grows with objects times rows. CI measured it past the
+    /// 30-second MCP read deadline on a production-shaped seed where this form's single sort answers. The
+    /// answers are identical either way; only the plan differs.
+    /// </summary>
+    public const string StoreMetricsLatestWithoutIndexSql = @"
+SELECT DISTINCT ON (object_kind, object_name)
+    object_kind,
+    object_name,
+    metric_time,
+    total_bytes,
+    compressed_before_bytes,
+    compressed_after_bytes,
+    chunk_count,
+    row_count,
+    enabled_server_count,
+    last_run_duration_ms,
+    schedule_interval_ms,
+    total_runs,
+    total_failures,
+    toast_bytes,
+    toast_live_bytes
+FROM collect.store_metrics
+ORDER BY object_kind, object_name, metric_time DESC";
+
     public static async Task<List<StoreMetricRow>> GetLatestAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
+        bool indexed;
+        await using (var probe = postgres.CreateCommand(StoreMetricsLatestIndexProbeSql))
+        {
+            probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            indexed = await probe.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
         var rows = new List<StoreMetricRow>();
-        await using var command = postgres.CreateCommand(StoreMetricsLatestSql);
+        await using var command = postgres.CreateCommand(indexed ? StoreMetricsLatestSql : StoreMetricsLatestWithoutIndexSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

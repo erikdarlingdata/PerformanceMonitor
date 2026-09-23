@@ -98,6 +98,28 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("enabled_server_count", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3934: the skip-scan runs only when its index exists. Without the index every recursion step re-reads the
+    /// table, so a store the Tuning stage has not reached yet reads through the pre-#3934 DISTINCT ON instead. CI
+    /// measured the unindexed skip-scan past the 30-second MCP read deadline on a production-shaped seed. The probe
+    /// must name the index the Tuning stage creates: a rename on one side would silently leave every store on the
+    /// fallback.
+    /// </summary>
+    [Fact]
+    public void TheLatestRead_UsesTheSkipScanOnlyWhenItsIndexExists_AndTheProbeNamesTheTuningStagesIndex()
+    {
+        Assert.Contains(
+            $"CREATE INDEX IF NOT EXISTS {DarlingStoreMetricsReader.StoreMetricsLatestIndexName} ON collect.store_metrics (object_kind, object_name, metric_time DESC)",
+            string.Join("\n", PgTableTuning.Statements), StringComparison.Ordinal);
+        Assert.Contains($"to_regclass('collect.{DarlingStoreMetricsReader.StoreMetricsLatestIndexName}')",
+            DarlingStoreMetricsReader.StoreMetricsLatestIndexProbeSql, StringComparison.Ordinal);
+
+        var fallback = DarlingStoreMetricsReader.StoreMetricsLatestWithoutIndexSql;
+        Assert.Contains("SELECT DISTINCT ON (object_kind, object_name)", fallback, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY object_kind, object_name, metric_time DESC", fallback, StringComparison.Ordinal);
+        Assert.DoesNotContain("WITH RECURSIVE", fallback, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void StoreMetricsDailySql_LastSamplePerObjectPerDay_Windowed()
     {
