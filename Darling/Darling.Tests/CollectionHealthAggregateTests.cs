@@ -142,10 +142,35 @@ CROSS JOIN generate_series((now() AT TIME ZONE 'UTC') - INTERVAL '{(long)fromAgo
         await plant.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// <c>CALL run_job</c> on the parked policy, retried while a run the scheduler already launched is still
+    /// refreshing.
+    ///
+    /// <para><b>Why a parked policy can still be running.</b> The collection-health policy has no
+    /// <c>initial_start</c> (<see cref="TimescaleSupport.AddCollectionHealthRefreshPolicySql"/>), so TimescaleDB
+    /// schedules its first run for the moment the product's ensure path commits it, and
+    /// <see cref="OpenStoreAsync"/> can only park it after that commit. A launch that lands in the gap is not
+    /// cancelled by <c>alter_job(scheduled =&gt; false)</c>; it runs to completion, and a <c>run_job</c> that
+    /// overlaps it fails 55P03 "could not refresh continuous aggregate ... due to a concurrent refresh" (#3972's
+    /// CI run). That launch is the same policy over the same now-relative window, and the park stops any
+    /// other, so waiting it out and running again leaves what the test's own run would have left.</para>
+    /// </summary>
     internal static async Task RunPolicyAsync(NpgsqlConnection connection, int jobId, CancellationToken ct)
     {
-        await using var run = new NpgsqlCommand($"CALL run_job({jobId})", connection);
-        await run.ExecuteNonQueryAsync(ct);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (true)
+        {
+            try
+            {
+                await using var run = new NpgsqlCommand($"CALL run_job({jobId})", connection);
+                await run.ExecuteNonQueryAsync(ct);
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+            }
+        }
     }
 
     /// <summary>(runs the aggregate serves over the 7-day consumer window, runs raw holds there).</summary>

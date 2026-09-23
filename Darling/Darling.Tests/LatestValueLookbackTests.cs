@@ -492,8 +492,8 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
 
             if (timescaleEnabled)
             {
-                var shippedChunks = ChunkScans(shipped);
-                var oracleChunks = ChunkScans(oracle);
+                var shippedChunks = PlanChunkScans.Count(shipped);
+                var oracleChunks = PlanChunkScans.Count(oracle);
                 Assert.True(oracleChunks >= 11,
                     $"the pre-#3896 shape should plan every seeded chunk (eleven days of data), planned {oracleChunks}:\n{oracle}");
                 Assert.True(shippedChunks is >= 1 and <= 2,
@@ -609,10 +609,6 @@ WHERE rn = 1";
 
         return plan.ToString();
     }
-
-    /// <summary>Scan nodes over a hypertable chunk, compressed or not.</summary>
-    private static int ChunkScans(string plan) =>
-        plan.Split('\n').Count(l => Regex.IsMatch(l, @"(?:Scan|ColumnarScan)[^\n]* on _hyper_\d+_\d+_chunk"));
 
     private static async Task InsertFileIoAsync(NpgsqlConnection connection, int serverId, DateTime at,
         string database, string file, decimal sizeMb, CancellationToken ct)
