@@ -621,12 +621,15 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
     [Fact]
     public async Task DailySummary_StopsPaintingPurgedDaysGreen_AndPublishesTheHorizon()
     {
-        var today = DateTime.UtcNow.Date;
-        var horizon = LocalDataService.DailySummaryRetentionHorizon(DateTime.UtcNow);
+        var now = DateTime.UtcNow;
+        var today = now.Date;
+        var horizon = LocalDataService.DailySummaryRetentionHorizon(now);
         var ghostDay = horizon.AddDays(-10);
         var uncollectedDay = today.AddDays(-3);
 
-        await SeedRunAsync(DateTime.UtcNow.AddMinutes(-2));
+        /* Today's run has to land on today: two minutes back crosses midnight UTC in a day's first two
+           minutes, which is how this failed CI at 00:01Z on #3942. */
+        await SeedRunAsync(now.AddMinutes(-2) < today ? now : now.AddMinutes(-2));
         await SeedRunAsync(ghostDay.AddHours(12));
         /* Signal rows and no run record: the spine holds the day from wait_stats alone. */
         await SeedWaitStatAsync(uncollectedDay.AddHours(12), "CXPACKET", 4000);
