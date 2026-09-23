@@ -236,7 +236,9 @@ public sealed class FleetReadsAreBoundedByTheFleetTests
 /// <para>Sentinel servers, negative ids, cleaned up in <c>finally</c>: two collecting SQL Servers (one with a
 /// ring-buffer batch whose samples share a collection instant), one registered and never collected, one dark for
 /// five days, one never stamped with an engine, one disabled, and one PostgreSQL target carrying a planted
-/// SQL Server row it could never really have — which is how the driver's engine filter is shown to be real.</para>
+/// SQL Server row it could never really have — which is how the driver's engine filter is shown to be real.
+/// Each is registered the way the service registers one, with the first-connect instant #3935's fleet card
+/// reads to tell the dark server from the never-collected one.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class FleetReadsAreBoundedLivePostgresTests
@@ -356,7 +358,8 @@ GROUP BY server_id";
     /// over a week of history and every sentinel shape — including a CPU batch whose samples tie on the
     /// collection instant (the tiebreak must still pick the newest sample), grant pools summed at the newest
     /// instant, a server dark for five days (the unbounded probe must still find it; the 48-hour read must still
-    /// drop it), and incident rows collected late and collected ahead of their own event's clock.
+    /// leave its collection out, and since #3935 report it with an empty window and its registration), and
+    /// incident rows collected late and collected ahead of their own event's clock.
     /// </summary>
     [Fact]
     public async Task TheBoundedReads_ReturnTheUnboundedReadsRows_AgainstDevPostgres()
@@ -437,13 +440,22 @@ GROUP BY server_id";
             Assert.Single(oldDeadlocks);
             Assert.Empty(newDeadlocks);
 
-            /* Last collection: the 48 hours kept, so the five-days-dark server falls out of both. */
-            var lastArgs = new object[] { now.AddHours(-48) };
+            /* Last collection: the 48 hours kept, so the five-days-dark server's collection is outside the window
+               in both. #3935: the probe REPORTS that server, and the never-collected one, with an empty window
+               and the registration beside it, where the oracle simply has no row; every collection the oracle
+               finds, the probe finds identically. */
+            var lastArgs = new object[] { DarlingFleetReader.LastCollectionWindowStart(now) };
             var oldLast = Scoped(await ReadRowsAsync(connection, OldLastCollectionSql, lastArgs, ct), s_compared);
             var newLast = Scoped(await ReadRowsAsync(connection, DarlingFleetReader.FleetLastCollectionSql, lastArgs, ct), s_compared);
-            Assert.Equal(oldLast, newLast);
-            Assert.Equal(3, newLast.Count);
-            Assert.DoesNotContain(newLast, r => r.StartsWith(Id(DarkFiveDays), StringComparison.Ordinal));
+            Assert.Equal(3, oldLast.Count);
+            Assert.Equal(oldLast, newLast.Where(r => !r.Contains("|null|", StringComparison.Ordinal)).Select(WithoutLastCell).ToList());
+            Assert.Equal(s_compared.Length, newLast.Count);
+            Assert.Contains(Id(DarkFiveDays) + "null|" + Stamp(RegisteredLongAgo(now)), newLast);
+            Assert.Contains(Id(NeverCollected) + "null|" + Stamp(RegisteredJustNow(now)), newLast);
+            Assert.Contains(Id(CollectingA) + Stamp(now.AddMinutes(-1)) + "|" + Stamp(RegisteredLongAgo(now)), newLast);
+            Assert.DoesNotContain(
+                await ReadRowsAsync(connection, DarlingFleetReader.FleetLastCollectionSql, lastArgs, ct),
+                r => r.StartsWith(Id(Disabled), StringComparison.Ordinal));
 
             /* The WPF viewer's sidebar freshness: every REGISTERED server, disabled included, unbounded — so the
                dark and the disabled servers keep their real last collection. */
@@ -474,7 +486,9 @@ GROUP BY server_id";
     /// The seam: the overview itself, through <see cref="DarlingFleetReader.GetFleetOverviewAsync"/>, puts the
     /// newest reading on each card — the newest sample of a tied batch, the pools summed at the newest instant,
     /// a dark server's last values — leaves a never-collected server's metrics empty, and ignores the reading
-    /// planted under the PostgreSQL target.
+    /// planted under the PostgreSQL target. And (#3935) it bands the five-days-dark server Offline and the
+    /// just-registered one awaiting its first collection, the same words the WPF viewer's unbounded read gives
+    /// them.
     /// </summary>
     [Fact]
     public async Task TheOverview_BuildsEachCardFromItsNewestReading_AgainstDevPostgres()
@@ -523,13 +537,41 @@ GROUP BY server_id";
             var dark = cards[DarkFiveDays];
             Assert.Equal(11, dark.CpuPercent);             // five days old, still its newest
             Assert.Equal(1100, dark.MemoryMb);
-            Assert.NotEqual(true, dark.IsOnline);
+
+            /* #3935: dark for five days, registered nine days ago — Offline, the viewer's word for it, and not
+               "Awaiting first collection". Its last collection is outside the kept window, so the card carries
+               none; status is what tells this null from the never-collected one below. */
+            Assert.False(dark.IsOnline);
+            Assert.Equal(FleetHealthBand.Offline, dark.Band);
+            Assert.Equal(ServerCollectionStatus.Offline.Word(), dark.Status);
+            Assert.False(dark.AwaitingFirstCollection);
+            Assert.Null(dark.LastCollectionTime);
 
             var never = cards[NeverCollected];
             Assert.Null(never.CpuPercent);
             Assert.Null(never.MemoryMb);
             Assert.Null(never.TotalThreads);
             Assert.Null(never.GrantedMemoryMb);
+
+            /* Registered ten minutes ago and nothing collected since: still the bootstrap state, never red. */
+            Assert.Null(never.IsOnline);
+            Assert.True(never.AwaitingFirstCollection);
+            Assert.Equal(FleetHealthBand.Warning, never.Band);
+            Assert.Equal(ServerCollectionStatus.AwaitingFirstCollection.Word(), never.Status);
+
+            /* And both read what the WPF viewer reads for them: its sidebar freshness has no window, and each
+               card's status is the word that freshness bands to. */
+            await using (var viewer = new ViewerDataService(connectionString!))
+            {
+                var viewerFreshness = await viewer.GetServerFreshnessAsync(ct);
+                foreach (var id in new[] { DarkFiveDays, NeverCollected, CollectingA })
+                {
+                    DateTime? viewerLast = viewerFreshness.TryGetValue(id, out var seen) ? seen : null;
+                    Assert.Equal(
+                        ServerCollectionStatusRules.FromFreshness(ServerHealthClassifier.ClassifyFreshness(viewerLast, now)).Word(),
+                        cards[id].Status);
+                }
+            }
 
             var pg = cards[PostgresTarget];
             Assert.Null(pg.MemoryMb);                      // the planted SQL Server row is never read
@@ -603,6 +645,16 @@ GROUP BY server_id";
             Assert.True(flooredChunks <= unflooredChunks - 5,
                 $"the floored count planned {flooredChunks} of the oracle's {unflooredChunks} chunks for a one-hour window:\n{floored}");
 
+            /* #3935 kept the last-collection read's window and told a dark server from a never-collected one
+               with a registry column instead, because the same probe with the window taken out plans every
+               retained chunk of collection_log on every call. Pinned at the plan, so a fix that drops the window
+               goes red here: the windowed read plans only the window's chunks. */
+            var windowedLast = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + DarlingFleetReader.FleetLastCollectionSql, new object[] { DarlingFleetReader.LastCollectionWindowStart(now) }, ct);
+            var unwindowedLast = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + UnwindowedLastCollectionSql(), Array.Empty<object>(), ct);
+            Assert.True(ChunkScans(unwindowedLast) >= 7, $"the seeded week should put the unwindowed probe across at least seven chunks:\n{unwindowedLast}");
+            Assert.True(ChunkScans(windowedLast) <= ChunkScans(unwindowedLast) - 5,
+                $"the last-collection read planned {ChunkScans(windowedLast)} of the unwindowed probe's {ChunkScans(unwindowedLast)} chunks for a two-day window:\n{windowedLast}");
+
             bodySucceeded = true;
         }
         finally
@@ -649,13 +701,19 @@ GROUP BY server_id";
     /// </summary>
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime now, CancellationToken ct)
     {
-        await InsertServerAsync(connection, CollectingA, "fleet3895-a", true, MonitoredEngineKind.SqlServer, ct);
-        await InsertServerAsync(connection, CollectingB, "fleet3895-b", true, MonitoredEngineKind.SqlServer, ct);
-        await InsertServerAsync(connection, NeverCollected, "fleet3895-never", true, MonitoredEngineKind.SqlServer, ct);
-        await InsertServerAsync(connection, PostgresTarget, "fleet3895-pg", true, MonitoredEngineKind.Postgres, ct);
-        await InsertServerAsync(connection, Disabled, "fleet3895-off", false, MonitoredEngineKind.SqlServer, ct);
-        await InsertServerAsync(connection, DarkFiveDays, "fleet3895-dark", true, MonitoredEngineKind.SqlServer, ct);
-        await InsertServerAsync(connection, Unstamped, "fleet3895-unstamped", true, null, ct);
+        /* Registration the way the service writes it (#3935): created_date is the first successful connect,
+           and collection only follows one. Everything with history connected nine days ago, ahead of its
+           eight days of it; the never-collected server and the PostgreSQL fixture connected ten minutes ago
+           and have written no collection_log row since. */
+        var longAgo = RegisteredLongAgo(now);
+        var justNow = RegisteredJustNow(now);
+        await InsertServerAsync(connection, CollectingA, "fleet3895-a", true, MonitoredEngineKind.SqlServer, longAgo, ct);
+        await InsertServerAsync(connection, CollectingB, "fleet3895-b", true, MonitoredEngineKind.SqlServer, longAgo, ct);
+        await InsertServerAsync(connection, NeverCollected, "fleet3895-never", true, MonitoredEngineKind.SqlServer, justNow, ct);
+        await InsertServerAsync(connection, PostgresTarget, "fleet3895-pg", true, MonitoredEngineKind.Postgres, justNow, ct);
+        await InsertServerAsync(connection, Disabled, "fleet3895-off", false, MonitoredEngineKind.SqlServer, longAgo, ct);
+        await InsertServerAsync(connection, DarkFiveDays, "fleet3895-dark", true, MonitoredEngineKind.SqlServer, longAgo, ct);
+        await InsertServerAsync(connection, Unstamped, "fleet3895-unstamped", true, null, longAgo, ct);
 
         /* History: every two hours from eight days back to a day back, older values that the newest must
            outrank — eight daily chunks on a hypertable store, and enough rows that a read which streams them
@@ -741,17 +799,25 @@ GROUP BY server_id";
         }
     }
 
-    private static async Task InsertServerAsync(NpgsqlConnection connection, int id, string name, bool enabled, string? engineKind, CancellationToken ct)
+    private static async Task InsertServerAsync(NpgsqlConnection connection, int id, string name, bool enabled, string? engineKind, DateTime registeredAt, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, engine_kind) VALUES ($1, $2, $2, $3, $4, $5)", connection);
+            "INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_engine_edition, engine_kind, created_date, modified_date) VALUES ($1, $2, $2, $3, $4, $5, $6, $6)", connection);
         command.Parameters.AddWithValue(id);
         command.Parameters.AddWithValue(name);
         command.Parameters.AddWithValue(enabled);
         command.Parameters.Add(new NpgsqlParameter<int?> { TypedValue = engineKind == MonitoredEngineKind.Postgres ? 0 : 3 });
         command.Parameters.Add(new NpgsqlParameter<string?> { TypedValue = engineKind, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(registeredAt, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(ct);
     }
+
+    /// <summary>When the servers with history first connected: nine days back, ahead of the eight days of it.</summary>
+    private static DateTime RegisteredLongAgo(DateTime now) => now.AddDays(-9);
+
+    /// <summary>When the never-collected server (and the PostgreSQL fixture) first connected: ten minutes back,
+    /// well inside the last-collection read's two-day window.</summary>
+    private static DateTime RegisteredJustNow(DateTime now) => now.AddMinutes(-10);
 
     private static Task InsertCpuAsync(NpgsqlConnection connection, int id, DateTime at, DateTime sampleTime, int sqlCpu, int otherCpu, CancellationToken ct) =>
         ExecAsync(connection,
@@ -842,6 +908,22 @@ GROUP BY server_id";
         rows.Where(r => ids.Any(id => r.StartsWith(Id(id), StringComparison.Ordinal))).OrderBy(r => r, StringComparer.Ordinal).ToList();
 
     private static string Id(int id) => id.ToString(CultureInfo.InvariantCulture) + "|";
+
+    /// <summary>An instant as <see cref="ReadRowsAsync"/> renders it.</summary>
+    private static string Stamp(DateTime instant) => instant.ToString("O", CultureInfo.InvariantCulture);
+
+    /// <summary>A rendered row without its last cell — the last-collection probe's registration, which the
+    /// oracle does not carry.</summary>
+    private static string WithoutLastCell(string row) => row[..row.LastIndexOf('|')];
+
+    /// <summary><see cref="DarlingFleetReader.FleetLastCollectionSql"/> with its window taken out — option 1 of
+    /// #3935, derived rather than restated so it stays that statement minus one predicate.</summary>
+    private static string UnwindowedLastCollectionSql()
+    {
+        var sql = Regex.Replace(DarlingFleetReader.FleetLastCollectionSql, @"\s+AND\s+collection_time >= \$1", "");
+        Assert.NotEqual(DarlingFleetReader.FleetLastCollectionSql, sql);
+        return sql;
+    }
 
     private static async Task<string> ExplainAsync(NpgsqlConnection connection, string sql, object[] args, CancellationToken ct)
     {

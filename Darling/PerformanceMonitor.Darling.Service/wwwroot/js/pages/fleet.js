@@ -557,9 +557,17 @@ function serverCard(c) {
     c.metric_count > 0 && c.measured_metric_count < c.metric_count
       ? " · " + c.measured_metric_count + " of " + c.metric_count + " measured"
       : "";
+  /* #3935: an Offline card's last collection can be days old, or absent (nothing in the fleet read's
+     window), so it reads as an age, never as a bare time of day that implies today. */
+  const lastCollect =
+    c.is_online === false
+      ? c.last_collection
+        ? " · last collect " + relTime(c.last_collection)
+        : " · no recent collection"
+      : " · last collect " + localClock(c.last_collection);
   const statusLine = c.awaiting_first_collection
     ? el("div", { class: "status-line awaiting", text: c.status })
-    : el("div", { class: "status-line", text: c.status + " · last collect " + localClock(c.last_collection) + coverage });
+    : el("div", { class: "status-line", text: c.status + lastCollect + coverage });
 
   return el(
     "div",
