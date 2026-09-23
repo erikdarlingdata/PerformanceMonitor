@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -430,23 +432,26 @@ public sealed class StoreToastAndCheckpointerTests
                 .Split('\n')
                 .Where(l => l.Trim().Length > 0));
 
-        /* objects[]: the four, trailing, through the null-conditional so every non-dimension kind reads null. */
+        /* Object rows: the four, trailing the byte-bearing row shape (#3903 split the job fields into a shape of
+           their own, so the aggregate's retention policy is what precedes them now), through the
+           null-conditional so every non-dimension kind reads null. */
         Assert.Contains(
-            "                        total_failures = r.TotalFailures,\n" +
-            "                        toast_bytes = ToastFacts(r)?.ToastBytes,\n" +
-            "                        toast_live_bytes = ToastFacts(r)?.ToastLiveBytes,\n" +
-            "                        toast_utilisation_pct = ToastFacts(r)?.UtilisationPercent,\n" +
-            "                        toast_utilisation_note = ToastFacts(r)?.Note,\n" +
-            "                    }),",
+            "            retention_policy_job_id = AggregateState(r, aggregateStateByView)?.RetentionJobId,\n" +
+            "            toast_bytes = ToastFacts(r)?.ToastBytes,\n" +
+            "            toast_live_bytes = ToastFacts(r)?.ToastLiveBytes,\n" +
+            "            toast_utilisation_pct = ToastFacts(r)?.UtilisationPercent,\n" +
+            "            toast_utilisation_note = ToastFacts(r)?.Note,\n" +
+            "        };",
             source, StringComparison.Ordinal);
 
-        /* daily[] points: the series — bytes, live bytes, the quotient; no note per point. */
+        /* Series points (the object view's daily series since #3903): bytes, live bytes, the quotient; no note
+           per point. */
         Assert.Contains(
-            "                            total_failures = p.TotalFailures,\n" +
-            "                            toast_bytes = DarlingStoreMetricsReader.ToastFacts.For(p)?.ToastBytes,\n" +
-            "                            toast_live_bytes = DarlingStoreMetricsReader.ToastFacts.For(p)?.ToastLiveBytes,\n" +
-            "                            toast_utilisation_pct = DarlingStoreMetricsReader.ToastFacts.For(p)?.UtilisationPercent,\n" +
-            "                        }),",
+            "            row_count = p.RowCount,\n" +
+            "            toast_bytes = DarlingStoreMetricsReader.ToastFacts.For(p)?.ToastBytes,\n" +
+            "            toast_live_bytes = DarlingStoreMetricsReader.ToastFacts.For(p)?.ToastLiveBytes,\n" +
+            "            toast_utilisation_pct = DarlingStoreMetricsReader.ToastFacts.For(p)?.UtilisationPercent,\n" +
+            "        };",
             source, StringComparison.Ordinal);
 
         /* The checkpointer block, and its keys. */
@@ -456,10 +461,22 @@ public sealed class StoreToastAndCheckpointerTests
             Assert.Contains(key, source, StringComparison.Ordinal);
         }
 
-        /* The checkpointer row is out of objects[] and daily[], the job_history precedent. */
-        Assert.Equal(2, Regex.Matches(source, @"&& [rp]\.ObjectKind != StoreSelfMetrics\.CheckpointerObjectKind\)").Count);
+        /* The checkpointer row is never a list row, the job_history precedent. Until #3903 two inequalities kept it
+           out of objects[] and daily[]; now every list is built from DarlingStoreMetricsReader.SelectObjects, whose
+           candidates are ListedKinds, so the pin is that list and that the tool builds from nothing else. */
+        Assert.DoesNotContain(StoreSelfMetrics.CheckpointerObjectKind, DarlingStoreMetricsReader.ListedKinds);
+        Assert.DoesNotContain(StoreSelfMetrics.JobHistoryObjectKind, DarlingStoreMetricsReader.ListedKinds);
+        Assert.Contains("var selection = DarlingStoreMetricsReader.SelectObjects(latest, kind, name);", source, StringComparison.Ordinal);
+        Assert.Empty(DarlingStoreMetricsReader.SelectObjects(
+            new[] { new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.CheckpointerObjectKind, StoreSelfMetrics.CheckpointerObjectName, DateTime.UtcNow, null, null, null, null, null, null) },
+            null, null).Matched);
 
-        /* The description carries the load-bearing sentences a caller reads before trusting a number. */
+        /* The description carries the load-bearing sentences a caller reads before trusting a number. Read off
+           the DESCRIPTION itself since #3903 rather than the whole source file, so a comment repeating a
+           phrase can no longer stand in for the sentence a caller actually reads. */
+        var description = typeof(DarlingMcpStoreMetricsTools)
+            .GetMethod(nameof(DarlingMcpStoreMetricsTools.GetStoreMetrics))!
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
         foreach (var phrase in new[]
         {
             "TOAST UTILISATION (V137, #3783)",
@@ -479,10 +496,10 @@ public sealed class StoreToastAndCheckpointerTests
             "Reset (a counter went backwards",
             "sync phases of 25.2 s and 14.0 s",
             "WAL sizing (#3802) and refresh slicing (#3745)",
-            "The checkpointer row is not in objects[] or daily[]",
+            "The checkpointer row is never an object row",
         })
         {
-            Assert.Contains(phrase, raw, StringComparison.Ordinal);
+            Assert.Contains(phrase, description, StringComparison.Ordinal);
         }
 
         /* Web and Viewer store-metrics surfaces: neither enumerates dimension columns — the Viewer only PROBES
