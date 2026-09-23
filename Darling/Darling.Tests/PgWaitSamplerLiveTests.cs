@@ -152,9 +152,21 @@ public sealed class PgWaitSamplerLiveTests
                appended column's position is proven against the migrated table, not a fake writer. */
             Assert.All(rows, r => Assert.Equal(PgWaitSamplingCollector.SamplerSnapshotsPerCycle * PgWaitSamplingCollector.SamplerPeriodMs, r.SampledMs));
             var lockRow = Assert.Single(rows, r => r.Type == "Lock" && r.Event == "relation");
-            /* Held for the whole window, so seen in nearly every snapshot; allow for the first snapshot racing the waiter. */
-            Assert.InRange(lockRow.Samples, PgWaitSamplingCollector.SamplerSnapshotsPerCycle / 2, PgWaitSamplingCollector.SamplerSnapshotsPerCycle);
-            Assert.Equal(1, lockRow.Backends);
+            /* Held for the whole window, so seen in nearly every snapshot; allow for the first snapshot racing the
+               waiter. Upper bound scales with the row's own backend_count rather than a flat SnapshotsPerCycle
+               (#3939): the sampler polls pg_stat_activity cluster-wide with no per-database filter, correctly, so
+               a concurrent own-store class's unrelated relation-lock wait on its own scratch database - on this
+               same server - lands in this exact (Lock, relation, query_id=0) bucket (query_id is 0 for every
+               backend on this rig; compute_query_id has nothing to turn it on). Reproduced directly: holding an
+               unrelated ACCESS EXCLUSIVE lock on a second database for the run pushed this row from 30/30 to
+               49 samples across 2 backends. Each distinct backend the window observed can contribute at most
+               SamplerSnapshotsPerCycle samples, so bounding by Backends x SnapshotsPerCycle stays exactly as tight
+               as before (<=30) in the ordinary one-backend case and only relaxes by as much real, distinct
+               concurrent activity the window actually saw. */
+            Assert.InRange(lockRow.Samples, PgWaitSamplingCollector.SamplerSnapshotsPerCycle / 2, PgWaitSamplingCollector.SamplerSnapshotsPerCycle * lockRow.Backends);
+            /* At least the test's own waiter; full-suite load can add another backend's unrelated relation-lock
+               wait to this same cluster-wide bucket (#3939), so this no longer pins the count to exactly 1. */
+            Assert.True(lockRow.Backends >= 1, $"expected at least the test's own waiter, saw {lockRow.Backends} backends");
             Assert.Contains(rows, r => r.Type == "CPU" && r.Event == "Running");
             /* The shared exclusions hold on this arm too: the holder is idle in transaction (Client), and no
                background sleeper (Activity/Timeout) is counted. */
