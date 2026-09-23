@@ -1525,8 +1525,8 @@ internal sealed class DarlingStoreUpgrade
     {
         /// <summary>The versions the store database can be at: what a runtime must carry libraries for to open it.</summary>
         public IReadOnlyList<string> StoreVersions => State == TimescaleRecordState.Current
-            ? new[] { Version! }
-            : new[] { Version!, PendingTo! };
+            ? [Version!]
+            : [Version!, PendingTo!];
 
         public string Format() => State == TimescaleRecordState.Current ? Version! : $"pending {Version} {PendingTo}";
     }

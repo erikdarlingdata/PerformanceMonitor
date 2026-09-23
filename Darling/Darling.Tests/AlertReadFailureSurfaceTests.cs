@@ -1190,8 +1190,9 @@ public sealed class AlertReadFailureSurfaceTests
            since #3580: the daily documents' delivery-stamp WRITE, a write whose loss costs one
            re-announcement at the next restart and never a delivery. 26th since #3915: the store-log re-mask
            pass, a maintenance rewrite of stored text that resumes next hour, with the reader masking in the
-           meantime. */
-        Assert.Equal(26, totalExempt);
+           meantime. 27th since #3908: the store TimescaleDB self-alert's catch, whose evidence is the version
+           the bootstrap read before the alert engine existed. */
+        Assert.Equal(27, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
