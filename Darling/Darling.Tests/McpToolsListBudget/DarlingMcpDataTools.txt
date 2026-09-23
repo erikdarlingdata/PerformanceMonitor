@@ -7,14 +7,14 @@ param get_blocking_stats.server_name 28
 tool get_collection_health 21026
 param get_collection_health.server_name 28
 
-tool get_collection_log 6995
+tool get_collection_log 606
 param get_collection_log.as_of 167
-param get_collection_log.collector_name 244
+param get_collection_log.collector_name 149
 param get_collection_log.hours_back 191
 param get_collection_log.limit 120
-param get_collection_log.min_duration_ms 382
+param get_collection_log.min_duration_ms 191
 param get_collection_log.server_name 96
-param get_collection_log.status 481
+param get_collection_log.status 195
 
 tool get_cpu_utilization 249
 param get_cpu_utilization.as_of 167
@@ -42,7 +42,7 @@ param get_perfmon_stats.counter_name 61
 param get_perfmon_stats.instance_name 57
 param get_perfmon_stats.server_name 28
 
-tool get_query_store_top 609
+tool get_query_store_top 422
 param get_query_store_top.as_of 167
 param get_query_store_top.database_name 30
 param get_query_store_top.hours_back 29
