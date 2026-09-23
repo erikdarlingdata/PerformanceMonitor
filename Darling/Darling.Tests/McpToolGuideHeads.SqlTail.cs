@@ -90,3 +90,60 @@ public sealed class McpToolGuideHeadsSqlTailTests
         Assert.Contains("it walks query_store_stats and wait_stats fleet-wide over the window", served.Tail!, StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for the "SqlTail" lane's second drop: <c>get_query_duration_trend</c> and
+/// <c>get_procedure_duration_trend</c>, twins on both products (D6). <c>get_query_store_duration_trend</c>
+/// shares the same source file but is out of scope for this drop; see the Handoff note in the PR that added
+/// this class. Follows the pattern in <see cref="McpToolGuideHeadsHealthParserTests"/>.
+/// </summary>
+public sealed class McpToolGuideHeadsSqlTailDurationTrendTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_query_duration_trend",
+        "get_procedure_duration_trend",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_query_duration_trend", "unrated_collections counts it, and a point left with nothing else carries null rates (unrated_points), never zero"),
+        ("get_query_duration_trend", "status empty means a quiet window that has collected before; unavailable means query_stats has never been collected here"),
+        ("get_query_duration_trend", "window_truncated is the store's retention floor, not a page cut"),
+        ("get_procedure_duration_trend", "charged to the whole call rather than smeared across its statements"),
+        ("get_procedure_duration_trend", "the empty/unavailable split and window_truncated (a retention floor, not a page cut) all follow get_query_duration_trend exactly"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>The tail keeps the original opening sentence and the original wording Darling's rollup route
+    /// carries; Lite's own tail says "Lite has one tier" instead, never this Darling-only clause. D6's generic
+    /// cross-SKU check (<see cref="McpToolGuideTests.EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads"/>)
+    /// already pins that these two heads match Lite's byte for byte, so nothing family-specific is needed for
+    /// that half here.</summary>
+    [Fact]
+    public void QueryDurationTrend_TailKeepsOriginalSentence_AndDarlingsRollupRouteDetail()
+    {
+        var served = McpToolGuideTests.Served("get_query_duration_trend");
+        Assert.Contains("Gets a time-series of average query duration over time.", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("The hourly rollup route divides by the bucket width and has no unrated point.", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Lite has one tier", served.Tail!, StringComparison.Ordinal);
+    }
+}

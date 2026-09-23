@@ -19,6 +19,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -305,12 +306,14 @@ public sealed class McpToolGuideTests
         return Regex.Unescape(sb.ToString());
     }
 
-    private static readonly Type[] KnownConstantClasses = [typeof(McpToolGuideTopics), typeof(McpToolGuide), typeof(AlertReadFailureCounter)];
+    private static readonly Type[] KnownConstantClasses =
+        [typeof(McpToolGuideTopics), typeof(McpToolGuide), typeof(AlertReadFailureCounter), typeof(McpHelpers), typeof(BaselineDiscontinuities)];
 
     /// <summary>Resolves a <c>ClassName.MemberName</c> piece of a concatenated Description to its compile-time
-    /// value, for the handful of shared constants (topic texts, the marker, the fleet-scoped-reads sentence)
-    /// tool descriptions embed instead of repeating. Returns null for anything else, so the caller fails naming
-    /// the tool rather than silently dropping an unrecognized piece.</summary>
+    /// value, for the handful of shared constants (topic texts, the marker, the fleet-scoped-reads sentence,
+    /// and the window-floor / baseline-discontinuity sentences the trend family's tails carry) tool descriptions
+    /// embed instead of repeating. Returns null for anything else, so the caller fails naming the tool rather
+    /// than silently dropping an unrecognized piece.</summary>
     private static string? ResolveKnownConstant(string className, string memberName)
     {
         var type = KnownConstantClasses.FirstOrDefault(t => t.Name == className);
