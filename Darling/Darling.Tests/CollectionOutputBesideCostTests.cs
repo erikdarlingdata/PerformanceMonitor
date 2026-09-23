@@ -197,8 +197,9 @@ public sealed class CollectionOutputBesideCostTests
     /// SEVENTH parameter reports itself here instead of passing unnoticed — the discipline
     /// <see cref="TheBandingSignature_TakesNoOutputAndNoDenialCurrency"/> applies to the band, one method
     /// over. Six since #3754: the faulted-run count (a RUN-CLASS count, like the note count beside it) and
-    /// the event-collector bool, which is computed by the caller from the name on <c>Classify</c>'s
-    /// <c>isOnLoad</c> pattern precisely so that this method still takes no string.
+    /// the event-collector bool, which is computed by the caller from the name on
+    /// <see cref="CollectorHealthClassifier.IsEventCollector"/>'s own name-list pattern precisely so that
+    /// this method still takes no string.
     ///
     /// <para><b>The load-bearing half is that none of it is a string.</b> The note's prose has exactly one
     /// home, <see cref="CollectorHealthClassifier.FormatCollectionNote"/>. A finding that took the note TEXT
@@ -262,7 +263,7 @@ public sealed class CollectionOutputBesideCostTests
     /// the predicate. #3017 consumes the predicate for the first time, so the risk it introduces is exactly
     /// that consumption leaking into the banding chain. This reads
     /// <see cref="CollectorHealthClassifier.Classify"/>'s parameter list off the TYPE rather than asserting
-    /// over a hand-written list of what it takes today, so a TENTH parameter — an output count, a denial
+    /// over a hand-written list of what it takes today, so a NINTH parameter — an output count, a denial
     /// flag, anything — fails here instead of passing unnoticed.</para>
     /// </summary>
     [Fact]
@@ -275,16 +276,19 @@ public sealed class CollectionOutputBesideCostTests
             .ToArray();
 
         /* The precondition, named so a signature change reports itself instead of turning the assertions
-           below into a vacuous pass over a list that no longer means what this test thinks. 10 since
-           #3240 added extensionMissingCount — a RUN-CLASS count like the two beside it, not an output or
-           denial-currency term, which is what this pin refuses. */
-        Assert.Equal(10, parameters.Length);
+           below into a vacuous pass over a list that no longer means what this test thinks. 10 after #3240
+           added extensionMissingCount (a RUN-CLASS count like the two beside it, not an output or
+           denial-currency term, which is what this pin refuses); #4000 then removed isOnLoad, netting 9 -
+           an on-load collector is no longer a distinct input to the ladder, only a distinct CADENCE the
+           caller resolves (to CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes) before calling
+           in, so the ladder itself needs one fewer parameter to describe it. */
+        Assert.Equal(9, parameters.Length);
 
         Assert.Equal(
             new[]
             {
                 "totalRuns", "successCount", "errorCount", "permissionDeniedCount", "extensionMissingCount",
-                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes", "isOnLoad",
+                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes",
             },
             parameters);
 
