@@ -410,6 +410,9 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 WITH latest AS
 (
+    -- #3902: the row's clustered key rides the window, not its text. query_text is the compressed
+    -- varbinary(max) statement, and carrying it through the ROW_NUMBER sort for every row in the window
+    -- paid for the window's worth of text to print five; the final SELECT fetches it for those five by key.
     SELECT
         database_name,
         query_hash,
@@ -422,7 +425,8 @@ WITH latest AS
         max_grant_kb,
         min_spills,
         max_spills,
-        query_text,
+        collection_time,
+        collection_id,
         ROW_NUMBER() OVER
         (
             PARTITION BY database_name, query_hash, query_plan_hash
@@ -432,27 +436,49 @@ WITH latest AS
     WHERE collection_time >= @startTime
     AND   collection_time <= @endTime
     AND   execution_count_delta > 0
+),
+offenders AS
+(
+    SELECT
+        database_name,
+        query_hash,
+        query_plan_hash,
+        execution_count,
+        min_worker_time,
+        max_worker_time,
+        CAST(max_worker_time AS float) / NULLIF(min_worker_time, 0) AS worker_ratio,
+        CAST(max_grant_kb AS float) / NULLIF(min_grant_kb, 0) AS grant_ratio,
+        CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+        collection_time,
+        collection_id
+    FROM latest
+    WHERE rn = 1
+    AND   min_worker_time >= 10000
+    AND   max_worker_time >= 250000
+    AND   execution_count >= 20
+    AND   creation_time <= @startTime
+    AND   CAST(max_worker_time AS float) / NULLIF(min_worker_time, 0) >= 10
+    ORDER BY worker_ratio DESC
+    OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY
 )
 SELECT
-    database_name,
-    CONVERT(varchar(18), query_hash, 1) AS query_hash,
-    CONVERT(varchar(18), query_plan_hash, 1) AS query_plan_hash,
-    execution_count,
-    min_worker_time,
-    max_worker_time,
-    CAST(max_worker_time AS float) / NULLIF(min_worker_time, 0) AS worker_ratio,
-    CAST(max_grant_kb AS float) / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    LEFT(CAST(DECOMPRESS(query_text) AS NVARCHAR(MAX)), 500) AS query_text
-FROM latest
-WHERE rn = 1
-AND   min_worker_time >= 10000
-AND   max_worker_time >= 250000
-AND   execution_count >= 20
-AND   creation_time <= @startTime
-AND   CAST(max_worker_time AS float) / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY";
+    o.database_name,
+    CONVERT(varchar(18), o.query_hash, 1) AS query_hash,
+    CONVERT(varchar(18), o.query_plan_hash, 1) AS query_plan_hash,
+    o.execution_count,
+    o.min_worker_time,
+    o.max_worker_time,
+    o.worker_ratio,
+    o.grant_ratio,
+    o.spill_divergence,
+    -- The same row's text, by its clustered primary key (collection_time, collection_id). LEFT, so a row
+    -- purged between the two reads still reports its offender rather than vanishing.
+    LEFT(CAST(DECOMPRESS(qs.query_text) AS NVARCHAR(MAX)), 500) AS query_text
+FROM offenders AS o
+LEFT JOIN collect.query_stats AS qs
+  ON  qs.collection_time = o.collection_time
+  AND qs.collection_id = o.collection_id
+ORDER BY o.worker_ratio DESC";
 
         cmd.Parameters.Add(new SqlParameter("@startTime", context.TimeRangeStart));
         cmd.Parameters.Add(new SqlParameter("@endTime", context.TimeRangeEnd));
@@ -484,6 +510,9 @@ OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY";
     /// Top regressed queries behind a PLAN_REGRESSION finding.
     /// Uses the same 14-day server_last_execution_time comparison window as the detector
     /// (NOT the standard analysis window) so the days-old "best plan" baseline is present.
+    /// Since #3902 it re-runs the detection over the queries the fact reported this pass
+    /// (<see cref="AnalysisContext.PlanRegressionOffenders"/>), and over every query only when
+    /// the fact did not run.
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
@@ -491,11 +520,40 @@ OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY";
         await connection.OpenAsync();
 
         using var cmd = connection.CreateCommand();
+
+        /* #3902: the fact's offenders, or no filter at all when it did not run, failed, or reported none. An
+           empty list is read as unrestricted rather than as "nothing": a pass whose fact found no regression
+           raises no PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a
+           fact. One parameter per value rather than a split string: a database name may hold any delimiter,
+           and STRING_SPLIT needs compatibility level 130 in this database. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        var offenderFilter = string.Empty;
+        if (offenders is not null)
+        {
+            var databases = offenders.Select(o => o.DatabaseName).Distinct(StringComparer.Ordinal).ToList();
+            var queryIds = offenders.Select(o => o.QueryId).Distinct().ToList();
+
+            offenderFilter =
+                "\n    AND   database_name IN (" + string.Join(", ", databases.Select((_, i) => "@offenderDatabase" + i)) + ")" +
+                "\n    AND   query_id IN (" + string.Join(", ", queryIds.Select((_, i) => "@offenderQueryId" + i)) + ")";
+
+            for (var i = 0; i < databases.Count; i++)
+                cmd.Parameters.Add(new SqlParameter("@offenderDatabase" + i, databases[i]));
+            for (var i = 0; i < queryIds.Count; i++)
+                cmd.Parameters.Add(new SqlParameter("@offenderQueryId" + i, queryIds[i]));
+        }
+
         cmd.CommandText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 WITH deduped AS
 (
+    -- #3902: restricted to the PLAN_REGRESSION fact's offenders when the fact ran this pass (the IN lists
+    -- appended below the window bound). The top five this read returns are the head of the ranking the fact
+    -- has already computed -- the same detection over the same window, folded and ranked the same way -- so
+    -- deduplicating the whole Query Store slice again to find them was the pass's most expensive read run
+    -- twice. The two lists are matched independently, which admits every pairing of the listed databases and
+    -- query ids: a superset of the offenders, never a subset.
     SELECT
         database_name,
         query_id,
@@ -512,7 +570,7 @@ WITH deduped AS
         ) AS rn
     FROM collect.query_store_data
     WHERE execution_type_desc = N'Regular'
-    AND   server_last_execution_time >= @windowStart
+    AND   server_last_execution_time >= @windowStart" + offenderFilter + @"
 ),
 plan_agg AS
 (

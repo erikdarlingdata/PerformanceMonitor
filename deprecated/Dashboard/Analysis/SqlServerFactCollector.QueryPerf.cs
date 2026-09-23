@@ -208,6 +208,10 @@ OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY";
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
+           than a list some earlier pass stamped on a reused context. */
+        context.PlanRegressionOffenders = null;
+
         try
         {
             using var connection = new SqlConnection(_connectionString);
@@ -310,7 +314,8 @@ compared AS
          FROM (VALUES
              (CAST(l.cpu_per_exec AS float) / NULLIF(b.cpu_per_exec, 0)),
              (CAST(l.dur_per_exec AS float) / NULLIF(b.dur_per_exec, 0))
-         ) AS x(v)) AS regression_factor
+         ) AS x(v)) AS regression_factor,
+        l.database_name
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -327,7 +332,10 @@ SELECT
     force_failure_count,
     best_cpu,
     best_dur,
-    regression_factor
+    regression_factor,
+    -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
+    -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
+    database_name
 FROM compared
 WHERE regression_factor >= 2
 ORDER BY regression_factor DESC
@@ -343,6 +351,7 @@ OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            var offenders = new List<PlanRegressionOffender>();
 
             using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
@@ -366,7 +375,14 @@ OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY";
                     worstDimension = cpuRatio >= durRatio ? 1 : 2; // 1 = cpu, 2 = duration
                 }
                 offenderCount++;
+
+                /* #3902: both keys are join keys of the comparison above, so neither is ever NULL here. */
+                var offender = new PlanRegressionOffender(reader.GetString(8), Convert.ToInt64(reader.GetValue(0)));
+                if (!offenders.Contains(offender))
+                    offenders.Add(offender);
             }
+
+            context.PlanRegressionOffenders = offenders;
 
             if (offenderCount == 0) return;
 
