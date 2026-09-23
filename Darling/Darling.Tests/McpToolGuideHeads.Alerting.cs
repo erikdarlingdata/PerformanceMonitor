@@ -30,6 +30,10 @@ public sealed class McpToolGuideHeadsAlertingTests
         "get_notification_routes",
         "update_alert_settings",
         "update_mute_rule",
+        "get_alert_history",
+        "set_notification_route_enabled",
+        "create_mute_rule",
+        "set_mute_rule_enabled",
     ];
 
     [Fact]
@@ -148,5 +152,104 @@ public sealed class McpToolGuideHeadsAlertingTests
         Assert.Contains("Stale Mute Rules self-alert ages a rule from its creation date", muteRuleTail, StringComparison.Ordinal);
         Assert.Contains("a whole-fleet silence", muteRuleTail, StringComparison.Ordinal);
         Assert.Contains("must match the alert rows' spelling EXACTLY", muteRuleTail, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3c: get_alert_history's head states the fired/delivered/dismissed distinction (a row
+    /// existing means it FIRED; notification_type says whether it was DELIVERED; dismissed is a third, separate,
+    /// excluded-by-default axis), the page-bound-by-limit-not-hours_back trap, and the empty-vs-quiet hazard (an
+    /// empty page can mean no alerts fired OR that every alert was dismissed). Byte-identical on Lite (D6),
+    /// pinned again in <c>Lite.Tests/McpToolGuideHeads.Alerting.cs</c>.</summary>
+    [Fact]
+    public void GetAlertHistoryHead_StatesFiredVsDeliveredVsDismissedAndThePageBound()
+    {
+        var head = McpToolGuideTests.Served("get_alert_history").Served;
+        Assert.Contains("each row FIRED", head, StringComparison.Ordinal);
+        Assert.Contains("notification_type says whether it was DELIVERED", head, StringComparison.Ordinal);
+        Assert.Contains("DISMISSED (UI-acknowledged), excluded by default", head, StringComparison.Ordinal);
+        Assert.Contains("THE PAGE IS BOUNDED BY limit, NOT hours_back", head, StringComparison.Ordinal);
+        Assert.Contains("An EMPTY page can mean no alerts fired, or that every alert here was dismissed", head, StringComparison.Ordinal);
+        Assert.Contains("A null send_error proves nothing about delivery", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3c: set_notification_route_enabled's head states what it changes (shared alert
+    /// configuration), that it is reversible (unlike delete_notification_route), and the two safe-retry
+    /// outcomes.</summary>
+    [Fact]
+    public void SetNotificationRouteEnabledHead_StatesTheChangeAndReversibility()
+    {
+        var head = McpToolGuideTests.Served("set_notification_route_enabled").Served;
+        Assert.Contains("WITHOUT deleting it", head, StringComparison.Ordinal);
+        Assert.Contains("Changes shared alert configuration the service delivers on", head, StringComparison.Ordinal);
+        Assert.Contains("Reversible: re-enabling restores it exactly", head, StringComparison.Ordinal);
+        Assert.Contains("Returns updated (route as stored), unchanged", head, StringComparison.Ordinal);
+        Assert.Contains("Cannot author or re-point a route", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3c: create_mute_rule's head states the whole-fleet-silence hazard of a rule with no
+    /// scope fields, that there is no confirm step (it takes effect on the next collection sweep), and what it
+    /// returns for the follow-up delete/enable calls.</summary>
+    [Fact]
+    public void CreateMuteRuleHead_StatesTheEmptyRuleMutesEverythingHazard()
+    {
+        var head = McpToolGuideTests.Served("create_mute_rule").Served;
+        Assert.Contains("Changes shared alert configuration the service delivers on", head, StringComparison.Ordinal);
+        Assert.Contains("a rule with NO fields set matches and mutes EVERY alert across the whole fleet", head, StringComparison.Ordinal);
+        Assert.Contains("No confirm step", head, StringComparison.Ordinal);
+        Assert.Contains("Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3c: set_mute_rule_enabled's head states it is the reversible alternative to
+    /// delete+create (which loses the id and resets the Stale Mute Rules age clock), and the two safe-retry
+    /// outcomes.</summary>
+    [Fact]
+    public void SetMuteRuleEnabledHead_StatesTheReversibleFlagAndTheStaleClock()
+    {
+        var head = McpToolGuideTests.Served("set_mute_rule_enabled").Served;
+        Assert.Contains("WITHOUT deleting it", head, StringComparison.Ordinal);
+        Assert.Contains("Changes shared alert configuration the service delivers on", head, StringComparison.Ordinal);
+        Assert.Contains("keeps its id, scope, reason and creation date", head, StringComparison.Ordinal);
+        Assert.Contains("unlike delete+create, which loses those and resets the Stale Mute Rules age clock", head, StringComparison.Ordinal);
+        Assert.Contains("Returns updated (rule as stored), unchanged", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>D9: load-bearing facts that moved off get_alert_history's head stay reachable in Darling's own
+    /// tail: the full notification_type taxonomy, the severity/severity_source distinction, and the route vs
+    /// routing distinction (#3598/#3712 refs stripped per D4, the facts kept).</summary>
+    [Fact]
+    public void DarlingGetAlertHistoryTail_StillCarriesTheNotificationTypeAndRoutingTaxonomy()
+    {
+        var tail = McpToolGuideTests.Served("get_alert_history").Tail!;
+        Assert.Contains("notification_type is the delivery disposition and is the ONLY field that says why a row did not deliver", tail, StringComparison.Ordinal);
+        Assert.Contains("severity_source says where it came from", tail, StringComparison.Ordinal);
+        Assert.Contains("route says WHERE the posts went:", tail, StringComparison.Ordinal);
+        Assert.Contains("routing is a DIFFERENT question from route:", tail, StringComparison.Ordinal);
+        Assert.Contains("To see what the digest carried", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("(#3598)", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("(#3712)", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>D9/D2: the three write tools' tails still carry their full original reasoning, and
+    /// get_alert_history's include_dismissed overflow (D2: the parameter's own text stayed under 200 chars, the
+    /// rest moved to the tool's tail) is reachable there.</summary>
+    [Fact]
+    public void DarlingWriteToolTails_StillCarryTheOriginalReasoningAndTheMovedParameterOverflow()
+    {
+        var routeTail = McpToolGuideTests.Served("set_notification_route_enabled").Tail!;
+        Assert.Contains("the reversible form of", routeTail, StringComparison.Ordinal);
+        Assert.Contains("The running service picks the change up on its next collection sweep", routeTail, StringComparison.Ordinal);
+        Assert.Contains("destinations are bearer secrets and are set only in the Viewer's Settings window", routeTail, StringComparison.Ordinal);
+
+        var createTail = McpToolGuideTests.Served("create_mute_rule").Tail!;
+        Assert.Contains("the same rules get_mute_rules lists and the Viewer's Manage Mute Rules surface writes", createTail, StringComparison.Ordinal);
+        Assert.Contains("expires_at is an optional ISO-8601 UTC timestamp", createTail, StringComparison.Ordinal);
+        Assert.Contains("a matching alert already mid-flight can still be delivered once", createTail, StringComparison.Ordinal);
+
+        var enabledTail = McpToolGuideTests.Served("set_mute_rule_enabled").Tail!;
+        Assert.Contains("USE THIS rather than delete_mute_rule followed by create_mute_rule", enabledTail, StringComparison.Ordinal);
+        Assert.Contains("NEITHER direction changes created_at_utc", enabledTail, StringComparison.Ordinal);
+
+        var historyTail = McpToolGuideTests.Served("get_alert_history").Tail!;
+        Assert.Contains("Dismissal is an acknowledgement, not a verdict", historyTail, StringComparison.Ordinal);
+        Assert.Contains("Each row then carries dismissed so the two populations stay distinguishable", historyTail, StringComparison.Ordinal);
     }
 }
