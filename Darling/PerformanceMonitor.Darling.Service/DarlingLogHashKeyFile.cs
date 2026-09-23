@@ -36,9 +36,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Trusted the way #3983 trusts the compose role passwords</b>: the directory is set owner-only again first
 /// (<see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/>), then the file must be a regular file no one
 /// else can reach (<see cref="DarlingManagedRoles.UntrustedComposeCredentialReason"/>): no group or other bits on
-/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users. The directory is judged by the
-/// mode this START first found it with (<see cref="ComposeCredentialDirectoryStart"/>), because on compose role
-/// provisioning looks first and sets it owner-only before the key loads.</para>
+/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users.</para>
 ///
 /// <para><b>Where it parts from #3983: an existing key is not replaced, with one exception.</b> A role password costs
 /// only a re-assert to regenerate, so #3983 discards a file it cannot trust. A new key gives every stored log event a
@@ -48,11 +46,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// (<see cref="PgLogHashKey.UnavailableMessage"/>) until an operator fixes the file or deletes it. Deleting is how an
 /// operator rotates, and it is a deliberate act.</para>
 ///
-/// <para>The exception is #3983's own case (#4004 review): a directory other users could write to until this start.
-/// Any file in it could have been planted, and the file check cannot tell (it cannot see a Unix owner), so the key
-/// there is discarded and a new one generated, as every role password there is. Refusing it instead would hold for
-/// one start only: the next finds the directory owner-only, because this start set it so, and would trust the
-/// planted file.</para>
+/// <para>The exception is #3983's own case (#4004 review): a directory other users could write to until the service
+/// set it owner-only. Any file in it could have been planted, and the file check cannot tell (it cannot see a Unix
+/// owner), so the directory check removes the key there along with every role password, at the moment it finds the
+/// directory open, whichever caller that is (<see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/>),
+/// and this load then generates a new one. Refusing the key instead would hold for one start only: the next finds the
+/// directory owner-only, because the check set it so, and would trust the planted file. The removal is logged as an
+/// error, since a directory that keeps being opened (a Kubernetes fsGroup re-applied on every mount) rotates the key
+/// on every start.</para>
 /// </summary>
 public static class DarlingLogHashKeyFile
 {
@@ -124,9 +125,9 @@ public static class DarlingLogHashKeyFile
     }
 
     /// <summary>
-    /// Loads the key from <paramref name="directory"/>, generating it when no file exists at its path, or when the
-    /// directory was open to other users until this start (the class's one exception). Never throws for anything the
-    /// file system or the file can do; the result says what happened.
+    /// Loads the key from <paramref name="directory"/>, generating it when no file exists at its path, which includes a
+    /// key the directory check has just removed (the class's one exception). Never throws for anything the file system
+    /// or the file can do; the result says what happened.
     /// </summary>
     public static DarlingLogHashKeyLoad Load(string directory, ILogger logger)
     {
@@ -139,25 +140,14 @@ public static class DarlingLogHashKeyFile
             var trust = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, create: true, logger);
             var exists = AnythingAt(path);
 
+            /* A directory other users could write to until now has already lost every file the service reads from it,
+               this key included, inside the check itself (#4004 review): whichever caller found it open (role
+               provisioning, a host's earlier-credential read, or this load) removed them before returning. So a key
+               found past the check is one written while only the service could reach the directory, and a directory
+               that is not trusted is one nothing is read from or written to. */
             if (trust.Distrust is { } distrust)
             {
-                if (!trust.MayWrite)
-                {
-                    return Refuse(path, $"its directory {directory} is not trusted ({distrust})");
-                }
-
-                /* The directory let other users put files in it until this start (#3983's arm), and a planted 0600 file
-                   passes the file check, which cannot see a Unix owner. The verdict is the start's (#4004 review): on
-                   compose, role provisioning runs first and sets the directory 0700, and judged by what this call found,
-                   the key load trusted a planted key. So a key found there is discarded and a new one generated, as
-                   #3983 replaces every role password there. Refusing it would last one start: the next finds the
-                   directory owner-only and trusts the same file. Only the service can reach the directory now. */
-                if (exists && Discard(path, directory, distrust, logger) is { } failure)
-                {
-                    return Refuse(path, failure);
-                }
-
-                return Generate(path, logger);
+                return Refuse(path, $"its directory {directory} is not trusted ({distrust})");
             }
 
             if (exists)
@@ -185,33 +175,6 @@ public static class DarlingLogHashKeyFile
     {
         var info = new FileInfo(path);
         return info.LinkTarget is not null || info.Exists || Directory.Exists(path);
-    }
-
-    /// <summary>
-    /// Removes the key a directory that was open to other users held (#4004 review), or says why it could not. A
-    /// symbolic link is removed itself, never followed; a directory at the path is not removed, and refuses the load
-    /// as it would anywhere else.
-    /// </summary>
-    private static string? Discard(string path, string directory, string distrust, ILogger logger)
-    {
-        if (new FileInfo(path).LinkTarget is null && Directory.Exists(path))
-        {
-            return "it is a directory";
-        }
-
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return $"its directory {directory} was open to other users until this start ({distrust}) and it could not be removed ({ex.Message})";
-        }
-
-        logger.LogWarning(
-            "The store's log-hash key {Path} was in a directory other users could write to until this start ({Reason}), so it may not be the key this service generated. It is discarded and a new one generated (#4004); log events stored from now on are identified by hashes keyed with the new key.",
-            path, distrust);
-        return null;
     }
 
     private static DarlingLogHashKeyLoad Read(string path, ILogger logger)
@@ -269,8 +232,13 @@ public static class DarlingLogHashKeyFile
     /// </summary>
     private static DarlingLogHashKeyLoad Generate(string path, ILogger logger)
     {
-        var material = RandomNumberGenerator.GetBytes(PgLogHashKey.KeyLength);
         var temporary = path + ".tmp";
+        if (ClearStaleTemporary(temporary) is { } stale)
+        {
+            return Refuse(path, stale);
+        }
+
+        var material = RandomNumberGenerator.GetBytes(PgLogHashKey.KeyLength);
         try
         {
             var encoded = Convert.ToBase64String(material);
@@ -317,11 +285,35 @@ public static class DarlingLogHashKeyFile
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             TryDelete(temporary, logger);
-            return Refuse(path, $"it did not exist and a new one could not be written ({ex.Message})");
+            return Refuse(path, $"there was no key, and a new one could not be written ({ex.Message})");
         }
         finally
         {
             CryptographicOperations.ZeroMemory(material);
+        }
+    }
+
+    /// <summary>
+    /// A directory where the new key's temporary file goes (#4004 review): File.Delete cannot remove it, so the write
+    /// failed on every start with a reason that named only the key ("it did not exist"). An empty one is removed, which
+    /// is safe (a non-recursive delete removes nothing inside, and a symbolic link is not a directory here); one with
+    /// anything in it is someone's tree, left alone, and named as the reason. Null when the path is clear.
+    /// </summary>
+    private static string? ClearStaleTemporary(string temporary)
+    {
+        if (new FileInfo(temporary).LinkTarget is not null || !Directory.Exists(temporary))
+        {
+            return null;
+        }
+
+        try
+        {
+            Directory.Delete(temporary, recursive: false);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"{temporary}, the file a new key is written through before it is moved into place, is a directory the service could not remove ({ex.Message}); remove it and restart";
         }
     }
 

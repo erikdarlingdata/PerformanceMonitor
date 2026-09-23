@@ -456,10 +456,11 @@ public sealed class DarlingStoreLoginsTests
     }
 
     /// <summary>
-    /// #4004's review: a host's earlier-credential read gets the START's directory verdict. Whatever looked at the
-    /// directory first (the worker, as provisioning or as the log-hash key's load) set it 0700, so a read judged by what
-    /// IT found trusted a password planted while the directory was 0777. It is refused now with the start's reason, and
-    /// left where it is: replacing it is provisioning's job.
+    /// #4004's review: a host's earlier-credential read after another caller closed the directory. Whatever looked at
+    /// the directory first (the worker, as provisioning or as the log-hash key's load) set it 0700, so a read judged by
+    /// what IT found trusted a password planted while the directory was 0777. Round 2: that first look removed the
+    /// planted password there and then, so the read finds none, and a later start cannot find it either. A directory
+    /// opened again after that look is found open again by the next look, and emptied again.
     /// </summary>
     [Fact]
     public void AnEarlierCredential_InADirectoryOpenUntilThisStart_IsNotRead_AfterAnotherCallerClosedIt()
@@ -474,17 +475,28 @@ public sealed class DarlingStoreLoginsTests
             var modes = new StandInUnixModes();
             modes.Report(directory, "777");
 
-            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
             {
                 var first = DarlingManagedRoles.PrepareComposeCredentialDirectory(directory, create: true, NullLogger.Instance);
                 Assert.Equal("700", modes.Octal(directory));
+                Assert.Null(first.Distrust);
+                Assert.False(File.Exists(viewerFile), "the planted password outlived the look that found its directory open");
 
                 var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance);
 
                 Assert.Null(earlier.Password);
-                Assert.Equal($"the credentials directory {directory} is not trusted ({first.Distrust})", earlier.MissingReason);
-                Assert.StartsWith("its mode was 0777", first.Distrust, StringComparison.Ordinal);
-                Assert.Equal("Planted4004", File.ReadAllText(viewerFile));
+                Assert.Equal($"{viewerFile} does not exist", earlier.MissingReason);
+
+                /* Opened again after the first look, and planted again: round 1 judged every later caller by the mode the
+                   first look found (0700 by now) and trusted this. */
+                modes.Report(directory, "777");
+                StandInUnixModes.WriteOwnerOnly(viewerFile, "PlantedAgain4004");
+
+                var again = DarlingManagedRoles.ReadEarlierComposeCredential(directory, "viewer", NullLogger.Instance);
+
+                Assert.Null(again.Password);
+                Assert.False(File.Exists(viewerFile), "a password planted after the first look was read");
+                Assert.Equal("700", modes.Octal(directory));
             }
         }
         finally

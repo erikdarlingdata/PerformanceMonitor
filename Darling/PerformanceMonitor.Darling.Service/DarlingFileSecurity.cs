@@ -187,9 +187,13 @@ public static class DarlingFileSecurity
     /// folder only — so the operator's Viewer can reach the admin/viewer credential files beside the
     /// data directory without that access flowing into the data-directory subtree.
     /// </summary>
-    public static void HardenDirectory(string path, bool allowInteractiveTraverse)
+    public static void HardenDirectory(string path, bool allowInteractiveTraverse) =>
+        new DirectoryInfo(path).SetAccessControl(HardenedDirectorySecurity(allowInteractiveTraverse));
+
+    /// <summary>The one ACL <see cref="HardenDirectory"/> and <see cref="HardenWithoutFollowingLinks"/> apply to a
+    /// directory.</summary>
+    private static DirectorySecurity HardenedDirectorySecurity(bool allowInteractiveTraverse)
     {
-        var info = new DirectoryInfo(path);
         var security = new DirectorySecurity();
 
         /* Protect the DACL (isProtected: true) and drop inherited ACEs (preserveInheritance: false):
@@ -214,8 +218,131 @@ public static class DarlingFileSecurity
                 AccessControlType.Allow));
         }
 
-        info.SetAccessControl(security);
+        return security;
     }
+
+    /// <summary>
+    /// <see cref="HardenFile"/> or <see cref="HardenDirectory"/>, applied through a handle to exactly the object at
+    /// <paramref name="path"/>, never through a junction or symbolic link (#4004 review, round 2). An ACL set by path
+    /// follows every link on it, so a link planted where the path runs would have an elevated caller rewrite whatever
+    /// it points at. The object is opened without following a link at its own name
+    /// (<c>FILE_FLAG_OPEN_REPARSE_POINT</c>) and kept open while it is checked and changed, so what is checked is what
+    /// is changed: it must not be a link itself, and its final path must be <paramref name="anchorDirectory"/>'s own
+    /// final path followed by the same names, which a link anywhere between the two would change.
+    /// </summary>
+    /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
+    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory)
+    {
+        var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        if (!full.StartsWith(anchor + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException($"{full} is not below {anchor}.", nameof(path));
+        }
+
+        string anchorFinal;
+        using (var anchorHandle = OpenForSecurity(anchor, followLink: true, access: FileReadAttributes))
+        {
+            anchorFinal = FinalPath(anchorHandle);
+        }
+
+        using var handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
+        {
+            return $"{full} is a junction or symbolic link";
+        }
+
+        var expected = anchorFinal + full[anchor.Length..];
+        var actual = FinalPath(handle);
+        if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{full} resolves to {actual}, so a junction or symbolic link is on its path";
+        }
+
+        NativeObjectSecurity security = isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive);
+        var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+        var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
+        descriptor.DiscretionaryAcl.GetBinaryForm(dacl, 0);
+        var pinned = System.Runtime.InteropServices.GCHandle.Alloc(dacl, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            var result = SetSecurityInfo(
+                handle, FileObject, DaclSecurityInformation | ProtectedDaclSecurityInformation,
+                IntPtr.Zero, IntPtr.Zero, pinned.AddrOfPinnedObject(), IntPtr.Zero);
+            if (result != 0)
+            {
+                throw new System.ComponentModel.Win32Exception((int)result);
+            }
+        }
+        finally
+        {
+            pinned.Free();
+        }
+
+        return null;
+    }
+
+    private const uint ReadControl = 0x00020000;
+    private const uint WriteDac = 0x00040000;
+    private const uint FileReadAttributes = 0x00000080;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const int FileObject = 1;
+    private const uint DaclSecurityInformation = 0x00000004;
+    private const uint ProtectedDaclSecurityInformation = 0x80000000;
+
+    /// <summary>Opens a file or directory (backup semantics) for its security, sharing everything but delete, so it
+    /// cannot be renamed or removed while it is held.</summary>
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenForSecurity(string path, bool followLink, uint access)
+    {
+        var handle = CreateFileW(
+            path, access, FileShare.ReadWrite, IntPtr.Zero, FileMode.Open,
+            FileFlagBackupSemantics | (followLink ? 0 : FileFlagOpenReparsePoint), IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened");
+        }
+
+        return handle;
+    }
+
+    /// <summary>The path the system resolves an open handle to, without the <c>\\?\</c> prefix.</summary>
+    private static string FinalPath(Microsoft.Win32.SafeHandles.SafeFileHandle handle)
+    {
+        var buffer = new char[1024];
+        var length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
+        if (length > buffer.Length)
+        {
+            buffer = new char[length];
+            length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
+        }
+
+        if (length == 0 || length > buffer.Length)
+        {
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError());
+        }
+
+        var path = new string(buffer, 0, (int)length);
+        return path.StartsWith(@"\\?\UNC\", StringComparison.Ordinal) ? @"\\" + path[8..]
+            : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
+            : path;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
+        string lpFileName, uint dwDesiredAccess, FileShare dwShareMode, IntPtr lpSecurityAttributes,
+        FileMode dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile, [System.Runtime.InteropServices.Out] char[] lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, int objectType, uint securityInfo,
+        IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
 
     /// <summary>
     /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access. When

@@ -369,6 +369,79 @@ public sealed class ComposeStoreRolesLiveTests
         }
     }
 
+    /// <summary>
+    /// #4004's review, round 2 (M1), on a real store. A start whose store stood down never provisions and never loads
+    /// the log-hash key, but a host's earlier-credential read still sets an open credentials directory 0700. Round 1
+    /// kept the "was open" verdict in memory only, so the NEXT start found the directory owner-only, re-asserted a
+    /// planted admin password on the admin role and loaded a planted key. Now the host's read removes both, and the
+    /// next start's provisioning and key load use neither. Driven through the Unix-mode seam (the directory is reported
+    /// as 0777 at the host's read).
+    /// </summary>
+    [Fact]
+    public async Task APlantedPasswordAndKey_InADirectoryAHostFoundOpen_AreUsedByNoLaterStart_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-4004-planted-");
+        var credentials = Path.Combine(root.FullName, "credentials");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            await using var ownerSource = NpgsqlDataSource.Create(owner);
+
+            /* An earlier start provisioned the roles and wrote their files. */
+            var earlier = new CapturingTestLogger();
+            Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, earlier, ct, credentials)).Provisioned, earlier.Joined);
+
+            /* While the directory was 0777, someone replaced the admin password and planted a key. */
+            var adminFile = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName(DarlingManagedPostgres.AdminRoleName));
+            var keyFile = Path.Combine(credentials, DarlingLogHashKeyFile.FileName);
+            const string plantedAdmin = "Planted4004AdminPassword";
+            File.Delete(adminFile);
+            StandInUnixModes.WriteOwnerOnly(adminFile, plantedAdmin);
+            var plantedKey = Convert.ToBase64String(TestLogHashKeys.FixedMaterial);
+            StandInUnixModes.WriteOwnerOnly(keyFile, OperatingSystem.IsWindows() ? DarlingSecrets.Protect(plantedKey) : plantedKey);
+            var modes = new StandInUnixModes();
+            modes.Report(credentials, "777");
+
+            /* This start: the store stood down, so a host read its earlier credential and nothing else ran. */
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                Assert.Null(DarlingManagedRoles.ReadEarlierComposeCredential(credentials, DarlingManagedPostgres.AdminRoleName, NullLogger.Instance).Password);
+            }
+
+            Assert.Equal("700", modes.Octal(credentials));
+
+            /* The next start: provisioning, then the key load, on the directory this start left owner-only. */
+            DarlingLogHashKeyLoad load;
+            var next = new CapturingTestLogger();
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, next, ct, credentials)).Provisioned, next.Joined);
+                load = DarlingLogHashKeyFile.Load(credentials, NullLogger.Instance);
+            }
+
+            var admin = File.ReadAllText(adminFile).Trim();
+            Assert.NotEqual(plantedAdmin, admin);
+            Assert.Equal("admin", await CurrentUserAsync(Login(owner, "admin", admin), ct));
+            await Assert.ThrowsAsync<PostgresException>(() => CurrentUserAsync(Login(owner, "admin", plantedAdmin), ct));
+
+            Assert.True(load.Generated, "the next start loaded the key planted while the directory was open");
+            Assert.NotEqual(TestLogHashKeys.Fixed.RawLineHash("x"), load.Key!.RawLineHash("x"));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
     [Fact]
     public async Task TheBringYourOwnScript_GivesTheSettingsLoginsExactlyTheManagedGrants_Gated()
     {

@@ -3345,10 +3345,12 @@ public static class DarlingCliCommands
            will not load is a warning, not a stop: the config file itself is still hardened, and the store
            targets fall back to the documented default location. */
         string? dataDirectory = null;
+        string? keyDirectory = null;
         try
         {
             var config = DarlingConfig.Load(configPath);
             dataDirectory = DarlingManagedPostgres.ResolveDataDirectory(config.Postgres);
+            keyDirectory = DarlingLogHashKeyFile.DirectoryFor(config, resolvedConfig);
         }
         catch (Exception ex)
         {
@@ -3384,11 +3386,18 @@ public static class DarlingCliCommands
         }
 
         /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
-           service creates with no INTERACTIVE access at all, so it gets none here either. */
-        var keyDirectory = Path.Combine(
-            Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory, DarlingLogHashKeyFile.BringYourOwnDirectoryName);
-        targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
-        targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+           service creates with no INTERACTIVE access at all, so it gets none here either. Only when darling-keys IS
+           this install's key directory (#4004 review): on a managed install it never exists legitimately, and the
+           config's folder can let any local user create one, as a junction to anything. */
+        var configDirectory = Path.GetDirectoryName(Path.GetFullPath(resolvedConfig)) ?? AppContext.BaseDirectory;
+        if (keyDirectory is not null
+            && string.Equals(
+                Path.GetFullPath(keyDirectory), Path.Combine(configDirectory, DarlingLogHashKeyFile.BringYourOwnDirectoryName),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            targets.Add(new(keyDirectory, AllowInteractive: false, IsDirectory: true, "the log-hash key directory"));
+            targets.Add(new(Path.Combine(keyDirectory, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+        }
 
         /* #2371: harden for the account the SERVICE runs as, not for whoever is running THIS. The verb is
            documented to be run elevated and exists because the service cannot re-ACL a file it does not own,
@@ -3414,6 +3423,7 @@ public static class DarlingCliCommands
 
         var exposed = 0;
         var touched = 0;
+        var refused = 0;
 
         foreach (var target in targets)
         {
@@ -3425,9 +3435,29 @@ public static class DarlingCliCommands
 
             touched++;
 
+            /* #4004 review: an ACL set by path follows every junction and symbolic link on it, so one planted in the
+               config's folder would have this elevated run rewrite whatever it points at. */
+            if (ReparsePointOnPath(configDirectory, target.Path) is { } link)
+            {
+                error.WriteLine($"  REFUSED  {target.Path} ({target.What}): {link}, so nothing was changed through it. Remove it and re-run.");
+                refused++;
+                continue;
+            }
+
             try
             {
-                if (target.IsDirectory)
+                if (IsBelow(configDirectory, target.Path))
+                {
+                    /* Through a handle to exactly the checked object, so a link swapped in after the check above is
+                       not followed either. A directory's AllowInteractive is traverse, never read. */
+                    if (DarlingFileSecurity.HardenWithoutFollowingLinks(target.Path, target.IsDirectory, target.AllowInteractive, configDirectory) is { } swapped)
+                    {
+                        error.WriteLine($"  REFUSED  {target.Path} ({target.What}): {swapped}, so nothing was changed through it. Remove it and re-run.");
+                        refused++;
+                        continue;
+                    }
+                }
+                else if (target.IsDirectory)
                 {
                     /* A directory's AllowInteractive is traverse, never read (the store directory's, above); a
                        directory the service keeps from the operator entirely (darling-keys) keeps even that. */
@@ -3479,6 +3509,11 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        if (refused > 0)
+        {
+            error.WriteLine($"{refused} of {touched} item(s) were REFUSED: a junction or symbolic link is on the path, and nothing is changed through one.");
+        }
+
         if (exposed > 0)
         {
             error.WriteLine($"{exposed} of {touched} item(s) are STILL readable by ordinary users.");
@@ -3487,9 +3522,62 @@ public static class DarlingCliCommands
             return 1;
         }
 
+        if (refused > 0)
+        {
+            return 1;
+        }
+
         output.WriteLine($"All {touched} item(s) secured. The service re-asserts these ACLs at every start.");
         return 0;
     }
+
+    /// <summary>
+    /// Why <paramref name="target"/> must not be hardened by path: the first junction or symbolic link (any reparse
+    /// point) on its path below <paramref name="configDirectory"/>, the target itself included, or a component that
+    /// could not be checked for one; null when there is none (#4004 review). An ACL set by path
+    /// follows every one of them, and the config's folder can let any local user create one, so
+    /// <see cref="HardenFiles"/> refuses such a target rather than rewrite whatever it points at. A target outside that
+    /// folder (the store's) is checked itself.
+    /// </summary>
+    internal static string? ReparsePointOnPath(string configDirectory, string target)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configDirectory));
+        var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(target));
+        var inside = IsBelow(root, path);
+
+        for (var current = path; current is not null; current = Path.GetDirectoryName(current))
+        {
+            if (inside && current.Length <= root.Length)
+            {
+                break;
+            }
+
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                {
+                    return $"{current} is a junction or symbolic link";
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* Fail closed: a path that cannot be checked is not known to be free of one. */
+                return $"{current} could not be checked for a junction or symbolic link ({ex.Message})";
+            }
+
+            if (!inside)
+            {
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="path"/> is strictly below <paramref name="directory"/>.</summary>
+    private static bool IsBelow(string directory, string path) =>
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)).StartsWith(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Directory enumeration that treats an unreadable or missing folder as empty — this verb runs
     /// precisely when permissions are broken, so a throw here would defeat its purpose.</summary>

@@ -34,7 +34,7 @@ internal static class TestLogHashKeys
 /// <summary>
 /// Unix directory modes on a box that has none (#4004's review): what a test reports a credentials directory's mode as,
 /// and what the service's chmod leaves it at, as the kernel would. Stood in through
-/// <see cref="ComposeCredentialDirectoryStart.BeginForTest"/>; one instance outlives a start, the way a directory does.
+/// <see cref="ComposeCredentialDirectoryGuard.BeginForTest"/>; one instance outlives a start, the way a directory does.
 /// </summary>
 internal sealed class StandInUnixModes : IUnixDirectoryModes
 {
@@ -325,10 +325,10 @@ public sealed class PgLogHashKeyTests
     /// <summary>
     /// #4004's review (F1): on compose, role provisioning looks at the credentials directory first and sets it 0700, so
     /// a key load that judged the directory by what IT found saw owner-only and loaded a key planted while the directory
-    /// was 0777. The verdict is the start's now: the first look records the mode, and every later caller in that start
-    /// is judged by it. Driven through the Unix-mode seam, since the suite runs on Windows: provisioning's own call on a
-    /// directory reported as 0777 that holds a planted key, then the load. The planted key is discarded and a new one
-    /// generated, as #3983 replaces every role password there, and the NEXT start, which finds the directory 0700
+    /// was 0777. Round 2: whichever look finds the directory open removes the key there and then, with every role
+    /// password, so no later look can find it. Driven through the Unix-mode seam, since the suite runs on Windows:
+    /// provisioning's own call on a directory reported as 0777 that holds a planted key, then the load. The planted key
+    /// is gone before the load runs and a new one is generated, and the NEXT start, which finds the directory 0700
     /// because this one set it so, keeps the new key rather than rotating again.
     /// </summary>
     [Fact]
@@ -345,17 +345,19 @@ public sealed class PgLogHashKeyTests
             modes.Report(directory, "777");
 
             DarlingLogHashKeyLoad load;
-            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            var log = new CapturingTestLogger();
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
             {
-                /* Provisioning's call, first, as the worker makes it; spelled with a trailing separator, because the
-                   start's record is per full path, not per spelling. */
+                /* Provisioning's call, first, as the worker makes it, spelled with a trailing separator. The directory
+                   is trusted once the call returns, because nothing anyone else put in it is left. */
                 var provisioning = DarlingManagedRoles.PrepareComposeCredentialDirectory(
-                    directory + Path.DirectorySeparatorChar, create: true, NullLogger.Instance);
-                Assert.Equal(
-                    "its mode was 0777, which let other users put files in it until the service set it to owner-only this start",
-                    provisioning.Distrust);
+                    directory + Path.DirectorySeparatorChar, create: true, log);
+                Assert.Null(provisioning.Distrust);
                 Assert.True(provisioning.MayWrite);
                 Assert.Equal("700", modes.Octal(directory));
+                Assert.False(File.Exists(path), "the planted key outlived the look that found its directory open");
+                Assert.Contains("was open to other users until now (its mode was 0777", log.Joined, StringComparison.Ordinal);
+                Assert.Contains($"{DarlingLogHashKeyFile.FileName} discarded (#4004)", log.Joined, StringComparison.Ordinal);
 
                 load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
             }
@@ -365,7 +367,7 @@ public sealed class PgLogHashKeyTests
             Assert.NotEqual(TestLogHashKeys.Fixed.RawLineHash(FailedUpdate), load.Key!.RawLineHash(FailedUpdate));
             AssertOwnerOnly(path);
 
-            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
             {
                 var next = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
 
@@ -380,8 +382,10 @@ public sealed class PgLogHashKeyTests
     }
 
     /// <summary>
-    /// #4004's review: in a directory that was open until this start, a directory at the key's path is refused like
-    /// anywhere else (discarding never deletes a tree), and a directory still open to others after the chmod (a
+    /// #4004's review: in a directory that was open until now, a directory at the key's path cannot be discarded
+    /// (discarding never deletes a tree), so nothing there is read or written, and the directory is set back to the mode
+    /// it was found with: round 2, because left 0700 the next start would trust whatever else could not be removed.
+    /// That next start finds it open again and refuses again. A directory still open to others after the chmod (a
     /// filesystem that ignores modes) is refused without anything being written or removed.
     /// </summary>
     [Fact]
@@ -396,13 +400,19 @@ public sealed class PgLogHashKeyTests
             var modes = new StandInUnixModes();
             modes.Report(directory, "777");
 
-            using (ComposeCredentialDirectoryStart.BeginForTest(modes))
+            for (var start = 1; start <= 2; start++)
             {
-                var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+                using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+                {
+                    var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
 
-                Assert.Null(load.Key);
-                Assert.Contains("it is a directory", load.Refusal, StringComparison.Ordinal);
-                Assert.True(Directory.Exists(path));
+                    Assert.Null(load.Key);
+                    Assert.Contains(
+                        $"its mode was 0777, which let other users put files in it until the service set it to owner-only this start, and {path} could not be removed (it is a directory)",
+                        load.Refusal, StringComparison.Ordinal);
+                    Assert.True(Directory.Exists(path));
+                    Assert.Equal("777", modes.Octal(directory));
+                }
             }
 
             Directory.Delete(path);
@@ -410,7 +420,7 @@ public sealed class PgLogHashKeyTests
             var ignoresModes = new IgnoresModes(modes);
             modes.Report(directory, "777");
 
-            using (ComposeCredentialDirectoryStart.BeginForTest(ignoresModes))
+            using (ComposeCredentialDirectoryGuard.BeginForTest(ignoresModes))
             {
                 var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
 
@@ -434,6 +444,97 @@ public sealed class PgLogHashKeyTests
 
         public void Set(string directory, UnixFileMode mode)
         {
+        }
+    }
+
+    /// <summary>
+    /// #4004's review, round 2 (M1): the "was open" verdict lived only in the process's memory while the 0700 chmod was
+    /// permanent. A start whose store stood down never provisioned and never loaded the key, but the web or MCP host's
+    /// earlier-credential read still set the directory 0700, and the NEXT start found it owner-only and trusted the
+    /// planted key and the planted admin password, which provisioning re-asserts on the admin role. Now the look that
+    /// finds the directory open removes both at once. The next start's provisioning half is
+    /// <c>ComposeStoreRolesLiveTests</c>' (it needs a store); this pins the files and the key.
+    /// </summary>
+    [Fact]
+    public void AHostsReadOfAnOpenDirectory_DiscardsWhatWasPlanted_SoTheNextStartUsesNeither()
+    {
+        var directory = NewDirectory();
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var keyPath = Path.Combine(directory, DarlingLogHashKeyFile.FileName);
+            var adminPath = Path.Combine(directory, DarlingManagedRoles.ComposeStoreCredentialFileName(DarlingManagedPostgres.AdminRoleName));
+            var planted = Convert.ToBase64String(TestLogHashKeys.FixedMaterial);
+            StandInUnixModes.WriteOwnerOnly(keyPath, OperatingSystem.IsWindows() ? DarlingSecrets.Protect(planted) : planted);
+            StandInUnixModes.WriteOwnerOnly(adminPath, "Planted4004Admin");
+            StandInUnixModes.WriteOwnerOnly(keyPath + ".tmp", "planted-temporary");
+            var modes = new StandInUnixModes();
+            modes.Report(directory, "777");
+
+            /* This start: the store stood down, so neither provisioning nor the key load ran; a host read its role's
+               earlier credential, and that read closed the directory. */
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.AdminRoleName, NullLogger.Instance);
+
+                Assert.Null(earlier.Password);
+                Assert.Equal($"{adminPath} does not exist", earlier.MissingReason);
+            }
+
+            Assert.Equal("700", modes.Octal(directory));
+            Assert.False(File.Exists(adminPath), "the planted admin password outlived the start that closed its directory");
+            Assert.False(File.Exists(keyPath), "the planted key outlived the start that closed its directory");
+            Assert.False(File.Exists(keyPath + ".tmp"));
+
+            /* The next start finds the directory owner-only, as this one left it. */
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                var load = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+                Assert.Null(load.Refusal);
+                Assert.True(load.Generated, "the next start loaded the key planted while the directory was open");
+                Assert.NotEqual(TestLogHashKeys.Fixed.RawLineHash(FailedUpdate), load.Key!.RawLineHash(FailedUpdate));
+            }
+        }
+        finally
+        {
+            Remove(directory);
+        }
+    }
+
+    /// <summary>
+    /// #4004's review, round 2 (L3): a directory where the new key's temporary file goes made every start refuse with
+    /// "it did not exist", naming only the key. An empty one is cleared and the key generated; one with something in it
+    /// is left alone and named as the reason.
+    /// </summary>
+    [Fact]
+    public void ADirectoryAtTheTemporaryPath_IsClearedWhenEmpty_AndNamedWhenNot()
+    {
+        var directory = NewDirectory();
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, DarlingLogHashKeyFile.FileName);
+            var temporary = path + ".tmp";
+            Directory.CreateDirectory(Path.Combine(temporary, "someones"));
+
+            var refused = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+            Assert.Null(refused.Key);
+            Assert.Contains($"{temporary}, the file a new key is written through before it is moved into place, is a directory the service could not remove", refused.Refusal, StringComparison.Ordinal);
+            Assert.DoesNotContain("did not exist", refused.Refusal, StringComparison.Ordinal);
+            Assert.True(Directory.Exists(Path.Combine(temporary, "someones")));
+
+            Directory.Delete(Path.Combine(temporary, "someones"));
+            var generated = DarlingLogHashKeyFile.Load(directory, NullLogger.Instance);
+
+            Assert.Null(generated.Refusal);
+            Assert.True(generated.Generated);
+            Assert.False(Directory.Exists(temporary));
+        }
+        finally
+        {
+            Remove(directory);
         }
     }
 
