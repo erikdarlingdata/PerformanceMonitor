@@ -56,6 +56,31 @@ public sealed class McpToolGuideTests
         ("get_health_parser_significant_waits", "Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed."),
     ];
 
+    /// <summary>D9: what an empty answer means, tied to the gate (or the floors, or the absence of one) beside
+    /// it rather than one identical sentence on all nine — a fresh reader given only the head misread the
+    /// ungated tools' empty answer as ambiguous when it was a real, healthy result (#4048 D9 round).</summary>
+    private const string GatedEmptyFact =
+        "An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way.";
+
+    private const string FloorsEmptyFact =
+        "An empty answer with status empty is a real result: nothing in this window passed the floors, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way.";
+
+    private const string UngatedEmptyFact =
+        "An empty answer with status empty is a real result: nothing of this kind was recorded in this window. status unavailable with source_observed false is no evidence either way.";
+
+    private static readonly (string Tool, string Fact)[] EmptyAnswerFacts =
+    [
+        ("get_health_parser_system_health", UngatedEmptyFact),
+        ("get_health_parser_memory_node_oom", UngatedEmptyFact),
+        ("get_health_parser_significant_waits", FloorsEmptyFact),
+        ("get_health_parser_severe_errors", GatedEmptyFact),
+        ("get_health_parser_io_issues", GatedEmptyFact),
+        ("get_health_parser_scheduler_issues", GatedEmptyFact),
+        ("get_health_parser_memory_conditions", GatedEmptyFact),
+        ("get_health_parser_cpu_tasks", GatedEmptyFact),
+        ("get_health_parser_memory_broker", GatedEmptyFact),
+    ];
+
     private static McpToolsListBudgetTests.MeasuredTool Served(string tool) =>
         McpToolsListBudgetTests.Measure().Tools.Single(t => t.Name == tool);
 
@@ -70,13 +95,21 @@ public sealed class McpToolGuideTests
             Assert.NotNull(served.Tail);
             /* The window is fixed on the event's own time, ends at as_of, newest first. */
             Assert.Contains("over an event_time window ending at as_of, newest first.", served.Served, StringComparison.Ordinal);
-            /* Zero is not a measurement here unless the witness says so (#3541 A12). */
-            Assert.Contains("An empty answer is not a clean bill: read status, source_observed and last_captured_at.", served.Served, StringComparison.Ordinal);
             Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
-            Assert.True(served.Served.Length <= 600, $"{tool}: served head {served.Served.Length} is over the 600 target");
+            /* D9: the floors sentence is the longest of the three variants; 620 leaves it headroom while
+               staying far under the D2 absolute cap of 1,000 (McpToolsListBudgetTests.ConvertedHeadCap). */
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
         }
 
         foreach (var (tool, fact) in GateFacts)
+        {
+            Assert.Contains(fact, Served(tool).Served, StringComparison.Ordinal);
+        }
+
+        /* Zero is not a measurement here unless the witness says so (#3541 A12); D9: each tool's empty-answer
+           sentence ties to ITS gate (or floors, or absence of one) rather than one sentence on all nine, so a
+           reader given only the head does not have to guess which of the four rungs an empty answer landed on. */
+        foreach (var (tool, fact) in EmptyAnswerFacts)
         {
             Assert.Contains(fact, Served(tool).Served, StringComparison.Ordinal);
         }

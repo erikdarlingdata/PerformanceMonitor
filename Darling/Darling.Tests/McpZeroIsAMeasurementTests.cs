@@ -94,9 +94,12 @@ public sealed class McpZeroIsAMeasurementTests
             Assert.Contains("EmptyAsync(", body, StringComparison.Ordinal);
             Assert.DoesNotContain("McpHelpers.Status(\"empty\"", body, StringComparison.Ordinal);
 
+            /* #4048 D9 round: the head's empty-answer sentence now ties to the tool's own gate (or floors, or
+               its absence) instead of naming all three witness fields on every tool; last_captured_at stays on
+               the data envelope (asserted above) and in the get_tool_guide topic, just not spelled out in every
+               head's prose. source_observed is the one fact every variant (gated, floors, ungated) still names. */
             var description = DescriptionOf(source, tool);
             Assert.Contains("source_observed", description, StringComparison.Ordinal);
-            Assert.Contains("last_captured_at", description, StringComparison.Ordinal);
         }
     }
 

@@ -52,9 +52,12 @@ public sealed class McpToolsListBudgetTests
     /// <list type="bullet">
     /// <item>#3898 Phase 0 + seam: pinned at the measured value, which includes the new get_tool_guide and the
     /// converted get_health_parser_* family.</item>
+    /// <item>#4048 D9 round: the nine pilot heads' empty-answer sentence now ties to each tool's own gate (or
+    /// floors, or the absence of one) instead of repeating one identical sentence, so a reader given only the
+    /// head is not left to guess which of the four empty-window rungs applies. Raised deliberately.</item>
     /// </list>
     /// </summary>
-    private const int TotalCeilingBytes = 328_331;
+    private const int TotalCeilingBytes = 329_494;
 
     /// <summary>How far under the total ceiling the measured size may sit before the ceiling must be lowered.
     /// The per-tool and per-parameter lines are exact; this slack only spares every small edit a conflict on
