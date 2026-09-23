@@ -438,7 +438,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var utcPre = now.AddMinutes(-2);
         await SeedCpuAsync(_serverId, "TimeHonestySrv", utcPre.AddMinutes(CollectedOffset), null, 41);
 
-        var summary = await _dataService.GetServerSummaryAsync(_serverId, "TimeHonestySrv");
+        var summary = await _dataService.GetServerSummaryAsync(_serverId, "TimeHonestySrv", registeredAtUtc: null);
         Assert.NotNull(summary);
         Assert.Equal(41, summary!.CpuPercent);
         Assert.Equal(utcPre.AddMinutes(CollectedOffset), summary.CpuSampleTime);
@@ -448,7 +448,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var utcPost = now.AddMinutes(-1);
         await SeedCpuAsync(_serverId, "TimeHonestySrv", utcPost.AddMinutes(CollectedOffset), utcPost, 42);
 
-        summary = await _dataService.GetServerSummaryAsync(_serverId, "TimeHonestySrv");
+        summary = await _dataService.GetServerSummaryAsync(_serverId, "TimeHonestySrv", registeredAtUtc: null);
         Assert.NotNull(summary);
         Assert.Equal(42, summary!.CpuPercent);
         Assert.Equal(utcPost.AddMinutes(CollectedOffset), summary.CpuSampleTime);

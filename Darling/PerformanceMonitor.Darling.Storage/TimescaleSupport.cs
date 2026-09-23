@@ -939,8 +939,9 @@ WITH NO DATA";
     ///
     /// <para><b>COVERAGE IS READ OFF THE MATERIALIZATION, NOT THROUGH THE VIEW (#3653).</b> Measured on a
     /// TimescaleDB 2.28.1 rig while proving the interval-honest successors' rollout: a continuous aggregate
-    /// created <c>WITH NO DATA</c> has a watermark of <c>-infinity</c>, so its real-time branch serves EVERY
-    /// raw row and <c>min(bucket)</c> through the view is raw's own oldest bucket. The gate then reads
+    /// created <c>WITH NO DATA</c> has its watermark at the minimum timestamp (4714-11-24 BC — finite, not
+    /// <c>-infinity</c>, which is what #3973 tripped over), so its real-time branch serves EVERY raw row and
+    /// <c>min(bucket)</c> through the view is raw's own oldest bucket. The gate then reads
     /// "already covers" on the very start that created the aggregate and skips the backfill; one policy
     /// refresh later the watermark jumps to the trailing window's end and everything older than that window is
     /// served by neither branch — nineteen of twenty planted days went invisible on the rig — until the NEXT

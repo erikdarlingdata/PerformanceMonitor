@@ -91,7 +91,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// back into an absolute instant before anyone reads it; a dedicated column is the clean follow-up. On a
 /// <c>checkpointer</c> row (V137, #3783) the three columns named for it — <c>checkpoint_write_ms</c>,
 /// <c>checkpoint_sync_ms</c>, <c>checkpoints_requested</c> — hold the server's CUMULATIVE counters as the
-/// sweep read them, NOT the interval's delta; every other kind leaves them NULL, and the two TOAST columns
+/// sweep read them, NOT the interval's delta, and since V139 (#3955) <c>postmaster_start_time</c> holds the
+/// <c>pg_postmaster_start_time()</c> of the postmaster that produced them, as naive UTC, so a reader can tell an
+/// interval that spans a restart; every other kind leaves all four NULL, and the two TOAST columns
 /// are filled on <c>dimension</c> rows only. That is the same convention every <c>pg_stat_*</c>-sourced
 /// collector table in this store follows (the columns are raw counters; the read differences them), and
 /// <see cref="CheckpointerInsertSql"/> says why it was chosen over an in-process baseline here.</para>
@@ -497,18 +499,30 @@ AND   m.toast_bytes IS NOT NULL";
     /// as a small positive delta. On a checkpointer whose counters run since cluster start it is not a
     /// realistic hour, and it is stated rather than guarded against.</para>
     ///
+    /// <para><b>And which postmaster wrote the row (V139, #3955).</b> A counter that goes backwards is not the
+    /// only discontinuity. A CLEAN restart keeps the counters (the statistics are written out at shutdown) and
+    /// ADDS one: PostgreSQL counts the shutdown checkpoint in <c>num_requested</c>, measured +1 per fast stop on
+    /// 18.6. So every restart between two sweeps put a requested checkpoint in the interval that WAL volume did not
+    /// force, and the Store Checkpointer Pressure self-alert fired on each service restart. The row therefore
+    /// also stores <c>pg_postmaster_start_time()</c> as naive UTC (<c>AT TIME ZONE 'UTC'</c>, never a bare cast,
+    /// which renders in the session's zone), and the reader applies <see cref="PostmasterRestart"/>: across a
+    /// restart the interval states no delta at all, because the shutdown checkpoint is in the requested count and
+    /// its own write and sync phases are in the other two counters. That skips one hourly interval per restart; the
+    /// next interval is judged normally.</para>
+    ///
     /// <para>Single-row view, so no join and no filter. $1 metric_time.</para>
     /// </summary>
     public const string CheckpointerInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time)
 SELECT
     $1,
     '{CheckpointerObjectName}',
     '{CheckpointerObjectKind}',
     round(c.write_time)::bigint,
     round(c.sync_time)::bigint,
-    c.num_requested
+    c.num_requested,
+    pg_postmaster_start_time() AT TIME ZONE 'UTC'
 FROM pg_stat_checkpointer AS c";
 
     /// <summary>
@@ -516,18 +530,20 @@ FROM pg_stat_checkpointer AS c";
     /// (#3783): the same three cumulative counters under the names <c>pg_stat_bgwriter</c> carried them
     /// through 16 — <c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>, <c>checkpoints_req</c> — written
     /// under the SAME object name and kind so the series is one series. The bundled store is 18 and never
-    /// runs this arm; a bring-your-own store on 14–16 does. Same row shape, same reader. $1 metric_time.
+    /// runs this arm; a bring-your-own store on 14–16 does. Same row shape, same reader, the same postmaster
+    /// start time beside the counters (<c>checkpoints_req</c> counts the shutdown checkpoint too). $1 metric_time.
     /// </summary>
     public const string CheckpointerBgwriterInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time)
 SELECT
     $1,
     '{CheckpointerObjectName}',
     '{CheckpointerObjectKind}',
     round(b.checkpoint_write_time)::bigint,
     round(b.checkpoint_sync_time)::bigint,
-    b.checkpoints_req
+    b.checkpoints_req,
+    pg_postmaster_start_time() AT TIME ZONE 'UTC'
 FROM pg_stat_bgwriter AS b";
 
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See

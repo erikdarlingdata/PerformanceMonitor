@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -33,8 +34,11 @@ public sealed class McpDiscoveryTools
             };
 
             var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s));
-            var summary = await dataService.GetServerSummaryAsync(serverId, s.DisplayNameWithIntent);
-            var lastCollection = summary?.LastCollectionTime?.ToString("o") ?? "No data collected";
+            var summary = await dataService.GetServerSummaryAsync(serverId, s.DisplayNameWithIntent, s.RegisteredAtUtc);
+            /* #3967: a server whose history has aged out of the archive has no collection to show either,
+               and "No data collected" would claim it never collected. */
+            var lastCollection = summary?.LastCollectionTime?.ToString("o")
+                ?? (summary?.CollectionFreshness == ServerFreshness.Offline ? "none retained" : "No data collected");
 
             lines.Add($"- {display} [{statusText}] (last collection: {lastCollection})");
         }

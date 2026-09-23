@@ -905,7 +905,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 12),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 13),
     };
 
     /// <summary>
@@ -1000,6 +1000,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
+        ["Store TimescaleDB self-alert failed"] = "handed its evidence as parameters; the version was read by the bootstrap (#3908)",
         /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
            every policy family, so "Compression-job health" would have named a third of what it isolates. */
         ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
@@ -1189,8 +1190,9 @@ public sealed class AlertReadFailureSurfaceTests
            since #3580: the daily documents' delivery-stamp WRITE, a write whose loss costs one
            re-announcement at the next restart and never a delivery. 26th since #3915: the store-log re-mask
            pass, a maintenance rewrite of stored text that resumes next hour, with the reader masking in the
-           meantime. */
-        Assert.Equal(26, totalExempt);
+           meantime. 27th since #3908: the store TimescaleDB self-alert's catch, whose evidence is the version
+           the bootstrap read before the alert engine existed. */
+        Assert.Equal(27, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

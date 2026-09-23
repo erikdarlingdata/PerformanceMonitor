@@ -19,9 +19,16 @@ public partial class DuckDbFactCollector : IFactCollector
 {
     private readonly DuckDbInitializer _duckDb;
 
-    public DuckDbFactCollector(DuckDbInitializer duckDb)
+    /// <summary>
+    /// The cadence each collector runs at on a server, for the latest-value lookbacks (#3896) — see
+    /// <see cref="LatestValueBounds"/>. Null answers every collector with its shipped default.
+    /// </summary>
+    private readonly Func<int, string, int?>? _collectorFrequencyMinutes;
+
+    public DuckDbFactCollector(DuckDbInitializer duckDb, Func<int, string, int?>? collectorFrequencyMinutes = null)
     {
         _duckDb = duckDb;
+        _collectorFrequencyMinutes = collectorFrequencyMinutes;
     }
 
     /// <summary>
@@ -119,6 +126,12 @@ public partial class DuckDbFactCollector : IFactCollector
            it. Nothing else may run ahead of it — a wait fact emitted before the stamp would have no
            denominator, and the only "safe" fallback (the nominal window) is the defect being fixed. */
         await RunCollectorAsync(CollectObservedCoverageAsync);
+
+        /* #3896: every latest-value read below binds its collector's lower bound, resolved once from the
+           cadence that collector actually runs at. Emits no fact, so it cannot disturb the stamp above. */
+        context.CancellationToken.ThrowIfCancellationRequested();
+        await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
+
         await RunCollectorAsync(CollectWaitStatsFactsAsync);
         FactCollectorHelpers.GroupGeneralLockWaits(facts, context);
         FactCollectorHelpers.GroupParallelismWaits(facts, context);

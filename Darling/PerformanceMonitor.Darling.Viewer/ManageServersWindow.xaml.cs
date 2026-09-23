@@ -8,10 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -74,14 +76,32 @@ public partial class ManageServersWindow : Window
                 freshness = new Dictionary<int, DateTime>();
             }
 
+            /* #3967: the registry's first-connect instants, so a server whose whole history retention has
+               dropped reads "None retained" rather than "Never" — the registration rule the sidebar dot and the
+               Overview card apply. Defensive like the freshness read: a failure leaves every row on "Never". */
+            Dictionary<int, DateTime?> registered;
+            try
+            {
+                registered = (await _dataService.GetServersAsync()).ToDictionary(s => s.ServerId, s => s.RegisteredAt);
+            }
+            catch (Exception ex)
+            {
+                ViewerLogger.Warn("ManageServersWindow", $"registry read failed: {ex.Message}");
+                registered = new Dictionary<int, DateTime?>();
+            }
+
+            var nowUtc = DateTime.UtcNow;
             var items = new List<ManagedServerListItem>(rows.Count);
             foreach (var row in rows)
             {
                 var lastCollected = freshness.TryGetValue(row.ServerId, out var t) ? t : (DateTime?)null;
+                var registeredAt = registered.TryGetValue(row.ServerId, out var r) ? r : null;
                 items.Add(new ManagedServerListItem(row, _serverStore.IsFavorite(row.Host))
                 {
                     InstalledVersion = appVersion,
                     LastCollectedUtc = lastCollected,
+                    HistoryAgedOut = lastCollected is null
+                        && ServerSummaryItem.ClassifyFreshness(null, registeredAt, nowUtc) == ServerFreshness.Offline,
                 });
             }
 
@@ -318,10 +338,18 @@ public sealed class ManagedServerListItem
     /// collectors), set once before binding; null when the Darling service has not collected this server yet.</summary>
     public DateTime? LastCollectedUtc { get; set; }
 
+    /// <summary>True when there is no collection to show because retention has dropped all of it (#3967): the
+    /// server registered before the collection log's horizon and nothing newer is left. Set once before
+    /// binding.</summary>
+    public bool HistoryAgedOut { get; set; }
+
     /// <summary>The "Last Collected" cell: the newest collection time rendered in the viewer's timestamp-display
-    /// mode (Server/Local/UTC via <see cref="ViewerTimeHelper.ForDisplay"/>), or "Never" when the service has
-    /// not collected this server yet. Labeled "Last Collected" — the SERVICE connects and collects, the viewer
-    /// never does — so this reflects service activity, not a viewer connection.</summary>
+    /// mode (Server/Local/UTC via <see cref="ViewerTimeHelper.ForDisplay"/>), "None retained" when retention
+    /// has dropped all of it, or "Never" when the service has not collected this server yet. Labeled "Last
+    /// Collected" — the SERVICE connects and collects, the viewer never does — so this reflects service
+    /// activity, not a viewer connection.</summary>
     public string LastCollectedDisplay =>
-        LastCollectedUtc is { } utc ? ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm") : "Never";
+        LastCollectedUtc is { } utc ? ViewerTimeHelper.ForDisplay(utc).ToString("yyyy-MM-dd HH:mm")
+        : HistoryAgedOut ? "None retained"
+        : "Never";
 }

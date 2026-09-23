@@ -25,7 +25,8 @@ public sealed partial class PgTargetFactCollector
     /// — each parallel worker gets its own <c>work_mem</c>; <c>autovacuum_work_mem</c> — when set it replaces
     /// <c>maintenance_work_mem</c> for the autovacuum workers), <c>wal_buffers</c> (reported RESOLVED by <c>pg_settings</c>
     /// after startup, so the <c>-1</c> auto value never reaches this read on a running server), and
-    /// <c>effective_cache_size</c> for the plausibility line. <c>$1</c> server_id, <c>$2</c> window end.
+    /// <c>effective_cache_size</c> for the plausibility line. <c>$1</c> server_id, <c>$2</c> window end, <c>$3</c> the
+    /// lower bound <see cref="ConfigSnapshotLowerBounds"/> hands it (#3928).
     ///
     /// <para><b>Why a second read of the snapshot rather than the config family's facts.</b> The config partial emits a
     /// <c>CONFIG_PG_*</c> fact for four of these terms and this collector runs after it (emission order, pinned), so the
@@ -42,10 +43,12 @@ SELECT
     c.collection_time
 FROM pg_server_config AS c
 WHERE c.server_id = $1
+AND   c.collection_time >= $3
 AND   c.collection_time = (
           SELECT MAX(collection_time)
           FROM pg_server_config
           WHERE server_id = $1
+          AND   collection_time >= $3
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
 /* V138 (#3691): server-wide rows only. The per-database and per-role overrides pg_server_config now also
@@ -311,17 +314,25 @@ ORDER BY w.collection_time";
 
             var settings = new Dictionary<string, (string? Setting, string? Unit)>(StringComparer.Ordinal);
             DateTime? snapshotTime = null;
-            using (var cmd = new NpgsqlCommand(PgTargetMemoryConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })
+
+            /* #3928: the day first, and every retained snapshot only when that found nothing. */
+            foreach (var lowerBound in ConfigSnapshotLowerBounds(context.TimeRangeEnd))
             {
-                cmd.Parameters.AddWithValue(context.ServerId);
-                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await reader.ReadAsync(context.CancellationToken))
+                using (var cmd = new NpgsqlCommand(PgTargetMemoryConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })
                 {
-                    if (reader.IsDBNull(0)) continue;
-                    settings[reader.GetString(0)] = (reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2));
-                    snapshotTime ??= reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                    cmd.Parameters.AddWithValue(context.ServerId);
+                    cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                    cmd.Parameters.AddWithValue(lowerBound);
+                    using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                    while (await reader.ReadAsync(context.CancellationToken))
+                    {
+                        if (reader.IsDBNull(0)) continue;
+                        settings[reader.GetString(0)] = (reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2));
+                        snapshotTime ??= reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                    }
                 }
+
+                if (snapshotTime is not null) break;
             }
 
             if (snapshotTime is { } at)

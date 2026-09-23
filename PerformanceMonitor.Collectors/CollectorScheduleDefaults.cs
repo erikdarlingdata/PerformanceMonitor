@@ -390,4 +390,28 @@ public static class CollectorScheduleDefaults
            beside any per-minute family. One read of a shared catalog per cycle, no per-database fan-out. */
         ["pg_database_size_stats"] = new(60, 365),
     };
+
+    /// <summary>
+    /// The cadence a collector actually runs at: the per-server override, else the fleet-wide one, else the
+    /// <see cref="All"/> default. An override that cannot be honoured falls through to the next level rather
+    /// than drive the schedule — a negative frequency, or a delta-family cadence past
+    /// <see cref="CollectorDeltaCalculator.MaxDeltaFrequencyMinutes"/> (#3532: past the gap policy every cycle
+    /// re-baselines and stores a zero delta forever). 0 is honoured: on-load only.
+    ///
+    /// <para>One rule for two consumers that must agree (#3896): Darling's scheduler resolves the cadence it
+    /// RUNS a collector at through this, and the analysis pass resolves the cadence it BOUNDS that collector's
+    /// latest-value reads by through it. A pass that read a cadence the scheduler did not honour would bound
+    /// a daily collector's reads to a day and lose its facts every other pass.</para>
+    /// </summary>
+    public static int ResolveFrequencyMinutes(string collectorName, int? perServerOverride, int? fleetOverride) =>
+        HonouredFrequency(collectorName, perServerOverride)
+        ?? HonouredFrequency(collectorName, fleetOverride)
+        ?? All[collectorName].FrequencyMinutes;
+
+    private static int? HonouredFrequency(string collectorName, int? minutes) =>
+        minutes is int v
+            && v >= 0
+            && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
+        ? v
+        : null;
 }

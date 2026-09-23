@@ -39,7 +39,8 @@ public sealed class McpHealthTools
 
         try
         {
-            var summary = await dataService.GetServerSummaryAsync(resolved.ServerId, resolved.ServerName);
+            var summary = await dataService.GetServerSummaryAsync(
+                resolved.ServerId, resolved.ServerName, ServerResolver.RegisteredAtUtc(serverManager, resolved.ServerId));
             if (summary == null)
             {
                 return McpHelpers.Status(

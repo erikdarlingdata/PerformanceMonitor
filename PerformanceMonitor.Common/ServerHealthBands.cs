@@ -32,7 +32,10 @@ namespace PerformanceMonitor.Common
         /// No collection has EVER landed for this server (this run or any prior) — the service has not reached it
         /// yet. Distinct from <see cref="Offline"/> (which means data STOPPED): during a slow fleet bootstrap a
         /// red "Offline" on a server that was merely still queued sent a 24-server field report chasing a phantom
-        /// scheduler bug. Rendered as an amber "Awaiting first collection", never the red overlay.
+        /// scheduler bug. Rendered as an amber "Awaiting first collection", never the red overlay. A read that
+        /// cannot see all of history (a window, or retention) tells this apart from a server whose history is out
+        /// of its reach through <see cref="ServerHealthClassifier"/>'s registration overload of
+        /// <c>ClassifyFreshness</c> (#3967).
         /// </summary>
         NeverCollected,
     }
@@ -695,6 +698,45 @@ namespace PerformanceMonitor.Common
 
             return ServerFreshness.Fresh;
         }
+
+        /// <summary>
+        /// Classify freshness from a newest-collection read that could only see collections from
+        /// <paramref name="searchedFromUtc"/> on (#3935, #3967): the ladder above, except where that read's
+        /// null is not the ladder's "never".
+        ///
+        /// <para><b>Why a null can mean two things.</b> A read with a window drops a server that went quiet
+        /// before the window, and a read with no window drops one whose rows retention has purged. Both come
+        /// back null, and to the ladder above a null is <see cref="ServerFreshness.NeverCollected"/>, so a server
+        /// dark for longer than the read could see was called "Awaiting first collection" — the fleet card after
+        /// its 48 hours (#3935), and every surface that reads the collection log with no window once the
+        /// store's retention had dropped a long-dark server's history (#3967).</para>
+        ///
+        /// <para><b>The rule.</b> A newest collection bands exactly as the ladder bands it. With none, the
+        /// server's registration decides: registered before <paramref name="searchedFromUtc"/>, it is Offline;
+        /// registered at or after it, the ladder's never-collected reading stands, and that half is exact. A
+        /// registration is written when collection can first begin (Darling's registry row at the first
+        /// successful connect, Lite's server entry when it is added), so a server registered inside what the
+        /// read could see could only have collected inside it, and the read found nothing. Registered before
+        /// it, the server had time to collect and has sent nothing the read could see: Offline is the word, and
+        /// it is what a read that could see all of history says whenever the server did once collect.</para>
+        ///
+        /// <para><b>No registration keeps the ladder's reading</b>, because nothing then says when collection
+        /// could have begun. That is also the reading a caller gets by passing null for a server its read did
+        /// not report at all: an absence of evidence never becomes a red Offline.</para>
+        /// </summary>
+        /// <param name="lastCollectionUtc">The newest collection the read found, or null when it found none.</param>
+        /// <param name="registeredAtUtc">When the server was registered for collection, or null when unknown.</param>
+        /// <param name="searchedFromUtc">The earliest instant the read could have found a collection at: a
+        /// windowed read's lower bound, or the retention horizon of a read with no window.</param>
+        /// <param name="nowUtc">The reference instant the ladder measures age from.</param>
+        public static ServerFreshness ClassifyFreshness(
+            DateTime? lastCollectionUtc,
+            DateTime? registeredAtUtc,
+            DateTime searchedFromUtc,
+            DateTime nowUtc) =>
+            !lastCollectionUtc.HasValue && registeredAtUtc.HasValue && registeredAtUtc.Value < searchedFromUtc
+                ? ServerFreshness.Offline
+                : ClassifyFreshness(lastCollectionUtc, nowUtc);
 
         /// <summary>
         /// CPU band: &gt;= 95% Critical, &gt;= 80% Warning; nothing bandable Unknown. One ladder, applied to

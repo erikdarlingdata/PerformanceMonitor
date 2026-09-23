@@ -345,8 +345,10 @@ public partial class ViewerServerTab : UserControl
     /// Fills the toolbar's freshness readout with this server's newest collection time (the shared
     /// MAX(collection_time) read the sidebar dots use), rendered in the active Server/Local/UTC display mode
     /// exactly like the Manage Servers "Last Collected" column. A server the service hasn't collected yet is
-    /// absent from the freshness map, shown as "no data collected yet". Best-effort chrome: a read failure
-    /// blanks the readout rather than disturbing the tab load.
+    /// absent from the freshness map, shown as "no data collected yet"; so is a server whose whole history
+    /// retention has dropped, which reads "no collection retained" instead (#3967), by the same registration
+    /// rule the sidebar dot applies. Best-effort chrome: a read failure blanks the readout rather than
+    /// disturbing the tab load.
     /// </summary>
     private async Task UpdateServerFreshnessLabelAsync()
     {
@@ -355,7 +357,9 @@ public partial class ViewerServerTab : UserControl
             var freshness = await _dataService.GetServerFreshnessAsync();
             ServerFreshnessText.Text = freshness.TryGetValue(_server.ServerId, out var lastUtc)
                 ? $"collected {ViewerTimeHelper.ForDisplay(lastUtc):yyyy-MM-dd HH:mm}"
-                : "no data collected yet";
+                : ServerSummaryItem.ClassifyFreshness(null, _server.RegisteredAt, DateTime.UtcNow) == ServerFreshness.Offline
+                    ? "no collection retained"
+                    : "no data collected yet";
         }
         catch
         {

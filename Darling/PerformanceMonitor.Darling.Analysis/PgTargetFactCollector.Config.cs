@@ -28,7 +28,8 @@ public sealed partial class PgTargetFactCollector
     /// read emits (<c>max_connections</c> / <c>superuser_reserved_connections</c> / <c>reserved_connections</c>
     /// for lane 3's ceiling — the last a PostgreSQL 16+ name, absent from the snapshot before 16 and then simply
     /// not emitted, so the ceiling subtracts 0; <c>work_mem</c> for lane 6, <c>maintenance_work_mem</c> and
-    /// <c>autovacuum</c> for lane 4). <c>$1</c> server_id, <c>$2</c> window end.
+    /// <c>autovacuum</c> for lane 4). <c>$1</c> server_id, <c>$2</c> window end, <c>$3</c> the lower bound
+    /// <see cref="ConfigSnapshotLowerBounds"/> hands it (#3928).
     ///
     /// <para><b>The shape is <c>DarlingPgServerConfigReader.CurrentConfigSql</c>'s</b>, with two deliberate
     /// differences. The snapshot is anchored on <c>MAX(collection_time)</c> AT OR BEFORE <c>$2</c> rather than
@@ -58,10 +59,12 @@ SELECT
     c.collection_time
 FROM pg_server_config AS c
 WHERE c.server_id = $1
+AND   c.collection_time >= $3
 AND   c.collection_time = (
           SELECT MAX(collection_time)
           FROM pg_server_config
           WHERE server_id = $1
+          AND   collection_time >= $3
           AND   collection_time <= $2)
 AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
 /* V138 (#3691): the SERVER-WIDE population only. pg_server_config now also holds the per-database and
@@ -80,6 +83,28 @@ AND   c.name IN (
           'bgwriter_delay', 'bgwriter_lru_maxpages',
           'max_connections', 'superuser_reserved_connections', 'reserved_connections',
           'work_mem', 'maintenance_work_mem', 'autovacuum')";
+
+    /// <summary>
+    /// #3928: the lower bounds every <c>pg_server_config</c> snapshot read runs with, in order — this family's
+    /// four and <c>PgTargetBaselineProvider.PgTargetClockSql</c>. The first is
+    /// <see cref="AnalysisContext.LatestValueLookback"/> before the window's end. Bound on both the anchor's
+    /// <c>MAX(collection_time)</c> and the outer row scan, it lets TimescaleDB plan the day's chunks instead of
+    /// every retained one. The table keeps a year of hourly snapshots in one-day chunks, and a year in, planning
+    /// them all cost each read seconds before it touched a row. Bounding only the <c>MAX</c> is not enough: the
+    /// outer <c>collection_time = (…)</c> can exclude chunks only at run time.
+    ///
+    /// <para>The second is no bound at all (<see cref="DateTime.MinValue"/>, which Npgsql sends as
+    /// <c>-infinity</c>), run only when the first found nothing. A target whose config collector has been dark
+    /// for more than a day therefore still states the newest snapshot it has, the rule these reads had before, at
+    /// the cost they had before. The newest snapshot in the day IS the newest snapshot the unbounded anchor
+    /// finds, so the two runs cannot disagree; the bound decides only how much the planner has to look at. That
+    /// is why these reads take a flat day and a fallback rather than their collector's cadence
+    /// (<see cref="AnalysisContext.LatestValueStartFor"/>): they anchor on one snapshot per server, so there is
+    /// no stale series for a bound to drop, and a cadence slower than the day costs the fallback, never a
+    /// fact.</para>
+    /// </summary>
+    internal static DateTime[] ConfigSnapshotLowerBounds(DateTime windowEnd) =>
+        [AsNaive(windowEnd - AnalysisContext.LatestValueLookback), DateTime.MinValue];
 
     /// <summary>One <c>pg_settings</c> row as the snapshot stores it: raw text plus its unit.</summary>
     private readonly record struct PgConfigSetting(string? Setting, string? Unit, string? BootVal, bool IsDefault, bool PendingRestart);
@@ -127,22 +152,29 @@ AND   c.name IN (
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(PgTargetConfigSnapshotSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            while (await reader.ReadAsync(context.CancellationToken))
+            /* #3928: the day first, and every retained snapshot only when that found nothing. */
+            foreach (var lowerBound in ConfigSnapshotLowerBounds(context.TimeRangeEnd))
             {
-                if (reader.IsDBNull(0)) continue;
-                var name = reader.GetString(0);
-                settings[name] = new PgConfigSetting(
-                    Setting: reader.IsDBNull(1) ? null : reader.GetString(1),
-                    Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    BootVal: reader.IsDBNull(3) ? null : reader.GetString(3),
-                    IsDefault: !reader.IsDBNull(4) && reader.GetBoolean(4),
-                    PendingRestart: !reader.IsDBNull(5) && reader.GetBoolean(5));
-                snapshotTime ??= reader.IsDBNull(6) ? null : reader.GetDateTime(6);
+                using var cmd = new NpgsqlCommand(PgTargetConfigSnapshotSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+                cmd.Parameters.AddWithValue(context.ServerId);
+                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                cmd.Parameters.AddWithValue(lowerBound);
+
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    if (reader.IsDBNull(0)) continue;
+                    var name = reader.GetString(0);
+                    settings[name] = new PgConfigSetting(
+                        Setting: reader.IsDBNull(1) ? null : reader.GetString(1),
+                        Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
+                        BootVal: reader.IsDBNull(3) ? null : reader.GetString(3),
+                        IsDefault: !reader.IsDBNull(4) && reader.GetBoolean(4),
+                        PendingRestart: !reader.IsDBNull(5) && reader.GetBoolean(5));
+                    snapshotTime ??= reader.IsDBNull(6) ? null : reader.GetDateTime(6);
+                }
+
+                if (settings.Count > 0) break;
             }
 
             if (settings.Count == 0 || snapshotTime is null) return;

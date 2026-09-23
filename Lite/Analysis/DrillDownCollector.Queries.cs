@@ -127,7 +127,12 @@ LIMIT 5";
            reports 0, so 0 was "no reading" rendered as a degree of parallelism. dop_note is the
            shared sentence (PerformanceMonitor.Common.QueryDopProvenance) a renderer prints verbatim
            when the history disagrees with the headline. New columns are appended after the old ones so
-           the existing ordinals are untouched; the SQL is byte-identical to Darling's TopCpuQueriesSql. */
+           the existing ordinals are untouched; the SQL is byte-identical to Darling's TopCpuQueriesSql.
+
+           #3959: ranked and cut to five without the statement text, which is read afterwards for the
+           five that print. Most of the saving is Darling's, whose v_query_stats resolves text from a
+           dimension per row; here it stops every row's inline text riding through the window, and the
+           two SKUs keep one text of the read. */
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 WITH windowed AS
@@ -136,7 +141,7 @@ WITH windowed AS
     -- outer aggregate can name WHICH reading is current and WHEN the maximum was last seen. Explicit
     -- NULLS LAST on the tie-breakers: DuckDB and Postgres default DESC null placement differently.
     SELECT database_name, query_hash, query_plan_hash, collection_time, max_dop,
-           delta_worker_time, delta_execution_count, delta_spills, query_text,
+           delta_worker_time, delta_execution_count, delta_spills,
            ROW_NUMBER() OVER
            (
                PARTITION BY database_name, query_hash
@@ -146,20 +151,60 @@ WITH windowed AS
     FROM v_query_stats
     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
     AND   delta_worker_time > 0
+),
+top_queries AS
+(
+    -- #3959: ranked and cut WITHOUT the statement text. The text used to ride the window above for every
+    -- row it read, to print five, and on Darling v_query_stats resolves it from the fleet's text dimension
+    -- row by row. The final SELECT reads it for the five that print.
+    SELECT database_name, query_hash,
+           SUM(delta_worker_time)::BIGINT AS total_cpu_us,
+           SUM(delta_execution_count)::BIGINT AS exec_count,
+           MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
+           SUM(delta_spills)::BIGINT AS spills,
+           COUNT(DISTINCT query_plan_hash) AS plan_count,
+           MAX(max_dop_any_plan) AS max_dop_any_plan,
+           MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
+    FROM windowed
+    GROUP BY database_name, query_hash
+    ORDER BY total_cpu_us DESC
+    LIMIT 5
 )
-SELECT database_name, query_hash,
-       SUM(delta_worker_time)::BIGINT AS total_cpu_us,
-       SUM(delta_execution_count)::BIGINT AS exec_count,
-       MAX(CASE WHEN newest_rn = 1 THEN max_dop END) AS max_dop,
-       SUM(delta_spills)::BIGINT AS spills,
-       LEFT(MAX(query_text), 500) AS query_text,
-       COUNT(DISTINCT query_plan_hash) AS plan_count,
-       MAX(max_dop_any_plan) AS max_dop_any_plan,
-       MAX(CASE WHEN max_dop = max_dop_any_plan THEN collection_time END) AS max_dop_any_plan_last_seen
-FROM windowed
-GROUP BY database_name, query_hash
-ORDER BY total_cpu_us DESC
-LIMIT 5";
+SELECT t.database_name, t.query_hash,
+       t.total_cpu_us,
+       t.exec_count,
+       t.max_dop,
+       t.spills,
+       -- #3959: the same MAX over the same rows the single pass took it over (this group's window rows,
+       -- under the window's own filter). Equality first, which the (server_id, query_hash, collection_time)
+       -- index serves. GROUP BY puts a NULL key's rows in one group that equality cannot match, so only
+       -- a group with a NULL key reads them NULL-safe.
+       COALESCE
+       (
+           (
+               SELECT LEFT(MAX(v.query_text), 500)
+               FROM v_query_stats AS v
+               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               AND   v.delta_worker_time > 0
+               AND   v.database_name = t.database_name
+               AND   v.query_hash = t.query_hash
+           ),
+           CASE WHEN t.database_name IS NULL OR t.query_hash IS NULL THEN
+           (
+               SELECT LEFT(MAX(v.query_text), 500)
+               FROM v_query_stats AS v
+               WHERE v.server_id = $1 AND v.collection_time >= $2 AND v.collection_time <= $3
+               AND   v.delta_worker_time > 0
+               AND   v.database_name IS NOT DISTINCT FROM t.database_name
+               AND   v.query_hash IS NOT DISTINCT FROM t.query_hash
+           )
+           END
+       ) AS query_text,
+       t.plan_count,
+       t.max_dop_any_plan,
+       t.max_dop_any_plan_last_seen
+FROM top_queries AS t
+ORDER BY t.total_cpu_us DESC";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });

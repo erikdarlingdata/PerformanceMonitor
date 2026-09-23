@@ -730,6 +730,41 @@ public sealed class ViewerPostgresTabsTests
         Assert.Equal("0", selfManaged.Writes);
     }
 
+    /// <summary>
+    /// #3955: across a window holding a postmaster restart, the checkpoint figures a shutdown checkpoint lands in
+    /// are blank (the shared reader nulls them), and each of those rows SAYS the restart is why, rather than leaving
+    /// the reader to guess between the major and a reset. The timed and completed counts, which a restart does not
+    /// move, keep their figures and their own notes, and the same window without a restart reads as before.
+    /// </summary>
+    [Fact]
+    public void AWriteStatsWindowHoldingARestart_SaysSoOnEveryBlankCheckpointRow()
+    {
+        var across = PgDisplay.WriteStatsRows(WriteStats(restarted: true));
+        var steady = PgDisplay.WriteStatsRows(WriteStats(restarted: false));
+
+        foreach (var metric in new[] { "Requested", "Write Time (ms)", "Sync Time (ms)", "Buffers Written" })
+        {
+            var blank = Assert.Single(across, r => r.Group == "Checkpoints" && r.Metric == metric);
+            Assert.Equal(PgDisplay.NotApplicableText, blank.Value);
+            Assert.StartsWith("Blank: PostgreSQL restarted inside this window.", blank.Note, StringComparison.Ordinal);
+
+            var stated = Assert.Single(steady, r => r.Group == "Checkpoints" && r.Metric == metric);
+            Assert.NotEqual(PgDisplay.NotApplicableText, stated.Value);
+            Assert.DoesNotContain("restart", stated.Note, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /* SLRU can be blank for two reasons, so its restart note names both. */
+        Assert.Contains("across a restart inside this window", Assert.Single(across, r => r.Metric == "SLRU Written").Note, StringComparison.Ordinal);
+        Assert.DoesNotContain("restart", Assert.Single(steady, r => r.Metric == "SLRU Written").Note, StringComparison.OrdinalIgnoreCase);
+
+        foreach (var metric in new[] { "Timed", "Completed" })
+        {
+            var kept = Assert.Single(across, r => r.Group == "Checkpoints" && r.Metric == metric);
+            Assert.Equal(48L.ToString("N0", System.Globalization.CultureInfo.CurrentCulture), kept.Value);
+            Assert.DoesNotContain("restart", kept.Note, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     // ── Nothing the reader returns is dropped on the floor ───────────────────────────────────────
 
     /// <summary>
@@ -886,6 +921,38 @@ public sealed class ViewerPostgresTabsTests
         };
 
     // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>A four-hour write-stats window as the shared reader returns it, with or without a postmaster
+    /// restart inside it: across one, the reader has nulled the checkpoint figures the shutdown checkpoint lands in.</summary>
+    private static DarlingPgWriteStatsReader.PgWriteStatsRow WriteStats(bool restarted) => new(
+        WindowStartUtc: new DateTime(2026, 9, 22, 16, 0, 0, DateTimeKind.Utc),
+        WindowEndUtc: new DateTime(2026, 9, 22, 20, 0, 0, DateTimeKind.Utc),
+        CheckpointsTimed: 48,
+        CheckpointsRequested: restarted ? null : 1,
+        CheckpointsDone: 48,
+        RestartpointsTimed: 0,
+        RestartpointsRequested: 0,
+        RestartpointsDone: 0,
+        CheckpointWriteTimeMs: restarted ? null : 2_400.0,
+        CheckpointSyncTimeMs: restarted ? null : 1_200.0,
+        BuffersWrittenCheckpoint: restarted ? null : 24_000,
+        SlruWritten: restarted ? null : 12,
+        BuffersClean: 0,
+        MaxwrittenClean: 0,
+        BuffersAlloc: 0,
+        BuffersBackend: null,
+        BuffersBackendFsync: null,
+        WalRecords: 30_720,
+        WalFpi: 0,
+        WalBytes: 251_658_240m,
+        WalBuffersFull: 0,
+        WalWrite: null,
+        WalSync: null,
+        WalWriteTimeMs: null,
+        WalSyncTimeMs: null,
+        ResetDuringWindow: false,
+        PostmasterRestartedDuringWindow: restarted,
+        PostmasterStartTimeUtc: new DateTime(2026, 9, 22, 18, 0, 0, DateTimeKind.Utc));
 
     private static DarlingServer Server(string? engineKind) =>
         new(1, "alpha-pg-01", "alpha", isEnabled: true, sqlMajorVersion: null, monthlyCostUsd: 0m,

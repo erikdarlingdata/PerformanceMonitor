@@ -46,7 +46,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// materialized floor (or the source's horizon, whichever is later) up to its last materialized bucket, does the
 /// materialization hold a row for it, and does the source hold a row that the aggregate's own <c>WHERE</c>
 /// would admit? Both are index probes — every hypertable carries its time index and every materialization
-/// its <c>bucket</c> index — so the scan is a few hundred probes per aggregate whatever the tables weigh.
+/// its <c>bucket</c> index — so the scan is a few hundred probes per aggregate whatever the tables weigh. The
+/// scan's SQL has to fence them to keep them that way (#3933, <see cref="MaterializationHoleScanSql"/>): written
+/// bare, the planner joined each one over its whole relation.
 /// The aggregate's WHERE is applied to the source probe (<see cref="MaterializationHoleSourceFilterFor"/>) so a
 /// bucket whose every source row the aggregate rejects — a restart hour on an interval-honest successor — is
 /// not read as a hole and refreshed on every start for nothing. Buckets below the floor are the backfill's
@@ -201,6 +203,21 @@ public static partial class TimescaleSupport
     /// <paramref name="materialization"/> is the aggregate's materialization hypertable
     /// (<see cref="ResolveMaterializationAsync"/>), read directly so a real-time aggregate's un-materialized
     /// tail does not count as covered. Ordered oldest first, the order the cap consumes.
+    ///
+    /// <para><b>The probes stay probes because the SQL says so (#3933).</b> Written as a bare <c>NOT EXISTS</c>
+    /// and <c>EXISTS</c>, PostgreSQL pulls both up into joins, and neither join can push the per-bucket bound into
+    /// its scan. The planner made the materialization side a merge anti-join that read the WHOLE materialization
+    /// hypertable (every server, its whole retention, decompressing every compressed chunk to sort it by bucket),
+    /// and the source side a semi-join over a <c>Materialize</c> of the WHOLE source table. On a healthy store
+    /// the second never runs, because no bucket survives the first. After an outage, which is the case this pass
+    /// exists for, every outage bucket survives, holds no source row, and reads the entire materialized source
+    /// through once; the first one builds it, spilling past <c>work_mem</c>. That is the #3905 defect in
+    /// <see cref="DailySummarySql"/>'s not-carried probes without the <c>server_id</c> that bounded it there to
+    /// one server's rows. So each probe carries <c>OFFSET 0</c>, which PostgreSQL will not pull up into a join
+    /// (<c>simplify_EXISTS_query</c>: "OFFSET 0 ... traditionally is used as an optimization fence"), and runs as
+    /// a SubPlan once per bucket with the chunk it needs picked at run time. The candidate buckets are fenced the
+    /// same way, so the source is probed only for the buckets the materialization probe found empty. Measured
+    /// with the old text as the oracle: the same buckets, in the same order, on every target.</para>
     /// </summary>
     public static string MaterializationHoleScanSql(MaterializationHoleTarget target, (string Schema, string Name) materialization)
     {
@@ -208,14 +225,19 @@ public static partial class TimescaleSupport
         var sourceFilter = filter.Length == 0 ? string.Empty : $"\n    AND   {filter}";
 
         return $@"
-SELECT b.bucket
-FROM generate_series($1::timestamp, $2::timestamp, $3::interval) AS b(bucket)
-WHERE NOT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket = b.bucket)
-AND   EXISTS (
+SELECT c.bucket
+FROM (
+    SELECT b.bucket
+    FROM generate_series($1::timestamp, $2::timestamp, $3::interval) AS b(bucket)
+    WHERE NOT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket = b.bucket OFFSET 0)
+    OFFSET 0
+) AS c
+WHERE EXISTS (
     SELECT 1 FROM collect.{target.Source} AS s
-    WHERE s.{target.SourceTimeColumn} >= b.bucket
-    AND   s.{target.SourceTimeColumn} < b.bucket + $3::interval{sourceFilter})
-ORDER BY b.bucket";
+    WHERE s.{target.SourceTimeColumn} >= c.bucket
+    AND   s.{target.SourceTimeColumn} < c.bucket + $3::interval{sourceFilter}
+    OFFSET 0)
+ORDER BY c.bucket";
     }
 
     /// <summary>The materialized span of one aggregate — its oldest and newest bucket — read off the

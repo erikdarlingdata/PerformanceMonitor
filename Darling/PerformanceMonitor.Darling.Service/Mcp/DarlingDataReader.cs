@@ -238,7 +238,11 @@ internal static class DarlingDataReader
     /// freshness-derived status the tool assigns; the viewer has no live ping either).
     /// <para><c>EngineKind</c> and <c>PostgresMajorVersion</c> ride along because the row's version label is
     /// engine-aware (#3145): without the discriminator this read fed <c>SqlMajorVersion</c> — <c>0</c> at
-    /// every PostgreSQL target — through a SQL-Server-only table and published "SQL Server v0".</para></summary>
+    /// every PostgreSQL target — through a SQL-Server-only table and published "SQL Server v0".</para>
+    /// <para><c>RegisteredAt</c> is the registry's <c>created_date</c>, the server's first successful connect
+    /// (#3967). The newest-collection read has no window, but the collection log's retention bounds what it
+    /// can see, and the registration is what tells a server whose history retention dropped (Offline) from
+    /// one that has never collected.</para></summary>
     public sealed record ServerListRow(
         int ServerId,
         string ServerName,
@@ -246,7 +250,8 @@ internal static class DarlingDataReader
         int? SqlMajorVersion,
         DateTime? LastCollection,
         string? EngineKind = null,
-        int? PostgresMajorVersion = null);
+        int? PostgresMajorVersion = null,
+        DateTime? RegisteredAt = null);
 
     /// <summary>The latest server_properties snapshot (Lite's <c>ServerPropertiesRow</c>).
     /// <paramref name="UtcOffsetMinutes"/> is the offset IN FORCE at that collection (V16; null on a pre-V16 row)
@@ -1312,7 +1317,8 @@ internal static class DarlingDataReader
     /// Every enabled server plus its newest collection instant — the list_servers read. The
     /// correlated <c>MAX(collection_time)</c> per server drives the freshness-derived status the tool
     /// assigns (the headless viewer has no live ping either — see <c>ServerSummaryItem.ClassifyFreshness</c>).
-    /// $-free (no parameters, no bare now()) so a test can pin the dialect ungated.
+    /// <c>created_date</c> rides on the same registry row for the retention rule <see cref="ServerListRow"/>
+    /// describes (#3967). $-free (no parameters, no bare now()) so a test can pin the dialect ungated.
     /// </summary>
     public const string ServerListSql = """
         SELECT
@@ -1322,7 +1328,8 @@ internal static class DarlingDataReader
             s.sql_major_version,
             (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection,
             s.engine_kind,
-            s.postgres_major_version
+            s.postgres_major_version,
+            s.created_date
         FROM servers s
         WHERE s.is_enabled
         ORDER BY s.server_name
@@ -1344,7 +1351,8 @@ internal static class DarlingDataReader
                 reader.IsDBNull(3) ? null : reader.GetInt32(3),
                 reader.IsDBNull(4) ? null : reader.GetDateTime(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetInt32(6)));
+                reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                reader.IsDBNull(7) ? null : reader.GetDateTime(7)));
         }
 
         return rows;

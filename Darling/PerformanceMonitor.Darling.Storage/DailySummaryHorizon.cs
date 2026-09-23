@@ -46,6 +46,18 @@ public static class DarlingRetentionHorizons
     public const int CollectionLogRetentionDays = DataRetentionBaseDays * 2;
 
     /// <summary>
+    /// The earliest instant a read of <c>collection_log</c> with no window can still see at
+    /// <paramref name="nowUtc"/>: <see cref="CollectionLogRetentionDays"/> back, as naive UTC (#3967). The purge
+    /// never removes a row newer than this. It drops whole chunks whose every row is older, or deletes rows older
+    /// than its own run's cutoff, which is earlier still, so some older rows can survive and none newer are
+    /// lost. It is the <c>searchedFromUtc</c> every surface that reads a server's newest collection with no
+    /// window hands <c>ServerHealthClassifier.ClassifyFreshness</c>, so a server whose whole history retention
+    /// has dropped reads Offline rather than "Awaiting first collection".
+    /// </summary>
+    public static DateTime CollectionLogHorizon(DateTime nowUtc) =>
+        DateTime.SpecifyKind(nowUtc.AddDays(-CollectionLogRetentionDays), DateTimeKind.Unspecified);
+
+    /// <summary>
     /// <c>config_alert_log</c> (the fired-alert history) is a plain registry table — not a collector, so no
     /// schedule horizon; not a hypertable, so a batched DELETE purge. Kept 90 days (a quarter): alert history is
     /// low-volume and a valuable audit trail, so the horizon is generous, but it is BOUNDED. No operator setting

@@ -227,15 +227,21 @@ public partial class RecommendationsTab : UserControl
             /* #1757: the retention accessor reads the DEFAULT schedule — baselines are a per-server
                statistic but retention is configured per collector, and the default is what a user changes
                when they shrink history for disk reasons. */
+            var schedules = _scheduleManager;
+            var servers = _serverManager;
             var analysisService = new AnalysisService(
                 _duckDb,
                 planFetcher,
-                _scheduleManager is null
+                schedules is null
                     ? null
                     : (Func<string, int?>)(collector =>
-                        _scheduleManager.GetDefaultSchedule()
+                        schedules.GetDefaultSchedule()
                             .FirstOrDefault(x => string.Equals(x.Name, collector, StringComparison.OrdinalIgnoreCase))
-                            ?.RetentionDays));
+                            ?.RetentionDays),
+                /* #3896: the cadence each collector runs at on this server, for the latest-value lookbacks. */
+                schedules is null
+                    ? null
+                    : (id, collector) => schedules.GetFrequencyForStorageServer(servers, id, collector));
 
             var findings = await Task.Run(() => analysisService.AnalyzeAsync(serverId, serverName, hoursBack: 4));
 

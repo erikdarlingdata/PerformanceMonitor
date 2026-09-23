@@ -218,6 +218,10 @@ AND   port = $5";
     /// whose tab set, chip and card were already correct. It is read from the OBSERVED side beside the kind,
     /// for the same reason: a probed fact lives on <c>collect.servers</c>, and the desired-state config plane
     /// cannot carry one.</para>
+    ///
+    /// <para><c>created_date</c> (#3967) is read from the OBSERVED side for the same reason, and on both
+    /// queries for the #3145 one: it is the first successful connect, and a server the operator added that the
+    /// service has not reached has none, which keeps its dot on "Awaiting first collection".</para>
     /// </summary>
     public const string ManagedServersSql = @"
 SELECT
@@ -229,7 +233,8 @@ SELECT
     c.monthly_cost_usd,
     s.engine_kind,
     COALESCE(s.sql_engine_edition, 0) AS sql_engine_edition,
-    s.postgres_major_version
+    s.postgres_major_version,
+    s.created_date
 FROM config_monitored_servers c
 LEFT JOIN servers s ON s.server_id = c.server_id
 ORDER BY COALESCE(s.display_name, c.name)";
@@ -264,7 +269,8 @@ ORDER BY COALESCE(s.display_name, c.name)";
                 reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? CollectorEngineCapability.UnknownEngineEdition : reader.GetInt32(7),
-                reader.IsDBNull(8) ? null : reader.GetInt32(8)));
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
         }
 
         return servers;
