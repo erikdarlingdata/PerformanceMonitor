@@ -52,6 +52,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             await create.ExecuteNonQueryAsync();
         }
 
+        var bodySucceeded = false;
         try
         {
             var builder = new NpgsqlConnectionStringBuilder(connectionStringRoot)
@@ -87,10 +88,15 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
                     roleConnection, "dev-postgres-role-probe", CancellationToken.None);
                 Assert.True(granted);
             }
+
+            bodySucceeded = true;
         }
         finally
         {
-            await DropProbeRoleAsync(adminConnection, role);
+            await LiveStoreCleanup.RunAsync(connectionStringRoot, bodySucceeded, async (cleanup, _) =>
+            {
+                await DropProbeRoleAsync(cleanup, role);
+            });
         }
     }
 
