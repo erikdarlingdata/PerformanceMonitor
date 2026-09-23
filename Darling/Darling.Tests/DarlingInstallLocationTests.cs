@@ -521,6 +521,185 @@ function Get-CimInstance {
         Assert.Equal(installer, service, ignoreCase: true);
     }
 
+    /// <summary>
+    /// #4034: <c>Lock-DarlingInstallTree</c> ships twice, in install-darling.ps1 (a fresh install) and
+    /// upgrade-darling.ps1 (every install made before it existed, closed at its next upgrade). Neither script can
+    /// import the other, since each runs from wherever its zip was extracted, so the copies are compared byte for
+    /// byte: a fix made to one and not the other would leave half the installs open.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ShipsIdenticallyInTheInstallAndUpgradeScripts()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+
+        Assert.Equal(InstallTreeLockBlock(InstallScript), InstallTreeLockBlock(upgrade));
+        /* The account the lock is handed comes from the same lookup in both, for the same reason. */
+        Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingServiceLogonName"), ExtractFunction(upgrade, "Get-DarlingServiceLogonName"));
+    }
+
+    /// <summary>
+    /// #4034, executed as shipped against a real tree. A folder created directly under the system drive root
+    /// inherits "Authenticated Users: Modify" from it (the documented install location's hole). After the lock the
+    /// root must be protected and grant ordinary users read and execute only, the service account Modify (it
+    /// extracts pg-runtime into the tree), and every child that inherits must follow. A file with its own
+    /// protected DACL (darling.json, as step 4b leaves it) keeps it. A child that grants a broad principal write
+    /// EXPLICITLY, behind its own protection, is not something a folder lock can override, so it must come back
+    /// in the result for the warning to name, not be silently passed over.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ClosesTheInheritedGrant_KeepsProtectedFiles_AndReportsWhatItCannotClose()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4034-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path "$root\pg-runtime\pgsql\bin", "$root\planted" -Force | Out-Null
+                Set-Content -LiteralPath "$root\pg-runtime\pgsql\bin\postgres.exe" -Value 'x'
+                Set-Content -LiteralPath "$root\darling.json" -Value '{}'
+                Set-Content -LiteralPath "$root\planted\evil.dll" -Value 'x'
+                Set-Content -LiteralPath "$root\svc.exe" -Value 'x'
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+                $interactive = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
+                $system = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+                $admins = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                $service = (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType)
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                'me=' + $me.Value
+                # darling.json as step 4b leaves it: protected, the service and the machine's own accounts in
+                # full, INTERACTIVE reading.
+                $j = New-Object System.Security.AccessControl.FileSecurity
+                $j.SetAccessRuleProtection($true, $false)
+                foreach ($s in @($system, $admins, $service)) { $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
+                $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactive, 'Read', 'Allow')))
+                Set-Acl -LiteralPath "$root\darling.json" -AclObject $j
+                # #4038 round 2's High: a child an ordinary user owns and grants to itself behind its own
+                # protection, as one who re-created it while an older install was open would leave it.
+                $p = New-Object System.Security.AccessControl.DirectorySecurity
+                $p.SetAccessRuleProtection($true, $false)
+                $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+                $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+                Set-Acl -LiteralPath "$root\planted" -AclObject $p
+                $x = New-Object System.Security.AccessControl.FileSecurity
+                $x.SetAccessRuleProtection($true, $false)
+                $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+                Set-Acl -LiteralPath "$root\svc.exe" -AclObject $x
+                # A junction inside the tree (to the tree's own pg-runtime, so cleanup never leaves it).
+                & cmd.exe /c mklink /J "$root\planted-junction" "$root\pg-runtime" | Out-Null
+
+                function Rules($path) { (Get-Acl -LiteralPath $path).GetAccessRules($true, $true, $sidType) }
+                $trustedHere = @($system, $admins, $service, (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerSid, $null)))
+                function Untrusted($path) { @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType) | Where-Object { $trustedHere -notcontains $_.IdentityReference }).Count }
+
+                # Phase 1, as install step 1b2 runs it on a fresh install: no service account yet, so the tree is
+                # locked and nothing is granted to a service.
+                $null = Lock-DarlingInstallTree $root ''
+                'phase1Protected=' + (Get-Acl -LiteralPath $root).AreAccessRulesProtected
+                'phase1Service=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $service }).Count
+
+                # Phase 2, as step 4b2 and the upgrade run it: the service's grant, and the walk's report.
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
+
+                $rootAcl = Get-Acl -LiteralPath $root
+                'protected=' + $rootAcl.AreAccessRulesProtected
+                'authenticatedUsers=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $auth }).Count
+                'usersRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $users } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'serviceRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $service } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'postgresServiceInherited=' + @(Rules "$root\pg-runtime\pgsql\bin\postgres.exe" | Where-Object { $_.IdentityReference -eq $service -and $_.IsInherited }).Count
+                'jsonProtected=' + (Get-Acl -LiteralPath "$root\darling.json").AreAccessRulesProtected
+                'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'jsonOwnerIsService=' + ((Get-Acl -LiteralPath "$root\darling.json").GetOwner($sidType) -eq $service)
+                'plantedUntrusted=' + (Untrusted "$root\planted")
+                'plantedInherits=' + (-not (Get-Acl -LiteralPath "$root\planted").AreAccessRulesProtected)
+                'svcUntrusted=' + (Untrusted "$root\svc.exe")
+                'svcInherits=' + (-not (Get-Acl -LiteralPath "$root\svc.exe").AreAccessRulesProtected)
+                'svcOwnerIsAdmins=' + ((Get-Acl -LiteralPath "$root\svc.exe").GetOwner($sidType) -eq $admins)
+
+                # The account spellings Win32_Service reports that do not translate as written. Last, since each
+                # call grants the account it is handed.
+                'localSystem=' + $(try { $null = Lock-DarlingInstallTree $root 'LocalSystem'; 'ok' } catch { 'threw: ' + $_.Exception.Message })
+                $local = $env:USERDOMAIN -eq $env:COMPUTERNAME
+                'dotAccount=' + $(if (-not $local) { 'skipped' } else { try { $null = Lock-DarlingInstallTree $root ('.\' + $env:USERNAME); 'ok' } catch { 'threw: ' + $_.Exception.Message } })
+
+                # A root that is itself a junction is refused, not locked through.
+                & cmd.exe /c mklink /J "$root-link" "$root" | Out-Null
+                'junctionRoot=' + (@(Lock-DarlingInstallTree "$root-link" 'NT SERVICE\TrustedInstaller') -join ';').Contains('the install folder itself is a junction or link')
+            }
+            finally {
+                # The test user owns every object here and so keeps WRITE_DAC: reset to inherited, then delete. The
+                # junction goes first with rmdir, which removes the link and never what it points at.
+                if (Test-Path -LiteralPath "$root-link") { & cmd.exe /c rmdir "$root-link" | Out-Null }
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    if (Test-Path -LiteralPath "$root\planted-junction") { & cmd.exe /c rmdir "$root\planted-junction" | Out-Null }
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("phase1Protected=True", answers);
+        Assert.Contains("phase1Service=0", answers);
+
+        /* The High: the user-owned, self-granted children are closed where they stand (reset to the tree's ACEs,
+           their own grant gone), not merely reported, while darling.json keeps its protected DACL. */
+        Assert.Contains("plantedUntrusted=0", answers);
+        Assert.Contains("plantedInherits=True", answers);
+        Assert.Contains("svcUntrusted=0", answers);
+        Assert.Contains("svcInherits=True", answers);
+
+        /* Ownership is the half that needs elevation: icacls /setowner to Administrators. Elevated (CI), nothing
+           is left but the junction, which the walk does not descend; darling.json belongs to the service and the
+           planted binary to Administrators. Not elevated (a developer's shell), the lock cannot take ownership,
+           and the walk says so object by object: every remaining entry is one this user still owns, never a
+           writer. (icacls exits 0 under /C even when /setowner is denied, so the walk's owner check is what
+           catches it, not the exit code.) */
+        var open = answers.FindAll(a => a.StartsWith("open:", StringComparison.Ordinal));
+        Assert.Contains(@"open:\planted-junction (a junction or link)", open);
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Single(open);
+            Assert.Contains("jsonOwnerIsService=True", answers);
+            Assert.Contains("svcOwnerIsAdmins=True", answers);
+        }
+        else
+        {
+            var me = answers.Find(a => a.StartsWith("me=", StringComparison.Ordinal))!.Substring(3);
+            var owned = open.FindAll(o => !o.Contains("junction or link", StringComparison.Ordinal) && !o.Contains("could not make", StringComparison.Ordinal));
+            Assert.Contains(owned, o => o.Equals($"open: (owned by {me})", StringComparison.Ordinal));
+            Assert.All(owned, o => Assert.EndsWith($"(owned by {me})", o, StringComparison.Ordinal));
+        }
+
+        Assert.Contains("junctionRoot=True", answers);
+        Assert.Contains("localSystem=ok", answers);
+        Assert.True(answers.Contains("dotAccount=ok") || answers.Contains("dotAccount=skipped"),
+            "a .\\ account must be normalized to this computer, not thrown on: " + string.Join(" | ", answers));
+        Assert.Contains("protected=True", answers);
+        Assert.Contains("authenticatedUsers=0", answers);
+        Assert.Contains("usersRights=ReadAndExecute, Synchronize", answers);
+        Assert.Contains("serviceRights=Modify, Synchronize", answers);
+        Assert.Contains("postgresServiceInherited=1", answers);
+        Assert.Contains("jsonProtected=True", answers);
+        Assert.Contains("jsonInteractive=Read, Synchronize", answers);
+    }
+
+    /// <summary>The #4034 block, its explaining comment included, exactly as a script ships it.</summary>
+    private static string InstallTreeLockBlock(string script)
+    {
+        var start = script.IndexOf("# Lock the install tree against ordinary users (#4034).", StringComparison.Ordinal);
+        Assert.True(start >= 0, "a Darling script no longer carries the #4034 install-tree lock");
+        var function = script.IndexOf("function Lock-DarlingInstallTree", start, StringComparison.Ordinal);
+        ExtractBracedBlockAt(script, script.IndexOf('{', function), out var end);
+        return script.Substring(start, end - start + 1);
+    }
+
     /// <summary>Returns the single line of <paramref name="script"/> containing <paramref name="marker"/>,
     /// verbatim — so a composition can be executed as shipped instead of retyped into a probe.</summary>
     private static string ExtractLine(string script, string marker)
@@ -543,13 +722,20 @@ function Get-CimInstance {
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
+            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+            /* A test host started from PowerShell 7 (CI's step shell) hands down a PSModulePath that points
+               Windows PowerShell 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it ships:
+               Get-Acl and Set-Acl, in Microsoft.PowerShell.Security, fail with "the module could not be loaded"
+               (#4038's first CI run). Without the variable, 5.1 builds its own default, as an operator's console
+               does. */
+            startInfo.Environment.Remove("PSModulePath");
+            using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 
             var stdout = process!.StandardOutput.ReadToEnd();

@@ -825,6 +825,9 @@ public sealed class DarlingWorker : BackgroundService
        store-metrics tick. Held here (not in the runner) so its lifetime matches the sweep that drains it. */
     private readonly CollectorCostAccumulator _collectorCost = new();
 
+    /* #4004 review, round 3: "the log-hash key was replaced at start", held for the first pg_log_events run. */
+    private readonly LogHashKeyRotationNote _logHashKeyRotation = new();
+
     /* Fleet-level working-set launch-guard latch (#1556): true once ShouldLaunchSweeps has tripped this
        episode, so its CRITICAL log is emitted ONCE rather than every sweep (the WarnedThisEpisode idiom —
        but fleet-wide: the guard is about the whole process's working set, so it is a single worker field,
@@ -2027,9 +2030,15 @@ public sealed class DarlingWorker : BackgroundService
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
         /* #4004: the store's log-hash key, loaded ONCE here and shared by every run that hashes log text (pg_log_events
            on the pg_read_file and RDS routes), so raw_line_hash and statement_fingerprint are keyed with a secret the
-           store never holds. Generated only when none exists and never replaced: null means the file could not be used,
-           the reason is already logged, and those runs refuse rather than hash without it. */
-        var logHashKey = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
+           store never holds. Generated when none exists, and replaced only when its directory was found open to other
+           users, by whichever look found it so (role provisioning above, a host, or this load), which removes the key
+           there and then: null means the file could not be used, the reason is already logged, and those runs refuse
+           rather than hash without it. */
+        var logHashKeyLoad = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
+        var logHashKey = logHashKeyLoad.Key;
+        /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log
+           row of the first pg_log_events run after this, and only that run (RunOneAsync takes it). */
+        _logHashKeyRotation.Arm(DarlingLogHashKeyFile.RotationNote(logHashKeyLoad));
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
@@ -9476,6 +9485,10 @@ LIMIT 1";
             {
                 result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };
             }
+
+            /* #4004 review, round 3: the first pg_log_events run after a start that replaced a discarded log-hash key
+               carries that on its row, through the same HostNote channel; taking it clears it, so no later run does. */
+            result = _logHashKeyRotation.ApplyTo(collectorName, result);
 
             /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
                per-database fault split takes its arm's level — see LogPerDatabaseFaultSplit's remarks. A

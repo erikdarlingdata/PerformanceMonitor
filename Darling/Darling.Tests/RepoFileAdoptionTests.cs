@@ -149,6 +149,9 @@ public sealed class RepoFileAdoptionTests
            (`short_desc text,` / `database_name text,` / `role_name text`), its tool pin anchors the override
            section's null else-arm on the key that follows it on the next line, and its rung-doc and
            reader-census arms slice LF-normalised source. */
+        /* #4004 review, round 3: its rotation-note pin anchors the collection-log write in RunOneAsync on the
+           call and its argument list on the NEXT line, so the note is proven applied before THAT row is written. */
+        "PgLogHashKeyTests.cs",
         "PgServerConfigScopeRungTests.cs",
         /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
            is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
