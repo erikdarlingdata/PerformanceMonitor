@@ -167,6 +167,12 @@ public sealed class McpFilterSemanticsLivePostgresTests
             Assert.Equal(JsonValueKind.String, hints.GetProperty("effective_start").ValueKind);
             Assert.False(hints.GetProperty("window_truncated").GetBoolean());
 
+            /* Beside #4060's execution_type: the module does run, but never with that outcome. Still a measured
+               zero, and the message names both filters, because either could be why nothing matched. */
+            var bothMiss = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1, execution_type: "Aborted", module_name: "dbo.usp_Target")).RootElement;
+            Assert.Equal("empty", bothMiss.GetProperty("status").GetString());
+            Assert.Contains("with execution_type Aborted", bothMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
+
             /* The same filter over a window that holds nothing: not the filter's miss, so not "empty". */
             var asOf = now.AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ");
             var nothing = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1, as_of: asOf, module_name: "dbo.usp_Target")).RootElement;

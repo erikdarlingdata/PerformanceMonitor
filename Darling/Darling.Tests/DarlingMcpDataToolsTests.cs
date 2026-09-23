@@ -135,7 +135,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     [InlineData("get_perfmon_stats", "server_name,counter_name,instance_name")]
     [InlineData("get_top_queries_by_cpu", "server_name,hours_back,top,database_name,parallel_only,min_dop,as_of")]
     [InlineData("get_top_procedures_by_cpu", "server_name,hours_back,top,database_name,as_of")]
-    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of,module_name")]
+    [InlineData("get_query_store_top", "server_name,hours_back,top,database_name,as_of,execution_type,module_name")]
     [InlineData("get_collection_health", "server_name")]
     /* #3287 gave this read two filters, on BOTH SKUs and in the same relative order, so it joins the theory
        rather than sitting outside it. The two are LAST because as_of and collector_name are both `string?`:
@@ -677,9 +677,11 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.Contains("AVG(CAST(avg_duration_us AS double precision))", sql, StringComparison.Ordinal);
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
            primary and secondary workload blended into one row. */
-        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, replica_role", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
         Assert.Contains("$5::text IS NULL OR database_name = $5", sql, StringComparison.Ordinal);
-        Assert.Contains("$6::text IS NULL OR module_name = $6", sql, StringComparison.Ordinal);
+        Assert.Contains("$6::text IS NULL OR execution_type_desc = $6", sql, StringComparison.Ordinal);
+        Assert.Contains("r.execution_type_desc", sql, StringComparison.Ordinal);
+        Assert.Contains("$7::text IS NULL OR module_name = $7", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(module_name) AS module_name", sql, StringComparison.Ordinal);
         Assert.Contains("r.module_name", sql, StringComparison.Ordinal);
         Assert.Contains("SUM(execution_count)", sql, StringComparison.Ordinal);
@@ -691,7 +693,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var sql = DarlingDataReader.QueryStoreTopSql;
         var rankedCte = sql.IndexOf("ranked AS", StringComparison.Ordinal);
         var dedupSurvivor = sql.IndexOf("WHERE rn = 1", rankedCte, StringComparison.Ordinal);
-        var moduleFilter = sql.IndexOf("$6::text IS NULL OR module_name = $6", StringComparison.Ordinal);
+        var moduleFilter = sql.IndexOf("$7::text IS NULL OR module_name = $7", StringComparison.Ordinal);
         var firstLimit = sql.IndexOf("LIMIT $4 + 5", StringComparison.Ordinal);
 
         Assert.True(dedupSurvivor > rankedCte && moduleFilter > dedupSurvivor,
@@ -1019,6 +1021,7 @@ public sealed class DarlingMcpDataToolsLivePostgresTests
             Assert.Contains("0xE2EDATAHASH", q, StringComparison.Ordinal);   /* the planted query surfaced */
             AssertServerEnvelope(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName), "procedures");
             AssertServerEnvelope(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName), "queries");
+            await AssertQueryStoreOutcomesAsync(postgres, cs!, ct);
 
             /* database_name filter narrows without erroring. */
             AssertServerEnvelope(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24, 20, Db), "queries");
@@ -1136,11 +1139,61 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
                 dc, dc * 1000L, dc * 2000L, dc * 400L, 0L, dc * 4L, 0L, 900L, 1200L, 1800L, 2400L);
     }
 
-    private static async Task PlantQueryStoreAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
-        await Exec(c, @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, min_dop, max_dop, last_execution_time)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
-            ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, 42L, 7L, "0xE2EDATAHASH", "0xPLANHASH", "SELECT * FROM Users",
-            100L, 5000L, 4000L, 800L, 0L, 40L, 250L, 1L, 4L, Naive(t));
+    /* Two outcomes of ONE plan in ONE collection, the way Query Store writes them: a runtime-stats row per
+       (plan, interval, execution type). The Aborted row is what AssertQueryStoreOutcomesAsync splits out. */
+    private static async Task PlantQueryStoreAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct)
+    {
+        await PlantQueryStoreOutcomeAsync(c, t, "Regular", 100L, 5000L, ct);
+        await PlantQueryStoreOutcomeAsync(c, t, "Aborted", 3L, 30_000_000L, ct);
+    }
+
+    private static async Task PlantQueryStoreOutcomeAsync(NpgsqlConnection c, DateTime t, string executionType, long executionCount, long avgDurationUs, System.Threading.CancellationToken ct) =>
+        await Exec(c, @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc, query_hash, query_plan_hash, query_text, execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads, avg_rowcount, min_dop, max_dop, last_execution_time)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+            ct, CollectionIdGenerator.Next(), Naive(t), ServerId, ServerName, Db, 42L, 7L, executionType, "0xE2EDATAHASH", "0xPLANHASH", "SELECT * FROM Users",
+            executionCount, avgDurationUs, 4000L, 800L, 0L, 40L, 250L, 1L, 4L, Naive(t));
+
+    /// <summary>
+    /// get_query_store_top's execution outcomes, against the two planted rows of plan 7: unfiltered it returns
+    /// one row per outcome (not one blended "Regular" row of 103); a filter in any case returns that outcome
+    /// alone; a filter that matches nothing while the unfiltered read has rows is <c>empty</c>, not the
+    /// "Query Store may not be enabled" fallback; an unknown outcome is refused by name. The viewer's grid twins
+    /// the read and splits the same way.
+    /// </summary>
+    private static async Task AssertQueryStoreOutcomesAsync(NpgsqlDataSource postgres, string cs, System.Threading.CancellationToken ct)
+    {
+        static (string?, long)[] Outcomes(JsonElement queries) => queries.EnumerateArray()
+            .Where(r => r.GetProperty("query_id").GetInt64() == 42)
+            .Select(r => (r.GetProperty("execution_type").GetString(), r.GetProperty("execution_count").GetInt64()))
+            .OrderBy(x => x.Item1, StringComparer.Ordinal)
+            .ToArray();
+
+        using (var all = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName)))
+            Assert.Equal(new (string?, long)[] { ("Aborted", 3L), ("Regular", 100L) }, Outcomes(all.RootElement.GetProperty("queries")));
+
+        using (var aborted = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "aborted")))
+            Assert.Equal(new (string?, long)[] { ("Aborted", 3L) }, Outcomes(aborted.RootElement.GetProperty("queries")));
+
+        using (var none = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "Exception")))
+        {
+            Assert.Equal("empty", none.RootElement.GetProperty("status").GetString());
+            Assert.Contains("No Exception executions", none.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+
+        using (var bad = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "Timeout")))
+        {
+            Assert.Equal("invalid", bad.RootElement.GetProperty("status").GetString());
+            Assert.Equal("execution_type", bad.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        }
+
+        await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(cs);
+        var grid = (await viewer.GetQueryStoreTopQueriesAsync(ServerId, Naive(DateTime.UtcNow.AddHours(-24)), Naive(DateTime.UtcNow.AddMinutes(5)), cancellationToken: ct))
+            .Where(r => r.QueryId == 42)
+            .Select(r => (r.ExecutionTypeDesc, r.TotalExecutions))
+            .OrderBy(x => x.ExecutionTypeDesc, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { ("Aborted", 3L), ("Regular", 100L) }, grid);
+    }
 
     private static async Task PlantServerPropertiesAsync(NpgsqlConnection c, DateTime t, System.Threading.CancellationToken ct) =>
         await Exec(c, @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count, hyperthread_ratio, physical_memory_mb, socket_count, cores_per_socket, is_hadr_enabled, is_clustered)

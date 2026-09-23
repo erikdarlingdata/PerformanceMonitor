@@ -1,5 +1,5 @@
 # McpAnalysisTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool analyze_server 4160
+tool analyze_server 617
 param analyze_server.as_of 167
 param analyze_server.hours_back 104
 param analyze_server.server_name 28
@@ -7,9 +7,9 @@ param analyze_server.server_name 28
 tool audit_config 431
 param audit_config.server_name 28
 
-tool compare_analysis 1647
+tool compare_analysis 611
 param compare_analysis.as_of 167
-param compare_analysis.baseline_hours_back 211
+param compare_analysis.baseline_hours_back 139
 param compare_analysis.hours_back 57
 param compare_analysis.server_name 28
 

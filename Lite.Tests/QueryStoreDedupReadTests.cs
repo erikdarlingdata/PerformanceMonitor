@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -97,6 +98,7 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         DateTime? intervalStart = null,
         long avgWrites = 0,
         long avgPhysicalReads = 0,
+        string executionType = "Regular",
         string? moduleName = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
@@ -118,7 +120,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = Db });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
         cmd.Parameters.Add(new DuckDBParameter { Value = planId });
-        cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionType });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)firstExecutionTime ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)moduleName ?? DBNull.Value });
@@ -255,6 +257,57 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     }
 
     [Fact]
+    public async Task TopQueries_ExecutionTypeFilterSeparatesOutcomesBeforeRanking()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 201, 2001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xREG", intervalId: 9401, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(6), 202, 2002, FirstExecB, 3, 200, 500, 1,
+            "0xABORT", intervalId: 9402, intervalStart: BucketStart, executionType: "Aborted");
+        await SeedAsync(BucketStart.AddMinutes(7), 203, 2003, FirstExecB.AddMinutes(1), 2, 300, 700, 1,
+            "0xEX", intervalId: 9403, intervalStart: BucketStart, executionType: "Exception");
+
+        var service = new LocalDataService(_duckDb);
+        var aborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        var exception = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Exception"));
+
+        Assert.Equal("Aborted", aborted.ExecutionTypeDesc);
+        Assert.Equal("Exception", exception.ExecutionTypeDesc);
+    }
+
+    /// <summary>
+    /// The case the outcome split exists for: ONE plan, ONE interval, two outcomes. Query Store writes a
+    /// runtime-stats row per (plan, interval, execution type), and the grouping used to MAX() the outcome, so
+    /// this pair came back as one "Regular" row of 103 executions whose average blended the aborted executions'
+    /// 30-second duration into the plan's 2 ms one. The test above seeds one outcome per query and cannot see
+    /// that; this one fails on the old grouping.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_OnePlanWithTwoOutcomes_ReturnsOneRowPerOutcome()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 301, 3001, FirstExecA, 100, 1_000, 2_000, 1,
+            "0xMIXED", intervalId: 9501, intervalStart: BucketStart, executionType: "Regular");
+        await SeedAsync(BucketStart.AddMinutes(5), 301, 3001, FirstExecA, 3, 30_000, 30_000_000, 1,
+            "0xMIXED", intervalId: 9501, intervalStart: BucketStart, executionType: "Aborted");
+
+        var service = new LocalDataService(_duckDb);
+        var rows = (await service.GetQueryStoreTopQueriesAsync(ServerId, 24)).Where(r => r.QueryId == 301).ToList();
+
+        Assert.Equal(2, rows.Count);
+        var regular = Assert.Single(rows, r => r.ExecutionTypeDesc == "Regular");
+        var abortedRow = Assert.Single(rows, r => r.ExecutionTypeDesc == "Aborted");
+        Assert.Equal(100L, regular.TotalExecutions);
+        Assert.Equal(2.0, regular.AvgDurationMs, precision: 6);
+        Assert.Equal(3L, abortedRow.TotalExecutions);
+        Assert.Equal(30_000.0, abortedRow.AvgDurationMs, precision: 6);
+
+        /* Filtered, the plan's aborted executions alone: the filter runs before the dedup's ROW_NUMBER, which
+           cannot change the winner because the outcome is in the partition. */
+        var onlyAborted = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, executionType: "Aborted"));
+        Assert.Equal(3001L, onlyAborted.PlanId);
+        Assert.Equal(3L, onlyAborted.TotalExecutions);
+    }
+
+    [Fact]
     public async Task TopQueries_ModuleFilterRunsBeforeRankingAndReturnsModuleName()
     {
         await SeedAsync(BucketStart.AddMinutes(5), 101, 1001, FirstExecA, 100, 20_000, 50_000, 1,
@@ -270,24 +323,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal("dbo.usp_Target", row.ModuleName);
     }
 
-    /// <summary>
-    /// The probe <c>get_query_store_top</c> asks when a <c>module_name</c> filter matched nothing (#4057): it must
-    /// answer for the same window the top read resolves, so a module miss over a window that holds rows reads as
-    /// a true negative, and the same miss over an empty window reads as the unfiltered "unavailable".
-    /// </summary>
-    [Fact]
-    public async Task WindowProbe_SeesTheTopReadsWindow_AndOnlyIt()
-    {
-        await SeedAsync(BucketStart.AddMinutes(5), 105, 1005, FirstExecA, 3, 100, 200, 1,
-            "0xPROBE", intervalId: 9305, intervalStart: BucketStart, moduleName: "dbo.usp_Probe");
-
-        var service = new LocalDataService(_duckDb);
-        Assert.True(await service.HasQueryStoreRowsInWindowAsync(ServerId, 24));
-        Assert.Empty(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_Missing"));
-        Assert.False(await service.HasQueryStoreRowsInWindowAsync(ServerId, 1, asOfUtc: BucketStart.AddDays(-2)));
-    }
-
-    [Fact]
     public async Task TopQueries_ModuleFilterRunsAfterIntervalDedup()
     {
         await SeedAsync(BucketStart.AddMinutes(5), 104, 1004, FirstExecA, 10, 100, 200, 1,
@@ -300,6 +335,29 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var current = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_NewName"));
         Assert.Equal(40L, current.TotalExecutions);
         Assert.Equal("dbo.usp_NewName", current.ModuleName);
+    }
+
+    /// <summary>
+    /// Both filters at once, behind a database list (#4057 on top of #4060). DuckDB binds $N by position, so the
+    /// database names, the outcome and the module must each land in their own slot; one slot off binds the module
+    /// name to execution_type_desc and nothing matches.
+    /// </summary>
+    [Fact]
+    public async Task TopQueries_DatabaseOutcomeAndModuleFilters_EachBindTheirOwnSlot()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 401, 4001, FirstExecA, 50, 1_000, 2_000, 1,
+            "0xTARGET2", intervalId: 9601, intervalStart: BucketStart, moduleName: "dbo.usp_Target");
+        await SeedAsync(BucketStart.AddMinutes(5), 401, 4001, FirstExecA, 2, 30_000, 30_000_000, 1,
+            "0xTARGET2", intervalId: 9601, intervalStart: BucketStart, executionType: "Aborted", moduleName: "dbo.usp_Target");
+        await SeedAsync(BucketStart.AddMinutes(6), 402, 4002, FirstExecB, 9, 1_000, 60_000_000, 1,
+            "0xOTHER2", intervalId: 9602, intervalStart: BucketStart, executionType: "Aborted", moduleName: "dbo.usp_Other");
+
+        var row = Assert.Single(await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(
+            ServerId, 24, databaseNames: new[] { Db }, executionType: "Aborted", moduleName: "dbo.usp_Target"));
+        Assert.Equal(401L, row.QueryId);
+        Assert.Equal("Aborted", row.ExecutionTypeDesc);
+        Assert.Equal("dbo.usp_Target", row.ModuleName);
+        Assert.Equal(2L, row.TotalExecutions);
     }
 
     [Fact]

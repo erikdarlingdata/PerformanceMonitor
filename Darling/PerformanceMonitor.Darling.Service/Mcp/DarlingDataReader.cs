@@ -230,7 +230,7 @@ internal static class DarlingDataReader
     /// did not attribute the row (pre-2022, or a 2022 standalone).
     /// </summary>
     public sealed record QueryStoreRow(
-        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string? ModuleName,
+        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string ExecutionTypeDesc, string? ModuleName,
         long TotalExecutions, double AvgDurationMs, double AvgCpuTimeMs, double AvgLogicalReads,
         double AvgLogicalWrites, double AvgPhysicalReads, double AvgRowcount, DateTime? LastExecutionTime, string QueryText,
         string? ReplicaRole);
@@ -1349,12 +1349,13 @@ internal static class DarlingDataReader
     /// <summary>
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
-    /// (database, query_id, plan_id, query_hash, replica_role), average the per-interval metrics, rank by total duration
-    /// (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending, over-fetch by 5 for the WAITFOR
-    /// trim, cap at top. The avg columns are bigint (per-interval averages) → double precision before the
-    /// AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view). $1 server_id, $2/$3 window
-    /// (naive UTC), $4 top, $5 database_name (NULL = every database), $6 module_name (NULL = every module;
-    /// applied to the deduplicated interval rows, before the ranking and the cap).
+    /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
+    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
+    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
+    /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
+    /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
     /// </summary>
     public const string QueryStoreTopSql = """
         WITH deduped AS (
@@ -1382,6 +1383,10 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
+               so dropping the other outcomes first cannot change which row wins any partition, and the window
+               sort then sees only the outcome asked for. */
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         ranked AS (
             SELECT
@@ -1389,6 +1394,10 @@ internal static class DarlingDataReader
                 query_id,
                 plan_id,
                 query_hash,
+                /* A GROUP BY key, like replica_role below: Query Store keeps Regular, Aborted and Exception
+                   executions of one plan in separate runtime-stats rows, and averaging them together would
+                   blend a timeout's duration into the plan's normal cost. One row per outcome instead. */
+                execution_type_desc,
                 MAX(module_name) AS module_name,
                 /* A GROUP BY key, not MAX(): an AG's Query Store for secondary replicas (2022+) keeps ONE
                    shared store on the primary holding every replica's rows, so grouping without it would
@@ -1406,8 +1415,8 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
-            AND   ($6::text IS NULL OR module_name = $6)
-            GROUP BY database_name, query_id, plan_id, query_hash, replica_role
+            AND   ($7::text IS NULL OR module_name = $7)
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
         )
@@ -1417,6 +1426,7 @@ internal static class DarlingDataReader
             r.plan_id,
             r.query_hash,
             r.query_plan_hash,
+            r.execution_type_desc,
             r.module_name,
             r.total_executions,
             r.avg_duration_ms,
@@ -1461,14 +1471,13 @@ internal static class DarlingDataReader
         """;
 
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        string? databaseName, CancellationToken cancellationToken = default) =>
-        GetQueryStoreTopAsync(
-            postgres, serverId, startUtc, endUtc, top, databaseName, moduleName: null, cancellationToken);
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        CancellationToken cancellationToken = default) =>
+        GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, moduleName: null, cancellationToken);
 
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top,
-        string? databaseName, string? moduleName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
@@ -1476,6 +1485,7 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        AddNullableText(command, executionType);
         AddNullableText(command, moduleName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -1486,17 +1496,18 @@ internal static class DarlingDataReader
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
                 reader.IsDBNull(4) ? "" : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                reader.IsDBNull(5) ? "" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
                 reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
                 reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
                 reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
-                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
-                reader.IsDBNull(14) ? "" : reader.GetString(14),
-                reader.IsDBNull(15) ? null : reader.GetString(15)));
+                reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
+                reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+                reader.IsDBNull(15) ? "" : reader.GetString(15),
+                reader.IsDBNull(16) ? null : reader.GetString(16)));
         }
 
         return rows;
