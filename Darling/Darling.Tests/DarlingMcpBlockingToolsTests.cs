@@ -151,23 +151,25 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The instructions have to ADVERTISE <c>dedup_key</c>, or the feature is unreachable in practice: an agent
-    /// picks tools and arguments from this text, and a parameter it never reads is one it never passes. Same
-    /// reason the store-metrics and AG tools pin their own mentions.
-    ///
-    /// <para>Also pins the two caveats that turn an empty result into a diagnosable one — the display-name
-    /// scoping and that <c>hours_back</c> still bounds the search — because those are the failure modes an agent
-    /// would otherwise report as "no such incident".</para>
+    /// The parameter's OWN description has to ADVERTISE <c>dedup_key</c>'s scoping, or the feature is
+    /// unreachable in practice: an agent picks tools and arguments from a tool's own description, and a
+    /// caveat it never reads is one it never accounts for. #3898 Phase 2 (D5) moved this pin off the
+    /// instructions (which used to carry a second, shorter mention) onto the parameter description that was
+    /// always the primary surface — the display-name scoping is the failure mode an agent would otherwise
+    /// report as "no such incident".
     /// </summary>
-    [Fact]
-    public void Instructions_AdvertiseDedupKeyAndItsScoping()
+    [Theory]
+    [InlineData("get_blocking")]
+    [InlineData("get_deadlocks")]
+    [InlineData("get_deadlock_detail")]
+    public void ParamContract_DedupKeyDescription_AdvertisesItsScoping(string tool)
     {
-        var text = DarlingMcpInstructions.Text;
+        var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == tool);
+        var description = method.GetParameters().Single(p => p.Name == "dedup_key")
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
-        Assert.Contains("dedup_key", text, StringComparison.Ordinal);
-        Assert.Contains("Dedup Key", text, StringComparison.Ordinal);
-        Assert.Contains("DISPLAY name", text, StringComparison.Ordinal);
-        Assert.Contains("hours_back` still bounds the search", text, StringComparison.Ordinal);
+        Assert.Contains("Dedup Key", description, StringComparison.Ordinal);
+        Assert.Contains("display name", description, StringComparison.Ordinal);
     }
 
     [Fact]

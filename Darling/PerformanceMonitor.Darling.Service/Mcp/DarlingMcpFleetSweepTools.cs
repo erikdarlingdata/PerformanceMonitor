@@ -68,7 +68,8 @@ public sealed class DarlingMcpFleetSweepTools
         "instruments_alive: false means the sweep could NOT prove its own data sources - a dead reader, a " +
         "silent fleet outside the post-restart settle window, or a frozen alert-pass counter beside a " +
         "delivering path. Read the instrument_liveness block before believing any quiet card on that sweep: " +
-        "an empty window there is unreadable, not healthy. " +
+        "an empty window there is unreadable, not healthy. Sweep content reaches the alert channels through " +
+        "at most one daily rollup (INFO, master-gated); this tool and the web feed are the full-cadence record. " +
         "Watch items carry entry/exit hysteresis (the bars ride the payload beside the counters); the default " +
         "worklist view is open plus carried, because open lasts exactly one sweep by design - ask for a named " +
         "state (pending, open, carried, closed) with watch_state. A stored read over the monitoring store; no " +

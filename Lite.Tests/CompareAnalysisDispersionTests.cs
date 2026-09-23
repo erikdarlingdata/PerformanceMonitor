@@ -185,11 +185,12 @@ public sealed class CompareAnalysisDispersionTests : IClassFixture<SharedDuckDbF
     }
 
     /// <summary>
-    /// The tool's description and the instructions row promise what the payload now carries — and say what
-    /// "worse" does not mean. A caller reads these before deciding to trust a verdict.
+    /// The tool's description promises what the payload now carries — and says what "worse" does not mean. A
+    /// caller reads this before deciding to trust a verdict. #3898 Phase 2 (D5, D6) retired the instructions
+    /// row that used to duplicate this on both SKUs; the description is now the only surface.
     /// </summary>
     [Fact]
-    public void Description_AndInstructionsRow_SayWhatWorseMeans_AndWhatItDoesNot()
+    public void Description_SaysWhatWorseMeans_AndWhatItDoesNot()
     {
         var method = typeof(McpAnalysisTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
             .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "compare_analysis");
@@ -198,12 +199,6 @@ public sealed class CompareAnalysisDispersionTests : IClassFixture<SharedDuckDbF
         foreach (var token in new[] { "delta_sigma", "band_source", "band_rules", "families", "plan_cache_churn", "coverage_caveat", "N=1 vs N=1", "cannot show that a change CAUSED anything" })
         {
             Assert.Contains(token, description, StringComparison.Ordinal);
-        }
-
-        var row = McpInstructions.Text.Split('\n').Single(l => l.Contains("| `compare_analysis` |", StringComparison.Ordinal));
-        foreach (var token in new[] { "`band_source`", "`families`", "`plan_cache_churn`", "N=1 vs N=1" })
-        {
-            Assert.Contains(token, row, StringComparison.Ordinal);
         }
     }
 

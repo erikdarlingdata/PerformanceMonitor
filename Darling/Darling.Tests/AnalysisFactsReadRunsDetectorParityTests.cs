@@ -139,15 +139,16 @@ public sealed class AnalysisFactsReadRunsDetectorParityTests
             Assert.Contains("the cost is the detector's baseline reads on top of the collector's", attribute, StringComparison.Ordinal);
         }
 
-        /* And the instructions rows no longer describe the read as collect+score while reserving anomaly
-           detection for analyze_server. */
+        /* #3898 Phase 2 (D5): the instructions' per-tool row that used to restate this is gone on both SKUs —
+           the "Asking about a PAST window" section's as_of guardrail still says the anchor reaches the
+           detector, which is the fact this half of the pin protects; the stale collect+score phrasing it
+           guarded against cannot come back once there is no per-tool row left to carry it. */
         foreach (var (sku, instructions) in new[]
         {
             ("Darling", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs")),
             ("Lite", RepoFile.ReadRepoFile("Lite", "Mcp", "McpInstructions.cs")),
         })
         {
-            Assert.Contains("`get_analysis_facts` | Exposes raw scored facts from the collect+detect+score pipeline", instructions, StringComparison.Ordinal);
             Assert.Contains("re-run fact collection, anomaly detection and scoring over the anchored window", instructions, StringComparison.Ordinal);
             Assert.DoesNotContain("`analyze_server`'s anomaly detection moves with it", instructions, StringComparison.Ordinal);
         }

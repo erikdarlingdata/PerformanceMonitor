@@ -240,15 +240,16 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
     /// <summary>
     /// <c>get_collection_log</c>'s parameter list, held identical across every surface that writes it down.
     ///
-    /// <para>Five places name these parameters: Darling's signature, Lite's signature, the two quick-reference
-    /// instruction tables (byte-identical rows on both SKUs), and the <c>/api/catalog</c> descriptor. #3287
-    /// added two filters to the first two and review found the other three stale — and nothing caught it,
-    /// because the new parameters are OPTIONAL and no shipped caller sends them, so every existing pin stayed
-    /// green. That is the same shape as the defect being fixed: a surface advertising a parameter list that no
-    /// longer matches what the read accepts, with no way for a consumer to discover the difference.</para>
+    /// <para>Three places name these parameters: Darling's signature, Lite's signature, and the
+    /// <c>/api/catalog</c> descriptor — down from five once #3898 Phase 2 (D5) retired the two quick-reference
+    /// instruction tables that used to carry byte-identical rows on both SKUs. #3287 added two filters to the
+    /// first two and review found the other three stale — and nothing caught it, because the new parameters
+    /// are OPTIONAL and no shipped caller sends them, so every existing pin stayed green. That is the same
+    /// shape as the defect being fixed: a surface advertising a parameter list that no longer matches what the
+    /// read accepts, with no way for a consumer to discover the difference.</para>
     ///
     /// <para>So the list is derived from the signature and compared, rather than each surface being spot-checked
-    /// for the two names this change happened to add. A third filter added to the tool and not to the tables
+    /// for the two names this change happened to add. A third filter added to the tool and not to the catalog
     /// reds this.</para>
     ///
     /// <para>The catalog is asserted by CONTAINMENT rather than equality, because it names parameters as they
@@ -261,19 +262,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var reflected = McpParams("get_collection_log").Select(p => p.Name).ToArray();
 
         Assert.Equal(reflected, LiteMcpParamNames("get_collection_log", "GetCollectionLog"));
-
-        /* The tables render the list as backticked names joined by ", " — the shape every other row uses. */
-        var expectedCell = string.Join(", ", reflected.Select(n => $"`{n}`"));
-
-        var liteInstructions = File.ReadAllText(Path.Combine(RepoRoot(), "Lite", "Mcp", "McpInstructions.cs"));
-        foreach (var (surface, text) in new[]
-                 {
-                     ("Darling's instruction table", DarlingMcpInstructions.Text),
-                     ("Lite's instruction table", liteInstructions),
-                 })
-        {
-            Assert.Equal(expectedCell, CollectionLogInstructionCell(surface, text));
-        }
 
         var catalog = DarlingWebEndpoints.CatalogDescriptors["get_collection_log"].Params;
 
@@ -428,23 +416,6 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         Assert.True(end > at, $"Could not find the end of {toolName}'s attribute.");
 
         return source[at..end];
-    }
-
-    /// <summary>The "Key Parameters" cell of the <c>get_collection_log</c> row in a quick-reference table.</summary>
-    private static string CollectionLogInstructionCell(string surface, string text)
-    {
-        var row = text
-            .Split('\n')
-            .SingleOrDefault(l => l.TrimStart().StartsWith("| `get_collection_log` |", StringComparison.Ordinal));
-
-        Assert.True(row is not null, $"{surface} has no `get_collection_log` row — this pin needs re-anchoring.");
-
-        /* Four cells between five pipes, so the parameter list is the last populated one. The row is a single
-           line by convention and its prose carries no pipe, which is what makes this safe. */
-        var cells = row!.TrimEnd('\r').Split('|');
-        Assert.True(cells.Length >= 4, $"{surface}'s `get_collection_log` row is not a four-cell row.");
-
-        return cells[^2].Trim();
     }
 
     /// <summary>The advertised MCP parameter names of one Lite tool, in declaration order, read out of Lite's
@@ -734,11 +705,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
         var sql = DarlingDataReader.ServerListSql;
         Assert.Contains("FROM servers", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
-        /* #3976: a per-server LATERAL probe, not a correlated MAX(collection_time) — same freshness source,
-           a plan TimescaleDB can stop at the newest chunk with a row instead of planning every retained one. */
-        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY cl.collection_time DESC", sql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
+        Assert.Contains("MAX(cl.collection_time)", sql, StringComparison.Ordinal);       /* freshness source */
         Assert.Contains("FROM v_collection_log cl", sql, StringComparison.Ordinal);
     }
 

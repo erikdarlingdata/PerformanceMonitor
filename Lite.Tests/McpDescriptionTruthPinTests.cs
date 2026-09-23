@@ -56,41 +56,40 @@ public sealed class McpDescriptionTruthPinTests
         Assert.DoesNotContain("edition-aware", instructions, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// Both SKUs' <c>get_cpu_utilization</c> notes, one theory. Since #3960 bucketed the read, the note is no
-    /// longer built inline per SKU (where two independent copies could drift, the #3696 lie told twice) — both
-    /// tool bodies build their envelope through the shared <c>TrendPayloads.CpuUtilization</c>, whose
-    /// <c>CpuCadenceNote</c> constant is now the ONE place the sentence is spelled. This pins that constant's text,
-    /// and that each SKU's tool body actually reaches it rather than composing its own.
-    /// </summary>
+    /// <summary>Both SKUs' <c>get_cpu_utilization</c> notes, one theory: the same tokens on each, and the two
+    /// wire strings byte-identical — the one-record-per-minute ring buffer is the same source on both, and a
+    /// note that drifted on one SKU would be the #3696 lie told once more, to half the callers.</summary>
     [Theory]
     [InlineData("Lite/Mcp/McpCpuTools.cs")]
     [InlineData("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs")]
     public void GetCpuUtilization_NamesBothSourceCadences_AndNotAFifteenSecondRingBuffer(string file)
     {
-        var source = File.ReadAllText(RepoPath(file.Split('/')));
-        Assert.Contains("Name = \"get_cpu_utilization\"", source, StringComparison.Ordinal);
-        Assert.Contains("TrendPayloads.CpuUtilization(", source, StringComparison.Ordinal);
+        var note = CpuUtilizationNote(file, out var body);
 
-        var note = CpuCadenceNote();
         Assert.DoesNotContain("15-second ring buffer", note, StringComparison.Ordinal);
         Assert.Contains("one RING_BUFFER_SCHEDULER_MONITOR record per minute", note, StringComparison.Ordinal);
         Assert.Contains("sys.dm_db_resource_stats row per 15 seconds on Azure SQL DB", note, StringComparison.Ordinal);
-        /* The note defers to the measured count the payload already carries per bucket
-           (CpuBucketPoint.Samples, projected as samples_in_bucket by TrendPayloads.CpuUtilization). */
+        /* The note defers to the measured count the payload already carries per bucket. */
         Assert.Contains("samples_in_bucket is the measured count", note, StringComparison.Ordinal);
+        Assert.Contains("samples_in_bucket = g.Count()", body, StringComparison.Ordinal);
+
+        /* The twin pin: the sentence is ONE sentence. Asserted from both rows of the theory so a drift on
+           either file reds under that file's name. */
+        Assert.Equal(CpuUtilizationNote("Lite/Mcp/McpCpuTools.cs", out _), CpuUtilizationNote("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpDataTools.cs", out _));
     }
 
-    /// <summary>The wire string of <see cref="PerformanceMonitor.Common"/>'s shared <c>TrendPayloads.CpuCadenceNote</c>
-    /// (#3960), read from source since the type is internal to that assembly: one place, so there is nothing left
-    /// for a per-SKU byte-identity check to prove.</summary>
-    private static string CpuCadenceNote()
+    /// <summary>The wire string of <c>get_cpu_utilization</c>'s <c>note</c> in <paramref name="file"/> (the
+    /// comment above it may quote the old wording as history, so the pin reads the literal, not the body).</summary>
+    private static string CpuUtilizationNote(string file, out string body)
     {
-        var source = File.ReadAllText(RepoPath("PerformanceMonitor.Common", "Mcp", "TrendPayloads.cs"));
-        var start = source.IndexOf("CpuCadenceNote =", StringComparison.Ordinal);
-        Assert.True(start > 0, "TrendPayloads.cs no longer declares CpuCadenceNote");
-        var noteStart = source.IndexOf('"', start);
-        return source[noteStart..source.IndexOf("\";", noteStart, StringComparison.Ordinal)];
+        var source = File.ReadAllText(RepoPath(file.Split('/')));
+        var start = source.IndexOf("Name = \"get_cpu_utilization\"", StringComparison.Ordinal);
+        Assert.True(start > 0, $"{file}: get_cpu_utilization is not declared here");
+        body = source[start..source.IndexOf("FormatError(\"get_cpu_utilization\"", StringComparison.Ordinal)];
+
+        var noteStart = body.IndexOf("note = \"", StringComparison.Ordinal);
+        Assert.True(noteStart > 0, $"{file}: the tool publishes no note");
+        return body[noteStart..body.IndexOf("\",", noteStart, StringComparison.Ordinal)];
     }
 
     /// <summary>
@@ -123,16 +122,8 @@ public sealed class McpDescriptionTruthPinTests
             Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
         }
 
-        /* The instructions' anti-pattern bullet names the field too, and neither the pre-#3696 wording ("CREATE
-           statements and impact scores" — an unlabelled impact) nor #3696's suppression ("evidence, not DDL") is
-           what it says now. */
-        var instructions = McpInstructions.Text;
-        Assert.Contains("suggested `create_statement` — corroboration for a statement already measured slow, never a diagnosis", instructions, StringComparison.Ordinal);
-        Assert.Contains("every row carries the fixed `caveat`", instructions, StringComparison.Ordinal);
-        Assert.Contains("impact estimate (`impact_basis`)", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("Missing indexes with CREATE statements", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("evidence, not DDL", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("no CREATE INDEX text", instructions, StringComparison.Ordinal);
+        /* #3898 Phase 2 (D5, D6): the instructions' anti-pattern bullet that used to restate this is gone on
+           both SKUs — the descriptions checked above are now the only surface. */
     }
 
     /* ---------------- plumbing ---------------- */
