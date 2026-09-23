@@ -1329,8 +1329,9 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the filtered window holds nothing at all, which
-    /// the caller reports as "nothing was read" rather than as an absence of activity.
+    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
+    /// reports as "nothing was read" rather than as an absence of activity. Deliberately unfiltered: the floor is
+    /// a property of the tier, so a database or module filter on the top read does not narrow it.
     /// </summary>
     public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
@@ -1352,7 +1353,8 @@ internal static class DarlingDataReader
     /// (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending, over-fetch by 5 for the WAITFOR
     /// trim, cap at top. The avg columns are bigint (per-interval averages) → double precision before the
     /// AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view). $1 server_id, $2/$3 window
-    /// (naive UTC), $4 top.
+    /// (naive UTC), $4 top, $5 database_name (NULL = every database), $6 module_name (NULL = every module;
+    /// applied to the deduplicated interval rows, before the ranking and the cap).
     /// </summary>
     public const string QueryStoreTopSql = """
         WITH deduped AS (

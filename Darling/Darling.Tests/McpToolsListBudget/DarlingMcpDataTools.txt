@@ -42,10 +42,11 @@ param get_perfmon_stats.counter_name 61
 param get_perfmon_stats.instance_name 57
 param get_perfmon_stats.server_name 28
 
-tool get_query_store_top 609
+tool get_query_store_top 620
 param get_query_store_top.as_of 167
 param get_query_store_top.database_name 30
 param get_query_store_top.hours_back 29
+param get_query_store_top.module_name 186
 param get_query_store_top.server_name 28
 param get_query_store_top.top 34
 
