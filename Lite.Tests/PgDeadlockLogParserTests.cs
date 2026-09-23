@@ -440,6 +440,38 @@ public sealed class PgDeadlockLogParserTests
     }
 
     /// <summary>
+    /// #4014's shape: a backend's own STATEMENT companion whose SQL comment echoes a report's header, with the
+    /// DETAIL arriving as the statement's tab-indented continuation. The pid bracket on that line is real, so
+    /// a gap that may cross a field label reaches the echoed header directly.
+    /// </summary>
+    [Fact]
+    public void AStatementCompanionEchoingAReport_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-09-23 10:00:02.000 UTC [7777] STATEMENT:  SELECT 1 -- ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"
+            + "\tProcess 2 waits for ShareLock on transaction 6; blocked by process 1.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+        Assert.Equal(1549, Assert.Single(PgDeadlockLogParser.Extract(forged + ReportWithLiterals)).VictimPid);
+    }
+
+    /// <summary>
+    /// #4014, the managed prefix: a lazy gap before the pid bracket could backtrack past the line's real
+    /// bracket to a forged one later in the statement. The gap excludes '[' now, as plan capture's does (#4008).
+    /// </summary>
+    [Fact]
+    public void AForgedHeaderBehindARealColonPrefixedBracket_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-08-25 14:50:05 UTC:192.0.2.10(52345):app_user@app_db:[58]:STATEMENT:  SELECT 1 -- [1] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 11 waits for ShareLock on transaction 5; blocked by process 12.\n"
+            + "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+    }
+
+    /// <summary>
     /// Participants are counted from the wait EDGES, not from the <c>Process N:</c> statement headers: the
     /// server omits a header when it could not recover the text, and a participant with no statement is
     /// still in the cycle. Counting headers would under-report it.
