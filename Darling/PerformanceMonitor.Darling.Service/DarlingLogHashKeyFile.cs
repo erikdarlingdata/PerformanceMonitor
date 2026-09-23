@@ -39,7 +39,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// <para><b>Trusted the way #3983 trusts the compose role passwords</b>: the directory is set owner-only again first
 /// (<see cref="DarlingManagedRoles.PrepareComposeCredentialDirectory"/>), then the file must be a regular file no one
 /// else can reach (<see cref="DarlingManagedRoles.UntrustedComposeCredentialReason"/>): no group or other bits on
-/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users.</para>
+/// Unix; on Windows, owned by a trusted principal and not readable by ordinary users, then held to an allowlist: no
+/// access for anyone beyond SYSTEM, Administrators and the service account (#4028), judged and read through one
+/// handle nobody can rename, replace or write while it is open (<see cref="DarlingFileSecurity.OpenForServiceOnlyRead"/>).</para>
 ///
 /// <para><b>Where it parts from #3983: an existing key is not replaced, with one exception.</b> A role password costs
 /// only a re-assert to regenerate, so #3983 discards a file it cannot trust. A new key gives every stored log event a
