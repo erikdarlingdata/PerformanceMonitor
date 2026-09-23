@@ -370,6 +370,86 @@ public sealed class ComposeStoreRolesLiveTests
     }
 
     /// <summary>
+    /// #4004's review, round 3 (M), on a real store. A directory planted at <c>pg-admin-credential</c>, the first name
+    /// the discard tries, stopped round 2's discard before it reached the viewer and mcp passwords planted after it, and
+    /// the directory went back to 0777; an operator who closed it and removed that directory got a start that re-asserted
+    /// the planted passwords on their roles. Now the start that finds it open removes every planted file and keeps the
+    /// directory 0700, provisions the roles with new passwords while writing none there, and the start after the
+    /// directory is removed re-asserts none of the planted passwords. Driven through the Unix-mode seam.
+    /// </summary>
+    [Fact]
+    public async Task PlantedPasswordsBehindADirectoryAtTheFirstName_AreUsedByNoLaterStart_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-4004-shielded-");
+        var credentials = Path.Combine(root.FullName, "credentials");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = Path.Combine(root.FullName, "pg") },
+            NullLogger.Instance, runtimeRoot);
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            await using var ownerSource = NpgsqlDataSource.Create(owner);
+
+            /* While the directory was 0777, someone put a directory at the first name and passwords at the others. */
+            Directory.CreateDirectory(credentials);
+            var adminPath = Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName(DarlingManagedPostgres.AdminRoleName));
+            var planted = new[]
+            {
+                (Role: DarlingManagedPostgres.ViewerRoleName, Path: Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName(DarlingManagedPostgres.ViewerRoleName)), Password: "Planted4004ViewerPassword"),
+                (Role: DarlingManagedPostgres.McpRoleName, Path: Path.Combine(credentials, DarlingManagedRoles.ComposeStoreCredentialFileName(DarlingManagedPostgres.McpRoleName)), Password: "Planted4004McpPassword"),
+            };
+            Directory.CreateDirectory(Path.Combine(adminPath, "someones"));
+            foreach (var file in planted)
+            {
+                StandInUnixModes.WriteOwnerOnly(file.Path, file.Password);
+            }
+
+            var modes = new StandInUnixModes();
+            modes.Report(credentials, "777");
+
+            /* This start: provisioning finds the directory open. */
+            var first = new CapturingTestLogger();
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, first, ct, credentials)).Provisioned, first.Joined);
+            }
+
+            Assert.Equal("700", modes.Octal(credentials));
+            Assert.All(planted, file => Assert.False(File.Exists(file.Path), $"the planted '{file.Role}' password outlived the start that found its directory open"));
+            Assert.Contains($"could not be removed, so nothing in it is used this start: {adminPath} (", first.Joined, StringComparison.Ordinal);
+
+            /* The operator removes what the refusal named, and restarts. */
+            Directory.Delete(adminPath, recursive: true);
+            var next = new CapturingTestLogger();
+            using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+            {
+                Assert.True((await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, next, ct, credentials)).Provisioned, next.Joined);
+            }
+
+            foreach (var file in planted)
+            {
+                var written = File.ReadAllText(file.Path).Trim();
+                Assert.NotEqual(file.Password, written);
+                Assert.Equal(file.Role, await CurrentUserAsync(Login(owner, file.Role, written), ct));
+                await Assert.ThrowsAsync<PostgresException>(() => CurrentUserAsync(Login(owner, file.Role, file.Password), ct));
+            }
+
+            var admin = File.ReadAllText(adminPath).Trim();
+            Assert.Equal(DarlingManagedPostgres.AdminRoleName, await CurrentUserAsync(Login(owner, DarlingManagedPostgres.AdminRoleName, admin), ct));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// #4004's review, round 2 (M1), on a real store. A start whose store stood down never provisions and never loads
     /// the log-hash key, but a host's earlier-credential read still sets an open credentials directory 0700. Round 1
     /// kept the "was open" verdict in memory only, so the NEXT start found the directory owner-only, re-asserted a
