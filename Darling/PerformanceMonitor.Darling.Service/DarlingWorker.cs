@@ -2095,12 +2095,21 @@ public sealed class DarlingWorker : BackgroundService
 
         /* #3285: the user-authored custom-alert evaluator. A rule's compose metric runs on a dedicated
            VIEWER-role pool (which carries the statement_timeout cap and the least-privilege ACL) — never the
-           owner pool. Requires a managed Windows store with a provisioned viewer credential (written by
-           EnsureProvisionedAsync above); other deployments do not get custom alerts in this first slice. */
+           owner pool. #3970: two deployments can supply that pool — a managed Windows store's provisioned
+           viewer credential (written by EnsureProvisionedAsync above), or the Linux compose store's own viewer
+           role (DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync: this start's, provisioned above, or a
+           trusted credential an earlier start left, accepted before use — never the owner login, unlike a
+           host's own fallback). A bring-your-own store stays out either way: its viewer role comes from
+           tools/provision-roles.sql, which does not create config.record_custom_alert_resolution. */
         string? customAlertViewerConnString = null;
         if (OperatingSystem.IsWindows() && config.Postgres.Managed)
         {
             customAlertViewerConnString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config.Postgres);
+        }
+        else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
+        {
+            customAlertViewerConnString = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+                config.Postgres.ConnectionString, _logger, stoppingToken);
         }
 
         await using var customAlertViewerSource =
@@ -2127,7 +2136,7 @@ public sealed class DarlingWorker : BackgroundService
         else
         {
             _logger.LogInformation(
-                "Custom alert evaluator not started: this build evaluates custom alerts only on a managed Windows store with a provisioned viewer role (#3285 first slice).");
+                "Custom alert evaluator not started: this deployment has no viewer-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned viewer role are required; a bring-your-own store is not (#3285, #3970).");
         }
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.

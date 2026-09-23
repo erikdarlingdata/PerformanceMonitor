@@ -717,6 +717,67 @@ public sealed class DarlingStoreLoginsTests
         Assert.Contains(problems, p => p.Contains("postgres.mcpConnectionString is set", StringComparison.Ordinal));
     }
 
+    /* ─────────────────────────── the custom-alert evaluator's login (#3970) ─────────────────────────── */
+
+    [Fact]
+    public async Task CustomAlertViewer_WithNoVerdictPublished_IsNull()
+    {
+        DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        try
+        {
+            /* No verdict at all: a bring-your-own store, or a process that never reached compose provisioning
+               (managed mode, or not running in a container). Neither gets the evaluator. */
+            Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+                Owner, NullLogger.Instance, CancellationToken.None));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        }
+    }
+
+    [Fact]
+    public async Task CustomAlertViewer_WithAProvisionedVerdict_IsItsViewerLogin()
+    {
+        DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        try
+        {
+            DarlingStoreLogins.PublishComposeStoreVerdict(Provisioned());
+
+            Assert.Equal(ViewerLogin, await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+                Owner, NullLogger.Instance, CancellationToken.None));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        }
+    }
+
+    /// <summary>
+    /// Unlike a host (<see cref="ResolveUnmanagedAsync"/>'s last branch), a not-provisioned verdict with no
+    /// trusted credential from an earlier start never falls back to the owner login for the evaluator: it
+    /// returns null, exactly as "no verdict at all" does, so the worker logs "not started" rather than hand a
+    /// rule's compose metric owner rights.
+    /// </summary>
+    [Fact]
+    public async Task CustomAlertViewer_NotProvisioned_WithNoEarlierCredential_IsNull_NeverTheOwner()
+    {
+        DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        try
+        {
+            var emptyDirectory = Path.Combine(Path.GetTempPath(), "darling-3970-no-credential-" + Guid.NewGuid().ToString("N"));
+            DarlingStoreLogins.PublishComposeStoreVerdict(
+                DarlingStoreLogins.ComposeStoreVerdict.NotProvisioned("refused", emptyDirectory));
+
+            Assert.Null(await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
+                Owner, NullLogger.Instance, CancellationToken.None));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+        }
+    }
+
     /* ─────────────────────────── the wiring, by source ─────────────────────────── */
 
     /// <summary>
@@ -799,6 +860,43 @@ public sealed class DarlingStoreLoginsTests
         Assert.Contains(
             "config.Postgres.Managed, OperatingSystem.IsWindows(), _composeStoreRolesProvisioned)",
             reload, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The custom-alert evaluator's connection-string gate (#3970): the managed branch is unchanged, the compose
+    /// branch is gated on EXACTLY the condition the worker provisions the compose store's roles under (so a
+    /// bring-your-own store — not managed, not in a container — takes neither branch and the evaluator does not
+    /// start there), and there are only ever the two assignments — never the raw owner connection string.
+    /// </summary>
+    [Fact]
+    public void TheCustomAlertEvaluator_AdmitsTheComposeVerdictBesideManaged_AndNeverTheOwner()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var loop = Body(code, "private async Task RunCollectionLoopAsync(");
+
+        const string declare = "string? customAlertViewerConnString = null;";
+        var declareAt = loop.IndexOf(declare, StringComparison.Ordinal);
+        Assert.True(declareAt >= 0, "the custom-alert evaluator's connection-string gate could not be located");
+        const string sourceCreate = "await using var customAlertViewerSource =";
+        var sourceAt = loop.IndexOf(sourceCreate, declareAt, StringComparison.Ordinal);
+        Assert.True(sourceAt > declareAt, "the custom-alert evaluator's pool creation could not be located after the gate");
+        // Past the "= null;" declaration itself, which would otherwise count as a third assignment below.
+        var gate = loop[(declareAt + declare.Length)..sourceAt];
+
+        Assert.Matches(
+            @"if \(OperatingSystem\.IsWindows\(\) && config\.Postgres\.Managed\)\s*\{\s*"
+            + @"customAlertViewerConnString = DarlingManagedPostgres\.TryBuildViewerConnectionStringFromStoredCredential\(config\.Postgres\);\s*\}",
+            gate);
+
+        Assert.Matches(
+            @"else if \(!config\.Postgres\.Managed && Hosting\.DarlingHostBinding\.IsRunningInContainer\)\s*\{\s*"
+            + @"customAlertViewerConnString = await DarlingStoreLogins\.ResolveComposeCustomAlertViewerAsync\(\s*"
+            + @"config\.Postgres\.ConnectionString, _logger, stoppingToken\);\s*\}",
+            gate);
+
+        Assert.Equal(2, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
+        Assert.DoesNotContain("customAlertViewerConnString = config.Postgres.ConnectionString", gate, StringComparison.Ordinal);
     }
 
     private static string Body(string code, string signature)

@@ -257,6 +257,56 @@ internal static class DarlingStoreLogins
     }
 
     /// <summary>
+    /// The user-authored custom-alert evaluator's viewer login on the compose store (#3970), or null when this
+    /// deployment must not get one. The worker calls this beside the managed DPAPI gate
+    /// (<see cref="DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential"/>), after this
+    /// start's <see cref="ComposeStoreVerdict"/> is already published (<see cref="ProvisionComposeStoreAsync"/>
+    /// runs earlier in the same start). Follows the same two compose branches <see cref="ResolveUnmanagedAsync"/>
+    /// gives a host — this start's provisioned role, or, when this start did not provision the roles, a trusted
+    /// credential an earlier start left, accepted before use exactly as a host accepts one — but stops there: the
+    /// evaluator has no configured setting of its own, and per the ruling it must NEVER fall back to the owner
+    /// login the way a host's <see cref="Resolve"/> does: a rule's compose metric would then run with owner
+    /// rights, which the viewer-role pool exists to prevent. A bring-your-own store, and a process that never
+    /// reaches compose provisioning at all (managed mode, or not running in a container), publish no verdict
+    /// here (<see cref="ReadComposeStoreVerdict"/> is null), so both return null — the ruling's "a bring-your-own
+    /// store stays out": its viewer role comes from <c>tools/provision-roles.sql</c>, which does not create
+    /// <c>config.record_custom_alert_resolution</c>.
+    /// </summary>
+    internal static async Task<string?> ResolveComposeCustomAlertViewerAsync(
+        string ownerConnectionString, ILogger logger, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+
+        var verdict = ReadComposeStoreVerdict();
+        if (verdict is null)
+        {
+            return null;
+        }
+
+        if (verdict.ConnectionStringFor(Surface.Web) is { } roleLogin)
+        {
+            return roleLogin;
+        }
+
+        if (verdict.CredentialDirectory is not { } directory)
+        {
+            return null;
+        }
+
+        var earlier = DarlingManagedRoles.ReadEarlierComposeCredential(directory, DarlingManagedPostgres.ViewerRoleName, logger);
+        if (earlier.Password is not { } password)
+        {
+            return null;
+        }
+
+        var candidate = BuildComposeStoreRoleConnectionString(ownerConnectionString, DarlingManagedPostgres.ViewerRoleName, password);
+        return await AcceptsLoginAsync(
+            candidate, "Custom alert evaluator", DarlingManagedPostgres.ViewerRoleName, logger, cancellationToken)
+            ? candidate
+            : null;
+    }
+
+    /// <summary>
     /// The non-managed branch of both hosts' start (#3914): the connection string the host's store pool is
     /// created from, or null when the host must not start this attempt — a configured reference that cannot
     /// resolve, or that resolves to nothing (fail-closed: the operator asked for a login, so the owner is not a
