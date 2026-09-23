@@ -1447,11 +1447,17 @@ namespace PerformanceMonitor.Common
         public const double StaleCadenceMultiplier = 1.5;
 
         /// <summary>
-        /// On-load collectors run once per server connect / tab open, NOT on the scheduled loop, so the
-        /// staleness thresholds never apply to them — they are banded by failure rate only (a 100-hour-old
-        /// last success is fine). Centralized here so the three surfaces cannot disagree on the set. These
-        /// are exactly the <c>FrequencyMinutes == 0</c> entries in <c>CollectorScheduleDefaults</c>, kept as
-        /// an explicit name set so this classifier stays free of a dependency on the collector catalog.
+        /// On-load collectors run once per server connect / tab open, NOT on the scheduled loop.
+        /// <b>No longer staleness-exempt (#4000):</b> since #3929/#3930 gave every one of them a daily
+        /// reschedule on top of the connect-time capture, "hours since last success" is a meaningful signal
+        /// again, and <see cref="Classify"/> bands them on the same ladder as any other collector, at their
+        /// effective cadence (<c>CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes</c>). The name
+        /// set now serves the callers still asking "did this run on connect rather than on a cadence" for a
+        /// reason OTHER than staleness — <see cref="ProducedThenStopped"/>'s "three tab opens are not three
+        /// consecutive cycles" exclusion is the current one. Centralized here so those callers cannot
+        /// disagree on the set. These are exactly the <c>FrequencyMinutes == 0</c> entries in
+        /// <c>CollectorScheduleDefaults</c>, kept as an explicit name set so this classifier stays free of a
+        /// dependency on the collector catalog.
         /// </summary>
         private static readonly HashSet<string> OnLoadCollectorNames = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -1462,7 +1468,7 @@ namespace PerformanceMonitor.Common
             "server_properties",
         };
 
-        /// <summary>True for a collector that runs on connect rather than on the scheduled loop (staleness-exempt).</summary>
+        /// <summary>True for a collector that runs on connect rather than on the scheduled loop.</summary>
         public static bool IsOnLoadCollector(string? collectorName) =>
             collectorName is not null && OnLoadCollectorNames.Contains(collectorName);
 
@@ -2011,9 +2017,8 @@ namespace PerformanceMonitor.Common
         /// <summary>
         /// Band one collector's trailing-window roll-up. Order is fixed: NEVER_RUN (no runs at all) ->
         /// EXTENSION_MISSING (a declared extension absent, #3240) -> NO_PERMISSIONS (only permission
-        /// denials) -> on-load (failure-rate only, never STOPPED/STALE/FAILING) -> STOPPED (no attempt of
-        /// ANY kind recently, despite a history of runs) -> FAILING -> STALE -> WARNING (failure rate OR
-        /// abandon rate over its own threshold) -> HEALTHY.
+        /// denials) -> STOPPED (no attempt of ANY kind recently, despite a history of runs) -> FAILING ->
+        /// STALE -> WARNING (failure rate OR abandon rate over its own threshold) -> HEALTHY.
         /// <paramref name="extensionMissingCount"/> is runs recorded <c>EXTENSION_MISSING</c> — the
         /// PostgreSQL fault mapper's named skip for a source whose DECLARED extension is not installed
         /// (#3240); like the permission count, any success or error makes the window's story bigger than
@@ -2026,9 +2031,19 @@ namespace PerformanceMonitor.Common
         /// <paramref name="hoursSinceLastRun"/> is hours since the newest run of ANY status (success,
         /// error, or permissions) — see <see cref="Stopped"/> below for why this is a separate input from
         /// <paramref name="hoursSinceLastSuccess"/>. <paramref name="frequencyMinutes"/> is the collector's
-        /// cadence (callers resolve it from <c>CollectorScheduleDefaults</c>; 0 for on-load or an unknown
-        /// collector, which yields the floor thresholds = the old flat behavior). <paramref name="isOnLoad"/>
-        /// is <see cref="IsOnLoadCollector"/>.
+        /// cadence (callers resolve it from <c>CollectorScheduleDefaults</c>, routed through
+        /// <c>EffectiveRecurringIntervalMinutes</c>; 0 only reaches here for a collector unknown to the
+        /// catalog, which yields the floor thresholds = the old flat behavior).
+        ///
+        /// <para><b>On-load collectors are no longer a special case (#4000).</b> Before #3929/#3930 gave
+        /// them a daily reschedule, an on-load collector's only capture was the last connect, so "hours
+        /// since last success" could be weeks old on a healthy server and this method exempted them from
+        /// every staleness band, reading them by failure/abandon rate alone. Now that they also run on
+        /// <c>CollectorScheduleDefaults.OnLoadRecaptureMinutes</c> (1440), a caller resolving
+        /// <paramref name="frequencyMinutes"/> through <c>EffectiveRecurringIntervalMinutes</c> passes 1440
+        /// for them too, and they fall through this SAME ladder like any other collector — a daily config
+        /// capture whose reschedule silently breaks now goes STALE/FAILING/STOPPED instead of reading
+        /// HEALTHY forever, closing the exact blind spot that let #3930's field defect go unnoticed.</para>
         /// </summary>
         public static string Classify(
             long totalRuns,
@@ -2039,8 +2054,7 @@ namespace PerformanceMonitor.Common
             long abandonedCount,
             double hoursSinceLastSuccess,
             double hoursSinceLastRun,
-            int frequencyMinutes,
-            bool isOnLoad)
+            int frequencyMinutes)
         {
             if (totalRuns == 0)
             {
@@ -2073,16 +2087,6 @@ namespace PerformanceMonitor.Common
                one — a number no run actually produced. Both counts reach the surface, so the reader can always
                attribute the band. */
             var abandonRatePercent = totalRuns > 0 ? (double)abandonedCount / totalRuns * 100 : 0;
-
-            if (isOnLoad)
-            {
-                /* On-load collectors are staleness-exempt and banded by rate only, so abandonment has to be
-                   asked here too — otherwise the one class of collector that CANNOT reach the staleness safety
-                   net below would be the one class where abandonment stays invisible. */
-                return failureRatePercent > WarningFailureRatePercent || abandonRatePercent > WarningAbandonRatePercent
-                    ? Warning
-                    : Healthy;
-            }
 
             /* STOPPED: a collector whose LAST ATTEMPT OF ANY KIND — success, error, or
                permissions, not just success — is older than the FAILING cutoff has not been invoked at
@@ -2322,8 +2326,8 @@ namespace PerformanceMonitor.Common
         /// note from a collector that stores a row only when an event occurs is that collector at rest;
         /// the same four facts from a configuration or snapshot collector mean its source returned nothing
         /// on every run, and the sentence says that instead. A bool computed by the caller from the name,
-        /// on <see cref="Classify"/>'s <c>isOnLoad</c> pattern, so this method still takes no string and
-        /// the note-text property above is preserved.</para>
+        /// on <see cref="IsEventCollector"/>'s own name-list pattern, so this method still takes no string
+        /// and the note-text property above is preserved.</para>
         /// </summary>
         /// <param name="faultedRuns">
         /// <c>error_count + session_missing_count</c> for the same row - the fifth term. Runs that recorded

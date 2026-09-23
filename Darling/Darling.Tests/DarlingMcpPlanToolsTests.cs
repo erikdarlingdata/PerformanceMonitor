@@ -181,13 +181,8 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
             Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
         });
 
-        /* The instructions' family paragraph names the field the same way and no longer carries #3696's
-           "no CREATE INDEX text". */
-        var instructions = DarlingMcpInstructions.Text;
-        Assert.Contains("`create_statement` — the optimizer's suggested CREATE INDEX for that one statement, corroboration for a statement already measured slow and never a diagnosis", instructions, StringComparison.Ordinal);
-        Assert.Contains("every row carries the fixed `caveat`", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("no CREATE INDEX text", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("a hint, not a design", instructions, StringComparison.Ordinal);
+        /* #3898 Phase 2 (D5): the instructions' family paragraph that used to restate this is gone — the four
+           descriptions checked above are now the only surface, so nothing else to check here. */
     }
 
     /* ---------------- ungated: stored-plan read SQL pins ---------------- */

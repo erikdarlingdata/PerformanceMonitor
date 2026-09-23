@@ -61,7 +61,9 @@ public sealed class McpDescriptionTruthPinTests
     /// longer built inline per SKU (where two independent copies could drift, the #3696 lie told twice) — both
     /// tool bodies build their envelope through the shared <c>TrendPayloads.CpuUtilization</c>, whose
     /// <c>CpuCadenceNote</c> constant is now the ONE place the sentence is spelled. This pins that constant's text,
-    /// and that each SKU's tool body actually reaches it rather than composing its own.
+    /// and that each SKU's tool body actually reaches it rather than composing its own. (#3898 Phase 2 briefly
+    /// rewrote this to expect a per-file inline literal; #3960's shared-constant refactor was never undone, so
+    /// that rewrite failed against both SKUs — reverted back to reading the one shared constant.)
     /// </summary>
     [Theory]
     [InlineData("Lite/Mcp/McpCpuTools.cs")]
@@ -123,16 +125,8 @@ public sealed class McpDescriptionTruthPinTests
             Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
         }
 
-        /* The instructions' anti-pattern bullet names the field too, and neither the pre-#3696 wording ("CREATE
-           statements and impact scores" — an unlabelled impact) nor #3696's suppression ("evidence, not DDL") is
-           what it says now. */
-        var instructions = McpInstructions.Text;
-        Assert.Contains("suggested `create_statement` — corroboration for a statement already measured slow, never a diagnosis", instructions, StringComparison.Ordinal);
-        Assert.Contains("every row carries the fixed `caveat`", instructions, StringComparison.Ordinal);
-        Assert.Contains("impact estimate (`impact_basis`)", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("Missing indexes with CREATE statements", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("evidence, not DDL", instructions, StringComparison.Ordinal);
-        Assert.DoesNotContain("no CREATE INDEX text", instructions, StringComparison.Ordinal);
+        /* #3898 Phase 2 (D5, D6): the instructions' anti-pattern bullet that used to restate this is gone on
+           both SKUs — the descriptions checked above are now the only surface. */
     }
 
     /* ---------------- plumbing ---------------- */

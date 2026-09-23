@@ -351,32 +351,59 @@ public sealed class ViewerDailyHealthRowTests
     }
 
     [Fact]
-    public void CollectorHealthRow_OnLoadCollector_IsExemptFromStaleness()
+    public void CollectorHealthRow_OnLoadCollector_BandsOnItsDailyCadence()
     {
-        /* server_config runs once per tab open, not on the loop — a 100-hour-old last success is NOT
-           stale/failing for it (would be FAILING for a scheduled collector). */
-        var row = new CollectorHealthRow
+        /* #4000: server_config recaptures daily, so it bands on the same ladder as any collector at a
+           1440-minute cadence. It is no longer exempt: a 2-hour-old success is well inside a day, and a
+           100-hour-old one means the daily recapture has stopped. */
+        var fresh = new CollectorHealthRow
+        {
+            CollectorName = "server_config",
+            TotalRuns = 3,
+            SuccessCount = 3,
+            LastSuccessTime = DateTime.UtcNow.AddHours(-2),
+        };
+        Assert.Equal("HEALTHY", fresh.HealthStatus);
+
+        var dark = new CollectorHealthRow
         {
             CollectorName = "server_config",
             TotalRuns = 3,
             SuccessCount = 3,
             LastSuccessTime = DateTime.UtcNow.AddHours(-100),
         };
-        Assert.Equal("HEALTHY", row.HealthStatus);
+        Assert.Equal("STOPPED", dark.HealthStatus);
     }
 
     [Fact]
     public void CollectorHealthRow_OnLoadCollector_StillWarnsOnHighFailureRate()
     {
+        /* A recent success, so the daily cadence has nothing to say and the failure rate decides. */
         var row = new CollectorHealthRow
         {
             CollectorName = "server_config",
             TotalRuns = 10,
             SuccessCount = 7,
             ErrorCount = 3,   // 30% > 20%
-            LastSuccessTime = DateTime.UtcNow.AddHours(-100),
+            LastSuccessTime = DateTime.UtcNow.AddHours(-2),
         };
         Assert.Equal("WARNING", row.HealthStatus);
+    }
+
+    [Fact]
+    public void CollectorHealthRow_AnUncatalogedCollector_KeepsTheFloorLadder()
+    {
+        /* #4000 resolves only a CATALOG on-load entry to daily. A name the catalog doesn't know keeps the
+           floor thresholds it always had, so 30 hours without a run is STOPPED, not a day-and-a-half grace. */
+        var row = new CollectorHealthRow
+        {
+            CollectorName = "not_a_catalog_collector",
+            TotalRuns = 1,
+            SuccessCount = 1,
+            LastSuccessTime = DateTime.UtcNow.AddHours(-30),
+            LastRunTime = DateTime.UtcNow.AddHours(-30),
+        };
+        Assert.Equal("STOPPED", row.HealthStatus);
     }
 
     [Theory]

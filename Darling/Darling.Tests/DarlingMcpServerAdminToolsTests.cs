@@ -287,7 +287,8 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
     }
 
     /// <summary>The tool description promises the counters and the sum; a caller reads the description, not the
-    /// code.</summary>
+    /// code. #3898 Phase 2 (D5) retired the instruction table row that used to duplicate this; the description
+    /// is now the only surface.</summary>
     [Fact]
     public void AddServersDescription_NamesEveryCounter_TheSumRule_AndTheCollidesStatus()
     {
@@ -298,19 +299,16 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         {
             Assert.Contains(token, description, StringComparison.Ordinal);
         }
-
-        /* And the instruction table agrees with the description — the two surfaces an agent reads. */
-        Assert.Contains("`{requested, added, skipped, collided, failed, results:[{server, status, detail}]}`", DarlingMcpInstructions.Text, StringComparison.Ordinal);
-        Assert.Contains("is `collides`", DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     /// <summary>
     /// #3484 accepted the two non-interactive Entra modes; the instruction table went on saying
     /// "Entra/MFA/Service-Principal/Managed-Identity auth is `invalid` (Windows/SQL only)" for a release. The
-    /// accepted set is read off the parser — the authority — and the table is held to it.
+    /// accepted set is read off the parser — the authority — and the description is held to it. #3898
+    /// Phase 2 (D5) retired the instruction table row that used to duplicate this too.
     /// </summary>
     [Fact]
-    public void InstructionsTable_MatchesTheAuthModesTheParserAccepts()
+    public void DescriptionMatchesTheAuthModesTheParserAccepts()
     {
         /* The parser is the authority: these two are accepted (they parse to an entry) ... */
         foreach (var accepted in new[] { "ServicePrincipal", "ManagedIdentity" })
@@ -332,15 +330,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
             Assert.Single(invalid);
         }
 
-        /* The table says the same: the accepted pair is named as accepted, the interactive trio as invalid, and
-           the release-old denial is gone in both of its spellings. */
-        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `add_servers` |", StringComparison.Ordinal));
-        Assert.Contains("`ServicePrincipal` / `ManagedIdentity`", row, StringComparison.Ordinal);
-        Assert.Contains("INTERACTIVE Entra modes (MFA / device-code / default-credential) are `invalid`", row, StringComparison.Ordinal);
-        Assert.DoesNotContain("Windows/SQL only", row, StringComparison.Ordinal);
-        Assert.DoesNotContain("Service-Principal/Managed-Identity auth is `invalid`", row, StringComparison.Ordinal);
-
-        /* And the tool description — the other surface an agent reads — agrees. */
+        /* The description — the surface an agent reads — agrees. */
         var method = ToolMethods().Single(m => m.GetCustomAttribute<McpServerToolAttribute>()!.Name == "add_servers");
         var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
         Assert.Contains("\"ServicePrincipal\"", description, StringComparison.Ordinal);
@@ -450,12 +440,8 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Contains("never connected", description, StringComparison.Ordinal);
         Assert.Contains("ever_connected", description, StringComparison.Ordinal);
         Assert.Contains("matched_in", description, StringComparison.Ordinal);
-
-        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `remove_server` |", StringComparison.Ordinal));
-        Assert.Contains("status:\"ambiguous\"", row, StringComparison.Ordinal);
-        Assert.Contains("deletes NOTHING", row, StringComparison.Ordinal);
-        Assert.Contains("never connected", row, StringComparison.Ordinal);
-        Assert.Contains("ever_connected", row, StringComparison.Ordinal);
+        /* #3898 Phase 2 (D5): the instruction table row that used to duplicate these facts is gone; the
+           description checked above is now the only surface. */
     }
 
     /// <summary>

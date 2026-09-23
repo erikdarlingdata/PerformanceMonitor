@@ -2445,14 +2445,15 @@ public sealed class AlertReadFailureSurfaceTests
         /* #3017 kept the collector band free of its output figures because a verdict keyed on them fired
            on the healthy quiet install. The same argument is stronger here: a band over blind alert reads
            would have to guess how many make alerting unhealthy, and on THIS surface a wrong guess fails by
-           saying nothing is wrong. Read off the type so a tenth parameter fails rather than being
+           saying nothing is wrong. Read off the type so a new parameter fails rather than being
            discovered later. */
         var classify = typeof(CollectorHealthClassifier)
             .GetMethod("Classify", BindingFlags.Public | BindingFlags.Static);
 
         Assert.NotNull(classify);
-        /* 10 since #3240 added extensionMissingCount — a run-class count, not an alert-read term. */
-        Assert.Equal(10, classify!.GetParameters().Length);
+        /* 10 since #3240 added extensionMissingCount (a run-class count, not an alert-read term); 9 since
+           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily. */
+        Assert.Equal(9, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",
             string.Join("|", classify.GetParameters().Select(p => p.Name)),

@@ -607,17 +607,19 @@ public sealed class QueryStoreClutterTests
         Assert.Contains("Replicas excluded by architecture", descriptor.Description, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3898 Phase 2 (D5) retired the instructions' per-tool "Tool Reference" row that used to restate these
+    /// facts — the tool's own description (read by every MCP client regardless of instructions) is now the
+    /// only surface, so this pin moved onto it rather than being dropped.
+    /// </summary>
     [Fact]
-    public void TheInstructions_CarryTheRow_AndTheCensusSentenceNamesTheTool()
+    public void TheDescription_NamesTheExclusionAndCaptureModeFacts()
     {
-        var instructions = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
-        var row = Regex.Match(instructions, @"^\s*\| `get_query_store_clutter` \| (.+?) \| (.+?) \|\s*$", RegexOptions.Multiline);
-        Assert.True(row.Success, "DarlingMcpInstructions.cs has no Tool Reference row for get_query_store_clutter");
-        Assert.Contains("qs_read_only_replica", row.Groups[1].Value, StringComparison.Ordinal);
-        Assert.Contains("capture_mode_known", row.Groups[1].Value, StringComparison.Ordinal);
-        Assert.Contains("never `NONE`", row.Groups[1].Value, StringComparison.Ordinal);
-        Assert.Contains("`include_fleet_median` (default false)", row.Groups[2].Value, StringComparison.Ordinal);
-        Assert.Contains("`get_query_store_clutter` composes the Query Store clutter view", instructions, StringComparison.Ordinal);
+        var source = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpQueryStoreClutterTools.cs");
+        Assert.Contains("qs_read_only_replica", source, StringComparison.Ordinal);
+        Assert.Contains("capture_mode_known", source, StringComparison.Ordinal);
+        Assert.Contains("never asked, never NONE", source, StringComparison.Ordinal);
+        Assert.Contains("include_fleet_median", source, StringComparison.Ordinal);
     }
 
     [Fact]

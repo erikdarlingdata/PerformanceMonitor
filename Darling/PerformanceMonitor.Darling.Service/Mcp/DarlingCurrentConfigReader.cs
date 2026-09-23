@@ -167,23 +167,26 @@ internal static class DarlingCurrentConfigReader
     /// that finds every flag off writes ZERO rows (<c>DBCC TRACESTATUS(-1)</c> only ever lists flags that are
     /// ON), so plain <c>capture_time = MAX(capture_time)</c> cannot see that capture at all and silently falls
     /// back to an older capture that still had a flag on — reporting a flag enabled days or weeks after it (and
-    /// every other flag) was turned off. The second <c>AND</c> below closes that: it compares the newest row's
-    /// own timestamp against the newest SUCCESS this collector logged in <c>v_collection_log</c>, and if that
-    /// successful run is NEWER than the newest row, the run that ran most recently found nothing on, so the
-    /// whole predicate goes false and the read reports no flags — exact, rather than a stale fallback. The
-    /// <c>COALESCE</c> floor only matters when collection_log's retention has aged past this collector's
-    /// oldest trace_flags row (or nothing has run yet), and defaults to the pre-fix reading rather than
-    /// wrongly suppressing a real row it cannot corroborate.</para>
+    /// every other flag) was turned off. The second <c>AND</c> below closes that on the ROW COUNT of the newest
+    /// SUCCESS this collector logged in <c>v_collection_log</c>: every capture writes the full list of flags
+    /// that are on, so a newest successful run that wrote 0 rows found every flag off, and the read reports
+    /// none. Timestamps can't decide it: this service stamps a collection_log row when the run ENDS (after its
+    /// capture rows), Lite stamps it when the run STARTS, so "is the newest success newer than the newest
+    /// capture" is true after every ordinary run here and would hide every enabled flag. No SUCCESS row, or a
+    /// NULL count from an old row, keeps the pre-fix reading rather than suppressing a capture it can't
+    /// corroborate.</para>
     /// </summary>
     public const string TraceFlagsSql = """
         SELECT trace_flag, status, is_global, is_session, capture_time
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
-        AND   (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1) >= COALESCE(
-                  (SELECT MAX(collection_time) FROM v_collection_log
-                   WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'),
-                  TIMESTAMP '1900-01-01')
+        AND   COALESCE(
+                  (SELECT rows_collected FROM v_collection_log
+                   WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'
+                   ORDER BY collection_time DESC NULLS LAST
+                   LIMIT 1),
+                  1) > 0
         ORDER BY trace_flag
         """;
 
