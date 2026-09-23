@@ -176,3 +176,88 @@ public sealed class McpToolGuideHeadsPgDatabaseTests
         }
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for a third pgA batch: <c>get_pg_plan_capture_readiness</c>, <c>get_pg_plans</c> and
+/// <c>get_pg_session_states</c>, converted out of <c>DarlingMcpPgPlanTools</c> and
+/// <c>DarlingMcpPgSessionStatesTools</c> (Darling only — none of the three has a Lite twin). Shares this file's
+/// "PgA" home per the coordinator's file assignment, distinct from <see cref="McpToolGuideHeadsPgATests"/> and
+/// <see cref="McpToolGuideHeadsPgDatabaseTests"/>. Follows the pattern in
+/// <see cref="McpToolGuideHeadsHealthParserTests"/>.
+/// </summary>
+public sealed class McpToolGuideHeadsPgPlanTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_plan_capture_readiness",
+        "get_pg_plans",
+        "get_pg_session_states",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_plans", "Returns the plan JSON ITSELF, not a reference"),
+        ("get_pg_plans", "queryid is a STRING"),
+        ("get_pg_plans", "Empty separates three causes"),
+        ("get_pg_plans", "read get_pg_plan_capture_readiness first"),
+        ("get_pg_plan_capture_readiness", "in CAUSAL order"),
+        ("get_pg_plan_capture_readiness", "Runs HOURLY"),
+        ("get_pg_plan_capture_readiness", "An EMPTY answer here is NOT the healthy case"),
+        ("get_pg_plan_capture_readiness", "Never claims a plan was captured"),
+        ("get_pg_session_states", "-1 means pinned NOTHING, not a small age"),
+        ("get_pg_session_states", "THIS IS A SAMPLE at the collection interval"),
+        ("get_pg_session_states", "captures_in_window = 0 means unavailable"),
+        ("get_pg_session_states", "Requires pg_monitor"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: the parameter-overflow sentences D2 moved off <c>get_pg_plans.limit</c>,
+    /// <c>get_pg_plans.query_id</c>, <c>get_pg_plan_capture_readiness.limit</c> and
+    /// <c>get_pg_session_states.limit</c> land verbatim in their tool's tail rather than disappearing when the
+    /// parameter itself was trimmed to a pointer at the tool's reading guide.</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_NotJustTheGuardrailSentence()
+    {
+        var plans = McpToolGuideTests.Served("get_pg_plans");
+        Assert.Contains("read truncated to know whether the window held more shapes than were returned", plans.Tail!, StringComparison.Ordinal);
+        Assert.Contains("an empty answer with this set genuinely means no plan for it was captured", plans.Tail!, StringComparison.Ordinal);
+
+        var readiness = McpToolGuideTests.Served("get_pg_plan_capture_readiness");
+        Assert.Contains("in which case unsatisfied_facets is withheld", readiness.Tail!, StringComparison.Ordinal);
+
+        var sessions = McpToolGuideTests.Served("get_pg_session_states");
+        Assert.Contains("read truncated to know whether the window held more sessions than were returned", sessions.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D8: no renames, no consolidation — all three still resolve as the same tool names with the same
+    /// parameters, just a shorter served head and the over-cap parameters (D2) trimmed to a pointer at the
+    /// tool's reading guide.</summary>
+    [Fact]
+    public void OverCapParameters_StayAtOrUnder200_AndKeepThePointer()
+    {
+        foreach (var (tool, param) in new[] { ("get_pg_plans", "limit"), ("get_pg_plans", "query_id"), ("get_pg_plan_capture_readiness", "limit"), ("get_pg_session_states", "limit") })
+        {
+            var served = McpToolGuideTests.Served(tool);
+            var p = Assert.Single(served.ParameterDescriptionLengths, x => x.Parameter == param);
+            Assert.True(p.Length <= 200, $"{tool}.{param}: {p.Length} > 200");
+        }
+    }
+}
