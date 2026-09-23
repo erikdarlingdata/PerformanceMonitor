@@ -149,6 +149,20 @@ public class AnalysisContext
     public int CollectionFamilyCount { get; set; }
 
     /// <summary>
+    /// The queries the PLAN_REGRESSION fact reported this pass (#3902): one entry per (database, query_id)
+    /// among its at most twenty offenders, stamped by the fact collector after the read. Null until then,
+    /// and null when that read failed.
+    ///
+    /// <para>The regressed-queries drill-down re-runs the same detection to list the top five with their
+    /// text and plan ids, and before this it re-deduplicated the server's whole Query Store slice to do it:
+    /// the most expensive read in the pass, twice. Its top five are the head of the fact's own ranking, so
+    /// it now computes its rows for these queries only, and reads unrestricted when this is null or empty
+    /// (a drill-down run without a fact pass, after a failed fact read, or with no fact to follow),
+    /// exactly as it always did.</para>
+    /// </summary>
+    public IReadOnlyList<PlanRegressionOffender>? PlanRegressionOffenders { get; set; }
+
+    /// <summary>
     /// Records one failed read. <paramref name="family"/> is the family label the caveat counts by
     /// (<see cref="CollectionFailure.FamilyOf"/> from the collect method's name on the SQL Server collectors,
     /// <see cref="CollectionFailure.FamilyOfFile"/> from the partial file on the PostgreSQL-target one, whose
@@ -159,6 +173,9 @@ public class AnalysisContext
     public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, string message) =>
         CollectionFailures.Add(new CollectionFailure(family, read, outcome, message));
 }
+
+/// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>
+public readonly record struct PlanRegressionOffender(string DatabaseName, long QueryId);
 
 /// <summary>
 /// How a family read failed (#3691) — the three-outcome degrade the collectors already classify for their log

@@ -423,7 +423,8 @@ compared AS
         END AS regression_factor,
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
-        l.execs * l.cpu_per_exec AS latest_total_cpu_us
+        l.execs * l.cpu_per_exec AS latest_total_cpu_us,
+        l.database_name
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -441,7 +442,10 @@ SELECT
     force_failure_count,
     best_cpu,
     best_dur,
-    regression_factor
+    regression_factor,
+    -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
+    -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
+    database_name
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
@@ -462,6 +466,10 @@ LIMIT 20";
     /// </summary>
     private async Task CollectPlanRegressionFactsAsync(AnalysisContext context, List<Fact> facts)
     {
+        /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
+           than a list some earlier pass stamped on a reused context. */
+        context.PlanRegressionOffenders = null;
+
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
@@ -484,6 +492,7 @@ LIMIT 20";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            var offenders = new List<PlanRegressionOffender>();
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
@@ -507,7 +516,15 @@ LIMIT 20";
                     worstDimension = cpuRatio >= 2 ? 1 : 2; // 1 = cpu, 2 = duration
                 }
                 offenderCount++;
+
+                /* #3902: both keys are join keys of the comparison above, so neither is ever NULL here. Two
+                   replicas of one query are two rows and one offender. */
+                var offender = new PlanRegressionOffender(reader.GetString(8), ToInt64(reader.GetValue(0)));
+                if (!offenders.Contains(offender))
+                    offenders.Add(offender);
             }
+
+            context.PlanRegressionOffenders = offenders;
 
             if (offenderCount == 0) return;
 

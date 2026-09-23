@@ -237,8 +237,10 @@ public sealed class DarlingAnalysisPipelineTests
            passthrough views. #2150's query_store_text is the first one a drill-down reads, because
            statement text moved out of the fact row and has to be resolved back. Sourced from the store
            class's own TableName rather than spelled here, so a rename cannot leave this guard asserting
-           against a table that no longer exists. */
-        var sideTables = new[] { QueryStoreTextStore.TableName }
+           against a table that no longer exists. query_text_dim is the second (#3902): the
+           parameter-sensitivity drill-down resolves text for its five output rows by digest rather than
+           reading v_query_stats, whose join resolves it for every row in the window. */
+        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable }
             .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
             .ToHashSet(StringComparer.Ordinal);
 
