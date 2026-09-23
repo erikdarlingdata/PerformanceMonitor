@@ -943,7 +943,7 @@ public sealed class AlertReadFailureSurfaceTests
     };
 
     private const int WorkerCountedSites = 10;
-    private const int WorkerExemptSites = 8;
+    private const int WorkerExemptSites = 9;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1013,6 +1013,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
         ["could not read the recorded store size"] = "context for the alert text, not the evidence the alert is judged on",
         ["Store self-metrics sweep did not finish"] = "a metrics write sweep; no alert is judged on its result",
+        ["so this hour's size rows are missing"] = "a metrics write sweep (#3923); no alert is judged on its result, and the store-log census and collector-cost flush the same tick still run on the connection this narrow catch deliberately leaves open",
         ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
         ["Store log: re-masking rows captured before this build failed"] = "a maintenance rewrite of stored store-log text (#3915); no alert is judged on it, it is idempotent and resumes next hour, and until it finishes the store-log reader masks every row on the way out",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
@@ -1191,8 +1192,11 @@ public sealed class AlertReadFailureSurfaceTests
            re-announcement at the next restart and never a delivery. 26th since #3915: the store-log re-mask
            pass, a maintenance rewrite of stored text that resumes next hour, with the reader masking in the
            meantime. 27th since #3908: the store TimescaleDB self-alert's catch, whose evidence is the version
-           the bootstrap read before the alert engine existed. */
-        Assert.Equal(27, totalExempt);
+           the bootstrap read before the alert engine existed. 28th since #3923: the sizing pass's own narrow
+           catch, mirroring the store-log capture's catch beside it - a metrics write sweep whose swallowed
+           failure costs no alert, and whose whole point is to leave the store-log census and the
+           collector-cost flush below it running on the connection this catch keeps open. */
+        Assert.Equal(28, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
