@@ -59,12 +59,14 @@ public sealed class PgTargetClockTests
         Assert.NotNull(overridden);
         Assert.Equal(seam, overridden!.GetBaseDefinition());
 
-        /* The compute calls the SEAM, once, with the analysis time as the window end — so an override that anchors
-           on the window sees the window an anchored pass (#2506) asked for, not the wall clock. */
+        /* The compute calls the SEAM, once, with the window end — the analysis HOUR since #3941, the end every caller
+           in that hour shares — so an override that anchors on the window sees the window an anchored pass (#2506)
+           asked for, not the wall clock. */
         var baseSource = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs");
         var baseCode = CSharpSourceWalker.StripCommentsAndStrings(baseSource);
         Assert.Single(Regex.Matches(baseCode, @"await ReadServerClockAsync\("));
-        Assert.Contains("await ReadServerClockAsync(connection, serverId, AsNaive(analysisTime), cancellationToken)", baseCode, StringComparison.Ordinal);
+        Assert.Contains("await ReadServerClockAsync(connection, serverId, AsNaive(windowEnd), cancellationToken)", baseCode, StringComparison.Ordinal);
+        Assert.Contains("var windowEnd = RoundedHour(analysisTime);", baseCode, StringComparison.Ordinal);
         Assert.DoesNotContain("DateTime.UtcNow", CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.Clock.cs")), StringComparison.Ordinal);
     }
@@ -181,11 +183,12 @@ public sealed class PgTargetClockLiveTests
     private const int Tuesday = (int)DayOfWeek.Tuesday;
 
     /* The series: 2026-02-07 00:00Z through 2026-03-11 00:00Z, one row a minute, across the 2026-03-08 07:00Z
-       spring-forward (−05:00 → −04:00). The analysis instant is Tuesday 2026-03-10 13:30Z = 09:30 EDT; its 30-day
-       window opens 2026-02-08 13:30Z, so it holds Tuesdays Feb 10, 17, 24 and Mar 3 on the EST side and Mar 10 on the
-       EDT side. */
+       spring-forward (−05:00 → −04:00). The analysis instant is Tuesday 2026-03-17 13:30Z = 09:30 EDT; its 30-day
+       window runs 2026-02-15 13:00Z to 2026-03-17 13:00Z — it ends on the analysis HOUR (#3941), so the analysis day's
+       own 13Z rows are never in it, which is why the instant is the Tuesday AFTER the series' last one — and it holds
+       Tuesdays Feb 17, 24 and Mar 3 on the EST side and the whole of Mar 10 on the EDT side. */
     private static readonly DateTime SeriesStart = new(2026, 2, 7, 0, 0, 0, DateTimeKind.Unspecified);
-    private static readonly DateTime AnalysisTime = new(2026, 3, 10, 13, 30, 0, DateTimeKind.Unspecified);
+    private static readonly DateTime AnalysisTime = new(2026, 3, 17, 13, 30, 0, DateTimeKind.Unspecified);
     private const int SeriesMinutes = 32 * 24 * 60;
 
     [Fact]
@@ -221,28 +224,28 @@ public sealed class PgTargetClockLiveTests
 
             var provider = new PgTargetBaselineProvider(postgres);
 
-            /* New York: the bucket for 09:30 local is the 09:00 local hour on a Tuesday — 4 EST Tuesdays × 60 rows
-               (14:xxZ) + the EDT Tuesday's 30 rows (13:00–13:29Z, the window end is exclusive) = 270 samples over 5
-               local days, every one of them exactly 100 tps. */
+            /* New York: the bucket for 09:30 local is the 09:00 local hour on a Tuesday — 3 EST Tuesdays × 60 rows
+               (14:xxZ) + the EDT Tuesday's 60 rows (13:xxZ) = 240 samples over 4 local days, every one of them exactly
+               100 tps. */
             var newYork = await provider.GetBaselineAsync(NewYorkServerId, MetricNames.PgTps, AnalysisTime, ct);
             Assert.Equal(BaselineTier.Full, newYork.Tier);
             Assert.Equal((9, Tuesday), (newYork.HourOfDay, newYork.DayOfWeek));
-            Assert.Equal(270L, newYork.SampleCount);
-            Assert.Equal(5L, newYork.DistinctDays);
+            Assert.Equal(240L, newYork.SampleCount);
+            Assert.Equal(4L, newYork.DistinctDays);
             Assert.Equal(100.0, newYork.Median, 0.001);
             Assert.Equal(100.0, newYork.Mean, 0.001);
             Assert.Equal(0.0, newYork.Mad, 0.001);
 
-            /* UTC: the same instant is 13:30Z, and the 13Z Tuesday bucket pools the four EST Tuesdays' 08:xx local
-               rows (idle, 10 tps) with the EDT Tuesday's 09:xx local rows (load, 100 tps) — 240 at 10 and 30 at 100:
-               median 10, mean 20. A detector judging 100 tps at 09:30 New York time against THIS bucket fires; against
+            /* UTC: the same instant is 13:30Z, and the 13Z Tuesday bucket pools the three EST Tuesdays' 08:xx local
+               rows (idle, 10 tps) with the EDT Tuesday's 09:xx local rows (load, 100 tps) — 180 at 10 and 60 at 100:
+               median 10, mean 32.5. A detector judging 100 tps at 09:30 New York time against THIS bucket fires; against
                the New York twin's it does not. That is the smear, on the PostgreSQL engine, and this is its end. */
             var utc = await provider.GetBaselineAsync(UtcServerId, MetricNames.PgTps, AnalysisTime, ct);
             Assert.Equal(BaselineTier.Full, utc.Tier);
             Assert.Equal((13, Tuesday), (utc.HourOfDay, utc.DayOfWeek));
-            Assert.Equal(270L, utc.SampleCount);
+            Assert.Equal(240L, utc.SampleCount);
             Assert.Equal(10.0, utc.Median, 0.001);
-            Assert.Equal(20.0, utc.Mean, 0.001);
+            Assert.Equal(32.5, utc.Mean, 0.001);
 
             /* The snapshot rule's other half: a newer snapshot INSIDE the window whose TimeZone is session-scoped
                (the collector's own connection set it) describes the connection, not the server — that compute keys

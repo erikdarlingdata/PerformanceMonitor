@@ -96,11 +96,17 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// failure logs on a calm cadence instead of every poll tick.</summary>
     internal static readonly TimeSpan FailedStartBackoff = TimeSpan.FromSeconds(30);
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState)
+    /* #3941: the process's shared baseline tier (the worker's passes fill it), so analyze_server and compare_analysis
+       inside an analysis hour a scheduled pass already computed read no 30-day baseline. Optional so a host built
+       outside the service's DI (a test) keeps a private one. */
+    private readonly BaselineCache _baselineCache;
+
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null)
     {
         _logger = logger;
         _state = state;
         _registryState = registryState;
+        _baselineCache = baselineCache ?? new BaselineCache();
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort)
@@ -477,7 +483,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
-            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger));
+            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache));
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
                reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder

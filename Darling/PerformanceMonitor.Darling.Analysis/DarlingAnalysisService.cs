@@ -227,7 +227,15 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public AnalysisAbandonKind? EndedEarlyAs { get; private set; }
 
-    public DarlingAnalysisService(NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null)
+    /// <param name="postgres">The store, read as whatever role this data source connects as.</param>
+    /// <param name="planFetcher">Optional; the SQL Server drill-down's cached-plan fetch.</param>
+    /// <param name="logger">Optional.</param>
+    /// <param name="baselineCache">#3941: the process's shared baseline tier. The worker builds a fresh service per pass
+    /// (see <see cref="IsAnalyzing"/>), so without it every pass recomputed every 30-day baseline and the MCP and web
+    /// hosts paid for them again; with it, all of them share one compute per series per analysis hour. Null keeps each
+    /// provider's cache private to this instance, as before.</param>
+    public DarlingAnalysisService(
+        NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null, BaselineCache? baselineCache = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -235,7 +243,7 @@ public sealed class DarlingAnalysisService
         _scorer = new FactScorer();
 
         /* The SQL Server set: the five objects this service always composed, in the same order. */
-        var sqlServerBaselines = new PgBaselineProvider(postgres, logger);
+        var sqlServerBaselines = new PgBaselineProvider(postgres, logger, baselineCache);
         _sqlServerEngine = new AnalysisEngineSet(
             new PgFactCollector(postgres, logger),
             new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
@@ -247,7 +255,7 @@ public sealed class DarlingAnalysisService
         /* The PostgreSQL-target set (#3542). No plan fetcher: that object connects to a monitored SQL Server
            to fetch a cached plan, and a PostgreSQL target's plans arrive through the collectors
            (pg_plan_capture) — there is nothing for it to fetch. */
-        var pgTargetBaselines = new PgTargetBaselineProvider(postgres, logger);
+        var pgTargetBaselines = new PgTargetBaselineProvider(postgres, logger, baselineCache);
         _pgTargetEngine = new AnalysisEngineSet(
             new PgTargetFactCollector(postgres, logger),
             new PgTargetAnomalyDetector(postgres, pgTargetBaselines, logger),

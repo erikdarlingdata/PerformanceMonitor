@@ -22,7 +22,11 @@ namespace PerformanceMonitorLite.Analysis;
 ///   Full (hour+dow) -> Hour-only -> Flat (global mean/stddev)
 ///
 /// Baselines are cached in memory with a 1-hour TTL to avoid redundant
-/// recomputation during rapid re-analysis.
+/// recomputation during rapid re-analysis. Since #3941 the cache has a second tier
+/// per store (<see cref="BaselineCache"/>) that the scheduler's per-pass services,
+/// the MCP host, the Recommendations tab and the overview lanes share, and the
+/// window ends on the analysis HOUR the cache keys on, so a shared entry is the
+/// answer a fresh compute would give.
 ///
 /// <para>
 /// <b>The bucket key is the TARGET's local hour-of-week, not UTC (#3653 item 12, Q6).</b> <c>collection_time</c>
@@ -69,10 +73,19 @@ public class BaselineProvider
     /// (which runs hourly, forever).</summary>
     private readonly ConcurrentDictionary<string, bool> _retentionWarned = new(StringComparer.Ordinal);
 
-    public BaselineProvider(DuckDbInitializer duckDb, Func<string, int?>? retentionDaysForCollector = null)
+    /* #3941: the store's shared tier (see BaselineCache for the invalidation rule), or null for a private cache. */
+    private readonly BaselineCache? _shared;
+
+    /// <param name="duckDb">The store.</param>
+    /// <param name="retentionDaysForCollector">#1757: see the field.</param>
+    /// <param name="sharedCache">#3941: the store's <see cref="BaselineCache"/> (<see cref="BaselineCache.For"/>),
+    /// consulted on a miss in this provider's own cache and handed every successful compute. Null (every caller before
+    /// #3941, and every test) keeps a private cache and nothing else.</param>
+    public BaselineProvider(DuckDbInitializer duckDb, Func<string, int?>? retentionDaysForCollector = null, BaselineCache? sharedCache = null)
     {
         _duckDb = duckDb;
         _retentionDaysForCollector = retentionDaysForCollector;
+        _shared = sharedCache;
     }
 
     /// <summary>
@@ -156,28 +169,54 @@ public class BaselineProvider
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
     }
 
-    /// <summary>Forces cache eviction for a server — used during testing.</summary>
+    /// <summary>Forces cache eviction for a server — used during testing. Both tiers (#3941): a shared entry left
+    /// behind would answer the very next lookup and defeat the eviction.</summary>
     public void InvalidateCache(int serverId)
     {
         var keysToRemove = _cache.Keys.Where(k => k.StartsWith($"{serverId}:", StringComparison.Ordinal)).ToList();
         foreach (var key in keysToRemove)
             _cache.TryRemove(key, out _);
+        _shared?.Invalidate(serverId);
     }
 
-    /// <summary>Forces full cache clear — used during testing.</summary>
-    public void ClearCache() => _cache.Clear();
+    /// <summary>Forces full cache clear — used during testing. Both tiers (#3941).</summary>
+    public void ClearCache()
+    {
+        _cache.Clear();
+        _shared?.Clear();
+    }
+
+    /// <summary>The analysis hour: the cache key's time AND, since #3941, the end of the compute's window
+    /// (<see cref="ComputeBaselinesAsync"/>), so the key names the rows its entry was computed from.</summary>
+    internal static DateTime RoundedHour(DateTime analysisTime)
+        => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
 
     private async Task<CachedBaseline> GetOrComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = $"{serverId}:{metricName}";
-        var roundedHour = new DateTime(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
+        var roundedHour = RoundedHour(analysisTime);
 
-        if (_cache.TryGetValue(cacheKey, out var cached) &&
-            cached.ComputedAt == roundedHour &&
-            (DateTime.UtcNow - cached.RealTime) < CacheTtl)
+        /* #3941, Darling's PgBaselineProvider.TryGetFresh twinned: a local SUCCESS; then the store's shared tier (copied
+           in, so the rest of this provider's life is a local hit); then a local FAILURE — "no baseline this pass", as
+           before. A shared success beats a local failure because it is the answer the failed compute was after. */
+        var local = _cache.TryGetValue(cacheKey, out var cached) &&
+                    cached.ComputedAt == roundedHour &&
+                    (DateTime.UtcNow - cached.RealTime) < CacheTtl;
+        if (local && cached!.Buckets is not null)
         {
             return cached;
+        }
+
+        if (_shared is not null && _shared.TryGet(serverId, cacheKey, roundedHour, out var shared))
+        {
+            _cache[cacheKey] = shared;
+            return shared;
+        }
+
+        if (local)
+        {
+            return cached!;
         }
 
         var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
@@ -190,6 +229,12 @@ public class BaselineProvider
             Clock = clock
         };
         _cache[cacheKey] = entry;
+
+        /* Only a SUCCESS is shared: a failed compute (null buckets) is this caller's "no baseline this pass". */
+        if (buckets is not null)
+        {
+            _shared?.Put(serverId, cacheKey, entry);
+        }
 
         return entry;
     }
@@ -230,12 +275,19 @@ LIMIT 1";
     private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
+        /* #3941: the window ends at the analysis HOUR, not the analysis instant. The cache has always keyed an entry on
+           that hour, but computed it over whichever instant inside the hour asked first, so a later caller in the same
+           hour was answered from a window up to 59 minutes off its own. Ending the window on the key makes every caller
+           in the hour ask for the SAME rows — what lets the store's callers share one compute (BaselineCache) without
+           changing anyone's answer. The lookup still keys the bucket on the analysis instant; its hour-of-week is the
+           hour's. Darling's PgBaselineProvider.ComputeBucketsAsync is the twin. */
+        var windowEnd = RoundedHour(analysisTime);
         var query = GetBaselineQuery(metricName);
-        var clock = LocalClockWindow.Utc(analysisTime);
+        var clock = LocalClockWindow.Utc(windowEnd);
         if (query == null) return (null, clock);
 
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
-        var windowStart = analysisTime.AddDays(-BaselineMath.BaselineWindowDays);
+        var windowStart = windowEnd.AddDays(-BaselineMath.BaselineWindowDays);
 
         try
         {
@@ -247,13 +299,13 @@ LIMIT 1";
                purpose — a store that cannot answer a one-row read of v_server_properties cannot answer the 30-day
                scan either, and one catch is the right number of places for "no baseline this pass" to be said. */
             var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, cancellationToken);
-            clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, windowStart, analysisTime);
+            clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, windowStart, windowEnd);
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = query;
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             cmd.Parameters.Add(new DuckDBParameter { Value = windowStart });
-            cmd.Parameters.Add(new DuckDBParameter { Value = analysisTime });
+            cmd.Parameters.Add(new DuckDBParameter { Value = windowEnd });
             /* $4..$6: the clock BaselineLocalClock.LocalCollectionTimeSql keys on — the transition instant and the
                offset minutes before/after it. Every statement this method runs must reference all three; DuckDB
                will not say so if one does not. */
@@ -580,7 +632,9 @@ clean AS (
         };
     }
 
-    private class CachedBaseline
+    /// <summary>One computed series. Internal, not private, since #3941: <see cref="BaselineCache"/> holds the same
+    /// objects, and an entry is never mutated after it is built, so two tiers can share it.</summary>
+    internal sealed class CachedBaseline
     {
         public DateTime ComputedAt { get; init; }
         public DateTime RealTime { get; init; }

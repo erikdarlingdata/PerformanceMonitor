@@ -239,8 +239,12 @@ public static class DarlingWebEndpoints
     /// writes through. Deliberately NOT <c>app.Logger</c>: the host clears the dashboard app's logging providers
     /// (both halves of that decision are stated at its ClearProviders site), so the app's own factory writes
     /// nowhere, and a degradation line logged through it would vanish.</para>
+    ///
+    /// <para><paramref name="baselineCache"/> is the process's shared baseline tier (#3941) — the one the worker's passes
+    /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
+    /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null)
     {
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -256,7 +260,7 @@ public static class DarlingWebEndpoints
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
            persisted-finding read — need only the store; the optional plan fetcher / logger are for the excluded
            analyze/drill path). Shared across requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres);
+        var analysis = new DarlingAnalysisService(postgres, baselineCache: baselineCache);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
