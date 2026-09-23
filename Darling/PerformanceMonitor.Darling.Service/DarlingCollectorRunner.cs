@@ -358,6 +358,10 @@ public sealed class DarlingCollectorRunner
     private readonly Func<bool> _collectSchemaChanges;
     private readonly Func<bool> _compressPlanContent;
 
+    /* #3953: the latest-snapshot-per-interval table's writer. One per runner, because it carries the per-server
+       "coverage ensured" and "gap checked at" state that must outlive a cycle. */
+    private readonly QueryStoreIntervalLatest _queryStoreIntervalLatest;
+
     /* Feeds CollectorContext.TextByteBudgetOverride on every cycle (#2164) — the query_store collector's
        per-database text budget in MB (config_service.query_store_text_budget_mb, V59). Provider-read for
        the same reason as the two above: a store reload takes effect on the NEXT cycle without rebuilding
@@ -644,6 +648,7 @@ public sealed class DarlingCollectorRunner
            false = 'none': plain text into query_plan_xml so direct-SQL consumers read it bare.
            The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
         _compressPlanContent = compressPlanContent ?? (() => true);
+        _queryStoreIntervalLatest = new QueryStoreIntervalLatest(logger);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
         /* Null provider = no scope for any collector = every database the server enumerates, which is
@@ -2525,6 +2530,8 @@ public sealed class DarlingCollectorRunner
            exactly the note it carried before. */
         collectionNote = EnumeratedCollectorDriver.MergeNotes(
             collectionNote, StoreWriteReattemptNote(context.StoreWriteReattempts));
+        collectionNote = EnumeratedCollectorDriver.MergeNotes(
+            collectionNote, QueryStoreIntervalMissNote(context.QueryStoreIntervalMisses));
 
         return new CollectorRunResult(
             rowsWritten, sqlMs, storageMs, context.Measurements, collectionNote, fanout.Result,
@@ -2786,6 +2793,25 @@ public sealed class DarlingCollectorRunner
             : string.Format(CultureInfo.InvariantCulture, s_storeWriteReattemptNote, reattempts);
 
     /// <summary>
+    /// The collection_log note for a cycle whose Query Store batches stored their raw rows but missed the interval
+    /// table (#3953), in <see cref="StoreWriteReattemptNoteFormat"/>'s shape. Raw was not lost; the batches are queued
+    /// for replay, and the note is what keeps a failing apply visible on a cycle that otherwise reads as a success.
+    /// </summary>
+    internal const string QueryStoreIntervalMissNoteFormat =
+        "{0} Query Store batch(es) this cycle stored their raw rows but missed the interval table (#3953); they are " +
+        "queued for replay, and PLAN_REGRESSION reads raw for this server until they apply";
+
+    /// <summary><see cref="QueryStoreIntervalMissNoteFormat"/> parsed once (CA1863).</summary>
+    private static readonly CompositeFormat s_queryStoreIntervalMissNote =
+        CompositeFormat.Parse(QueryStoreIntervalMissNoteFormat);
+
+    /// <summary>The note for this cycle's interval-table misses, or null when there were none.</summary>
+    internal static string? QueryStoreIntervalMissNote(int misses) =>
+        misses <= 0
+            ? null
+            : string.Format(CultureInfo.InvariantCulture, s_queryStoreIntervalMissNote, misses);
+
+    /// <summary>
     /// One attempt at the batch on a store connection of its own, borrowed for the attempt and returned
     /// when it ends (#3099). Both the re-attempt and a first attempt whose shared connection is already
     /// broken route through here, so "a fresh connection" is one named method with one body rather than two
@@ -2847,9 +2873,21 @@ public sealed class DarlingCollectorRunner
             writer.UseDimensions(diversionPlan, dimensions);
         }
 
-        /* Only the diverting collectors need a transaction; everything else keeps the pre-#1767
-           single-COPY commit and pays nothing. */
-        await using var transaction = diversionPlan.Count > 0
+        /* #3953: a Query Store batch also maintains the latest-snapshot-per-interval table, in the COPY's own
+           transaction behind a savepoint (QueryStoreIntervalLatest). Its two wider reads, the coverage row's
+           creation and the hourly gap check, run HERE, before the transaction, so nothing inside it reads raw
+           except by this batch's collection_time. Neither can block the COPY: a fault just records the batch
+           for replay. */
+        var queryStoreDatabases = definition is QueryStoreCollector
+            ? DistinctQueryStoreDatabases(rows)
+            : null;
+        var queryStorePrepared = queryStoreDatabases is not null
+            && await _queryStoreIntervalLatest.PrepareServerAsync(
+                pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+
+        /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
+           pre-#1767 single-COPY commit and pays nothing. */
+        await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
             ? await pgConnection.BeginTransactionAsync(cancellationToken)
             : null;
 
@@ -2962,13 +3000,49 @@ public sealed class DarlingCollectorRunner
 
         if (transaction is not null)
         {
-            await PayloadDimensionWriter.FlushAsync(
-                pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
-                compressPlanContent: _compressPlanContent());
+            if (diversionPlan.Count > 0)
+            {
+                await PayloadDimensionWriter.FlushAsync(
+                    pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
+                    compressPlanContent: _compressPlanContent());
+            }
+
+            /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
+               the COPY's and is never re-attempted. The apply cannot fail the batch: it rolls back to its own
+               savepoint and records the batch for replay, so raw commits either way. */
+            if (queryStoreDatabases is not null)
+            {
+                var applied = await _queryStoreIntervalLatest.ApplyBatchAsync(
+                    pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
+                    skipApply: !queryStorePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                if (applied == QueryStoreIntervalLatest.ApplyResult.RecordedAsPending)
+                {
+                    context.QueryStoreIntervalMisses++;
+                }
+            }
+
             await transaction.CommitAsync(cancellationToken);
         }
 
         return rowsWritten;
+    }
+
+    /// <summary>
+    /// The distinct databases of a Query Store batch (#3953): normally exactly one, because the enumerated and Azure
+    /// paths write one batch per database per cycle. Null for any other collector's rows.
+    /// </summary>
+    private static List<string>? DistinctQueryStoreDatabases<TRow>(List<TRow> rows)
+    {
+        var names = new List<string>();
+        foreach (var row in rows)
+        {
+            if (row is QueryStoreCollector.Row queryStoreRow && !names.Contains(queryStoreRow.DatabaseName))
+            {
+                names.Add(queryStoreRow.DatabaseName);
+            }
+        }
+
+        return names;
     }
 
     /// <summary>

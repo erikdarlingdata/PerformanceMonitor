@@ -219,6 +219,7 @@ public static class PgMigrations
         new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
         new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
         new Migration(139, "postmaster-start-time", V139Sql),
+        new Migration(140, "query-store-interval-latest", V140Sql),
     };
 
     /// <summary>
@@ -1815,6 +1816,95 @@ ALTER TABLE collect.store_metrics
    collector's payload order, so the positional COPY writer and an upgraded store's column order agree. */
 ALTER TABLE collect.pg_write_stats
     ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;";
+
+    /// <summary>
+    /// V140 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
+    /// drill-down read one row per interval instead of deduplicating the whole raw <c>query_store_stats</c> slice on
+    /// every pass. Three new tables, all engine-plain here (the <c>PgMigrations</c> rule); nothing on an existing
+    /// table changes, and there is no backfill.
+    ///
+    /// <para><b><c>collect.query_store_interval_latest</c></b>: one row per Regular interval identity, the dedup's
+    /// <c>GROUP BY</c> plus <c>server_id</c>, holding the snapshot the raw read's
+    /// <c>ORDER BY collection_time DESC, execution_count DESC</c> would keep. Its columns are exactly what the two reads
+    /// consume, and their types and nullability mirror raw's, so the table can never refuse a row raw accepted. One
+    /// unique index, <c>NULLS NOT DISTINCT</c> because <c>replica_role</c> is NULL off an availability group and must
+    /// still collapse (PostgreSQL 15+; the product minimum is 17). The column order is the writer's: a batch is one
+    /// database's rows for one or two interval ids, so each batch's entries form one contiguous run.
+    /// <c>fillfactor = 50</c> was measured (99% HOT against 56-59% at 70). The hypertable conversion, compression and
+    /// retention are runtime work in <c>collection_log</c>'s shape, not this rung's.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_latest_coverage</c></b>: per server, <c>filled_since</c> (every raw
+    /// snapshot at or after it is represented, except the pending batches below) and <c>applied_through</c> (the
+    /// newest batch accounted for). The reader uses the table only where that claim covers everything the raw read
+    /// would read.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_latest_pending</c></b>: one row per raw batch whose apply failed. The
+    /// apply runs behind a savepoint in the raw COPY's transaction, so a fault rolls back only the apply, records the
+    /// batch here, and raw still commits: raw ingestion never depends on this table. The next apply for the server
+    /// replays the row, and a server with any pending row reads raw. Empty in steady state.</para>
+    /// </summary>
+    private const string V140Sql = @"
+/* One row per Regular Query Store interval identity: the raw dedup's GROUP BY plus server_id. Types and nullability
+   mirror query_store_stats exactly, so no row raw accepts can be refused here. fillfactor 50 keeps the open
+   interval's refreshes HOT (measured, #3953). */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest
+(
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    replica_role text,
+    runtime_stats_interval_id bigint,
+    first_execution_time timestamp NOT NULL,
+    collection_time timestamp NOT NULL,
+    query_plan_hash text,
+    query_hash text,
+    execution_count bigint,
+    avg_cpu_time_us bigint,
+    avg_duration_us bigint,
+    last_execution_time timestamp,
+    is_forced_plan boolean,
+    force_failure_count bigint,
+    query_text text
+)
+WITH (fillfactor = 50);
+
+/* NULLS NOT DISTINCT: replica_role is NULL off an availability group, and a NULL-role re-collection must update its
+   row, not insert a second one. Column order is the writer's locality, not the reader's. */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_latest
+ON collect.query_store_interval_latest
+(
+    server_id,
+    database_name,
+    runtime_stats_interval_id,
+    plan_id,
+    query_id,
+    replica_role,
+    first_execution_time
+)
+NULLS NOT DISTINCT;
+
+/* Per server: every raw snapshot at or after filled_since is represented (except the pending batches), and
+   applied_through is the newest batch accounted for. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_coverage
+(
+    server_id integer NOT NULL,
+    filled_since timestamp NOT NULL,
+    applied_through timestamp NOT NULL,
+    CONSTRAINT pk_query_store_interval_latest_coverage PRIMARY KEY (server_id)
+);
+
+/* One row per raw batch whose apply failed; it commits with that batch's raw rows, and the next apply for the
+   server replays it. Empty in steady state. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
+(
+    server_id integer NOT NULL,
+    collection_time timestamp NOT NULL,
+    database_name text NOT NULL,
+    recorded_at timestamp NOT NULL,
+    failure text,
+    CONSTRAINT pk_query_store_interval_latest_pending PRIMARY KEY (server_id, collection_time, database_name)
+);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
