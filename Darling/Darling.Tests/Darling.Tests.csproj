@@ -26,6 +26,22 @@
     <!-- SystemHealthParser (the code under test) lives in Common; reference it explicitly rather than
          leaning on the transitive Viewer/Service edge. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+    <!-- #3938: the shared analysis engine, referenced explicitly by the same convention as Common above.
+         Dozens of classes here test PerformanceMonitor.Analysis types directly; the edge used to arrive
+         only transitively through Darling.Analysis, so dropping that reference would have broken them
+         for a reason nothing in this file named. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.Analysis\PerformanceMonitor.Analysis.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- #3938: the cross-SKU source-scan pins of the get_collection_health parity families, compiled here
+         from Lite.Tests rather than copied. Every fact in that file reads both SKUs source text and needs
+         nothing from WPF, but Lite.Tests cannot build or run on a Mac, so while they lived only there a
+         Darling-side change that broke one went red for the first time in CI. One file, one authority,
+         no parity pin needed - the mirror image of the CSharpSourceWalker link in Lite.Tests.csproj. It
+         brings its Lite.Tests namespace with it and uses only the BCL, xunit and PerformanceMonitor.Alerting,
+         which both projects carry. -->
+    <Compile Include="..\..\Lite.Tests\CrossSkuSurfaceSourceTests.cs" Link="Linked\CrossSkuSurfaceSourceTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
