@@ -1,6 +1,6 @@
 # DarlingMcpPgAutovacuumTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_autovacuum_health 2215
+tool get_pg_autovacuum_health 616
 param get_pg_autovacuum_health.as_of 167
 param get_pg_autovacuum_health.hours_back 83
-param get_pg_autovacuum_health.limit 261
+param get_pg_autovacuum_health.limit 161
 param get_pg_autovacuum_health.server_name 28

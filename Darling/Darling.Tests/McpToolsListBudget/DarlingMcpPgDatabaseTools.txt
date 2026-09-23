@@ -1,6 +1,6 @@
 # DarlingMcpPgDatabaseTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_database_stats 2361
+tool get_pg_database_stats 585
 param get_pg_database_stats.as_of 167
 param get_pg_database_stats.hours_back 40
-param get_pg_database_stats.limit 229
+param get_pg_database_stats.limit 175
 param get_pg_database_stats.server_name 28
