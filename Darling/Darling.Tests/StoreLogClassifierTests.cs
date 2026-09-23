@@ -531,18 +531,20 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
-    /// #3944: a retained entry's prose is kept as PostgreSQL wrote it wherever it sits: a message whose value runs
-    /// onto the next line, a HINT, a LOCATION with a command's stderr after it (<c>log_error_verbosity =
+    /// #3944: a retained entry's prose is kept as PostgreSQL wrote it wherever it sits: a message that runs onto
+    /// the next line, a HINT, a LOCATION with a command's stderr after it (<c>log_error_verbosity =
     /// verbose</c>), and the text before a field token on a line that merely contains one (an archive command's
-    /// stderr). #3920's reviews masked each of these; none is SQL.
+    /// stderr). #3920's reviews masked each of these; none is SQL. What a syntax error quotes after
+    /// <c>at or near</c> IS SQL (#3996's review), and this fixture's first message kept an unterminated literal's
+    /// text as written until that ruling: it is the pin's own case below.
     /// </summary>
     [Fact]
     public void TheMessageHintLocationAndAForeignHead_AreKeptAsWritten()
     {
         string[] entry =
         [
-            DefaultPrefix + "ERROR:  unterminated quoted string at or near \"'Kept3944g",
-            "\t\"",
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"Kept3944g",
+            "\tnext line\"",
             DefaultPrefix + "HINT:  Use an escape string such as E'Kept3944h'.",
         ];
         string[] location =
@@ -559,6 +561,135 @@ public class StoreLogClassifierTests
         Assert.Equal(string.Join("\n", entry), retained.Single(g => g.EventClass == StoreLogClassifier.UnclassifiedClass).SampleLine);
         Assert.Equal(string.Join("\n", location), retained.Single(g => g.EventClass == "statement_timeout").SampleLine);
         Assert.Equal(foreign, retained.Single(g => g.EventClass == "lock_timeout").SampleLine);
+
+        /* #3996's review (3): the scanner quotes the statement from its error token on, so an unterminated
+           literal's value is in the message, and the grouping key read it. Withheld in both. */
+        var syntax = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  unterminated quoted string at or near \"'Leak3996s",
+            "\t\"",
+            DefaultPrefix + "STATEMENT:  SELECT 'Leak3996s",
+            DefaultPrefix + "ERROR:  syntax error at or near \"'Leak3996t'\" at character 28",
+            "",
+        ]));
+        Assert.Equal(2, syntax.Groups.Count);
+        Assert.All(syntax.Groups, g => Assert.DoesNotContain("Leak3996", g.MessageText + g.SampleLine, StringComparison.Ordinal));
+        Assert.Contains(syntax.Groups, g => g.SampleLine == DefaultPrefix + "ERROR:  unterminated quoted string at or near \""
+            + StoreLogClassifier.WithheldStatement + "\"\n" + DefaultPrefix + "STATEMENT:  " + StoreLogClassifier.WithheldStatement);
+        Assert.Contains(syntax.Groups, g => g.SampleLine == DefaultPrefix + "ERROR:  syntax error at or near \"'?'\" at character 28");
+        foreach (var group in syntax.Groups)
+        {
+            Assert.Equal((group.MessageText, group.SampleLine), StoreLogClassifier.MaskStoredEvent(group.EventClass, group.MessageText, group.SampleLine));
+        }
+    }
+
+    /// <summary>
+    /// #3996's review (1), the store's half. A deadlock report whose entry ends at its DETAIL was cut between its
+    /// lines (DeadLockReport always writes its HINT), so a head after a query that did not read to its end may be a
+    /// look-alike inside that query's literal: withheld with every query after it. The same report with its HINT
+    /// reads the next query from its own first character.
+    /// </summary>
+    [Fact]
+    public void ACutDeadlockReport_TrustsNoHeadAfterAQueryThatDidNotReadToItsEnd()
+    {
+        string[] report =
+        [
+            DefaultPrefix + "ERROR:  deadlock detected",
+            DefaultPrefix + "DETAIL:  Process 100 waits for ShareLock on transaction 5; blocked by process 200.",
+            "\tProcess 200 waits for ShareLock on transaction 6; blocked by process 100.",
+            "\tProcess 100: UPDATE users SET bio = 'x",
+            "\tProcess 200: y', api_key = 'sk_live_Leak3996u', motto = '--' WHERE id = 5",
+        ];
+
+        var cut = Assert.Single(StoreLogClassifier.Classify(string.Join("\n", [.. report, ""])).Groups).SampleLine!;
+        Assert.DoesNotContain("Leak3996", cut, StringComparison.Ordinal);
+        Assert.EndsWith(
+            "\tProcess 100: " + StoreLogClassifier.WithheldStatement + "\n\tProcess 200: " + StoreLogClassifier.WithheldStatement,
+            cut,
+            StringComparison.Ordinal);
+
+        var whole = Assert.Single(StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  deadlock detected",
+            DefaultPrefix + "DETAIL:  Process 100 waits for ShareLock on transaction 5; blocked by process 200.",
+            "\tProcess 200 waits for ShareLock on transaction 6; blocked by process 100.",
+            "\tProcess 100: UPDATE t SET a = 'x",
+            "\tProcess 200: UPDATE t SET pw = 'Leak3996v' WHERE id = 5",
+            DefaultPrefix + "HINT:  See server log for query details.",
+            "",
+        ])).Groups).SampleLine!;
+        Assert.Contains(
+            "\tProcess 100: " + StoreLogClassifier.WithheldStatement + "\n\tProcess 200: UPDATE t SET pw = '?' WHERE id = ?\n",
+            whole,
+            StringComparison.Ordinal);
+        Assert.Equal(whole, StoreLogClassifier.MaskStoredEvent("deadlock", "deadlock detected", whole).Sample);
+    }
+
+    /// <summary>
+    /// #3996's review (2), the store's half. Under a translated lc_messages a field's label is not one this reader
+    /// knows: a Spanish <c>SENTENCIA:</c> line folded into the block above and kept its SQL as prose, and the
+    /// earliest KNOWN token on it, <c>ERROR:  </c> inside the statement's literal, opened an entry from the middle
+    /// of the SQL. Now a line's field is the label its first label-shaped colon ends, in any shipped catalogue, and
+    /// a line whose label is not one this reader knows is withheld with the rest of its entry: a German
+    /// <c>FEHLER:</c> line's untranslated <c>DETAIL:</c> is its own, not the entry's above. A row an earlier
+    /// release stored from inside such a literal keeps no text.
+    /// </summary>
+    [Fact]
+    public void ATranslatedLabel_IsWithheld_AndNeverOpensAnEntryFromInsideItsSql()
+    {
+        var spanish = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  llave duplicada viola restriccion de unicidad \"users_pkey\"",
+            DefaultPrefix + "DETALLE:  Ya existe la llave (id)=(5).",
+            DefaultPrefix + "SENTENCIA:  INSERT INTO users (id, api_key) VALUES (5, 'ERROR:  sk_live_Leak3996w')",
+            "",
+        ]));
+        Assert.Equal(1, spanish.EntriesRead);
+        Assert.Equal(
+            DefaultPrefix + "ERROR:  llave duplicada viola restriccion de unicidad \"users_pkey\"\n" + StoreLogClassifier.WithheldLines,
+            Assert.Single(spanish.Groups).SampleLine);
+
+        var german = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "FATAL:  Verbindung zum Client wurde verloren",
+            DefaultPrefix + "FEHLER:  Verklemmung (Deadlock) entdeckt",
+            DefaultPrefix + "DETAIL:  Prozess 4504 wartet auf ShareLock",
+            "\tProzess 4504: UPDATE t SET pw = 'Leak3996x'",
+            DefaultPrefix + "ANWEISUNG:  Schluessel \"(id)=(5)\" existiert bereits. 'Leak3996x'",
+            "",
+        ]));
+        Assert.Equal(
+            DefaultPrefix + "FATAL:  Verbindung zum Client wurde verloren\n" + StoreLogClassifier.WithheldLines,
+            Assert.Single(german.Groups).SampleLine);
+
+        /* Turkish and Korean write four labels and one with no space after the colon. */
+        var noSpace = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  x",
+            DefaultPrefix + "ORTAM:SQL ifadesi \"SELECT 'ERROR:  Leak3996y'\"",
+            DefaultPrefix + "ERROR:  y",
+            DefaultPrefix + "쿼리:SELECT 'FATAL:  Leak3996y'",
+            "",
+        ]));
+        Assert.Equal(2, noSpace.EntriesRead);
+        Assert.All(noSpace.Groups, g => Assert.DoesNotContain("Leak3996", g.MessageText + g.SampleLine, StringComparison.Ordinal));
+
+        /* A row an earlier release stored from the middle of such a literal, and a slow statement whose DETAIL a
+           translated catalogue labelled: the first keeps no text, the second's statement stops at that line. */
+        Assert.Equal(
+            (null, null),
+            StoreLogClassifier.MaskStoredEvent(
+                StoreLogClassifier.UnclassifiedClass,
+                "sk_live_Leak3996z')",
+                DefaultPrefix + "SENTENCIA:  INSERT INTO users (id, api_key) VALUES (5, 'ERROR:  sk_live_Leak3996z')"));
+        var slow = Assert.Single(StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "LOG:  duration: 6000.000 ms  execute <unnamed>: SELECT 1 FROM t WHERE a = $1",
+            DefaultPrefix + "DETALLE:  parámetros: $1 = 'Leak3996z'",
+            "",
+        ])).Groups);
+        Assert.Equal("execute <unnamed>: SELECT ? FROM t WHERE a = $1", slow.MessageText);
+        Assert.DoesNotContain("Leak3996", slow.SampleLine, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -803,6 +934,13 @@ public class StoreLogClassifierTests
     /// rendering puts a DIGIT immediately before the severity, so a boundary rule that refused any
     /// non-separator there would reintroduce #3030's defect from the other direction. Both are asserted
     /// here, in one test, because the fix and the thing it must not break are one decision.</para>
+    ///
+    /// <para><b>Changed deliberately by #3996's review.</b> This line used to classify as the ERROR after the
+    /// token. A line's field is now the label its FIRST label-shaped colon ends, because under a translated
+    /// lc_messages <c>SENTENCIA:  INSERT ... 'ERROR:  ...'</c> has the same shape as this line, and reading on to
+    /// the next known token opened an entry from inside the statement's literal. The two cannot be told apart,
+    /// so this line now opens nothing: a missed line under a prefix that renders a label-shaped token, where the
+    /// other reading kept SQL as prose. It is still never the manufactured LOG entry.</para>
     /// </summary>
     [Fact]
     public void AnAllCapsTokenEndingInAFieldNameIsNotTheField()
@@ -810,9 +948,9 @@ public class StoreLogClassifierTests
         var census = StoreLogClassifier.Classify(
             "2026-09-05 14:03:02.551 UTC [5288] PG_CATALOG:  ERROR:  canceling statement due to user request\n");
 
-        var group = Assert.Single(census.Groups);
-        Assert.Equal("user_request_cancel", group.EventClass);
-        Assert.Equal("ERROR", group.Severity);
+        Assert.Empty(census.Groups);
+        Assert.Equal(0, census.EntriesRead);
+        Assert.Equal(1, census.ContinuationLines);
 
         /* The control: a DIGIT before the severity is the %Q rendering and must still match. */
         var withQueryId = StoreLogClassifier.Classify(

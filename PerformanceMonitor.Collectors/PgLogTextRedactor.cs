@@ -38,8 +38,10 @@ namespace PerformanceMonitor.Collectors;
 /// <item><description><see cref="RedactDetail"/> and <see cref="RedactContext"/> — the SQL PostgreSQL writes into
 /// a DETAIL or a CONTEXT, found and put through that lexer; every other line of the field is kept as
 /// written.</description></item>
-/// <item><description><see cref="WithholdPlan"/> — auto_explain's plan report, whose plan carries the statement's
-/// text in a form the lexer cannot read, withheld below its duration line.</description></item>
+/// <item><description><see cref="RedactMessage"/> — a message as written, except auto_explain's plan report, whose
+/// plan carries the statement's text in a form the lexer cannot read (<see cref="WithholdPlan"/>, withheld below
+/// its duration line), and the SQL a syntax error quotes after <c>at or near</c>, put through the
+/// lexer.</description></item>
 /// </list>
 /// </summary>
 public static class PgLogTextRedactor
@@ -62,7 +64,22 @@ public static class PgLogTextRedactor
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex s_singleQueryHead = new(
-        @"^(?:Failed process was running: |prepare: |[Pp]arameters: )",
+        @"^(?:Failed process was running: |prepare: |(?<parameters>[Pp]arameters: ))",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* What a list of values reads as once lexed (#3996's review): `name = '?'` or `name = NULL` pairs, comma
+       separated, each name a plain identifier or a `$n`. PL/pgSQL writes a variable's name UNQUOTED
+       (format_expr_params), so a name that needed quoting in the function (`"o'k"`, `"a""b"`) opens a literal or an
+       identifier the lexer then reads out of step, and a value comes back as a word. Such a list is not this shape,
+       and is withheld. */
+    private static readonly Regex s_valueList = new(
+        @"^(?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*|\$[0-9]+) = (?:'\?'|NULL)(?:, (?:[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*|\$[0-9]+) = (?:'\?'|NULL))*$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* A portal's one bound value (`portal "p" parameter $1 = '...'`), or only its number when the value was not
+       logged. */
+    private static readonly Regex s_oneValue = new(
+        @"^\$[0-9]+(?: = (?:'\?'|NULL))?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* A CONTEXT frame that quotes the statement it was running, unescaped (#3920's review): SPI's
@@ -75,9 +92,12 @@ public static class PgLogTextRedactor
        `remote SQL command: <sql>`, whose pushed-down constants are literals, the values a statement was bound
        with (`unnamed portal with parameters: $1 = '...'`, `portal "p" parameter $1 = '...'`, written under
        log_parameter_max_length_on_error), which read as SQL too, and PL/pgSQL's `query: <sql>` under its
-       "query did not return data" error. Prose masking had covered their quoted values. */
+       "query did not return data" error. Prose masking had covered their quoted values. A portal's name is written
+       unescaped, so it is matched lazily to the first `" with parameters: ` or `" parameter $` (#3996's review): a
+       name holding a double quote had failed the match, and the frame's values were kept as prose. What a portal
+       frame's values lex to is checked against their shape as well, so a name holding that text only withholds. */
     private static readonly Regex s_contextSqlLine = new(
-        @"^\t?(?:remote SQL command: |query: |(?:unnamed portal|portal ""[^""]*"") (?:with parameters: |parameter ))",
+        @"^\t?(?:remote SQL command: |query: |(?:unnamed portal|portal "".*?"") (?:(?<list>with parameters: )|(?<one>parameter )(?=\$)))",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* What can follow an SQL frame: the line after its closing quote starts one of these, or the field ends. */
@@ -125,10 +145,21 @@ public static class PgLogTextRedactor
     /// query is withheld; so is every query of a report longer than <see cref="MaxSqlFieldLength"/>. #3920's fourth
     /// review took a head only where the query before it read to its end, which let one query that did not (cut at
     /// <c>track_activity_query_size</c> inside a literal, or written to look that way) take in the next and read it
-    /// out of step, a literal kept as a word. A report cut before its last queries keeps the ones it has. Null in,
-    /// null out; idempotent.</para>
+    /// out of step, a literal kept as a word. A report cut before its last queries keeps the ones it has.</para>
+    ///
+    /// <para><b>A cut report</b> (#3996's review). A report can also be cut between its lines: an RDS chunk is
+    /// consume-once, and the assembler stores an entry cut there as it arrived. Cut before a waiter's real head, a
+    /// line inside the query above it shaped like that head is the only one there is, so the order check passes,
+    /// and when that query did not read to its end the look-alike's text is read out of step. So after a query that
+    /// does not read to its end, a following head is trusted only when <paramref name="complete"/> says the caller
+    /// saw a companion field after the DETAIL (a HINT, CONTEXT or STATEMENT; DeadLockReport always writes its HINT),
+    /// which proves every real head is present and a look-alike a second head the order check refuses. Otherwise
+    /// that query and every one after it are withheld. Null in, null out; idempotent.</para>
     /// </summary>
-    public static string? RedactDetail(string? detail)
+    /// <param name="detail">The DETAIL field's text.</param>
+    /// <param name="complete">True only when a companion field followed the DETAIL in the same entry. False, the
+    /// default, fails closed.</param>
+    public static string? RedactDetail(string? detail, bool complete = false)
     {
         if (string.IsNullOrEmpty(detail))
         {
@@ -138,7 +169,8 @@ public static class PgLogTextRedactor
         var single = s_singleQueryHead.Match(detail);
         if (single.Success)
         {
-            return single.Value + MaskQuery(detail[single.Length..]);
+            var masked = MaskQuery(detail[single.Length..]);
+            return single.Value + (single.Groups["parameters"].Success && !s_valueList.IsMatch(masked) ? WithheldStatement : masked);
         }
 
         var lines = detail.Split('\n');
@@ -156,31 +188,52 @@ public static class PgLogTextRedactor
             return detail;
         }
 
+        var output = new List<string>(lines.Length - waits + 1) { string.Join('\n', lines, 0, waits) };
+        var first = s_deadlockQueryHead.Match(lines[waits]);
+        var firstHead = first.Success ? first.Value : lines[waits].StartsWith('\t') ? "\t" : string.Empty;
+
+        /* Too long to read at all, checked before the heads are looked for (#3996's review): a hostile DETAIL of
+           many wait-for lines and many head lines made that search quadratic. */
+        if (detail.Length > MaxSqlFieldLength)
+        {
+            output.Add(firstHead + WithheldStatement);
+            return string.Join('\n', output);
+        }
+
         /* Every line that starts with a waiter's head, in order. They must be the waiters themselves, from the
            first, each once, with the first on the line after the wait-for lines. */
+        var isWaiter = new HashSet<string>(waiters, StringComparer.Ordinal);
         var heads = new List<(int Line, Match Head)>();
         var inOrder = true;
         for (var k = waits; k < lines.Length && inOrder; k++)
         {
             var head = s_deadlockQueryHead.Match(lines[k]);
-            if (head.Success && waiters.Contains(head.Groups["pid"].Value))
+            if (head.Success && isWaiter.Contains(head.Groups["pid"].Value))
             {
                 inOrder = heads.Count < waiters.Count && head.Groups["pid"].Value == waiters[heads.Count];
                 heads.Add((k, head));
             }
         }
 
-        var output = new List<string>(lines.Length - waits + 1) { string.Join('\n', lines, 0, waits) };
-        if (!inOrder || heads.Count == 0 || heads[0].Line != waits || detail.Length > MaxSqlFieldLength)
+        if (!inOrder || heads.Count == 0 || heads[0].Line != waits)
         {
-            var first = s_deadlockQueryHead.Match(lines[waits]);
-            output.Add((first.Success ? first.Value : lines[waits].StartsWith('\t') ? "\t" : string.Empty) + WithheldStatement);
+            output.Add(firstHead + WithheldStatement);
             return string.Join('\n', output);
         }
 
+        /* Whole means every waiter's head is here: a report that claims it and lacks one is not what DeadLockReport
+           wrote, so the claim is not taken. */
+        var whole = complete && heads.Count == waiters.Count;
+        var outOfStep = false;
         for (var h = 0; h < heads.Count; h++)
         {
             var (line, head) = heads[h];
+            if (outOfStep)
+            {
+                output.Add(head.Value + WithheldStatement);
+                continue;
+            }
+
             var end = h + 1 < heads.Count ? heads[h + 1].Line : lines.Length;
             var query = new StringBuilder(lines[line], head.Length, lines[line].Length - head.Length, detail.Length);
             for (var k = line + 1; k < end; k++)
@@ -188,7 +241,9 @@ public static class PgLogTextRedactor
                 query.Append('\n').Append(lines[k]);
             }
 
-            output.Add(head.Value + MaskQuery(query.ToString()));
+            var masked = RedactStoredStatement(query.ToString());
+            output.Add(head.Value + (masked ?? WithheldStatement));
+            outOfStep = masked is null && !whole;
         }
 
         return string.Join('\n', output);
@@ -250,6 +305,12 @@ public static class PgLogTextRedactor
             var (masked, close) = context.Length > MaxSqlFieldLength
                 ? (null, -1)
                 : CloseSqlFrame(lines, i, sqlFrame.Length, quoted);
+            if ((sqlFrame.Groups["list"].Success && masked is not null && !s_valueList.IsMatch(masked))
+                || (sqlFrame.Groups["one"].Success && masked is not null && !s_oneValue.IsMatch(masked)))
+            {
+                masked = null;
+            }
+
             if (masked is null)
             {
                 output.Add(sqlFrame.Value + WithheldStatement + closingQuote);
@@ -337,6 +398,40 @@ public static class PgLogTextRedactor
 
         var indent = newline + 1 < message.Length && message[newline + 1] == '\t' ? "\t" : string.Empty;
         return message[..(newline + 1)] + indent + WithheldPlan;
+    }
+
+    /* A scanner's error (scanner_yyerror, plpgsql_yyerror): "<what> at or near "<text>"", and the log's " at
+       character N" after it (jsonpath's own grammar says " of jsonpath input" first). The quoted text is not
+       escaped, so it runs to the message's LAST quote. */
+    private static readonly Regex s_nearLexeme = new(
+        @"^(?<head>[^""\n]*?) at or near ""(?<lexeme>.*)""(?<tail>(?: of jsonpath input)?(?: at character [0-9]+)?)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    /// <summary>
+    /// A message as it is kept (#3944, #3996's review): as PostgreSQL wrote it (<see cref="WithholdPlan"/>), except
+    /// the text a syntax error quotes after <c>at or near</c>, which is SQL: the scanner writes the statement from
+    /// the error token on, one token for most errors (a string literal among them, value and all), and everything
+    /// to the end of the input for an unterminated one (<c>unterminated dollar-quoted string</c> carries a whole
+    /// function body). It is read by <see cref="RedactStoredStatement"/>, and an <c>unterminated ...</c> form is
+    /// withheld outright, since by its name it cannot be read to its end; so is quoted text whose closing quote the
+    /// message does not carry (its first line alone, or a cut). Null in, null out; idempotent.
+    /// </summary>
+    public static string? RedactMessage(string? message)
+    {
+        var kept = WithholdPlan(message);
+        var at = kept?.IndexOf(" at or near \"", StringComparison.Ordinal) ?? -1;
+        if (at < 0 || kept![..at].IndexOfAny(['"', '\n']) >= 0)
+        {
+            return kept;
+        }
+
+        var near = s_nearLexeme.Match(kept);
+        var head = kept[..at];
+        var lexeme = near.Success ? near.Groups["lexeme"].Value : null;
+        var masked = lexeme is null || head.StartsWith("unterminated ", StringComparison.Ordinal) || lexeme.Length > MaxSqlFieldLength
+            ? WithheldStatement
+            : RedactStoredStatement(lexeme) ?? WithheldStatement;
+        return head + " at or near \"" + masked + "\"" + (near.Success ? near.Groups["tail"].Value : string.Empty);
     }
 
     /// <summary>The form a monitored target's <c>STATEMENT:</c> companion is fingerprinted in, and never stored in:

@@ -122,6 +122,11 @@ public static class StoreLogClassifier
     /// that cannot know what the cut hid.</summary>
     public const string WithheldStatement = PgLogTextRedactor.WithheldStatement;
 
+    /// <summary>What a kept entry reads as from its first line that opens no field this reader knows (#3996's
+    /// review): a label a translated <c>lc_messages</c> wrote, or a line the server did not write. Such a line
+    /// cannot be told apart as prose or as SQL, so it and the rest of the entry are withheld.</summary>
+    public const string WithheldLines = "<lines withheld: a line here opens no field this reader recognizes, as a translated lc_messages writes>";
+
     /// <summary>
     /// How many DISTINCT retained messages one class may keep per capture before the rest are folded into
     /// the class's count and the drop is reported. A bound is necessary: an operator or an agent running
@@ -144,9 +149,10 @@ public static class StoreLogClassifier
     /// <summary>The fields PostgreSQL emits as their own prefixed lines BELOW an entry. Each belongs to the
     /// entry above it, so a line whose first field token is one of these never starts a new entry — which is
     /// also what stops a <c>STATEMENT:</c> line echoing SQL that contains the text <c>ERROR:  </c> from being
-    /// read as an error of its own.</summary>
+    /// read as an error of its own. <c>BACKTRACE</c> (<c>backtrace_functions</c>) is a list of frames, kept as
+    /// written; named so a line of it is not withheld as one this reader does not know (#3996's review).</summary>
     public static readonly string[] ContinuationFields =
-        ["DETAIL", "HINT", "QUERY", "CONTEXT", "STATEMENT", "LOCATION"];
+        ["DETAIL", "HINT", "QUERY", "CONTEXT", "STATEMENT", "LOCATION", "BACKTRACE"];
 
     private static readonly string[] Error = ["ERROR"];
     private static readonly string[] Fatal = ["FATAL"];
@@ -494,7 +500,9 @@ public static class StoreLogClassifier
                 {
                     /* A continuation field, or a bare line: PostgreSQL renders an embedded newline in a
                        message as newline-plus-tab, so a multi-line statement arrives as tab-indented lines
-                       with no field of their own. Either way it belongs to the entry above it. */
+                       with no field of their own. Either way it belongs to the entry above it. So does a line
+                       whose field this reader does not know (a translated label, #3996's review): it opens no
+                       entry, and MaskEntry withholds it and what follows it. */
                     continuations++;
                     currentRaw.Append('\n').Append(line);
                 }
@@ -736,12 +744,23 @@ public static class StoreLogClassifier
     private readonly record struct Field(FieldKind Kind, string Name, int MessageStart);
 
     /// <summary>
-    /// The FIRST severity-or-continuation field in the line, and where its message starts.
+    /// The line's field: the label the line's FIRST label-shaped colon ends, when that label is a severity or a
+    /// continuation field this reader knows, and where its message starts.
     ///
     /// <para>First, not any: a <c>STATEMENT:  </c> line echoing SQL that itself contains the characters
-    /// <c>ERROR:  </c> would otherwise be read as an error of its own. Because both field sets are searched
-    /// together and the earliest hit wins, the <c>STATEMENT</c> token is found first and the line is
-    /// correctly a continuation.</para>
+    /// <c>ERROR:  </c> would otherwise be read as an error of its own.</para>
+    ///
+    /// <para><b>The first label of any language, not the first one this reader knows</b> (#3996's review). Under a
+    /// translated <c>lc_messages</c> the line's own label is not in the lists (<c>SENTENCIA:  </c>,
+    /// <c>ANWEISUNG:  </c>), so the earliest KNOWN token was <c>ERROR:  </c> inside the statement's literal, and it
+    /// opened an entry from the middle of the SQL. So the field is decided at the first colon that ends a label in
+    /// any catalogue PostgreSQL 18 ships (<see cref="IsLabelColon"/>), and a line whose first label is not one of
+    /// these opens no field: <see cref="MaskEntry"/> withholds it, which is the fail-closed half of the trade. The
+    /// prefix's own colons are not label-shaped (a time's, <c>%r</c>'s, <c>]:</c> before the label), so the
+    /// prefix stays unread. The cost is a prefix that renders a label-shaped colon of its own ahead of the
+    /// severity: an application_name ending <c>:  </c> or in three capitals and a colon under <c>%a</c>. Its
+    /// lines open nothing, where they used to open an entry at the next known token, because such a line cannot
+    /// be told from a translated label with SQL after it.</para>
     ///
     /// <para>The separator is exactly <c>":  "</c> — colon and TWO spaces, which is what
     /// <c>elog.c</c>'s <c>"%s:  "</c> writes and is what makes this a construct rather than a phrase. A
@@ -750,55 +769,65 @@ public static class StoreLogClassifier
     /// </summary>
     private static Field FindField(ReadOnlySpan<char> line)
     {
-        var best = new Field(FieldKind.None, string.Empty, 0);
-        var bestAt = int.MaxValue;
+        var colon = line.IndexOf(':');
+        while (colon >= 0 && !IsLabelColon(line, colon))
+        {
+            var next = line[(colon + 1)..].IndexOf(':');
+            colon = next < 0 ? -1 : colon + 1 + next;
+        }
+
+        if (colon < 0 || !line[colon..].StartsWith(":  ", StringComparison.Ordinal))
+        {
+            return default;
+        }
 
         foreach (var name in PrimarySeverities)
         {
-            var at = IndexOfField(line, name);
-            if (at >= 0 && at < bestAt)
+            if (EndsAt(line, name, colon))
             {
-                bestAt = at;
-                best = new Field(FieldKind.Primary, name, at + name.Length + 3);
+                return new Field(FieldKind.Primary, name, colon + 3);
             }
         }
 
         foreach (var name in ContinuationFields)
         {
-            var at = IndexOfField(line, name);
-            if (at >= 0 && at < bestAt)
+            if (EndsAt(line, name, colon))
             {
-                bestAt = at;
-                best = new Field(FieldKind.Continuation, name, at + name.Length + 3);
+                return new Field(FieldKind.Continuation, name, colon + 3);
             }
         }
 
-        return best;
+        return default;
     }
 
-    private static int IndexOfField(ReadOnlySpan<char> line, string name)
+    /// <summary>Whether the field name ends right before <paramref name="colon"/> as a token of its own.</summary>
+    private static bool EndsAt(ReadOnlySpan<char> line, string name, int colon) =>
+        colon >= name.Length
+        && line[(colon - name.Length)..colon].SequenceEqual(name)
+        && !ContinuesAnUpperCaseToken(line, colon - name.Length);
+
+    /// <summary>
+    /// Whether the colon at <paramref name="at"/> ends a label as some catalogue of PostgreSQL 18's writes one
+    /// (#3996's review): followed by two spaces, as every English label and most translated ones are, or, as the
+    /// Turkish <c>AYRINTI:</c>, <c>İPUCU:</c>, <c>SORGU:</c> and <c>ORTAM:</c> and the Korean <c>쿼리:</c> are,
+    /// straight after a non-ASCII letter or three capitals and straight before the text. A colon before a digit, a
+    /// bracket, another colon or a space is a prefix's (a time, <c>%r</c>, <c>]:</c>, a <c>: </c> separator), and
+    /// so is one after two capitals at most (pgAdmin's application_name <c>DB:postgres</c>).
+    /// </summary>
+    private static bool IsLabelColon(ReadOnlySpan<char> line, int at)
     {
-        var from = 0;
-        while (from <= line.Length - name.Length)
+        if (line[(at + 1)..].StartsWith("  ", StringComparison.Ordinal))
         {
-            var at = line[from..].IndexOf(name, StringComparison.Ordinal);
-            if (at < 0)
-            {
-                return -1;
-            }
-
-            at += from;
-            var after = at + name.Length;
-            if (line[after..].StartsWith(":  ", StringComparison.Ordinal)
-                && !ContinuesAnUpperCaseToken(line, at))
-            {
-                return at;
-            }
-
-            from = at + 1;
+            return true;
         }
 
-        return -1;
+        if (at + 1 >= line.Length || char.IsAsciiDigit(line[at + 1]) || line[at + 1] is '[' or ':' || char.IsWhiteSpace(line[at + 1]))
+        {
+            return false;
+        }
+
+        return (at >= 1 && line[at - 1] >= '\u0080' && char.IsLetter(line[at - 1]))
+            || (at >= 3 && char.IsAsciiLetterUpper(line[at - 1]) && char.IsAsciiLetterUpper(line[at - 2]) && char.IsAsciiLetterUpper(line[at - 3]));
     }
 
     /// <summary>
@@ -809,9 +838,11 @@ public static class StoreLogClassifier
     /// <para>Reachable because the scan searches the WHOLE line, prefix included, which is exactly what makes
     /// the classifier indifferent to <c>log_line_prefix</c>: an all-caps token ending in a field name and
     /// followed by colon-two-spaces can be rendered by <c>%a</c> (application_name is arbitrary client text)
-    /// or <c>%u</c> / <c>%d</c> ahead of the real severity. The cost is not a missed line, it is a
-    /// MANUFACTURED one: the real entry's severity is replaced by the spurious token's and its message
-    /// starts mid-line, so an ERROR the reader needed becomes a <c>routine</c> row.</para>
+    /// or <c>%u</c> / <c>%d</c> ahead of the real severity. Without this check the cost is not a missed line, it
+    /// is a MANUFACTURED one: the real entry's severity is replaced by the spurious token's and its message
+    /// starts mid-line, so an ERROR the reader needed becomes a <c>routine</c> row. With it, since #3996's review,
+    /// such a line opens no field at all (<see cref="FindField"/> reads only the first label-shaped colon, and a
+    /// translated label with SQL after it looks the same), which is a missed line rather than a false one.</para>
     ///
     /// <para><b>Upper case and underscore ONLY, which is the whole design of this check.</b> A digit before
     /// the name must stay legal: <c>%Q</c> writes the query id with no separator, so the real field genuinely
@@ -872,15 +903,12 @@ public static class StoreLogClassifier
             return false;
         }
 
+        /* The statement's own lines are the tab-led ones: any other line opens a field, one this reader knows or
+           one a translated lc_messages wrote (#3996's review), which was read into the statement before. */
         var lines = rawText.Split('\n');
         var statement = new StringBuilder(head.Groups["rest"].Value);
-        for (var i = 1; i < lines.Length; i++)
+        for (var i = 1; i < lines.Length && lines[i].StartsWith('\t'); i++)
         {
-            if (!lines[i].StartsWith('\t') && FindField(lines[i]).Kind != FieldKind.None)
-            {
-                break;
-            }
-
             statement.Append('\n').Append(lines[i]);
         }
 
@@ -914,7 +942,10 @@ public static class StoreLogClassifier
                 : (RoutineClass, false, message, rawText);
         }
 
-        return (eventClass, true, GroupingKeyOf(message), MaskEntry(rawText));
+        /* Keyed from the message as it is kept, so a syntax error's quoted SQL is normalized before the key reads
+           it (#3996's review): the key keeps what lies between quoted runs, and an unterminated literal's quote
+           pairs with nothing. */
+        return (eventClass, true, GroupingKeyOf(PgLogTextRedactor.RedactMessage(message) ?? message), MaskEntry(rawText));
     }
 
     /* The values PostgreSQL's prose carries, as the grouping key sees them (#3944): a single- or double-quoted run
@@ -990,16 +1021,29 @@ public static class StoreLogClassifier
             var line = lines[i];
             var field = line.StartsWith('\t') ? default : FindField(line);
 
+            /* A field's own lines are the one it opens on and the tab-led lines under it: PostgreSQL writes an
+               embedded newline as newline-plus-tab, and every other line it writes opens with the prefix. */
             var next = i + 1;
-            while (next < lines.Length
-                && (lines[next].StartsWith('\t') || FindField(lines[next]).Kind == FieldKind.None))
+            while (next < lines.Length && lines[next].StartsWith('\t'))
             {
                 next++;
             }
 
-            if (result.Length > 0)
+            if (i > 0)
             {
                 result.Append('\n');
+            }
+
+            /* A line that opens no field this reader knows (#3996's review): a label a translated lc_messages
+               wrote (`SENTENCIA:  INSERT ...`, `DETALLE:  ...`), or a line the server did not write at all. Folded
+               into the field above, as releases before this one did, its SQL was kept as that field's prose. It
+               is withheld with everything after it, because a message's lines are written together and what
+               follows belongs to this line's message: a German `FEHLER:` line's untranslated `DETAIL:` is its
+               own, and would otherwise be read as the entry's. */
+            if (field.Kind == FieldKind.None)
+            {
+                result.Append(WithheldLines);
+                break;
             }
 
             if (field.Kind == FieldKind.Primary)
@@ -1010,9 +1054,9 @@ public static class StoreLogClassifier
                     message.Append('\n').Append(lines[k]);
                 }
 
-                result.Append(line, 0, field.MessageStart).Append(PgLogTextRedactor.WithholdPlan(message.ToString()));
+                result.Append(line, 0, field.MessageStart).Append(PgLogTextRedactor.RedactMessage(message.ToString()));
             }
-            else if (field.Kind == FieldKind.Continuation && field.Name is "STATEMENT" or "QUERY" or "DETAIL" or "CONTEXT")
+            else if (field.Name is "STATEMENT" or "QUERY" or "DETAIL" or "CONTEXT")
             {
                 var block = new StringBuilder(line, field.MessageStart, line.Length - field.MessageStart, rawText.Length);
                 for (var k = i + 1; k < next; k++)
@@ -1020,11 +1064,17 @@ public static class StoreLogClassifier
                     block.Append('\n').Append(lines[k]);
                 }
 
+                /* A deadlock report's later queries are read past one cut inside a literal only when the DETAIL is
+                   proven whole (#3996's review): a companion field follows it in the entry. DeadLockReport always
+                   writes its HINT, so a report without one was cut between its lines. */
+                var detailComplete = next < lines.Length
+                    && FindField(lines[next]) is { Kind: FieldKind.Continuation } after
+                    && after.Name != "DETAIL";
                 var text = block.ToString();
                 var masked = field.Name switch
                 {
                     "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
-                    "DETAIL" => PgLogTextRedactor.RedactDetail(text) ?? string.Empty,
+                    "DETAIL" => PgLogTextRedactor.RedactDetail(text, detailComplete) ?? string.Empty,
                     _ => PgLogTextRedactor.RedactContext(text) ?? string.Empty,
                 };
 
@@ -1052,9 +1102,10 @@ public static class StoreLogClassifier
     /// re-keys the message. Computed from the stored SAMPLE, whose first line carries the message the row was
     /// grouped on, so the key and the sample come out consistent. Idempotent, so a row already brought up comes back
     /// unchanged, with one exception: a sample the <see cref="MaxSampleLength"/> cap cut inside a normalized token
-    /// re-reads with that statement withheld, which the sweep's pass writes back once. Three shapes keep no text: a
-    /// slow-statement row whose first line names no statement, a row whose sample opens on a tab-led line, and a
-    /// row of any other class whose sample is a line of statement logging.
+    /// re-reads with that statement withheld, which the sweep's pass writes back once. Four shapes keep no text: a
+    /// slow-statement row whose first line names no statement, a row whose sample opens on a tab-led line, a row
+    /// whose sample's first line opens no severity this reader knows, and a row of any other class whose sample is
+    /// a line of statement logging.
     /// </summary>
     public static (string? Message, string? Sample) MaskStoredEvent(string eventClass, string? message, string? sample)
     {
@@ -1079,6 +1130,15 @@ public static class StoreLogClassifier
         if (eventClass != SlowStatementClass
             && primary.Kind == FieldKind.Primary
             && IsStatementLog(primary.Name, firstLine[primary.MessageStart..]))
+        {
+            return (null, null);
+        }
+
+        /* Releases before #3996's review opened an entry at the first severity token this reader knows anywhere in
+           the line, so under a translated lc_messages a stored row can open inside a statement's literal
+           (`SENTENCIA:  INSERT ... 'ERROR:  ...'`), its message the literal's tail. Its first line opens no field
+           now, and it keeps no text. */
+        if (primary.Kind != FieldKind.Primary)
         {
             return (null, null);
         }

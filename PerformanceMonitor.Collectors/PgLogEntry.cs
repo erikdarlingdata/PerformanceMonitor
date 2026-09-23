@@ -57,6 +57,9 @@ namespace PerformanceMonitor.Collectors;
 /// prefix does not, so this is null on most self-hosted targets.</param>
 /// <param name="RawText">The whole entry as it appeared in the log — every line, verbatim. Hashed for
 /// identity across overlapping tail reads; never stored.</param>
+/// <param name="DetailComplete">Whether the DETAIL is proven whole (#3996's review): another companion followed it
+/// in this entry and nothing cut into its lines. <see cref="PgLogTextRedactor.RedactDetail"/> trusts a deadlock
+/// report's later query heads after one that does not read to its end only then.</param>
 public readonly record struct PgLogEntry(
     string TimestampText,
     string ZoneText,
@@ -72,7 +75,8 @@ public readonly record struct PgLogEntry(
     string? UserName,
     string? DatabaseName,
     string? SqlState,
-    string RawText)
+    string RawText,
+    bool DetailComplete = false)
 {
     /// <summary>
     /// PostgreSQL's severity labels ranked by SERIOUSNESS, which is the order a reader filtering on

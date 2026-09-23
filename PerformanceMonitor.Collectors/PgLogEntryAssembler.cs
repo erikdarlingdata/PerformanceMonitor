@@ -62,12 +62,25 @@ public static class PgLogEntryAssembler
     /* The prefix line: stamp, zone-and-pid in either family, whatever else the prefix carried, then the
        label. `rest` is lazy so the label is the FIRST `LABEL:  ` after the pid, which is what %Q's glued
        query id requires. The companion labels are in the same alternation as the severities because a
-       companion line carries the same prefix and is told apart only by its label. */
+       companion line carries the same prefix and is told apart only by its label.
+
+       `rest` never runs past a label of ANY language (#3996's review). Under a translated lc_messages the
+       line's own label is one this does not know (`SENTENCIA:  `, `ANWEISUNG:  `), and a lazy run past it found
+       `ERROR:  ` inside the statement's literal and started a new event from the middle of it. So `rest` stops at
+       what a label ends with in every catalogue PostgreSQL 18 ships: a colon and two spaces, or, for the four
+       Turkish and one Korean label written with none (`SORGU:SELECT`, `쿼리:SELECT`), a colon straight after a
+       non-ASCII letter or three capitals and before text. A prefix's own colons pass: a time's, `]:` before the
+       label, `: ` separators, an IPv6 client, pgAdmin's `DB:postgres`. A label glued to capitals (`PG_CATALOG:`)
+       is not one. A line whose label is not this reader's opens nothing: fail closed. The managed family's `mid`
+       is held to the same run, because it is lazy too: refused at the real pid, it slid on to a `[1]` inside the
+       statement's literal and read that as the pid. */
+    private const string PrefixRun = @"(?:(?!:  )(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])[^\n])*?";
+
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
-        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>[^\n]*?)\[(?<pid>\d+)\])"
-        + @"(?<rest>[^\n]*?)"
-        + @"(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
+        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + PrefixRun + @")\[(?<pid>\d+)\])"
+        + @"(?<rest>" + PrefixRun + ")"
+        + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* %u@%d anywhere in the prefix's non-pid text. Both halves required: a background process renders
@@ -134,10 +147,18 @@ public static class PgLogEntryAssembler
 
             if (!match.Success)
             {
-                /* Not a prefix line and not a continuation: the cut head, or a line the server wrote to
-                   stderr outside its own format (a loader's chatter, a crash dump). Nothing to do with it, nor
-                   with the tab lines under it. */
-                current?.CloseField();
+                /* Not a prefix line and not a continuation: the cut head, a line the server wrote to stderr
+                   outside its own format (a loader's chatter, a crash dump), or a line whose label this reader
+                   does not know, as under a translated lc_messages (#3996's review). Nothing to do with it, nor
+                   with the tab lines under it, and it ends the open entry: a message's lines are written
+                   together, so what follows belongs to this line's message, not the entry above (a German
+                   `FEHLER:` line's untranslated `DETAIL:` would otherwise join the entry before it). */
+                if (current is not null)
+                {
+                    entries.Add(current.Build());
+                    current = null;
+                }
+
                 continue;
             }
 
@@ -194,6 +215,11 @@ public static class PgLogEntryAssembler
         private StringBuilder? _context;
         private StringBuilder? _open;
 
+        /* Whether the DETAIL is proven whole (#3996's review): another companion followed it, and nothing cut
+           into its lines on the way. */
+        private bool _detailFollowed;
+        private bool _detailInterrupted;
+
         public string Pid { get; }
 
         private Builder(Match match, string line)
@@ -237,12 +263,17 @@ public static class PgLogEntryAssembler
         }
 
         /// <summary>Stops tab-continuation lines from joining the field last opened: the line they continue was
-        /// not this entry's.</summary>
-        public void CloseField() => _open = null;
+        /// not this entry's. A DETAIL closed this way may have lost the rest of its lines.</summary>
+        public void CloseField()
+        {
+            _detailInterrupted |= _open is not null && ReferenceEquals(_open, _detail);
+            _open = null;
+        }
 
         public void Companion(string label, string text, string line)
         {
             _raw.Append(line).Append('\n');
+            _detailFollowed |= _detail is not null && label != "DETAIL";
 
             switch (label)
             {
@@ -304,7 +335,8 @@ public static class PgLogEntryAssembler
                 UserName: userMatch.Success ? userMatch.Groups["user"].Value : null,
                 DatabaseName: userMatch.Success ? userMatch.Groups["db"].Value : null,
                 SqlState: stateMatch.Success ? stateMatch.Groups["state"].Value : null,
-                RawText: _raw.ToString());
+                RawText: _raw.ToString(),
+                DetailComplete: _detailFollowed && !_detailInterrupted);
         }
     }
 }

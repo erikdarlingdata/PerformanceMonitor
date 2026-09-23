@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -624,18 +625,32 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(waitFor + "\n\tProcess 11: " + PgLogTextRedactor.WithheldStatement, ambiguous);
         Assert.Equal(ambiguous, PgLogTextRedactor.RedactDetail(ambiguous));
 
-        /* A query cut at track_activity_query_size inside a literal is withheld on its own: the next query is read
-           from its own first character, so the cut literal cannot pair with its quotes (#3920's rule read it on,
-           and the next query's literal came back as a word). A report cut before its last query keeps the rest. */
+        /* A query cut at track_activity_query_size inside a literal is withheld on its own in a report proven whole
+           (a companion field followed it, and every waiter's head is here): the next query is read from its own
+           first character, so the cut literal cannot pair with its quotes (#3920's rule read it on, and the next
+           query's literal came back as a word). Without that proof, the next head may be a look-alike in a report
+           cut between its lines, and every query from there on is withheld (#3996's review), which is also what a
+           claim of whole with a head missing gets. A report cut before its last query keeps the rest when the ones
+           it has read to their end. */
         const string three = "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
             + "Process 200 waits for ShareLock on transaction 6; blocked by process 300.\n"
             + "Process 300 waits for ShareLock on transaction 7; blocked by process 100.";
         Assert.Equal(
-            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: UPDATE t SET pw = '?'",
-            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = '\nProcess 200: UPDATE t SET pw = 'Leak3944y' /* it's */"));
+            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: UPDATE t SET pw = '?'\nProcess 300: SELECT ?",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = '\nProcess 200: UPDATE t SET pw = 'Leak3944y' /* it's */\nProcess 300: SELECT 1", complete: true));
         Assert.Equal(
-            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: SELECT '?', '?'",
-            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = $$\nProcess 200: SELECT $$Leak3944z$$, 'a\"'"));
+            three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: SELECT '?', '?'\nProcess 300: SELECT ?",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = $$\nProcess 200: SELECT $$Leak3944z$$, 'a\"'\nProcess 300: SELECT 1", complete: true));
+        foreach (var complete in new[] { false, true })
+        {
+            Assert.Equal(
+                three + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: " + PgLogTextRedactor.WithheldStatement,
+                PgLogTextRedactor.RedactDetail(three + "\nProcess 100: UPDATE t SET a = '\nProcess 200: UPDATE t SET pw = 'Leak3944y' /* it's */", complete));
+        }
+
+        Assert.Equal(
+            three + "\nProcess 100: SELECT ?\nProcess 200: SELECT '?'",
+            PgLogTextRedactor.RedactDetail(three + "\nProcess 100: SELECT 1\nProcess 200: SELECT 'Leak3944x2'"));
 
         /* Any other DETAIL is prose, kept as written, a line inside it shaped like a query head included. */
         const string failingRow = "Failing row contains (42, 123-45-6789, Steps:\nProcess 1: mix, null).";
@@ -862,6 +877,207 @@ public sealed class PgLogEventsPipelineTests
             Assert.EndsWith(PgLogTextRedactor.WithheldStatement, masked, StringComparison.Ordinal);
             Assert.DoesNotContain("Process 12: x", masked, StringComparison.Ordinal);
         }
+
+        /* #3996's review (7): a DETAIL of W wait-for lines and H head lines made the head search O(W x H), a
+           list membership test per line. The length check now comes first, and the waiters are a set. */
+        foreach (var (waits, heads) in new[] { (10_000, 25_000), (40_000, 100_000) })
+        {
+            var detail = new StringBuilder();
+            for (var k = 0; k < waits; k++)
+            {
+                detail.Append("Process ").Append(1_000_000 + k).Append(" waits for ; blocked by process 1.\n");
+            }
+
+            for (var k = 0; k < heads; k++)
+            {
+                detail.Append("Process 2000000: x\n");
+            }
+
+            var text = detail.ToString().TrimEnd('\n');
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var masked = PgLogTextRedactor.RedactDetail(text)!;
+            clock.Stop();
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), $"{text.Length} chars took {clock.Elapsed}");
+            Assert.EndsWith(PgLogTextRedactor.WithheldStatement, masked, StringComparison.Ordinal);
+        }
+    }
+
+    /* ---- #3996's review, round 1 -------------------------------------------------------------------- */
+
+    private const string TwoWaiters =
+        "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+        + "Process 200 waits for ShareLock on transaction 6; blocked by process 100.";
+
+    /// <summary>
+    /// #3996's review (1). A deadlock report cut between its lines, before a waiter's real head, leaves a line
+    /// inside the query above shaped like that head as the only one, in order; when that query did not read to its
+    /// end, the look-alike's text was read out of step and the literal after it came back as a word. RDS chunks are
+    /// consume-once, and the assembler stores an entry cut there. Now a head after such a query is trusted only
+    /// when the entry proves its DETAIL whole, by a companion after it (DeadLockReport always writes its HINT);
+    /// otherwise that query and every one after it are withheld.
+    /// </summary>
+    [Fact]
+    public void ACutDeadlockReport_TrustsNoHeadAfterAQueryThatDidNotReadToItsEnd()
+    {
+        string[] cuts =
+        [
+            TwoWaiters + "\nProcess 100: UPDATE users SET bio = 'x\nProcess 200: y', api_key = 'sk_live_Leak3996a', motto = '--' WHERE id = 5",
+            TwoWaiters + "\nProcess 100: UPDATE t SET a = 'x\nProcess 200: y', pw = 'Leak3996b', b = 'z",
+        ];
+        foreach (var cut in cuts)
+        {
+            var masked = PgLogTextRedactor.RedactDetail(cut);
+            Assert.Equal(
+                TwoWaiters + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: " + PgLogTextRedactor.WithheldStatement,
+                masked);
+            Assert.Equal(masked, PgLogTextRedactor.RedactDetail(masked));
+        }
+
+        const string threeWaiters = "Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "Process 200 waits for ShareLock on transaction 6; blocked by process 300.\n"
+            + "Process 300 waits for ShareLock on transaction 7; blocked by process 100.";
+        Assert.Equal(
+            threeWaiters + "\nProcess 100: UPDATE t SET a = ? WHERE id = ?\nProcess 200: " + PgLogTextRedactor.WithheldStatement
+                + "\nProcess 300: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactDetail(threeWaiters + "\nProcess 100: UPDATE t SET a = 1 WHERE id = 1\nProcess 200: UPDATE users SET bio = 'x"
+                + "\nProcess 300: y', api_key = 'sk_live_Leak3996c', motto = '--' WHERE id = 5"));
+
+        /* Through the pipeline: the entry the chunk cut after its DETAIL keeps no value, and a whole report, its
+           HINT after the DETAIL, still reads the query after one cut at track_activity_query_size. */
+        var events = Classify(
+            P + "[4400] ERROR:  deadlock detected\n"
+            + P + "[4400] DETAIL:  Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "\tProcess 200 waits for ShareLock on transaction 6; blocked by process 100.\n"
+            + "\tProcess 100: UPDATE users SET bio = 'x\n"
+            + "\tProcess 200: y', api_key = 'sk_live_Leak3996d', motto = '--' WHERE id = 5\n"
+            + P + "[4401] ERROR:  deadlock detected\n"
+            + P + "[4401] DETAIL:  Process 100 waits for ShareLock on transaction 5; blocked by process 200.\n"
+            + "\tProcess 200 waits for ShareLock on transaction 6; blocked by process 100.\n"
+            + "\tProcess 100: UPDATE t SET a = 'x\n"
+            + "\tProcess 200: UPDATE t SET pw = 'Leak3996e' WHERE id = 5\n"
+            + P + "[4401] HINT:  See server log for query details.\n"
+            + P + "[4401] STATEMENT:  UPDATE t SET pw = 'Leak3996e' WHERE id = 5\n");
+        Assert.Equal(2, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak3996", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
+        Assert.Equal(
+            TwoWaiters + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: " + PgLogTextRedactor.WithheldStatement,
+            events.Single(e => e.Pid == 4400).Detail);
+        Assert.Equal(
+            TwoWaiters + "\nProcess 100: " + PgLogTextRedactor.WithheldStatement + "\nProcess 200: UPDATE t SET pw = '?' WHERE id = ?",
+            events.Single(e => e.Pid == 4401).Detail);
+    }
+
+    /// <summary>
+    /// #3996's review (2), the target's half. Under a translated lc_messages a line's label is one this reader does
+    /// not know, and the assembler's lazy run past it found <c>ERROR:  </c> inside the statement's literal and
+    /// started an event from the middle of the SQL, its message the literal's tail. The run now stops at a label of
+    /// any shipped catalogue, two spaces after its colon or none (Turkish, Korean), and a line it cannot read ends
+    /// the entry above, so a German <c>FEHLER:</c> line's untranslated <c>DETAIL:</c> joins nothing. The managed
+    /// family's run between zone and pid is held the same way: refused at the real pid, it slid to a <c>[1]</c>
+    /// inside the literal.
+    /// </summary>
+    [Fact]
+    public void ATranslatedLabel_NeverOpensAnEventFromInsideItsSql()
+    {
+        var events = Classify(
+            P + "[4500] ERROR:  llave duplicada viola restriccion de unicidad \"users_pkey\"\n"
+            + P + "[4500] DETALLE:  Ya existe la llave (id)=(5).\n"
+            + P + "[4500] SENTENCIA:  INSERT INTO users (id, api_key) VALUES (5, 'ERROR:  sk_live_Leak3996f')\n"
+            + P + "[4501] ERROR:  x\n"
+            + P + "[4501] ORTAM:SQL ifadesi \"SELECT 'ERROR:  Leak3996g'\"\n"
+            + P + "[4502] ERROR:  y\n"
+            + P + "[4502] 쿼리:SELECT 'FATAL:  Leak3996h'\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@app_db:[4503]:ANWEISUNG:  SELECT 'ERROR:  Leak3996i'\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@app_db:[4503]:ANWEISUNG:  SELECT 'x [1]:ERROR:  Leak3996i'\n");
+        Assert.Equal(3, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak3996", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
+        Assert.All(events, e => Assert.Null(e.Detail));
+
+        /* A German FEHLER line is not a primary this reader knows; its untranslated DETAIL is its own, not the
+           LOG entry's above it. */
+        var entries = PgLogEntryAssembler.Assemble(
+            P + "[4504] LOG:  Anweisung: SELECT 1\n"
+            + P + "[4504] FEHLER:  Verklemmung (Deadlock) entdeckt\n"
+            + P + "[4504] DETAIL:  Prozess 4504 wartet auf ShareLock\n"
+            + "\tProzess 4504: UPDATE t SET pw = 'Leak3996j'\n");
+        var only = Assert.Single(entries);
+        Assert.Equal("LOG", only.Severity);
+        Assert.Null(only.Detail);
+
+        /* The prefixes this reader already read still open their entries: a %Q query id, an IPv6 client and
+           pgAdmin's DB:name application under a pgBadger-style prefix, and the managed family. */
+        Assert.Equal(3, PgLogEntryAssembler.Assemble(
+            P + "[4505] 322048460535975151ERROR:  canceling statement due to user request\n"
+            + P + "[4506]: [1-1] user=u,db=d,app=pgAdmin 4 - DB:postgres,client=::1 ERROR:  canceling statement due to user request\n"
+            + "2026-09-18 03:07:12 UTC::@:[4507]:LOG:  checkpoint starting: time\n").Count);
+    }
+
+    /// <summary>
+    /// #3996's review (3), ruled under #3944's: the text a syntax error quotes after <c>at or near</c> is SQL. The
+    /// scanner writes the statement from the error token on, one token for most errors (a string literal among
+    /// them) and the rest of the input for an unterminated one, a whole function body for a dollar quote. It goes
+    /// through the lexer, and an <c>unterminated ...</c> form is withheld.
+    /// </summary>
+    [Fact]
+    public void ASyntaxErrorsQuotedText_IsReadAsSql()
+    {
+        var events = Classify(
+            P + "[4600] ERROR:  unterminated quoted string at or near \"'123-45-6789 WHERE id = 1\" at character 31\n"
+            + P + "[4600] STATEMENT:  UPDATE t SET ssn = '123-45-6789 WHERE id = 1\n"
+            + P + "[4601] ERROR:  syntax error at or near \"'Leak3996k'\" at character 28\n"
+            + P + "[4602] ERROR:  unterminated dollar-quoted string at or near \"$$ BEGIN\n"
+            + "\tRAISE NOTICE 'Leak3996l';\n"
+            + "\tEND\" at character 20\n"
+            + P + "[4603] ERROR:  syntax error at or near \"FROM\" at character 8\n");
+        Assert.Equal(4, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak3996", e.Message, StringComparison.Ordinal));
+        Assert.All(events, e => Assert.DoesNotContain("6789", e.Message, StringComparison.Ordinal));
+        Assert.Equal(
+            "unterminated quoted string at or near \"" + PgLogTextRedactor.WithheldStatement + "\" at character 31",
+            events.Single(e => e.Pid == 4600).Message);
+        Assert.Equal("syntax error at or near \"'?'\" at character 28", events.Single(e => e.Pid == 4601).Message);
+        Assert.Equal(
+            "unterminated dollar-quoted string at or near \"" + PgLogTextRedactor.WithheldStatement + "\" at character 20",
+            events.Single(e => e.Pid == 4602).Message);
+        Assert.Equal("syntax error at or near \"FROM\" at character 8", events.Single(e => e.Pid == 4603).Message);
+    }
+
+    /// <summary>
+    /// #3996's review (5, 6). PL/pgSQL writes a variable's name UNQUOTED in its <c>parameters:</c> list, so a name
+    /// that needed quoting (<c>o'k</c>, <c>a"b</c>) put the lexer out of step and a value came back as a word; the
+    /// lexed list must now read as <c>name = '?'</c> or <c>NULL</c> pairs, or it is withheld. A portal's name is
+    /// unescaped too, and one holding a double quote failed the frame's match, so its values were kept as prose.
+    /// </summary>
+    [Fact]
+    public void AValueListThatDoesNotLexToItsShape_IsWithheld()
+    {
+        foreach (var list in new[]
+        {
+            "parameters: o'k = 'x', p_secret = 'Leak3996m', it's = 'y'",
+            "parameters: a\"b = 'x', p_secret = 'Leak3996n', c\"d = 'y'",
+            "parameters: o'k = 'x', p_secret = 'Leak3996o', p_note = '--'",
+        })
+        {
+            Assert.Equal("parameters: " + PgLogTextRedactor.WithheldStatement, PgLogTextRedactor.RedactDetail(list));
+        }
+
+        Assert.Equal(
+            "portal \"C\"1\" with parameters: $1 = '?', $2 = '?'",
+            PgLogTextRedactor.RedactContext("portal \"C\"1\" with parameters: $1 = 'Leak3996p', $2 = '42'"));
+        Assert.Equal(
+            "portal \"a\"b\" parameter $1 = '?'",
+            PgLogTextRedactor.RedactContext("portal \"a\"b\" parameter $1 = 'Leak3996q'"));
+
+        /* A portal's list is held to the same shape, so text after a name that ends a head early only withholds. */
+        Assert.Equal(
+            "unnamed portal with parameters: " + PgLogTextRedactor.WithheldStatement,
+            PgLogTextRedactor.RedactContext("unnamed portal with parameters: $1 = 'x', Leak3996r"));
+        Assert.Equal(
+            "unnamed portal with parameters: $1 = '?', $2 = NULL",
+            PgLogTextRedactor.RedactContext("unnamed portal with parameters: $1 = 'x', $2 = NULL"));
+        Assert.Equal(
+            "parameters: p_secret = '?', p_n = NULL, $3 = '?', café = '?'",
+            PgLogTextRedactor.RedactDetail("parameters: p_secret = 'x', p_n = NULL, $3 = '4111', café = 'y'"));
     }
 
     /* ---- the self-hosted collector and the shared tailer --------------------------------------------- */
