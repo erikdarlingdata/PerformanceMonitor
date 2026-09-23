@@ -76,8 +76,8 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// </summary>
 public sealed partial class PgTargetBaselineProvider : PgBaselineProvider
 {
-    public PgTargetBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null)
-        : base(postgres, logger)
+    public PgTargetBaselineProvider(NpgsqlDataSource postgres, ILogger? logger = null, BaselineCache? sharedCache = null)
+        : base(postgres, logger, sharedCache)
     {
     }
 

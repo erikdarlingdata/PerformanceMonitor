@@ -1924,7 +1924,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours, limit: 50 },
         "events",
         PG_LOG_EVENT_COLUMNS,
-        ctx.label + ", newest 50 across every family; message and detail are redacted at the collector, the statement is never stored; Sightings counts re-reads of the same line, not repeats",
+        ctx.label + ", newest 50 across every family; messages as PostgreSQL wrote them, SQL in them normalized, the statement never stored; Sightings counts re-reads of the same line, not repeats",
         "No classified log event was stored in this window. That is the healthy answer for the error and lock-wait families - and it is also what a target with the relevant log_* setting off looks like (log_connections, log_lock_waits, log_temp_files, log_autovacuum_min_duration), or one whose log cannot be read, is not stamped UTC, or is not written in English: the Plan Capture Readiness panel above reads the same file and reports those three."
       ),
       /* #2663 the regression read: what ONE execution of the busiest statement cost, interval by interval.

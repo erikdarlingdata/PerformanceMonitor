@@ -432,7 +432,10 @@ public sealed class LocalClockBucketKeyLiveTests
         var bodySucceeded = false;
         try
         {
-            var analysisTime = new DateTime(2026, 3, 10, 21, 30, 0, DateTimeKind.Unspecified);
+            /* Tuesday 17:30 EDT, a week after the EDT row's day: the window ends on the analysis HOUR (#3941), so the
+               analysis day's own 21Z rows are never in it — the lookup is the next Tuesday's, over a window that holds
+               both planted Tuesdays whole. */
+            var analysisTime = new DateTime(2026, 3, 17, 21, 30, 0, DateTimeKind.Unspecified);
             var estTuesday = new DateTime(2026, 2, 24, 22, 0, 0, DateTimeKind.Unspecified); // 17:00 EST
             var edtTuesday = new DateTime(2026, 3, 10, 21, 0, 0, DateTimeKind.Unspecified); // 17:00 EDT
             var wednesdayThreeZ = new DateTime(2026, 3, 4, 3, 0, 0, DateTimeKind.Unspecified); // Tue 22:00 EST
@@ -492,10 +495,11 @@ public sealed class LocalClockBucketKeyLiveTests
             Assert.Equal("Tue 17:00", label!["bucket"]);
 
             /* The rollover rows: Wednesday 03:xxZ is Tuesday 22h on the server, dated TUESDAY. A lookup at
-               Wednesday 03:50Z (after the last row — the window end is exclusive) asks for (22, Tue) and finds the ten rows there — not at UTC's (3, Wed), which
-               holds nothing. */
+               Wednesday 2026-03-11 02:50Z — Tuesday 22:50 EDT, the next Tuesday's 22h, whose window (ending on the hour,
+               #3941) holds the rows whole — asks for (22, Tue) and finds the ten rows there — not at UTC's (3, Wed),
+               which holds nothing. */
             provider.ClearCache();
-            var rollover = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, new DateTime(2026, 3, 4, 3, 50, 0, DateTimeKind.Unspecified), ct);
+            var rollover = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, new DateTime(2026, 3, 11, 2, 50, 0, DateTimeKind.Unspecified), ct);
             Assert.Equal(BaselineTier.Full, rollover.Tier);
             Assert.Equal(22, rollover.HourOfDay);
             Assert.Equal(Tuesday, rollover.DayOfWeek);

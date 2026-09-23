@@ -49,10 +49,10 @@ namespace PerformanceMonitor.Collectors;
 /// those settings — #3607 is that audit, running against <c>pg_server_config</c>'s snapshot — so an
 /// all-off target here reads as quiet, and the read's empty branch names the settings.</para>
 ///
-/// <para><b>Redaction is not optional and not here.</b> Every text column passes through
-/// <see cref="PgLogTextRedactor"/> inside <see cref="PgLogEvent.From"/>, the only constructor path; this
-/// collector never sees an unredacted row. The <c>STATEMENT</c> companion — the user's SQL with its
-/// literals — is never stored at all, only fingerprinted.</para>
+/// <para><b>SQL normalization is not optional and not here.</b> The SQL PostgreSQL writes into a DETAIL or a
+/// CONTEXT passes through <see cref="PgLogTextRedactor"/> inside <see cref="PgLogEvent.From"/>, the only
+/// constructor path, and the prose around it is stored as PostgreSQL wrote it (#3944). The <c>STATEMENT</c>
+/// companion — the user's SQL with its literals — is never stored at all, only fingerprinted.</para>
 /// </summary>
 public sealed class PgLogEventsCollector : PostgresCollectorDefinitionBase<PgLogEvent>
 {
@@ -102,11 +102,12 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
         new CollectorColumn("user_name", CollectorColumnType.Varchar),
         new CollectorColumn("application_name", CollectorColumnType.Varchar),
         new CollectorColumn("pid", CollectorColumnType.Integer),
-        /* REDACTED. */
+        /* As PostgreSQL wrote it (#3944). */
         new CollectorColumn("message", CollectorColumnType.Varchar),
-        /* REDACTED. */
+        /* As written, with the SQL in it (a deadlock's queries, a crash's query) normalized. */
         new CollectorColumn("detail", CollectorColumnType.Varchar),
-        /* REDACTED. The CONTEXT companion — for a lock wait, the tuple and relation. */
+        /* As written, with an SQL frame's statement normalized. The CONTEXT companion — for a lock wait, the
+           tuple and relation. */
         new CollectorColumn("context", CollectorColumnType.Varchar),
         /* Hash of the REDACTED statement; the statement itself is never stored. */
         new CollectorColumn("statement_fingerprint", CollectorColumnType.Varchar),

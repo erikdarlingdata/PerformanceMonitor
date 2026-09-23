@@ -143,6 +143,12 @@ internal static class DarlingPlanCacheSchedulerReader
     /// bound for the newest snapshot, not an aggregate — the tool's <c>hours_back</c> description says exactly
     /// that — and the anchor makes "what did the scheduler look like at 03:00 Tuesday" answerable.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    ///
+    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
+    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
+    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
+    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
+    /// <c>LIMIT 1</c> returning either one depending on physical row order.</para>
     /// </summary>
     public const string CpuSchedulerPressureSql = """
         SELECT
@@ -164,7 +170,7 @@ internal static class DarlingPlanCacheSchedulerReader
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY collection_time DESC
+        ORDER BY collection_time DESC, collection_id DESC
         LIMIT 1
         """;
 

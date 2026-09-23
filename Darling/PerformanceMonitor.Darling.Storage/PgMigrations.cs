@@ -879,19 +879,20 @@ DROP VIEW IF EXISTS collect.v_query_stats;";
     /// <para><b>The identity column is the point, for V103's reason.</b> The <c>pg_read_file</c> transport
     /// re-reads an OVERLAPPING tail every cycle on purpose, so without <c>raw_line_hash</c> the same event
     /// is stored once per cycle for as long as it stays inside the window; every read dedupes on it as the
-    /// deadlock reads do on <c>deadlock_hash</c>. Over the RAW entry text rather than the redacted columns,
-    /// because two events that redact alike — the same error for two values, same millisecond, same pid —
-    /// are two events, and the hash must keep them apart. A hash of the raw text discloses nothing about
-    /// it.</para>
+    /// deadlock reads do on <c>deadlock_hash</c>. Over the RAW entry text rather than the stored columns,
+    /// because two events that store alike — the same error from one statement shape run with two values, same
+    /// millisecond, same pid — are two events, and the hash must keep them apart. It is NOT secret-safe (#3996's
+    /// review): an unkeyed hash of text a reader can mostly rebuild is an offline guessing oracle for the rest, a
+    /// failed UPDATE's four-digit PIN included, so no read surface returns it (#4004).</para>
     ///
-    /// <para><b>Every text column is REDACTED before it reaches this table, and the statement itself is
-    /// never stored.</b> <c>message</c>, <c>detail</c> and <c>context</c> have had quoted literals, quoted values
-    /// and unique-violation key values stripped by <c>PgLogTextRedactor</c>, the plan parser's own patterns
-    /// applied to prose;
-    /// <c>statement_fingerprint</c> is a hash of the REDACTED <c>STATEMENT</c> companion, so one statement
-    /// shape recurs to one fingerprint and no literal from the user's SQL exists anywhere in the store. The
-    /// issue's scope note — the log pipeline must not become where parameter values leak into the store —
-    /// is enforced at the row constructor rather than by convention.</para>
+    /// <para><b>The statement itself is never stored, and the SQL the other columns quote is normalized.</b>
+    /// <c>statement_fingerprint</c> is a hash of the REDACTED <c>STATEMENT</c> companion, the plan parser's own
+    /// patterns applied to SQL, so one statement shape recurs to one fingerprint and the statement's quoted
+    /// literals and numbers exist nowhere in the store (a dollar-quoted body is hashed as written, #3996's
+    /// review). <c>message</c>, <c>detail</c> and <c>context</c> are PostgreSQL's prose as
+    /// written (#3944), except the SQL PostgreSQL writes into a DETAIL or CONTEXT (a deadlock's queries, a
+    /// function's statement), which <c>PgLogTextRedactor</c> normalizes with every literal replaced by
+    /// <c>?</c> (#3920). Both are enforced at the row constructor rather than by convention.</para>
     ///
     /// <para><b>Retention is thirty days, not the deadlock table's ninety</b> (<c>CollectorScheduleDefaults</c>
     /// carries the argument): a deadlock is rare by construction and a log event is as common as the
@@ -956,7 +957,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_log_events_time
     /// <summary>
     /// V130 — the family-specific NUMBERS on <c>collect.pg_log_events</c> (#3602, #3603): a spill's bytes,
     /// and an autovacuum run's relation, duration, pages, tuples, buffers and WAL. V129 stored those two
-    /// families as recognised-only events — the line's prose, redacted, and nothing lifted — and this rung
+    /// families as recognised-only events — the line's prose and nothing lifted — and this rung
     /// is where the prose becomes columns a reader can sum, rank and alert on.
     ///
     /// <para><b>Columns on the event row, not sibling tables — the shape #3601 planned and this rung
@@ -4263,7 +4264,9 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// lines are actually asked ("did the rate move") without producing 1,100 rows a day nobody reads.
     /// <c>message_text</c> and <c>sample_line</c> are NULL for the classes that are counted only, and that
     /// NULL is the record that the class is a counted floor rather than a missing measurement — see
-    /// <see cref="StoreLogClassifier"/> for the class-by-class argument.</para>
+    /// <see cref="StoreLogClassifier"/> for the class-by-class argument. Since #3944 a retained row's
+    /// <c>message_text</c> is its message's grouping key (<see cref="StoreLogClassifier.GroupingKeyOf"/>) and its
+    /// <c>sample_line</c> the entry as PostgreSQL wrote it, its SQL normalized.</para>
     ///
     /// <para><b>Why <c>store_log_captures</c> is its own table.</b> Every other sampled read in the product
     /// borrows its denominator from <c>collection_log</c> — <c>get_pg_blocking</c> reports
@@ -4293,8 +4296,8 @@ CREATE OR REPLACE VIEW collect.v_collection_log AS SELECT * FROM collect.collect
     /// log's. That is deliberate: PostgreSQL renders <c>%m</c> in <c>log_timezone</c>, which
     /// <c>DarlingManagedPostgres</c>' v9 block leaves to the host (it pins the session <c>timezone</c> only,
     /// asserted by <c>DarlingManagedPostgresTests</c>), so the store's own log stamps are host-local. The
-    /// server's own rendering survives inside <c>sample_line</c>, uninterpreted, with only its values masked
-    /// (#3915).</para>
+    /// server's own rendering survives inside <c>sample_line</c>, uninterpreted, with only its SQL normalized
+    /// (#3915, #3944).</para>
     /// </summary>
     private const string V111Sql = @"
 CREATE TABLE IF NOT EXISTS collect.store_log_events

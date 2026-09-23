@@ -135,7 +135,7 @@ public sealed class PgLogEventMetricsParserTests
         /* A spill's member on a vacuum row is null: the families are disjoint. */
         Assert.Null(run.Metrics.Bytes);
 
-        /* The prose is still there, redacted — identifiers after `table` and `index` stay whole. */
+        /* The prose is still there, as PostgreSQL wrote it (#3944). */
         Assert.StartsWith("automatic vacuum of table \"app_db.public.orders\": index scans: 1", run.Message, StringComparison.Ordinal);
         Assert.Contains("index \"orders_pkey\": pages: 24567 in total", run.Message, StringComparison.Ordinal);
         Assert.Null(run.StatementFingerprint);
@@ -259,7 +259,7 @@ public sealed class PgLogEventMetricsParserTests
         Assert.Equal(spills[0].StatementFingerprint, spills[1].StatementFingerprint);
         Assert.NotEqual(spills[0].RawLineHash, spills[1].RawLineHash);
 
-        /* The path is not a relation and is not lifted; the message keeps it, redacted like any message. */
+        /* The path is not a relation and is not lifted; the message keeps it, as written like any message. */
         Assert.Null(spills[0].Metrics.RelationName);
         Assert.Null(spills[0].Metrics.IsAnalyze);
         Assert.Null(spills[0].Metrics.DurationMs);

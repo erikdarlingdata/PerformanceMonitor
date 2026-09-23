@@ -1327,7 +1327,7 @@ VALUES ($1, $2, $3, $4, $5, 120, 'SUCCESS', NULL, $6, 90, 30)", connection);
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>One <c>lock_wait</c> line as the parser stores it: family, LOG severity, the redacted message, the
+    /// <summary>One <c>lock_wait</c> line as the parser stores it: family, LOG severity, the message as written, the
     /// CONTEXT, and NO metrics — <c>duration_ms</c> and <c>relation_name</c> NULL, exactly as <c>PgLockWaitEventParser</c>
     /// writes today, so the read's message parse is what the e2e exercises.</summary>
     private static async Task PlantLockWaitLineAsync(NpgsqlConnection connection, DateTime at, string message, string? context, CancellationToken ct)

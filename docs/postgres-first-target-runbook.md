@@ -447,7 +447,7 @@ them; 35 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_lock_stats` | contended lock modes and relations over time, sampled from `pg_locks` |
 | `get_pg_deadlocks` | deadlocks parsed from the server log, one row per distinct deadlock |
 | `get_pg_deadlock_detail` | one deadlock in full: the complete wait graph and every participant's SQL |
-| `get_pg_log_events` | the server log, classified: errors (WARNING and worse), connections, lock waits, spills with their exact bytes per file (#3602), autovacuum / autoanalyze runs with their duration, pages, tuples, buffers and WAL (#3603), plus checkpoints recognised for later structure — redacted, filtered by `family` and `min_severity`, the page saying what bounded it. The "check the error log" read (#3601) |
+| `get_pg_log_events` | the server log, classified: errors (WARNING and worse), connections, lock waits, spills with their exact bytes per file (#3602), autovacuum / autoanalyze runs with their duration, pages, tuples, buffers and WAL (#3603), plus checkpoints recognised for later structure — messages as PostgreSQL wrote them with any SQL in them normalized, filtered by `family` and `min_severity`, the page saying what bounded it. The "check the error log" read (#3601) |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split, and the window's peak connected backends per database (`peak_numbackends`, a level — `null` on a pre-V133 history, not 0) |
 | `get_pg_database_trend` | one database's spills, hit ratio, deadlocks and rollback share over time, in buckets sized to the window, each with its worst interval |
 | `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
