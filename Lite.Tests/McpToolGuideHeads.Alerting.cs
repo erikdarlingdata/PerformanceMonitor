@@ -73,8 +73,8 @@ public sealed class McpToolGuideHeadsAlertingTests
     public void LiteTails_StillCarryTheKnobsAndTheEditionGapsTheHeadCouldNotFit()
     {
         var settingsTail = McpToolGuideTests.Served("get_alert_settings").Tail!;
-        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", settingsTail, StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route (#3712)", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes", settingsTail, StringComparison.Ordinal);
         Assert.Contains("7-day read of one large production store", settingsTail, StringComparison.Ordinal);
         Assert.Contains("minus its self_alerts group", settingsTail, StringComparison.Ordinal);
         Assert.Contains("smtp", settingsTail, StringComparison.Ordinal);
