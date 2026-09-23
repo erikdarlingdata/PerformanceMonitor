@@ -656,6 +656,10 @@ public sealed class DarlingCollectorRunner
 
     private readonly PgLogHashKey? _logHashKey;
 
+    /// <summary>The store's log-hash key this runner was given (#4004), null when the service could not load one. The
+    /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
+    internal PgLogHashKey? LogHashKey => _logHashKey;
+
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
        in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
        forever while looking like it was making progress. */

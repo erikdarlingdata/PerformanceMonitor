@@ -851,30 +851,18 @@ public sealed class DarlingWorker : BackgroundService
 
     private bool _storeLogRemaskDone;
 
-    /* #4012: the re-mask of PostgreSQL deadlock alerts, then stored analysis findings' deadlock exemplars, then
-       deadlock reports, stored before #4005 with their SQL raw. The alerts go first because they are found through the reports' raw hashes, which the report pass
-       replaces. Each has a cursor and is done once a slice reaches its table's end; a scan that left rows raw
-       (a row that changed under its write, a report whose rewrite failed) reads its table through again, at
-       most PgDeadlockRemask.MaxRescansPerProcess times, and the next process's pass is a no-op re-read. */
-    private string? _pgDeadlockAlertRemaskCursor;
+    /* #4012: the re-mask of PostgreSQL deadlock alerts, then deadlock reports, then stored analysis findings'
+       deadlock exemplars, stored before #4005 with their SQL raw. The alerts go first because they are found
+       through the reports' raw hashes, which the report stage replaces; the findings last, so their read cannot
+       hold the reports back. In memory, like the store-log cursor above (#4012's review ruled out a store
+       migration): each stage is done after a whole walk that rewrote nothing, and a restart walks again. */
+    private readonly PgDeadlockRemask.RemaskProgress _pgDeadlockRemask = new();
 
-    private bool _pgDeadlockAlertRemaskLeftRows;
+    /* #4012: the re-mask keys an alert whose report is gone under the store's log-hash key, so without one it
+       does not run; said once per process. */
+    private bool _pgDeadlockRemaskNoKeyWarned;
 
-    private bool _pgDeadlockAlertRemaskDone;
-
-    private string? _pgDeadlockFindingRemaskCursor;
-
-    private bool _pgDeadlockFindingRemaskLeftRows;
-
-    private bool _pgDeadlockFindingRemaskDone;
-
-    private PgDeadlockRemask.ReportCursor? _pgDeadlockRemaskCursor;
-
-    private bool _pgDeadlockRemaskLeftRows;
-
-    private bool _pgDeadlockRemaskDone;
-
-    private int _pgDeadlockRemaskRescans;
+    private PgLogHashKey? _pgDeadlockRemaskKey;
 
     /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
        process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
@@ -2857,6 +2845,10 @@ public sealed class DarlingWorker : BackgroundService
             if (DateTime.UtcNow >= _nextStoreMetricsUtc)
             {
                 _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);
+
+                /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
+                   same log-hash key the runner's log-event runs share. */
+                _pgDeadlockRemaskKey = runner.LogHashKey;
                 await SweepStoreSelfMetricsAsync(stoppingToken);
 
                 /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
@@ -7004,88 +6996,43 @@ LIMIT 1";
 
             /* #4012: PostgreSQL deadlock reports stored before #4005 keep their SQL raw, with a hash over the raw
                graph, for pg_deadlocks' 90 days, and a deadlock alert fired before it keeps the same in its history
-               row, and an analysis finding its exemplars. Every read normalizes them; a direct SELECT does not. One
-               bounded slice per tick, the alerts' until they are done, then the findings', then the reports', with the store-log slice's own-catch, own-cap posture:
-               neither a failure nor a slow slice may cost the collector-cost flush below. */
-            if (!_pgDeadlockRemaskDone)
+               row, and an analysis finding its exemplars. Every read normalizes them; a direct SELECT does not.
+               Page after page until the slice's own cap (#4012's review: a page an hour took about 11 days for the
+               reports alone), alerts, then reports, then findings, with the store-log slice's own-catch, own-cap
+               posture: neither a failure nor a slow slice may cost the collector-cost flush below. RunAsync ends
+               quietly on its cap and keeps each walk's cursor; a stage's own failures are counted and logged there. */
+            if (!_pgDeadlockRemask.Done)
             {
-                if (connection.State != ConnectionState.Open)
+                if (_pgDeadlockRemaskKey is not { } logHashKey)
                 {
-                    await connection.CloseAsync();
-                    await connection.OpenAsync(budget.Token);
-                }
-
-                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
-                remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
-                try
-                {
-                    if (!_pgDeadlockAlertRemaskDone)
+                    if (!_pgDeadlockRemaskNoKeyWarned)
                     {
-                        var (next, examined, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(
-                            connection, _pgDeadlockAlertRemaskCursor, remaskBudget.Token);
-                        _pgDeadlockAlertRemaskCursor = next;
-                        _pgDeadlockAlertRemaskLeftRows |= raced > 0;
-                        if (next is null)
-                        {
-                            _pgDeadlockAlertRemaskDone = !_pgDeadlockAlertRemaskLeftRows
-                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
-                            _pgDeadlockAlertRemaskLeftRows = false;
-                        }
-
-                        if (rewritten > 0)
-                        {
-                            _logger.LogInformation(
-                                "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} deadlock alert(s) fired before this build, so their SQL literals and raw report hashes no longer sit in the alert history{Remaining}.",
-                                rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
-                        }
-                    }
-                    else if (!_pgDeadlockFindingRemaskDone)
-                    {
-                        var (next, examined, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(
-                            connection, _pgDeadlockFindingRemaskCursor, remaskBudget.Token);
-                        _pgDeadlockFindingRemaskCursor = next;
-                        _pgDeadlockFindingRemaskLeftRows |= raced > 0;
-                        if (next is null)
-                        {
-                            _pgDeadlockFindingRemaskDone = !_pgDeadlockFindingRemaskLeftRows
-                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
-                            _pgDeadlockFindingRemaskLeftRows = false;
-                        }
-
-                        if (rewritten > 0)
-                        {
-                            _logger.LogInformation(
-                                "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} stored analysis finding(s) written before this build, so their deadlock exemplars' SQL literals no longer sit in the findings store{Remaining}.",
-                                rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
-                        }
-                    }
-                    else
-                    {
-                        var (next, examined, rewritten, failed) = await PgDeadlockRemask.RemaskStoredReportsAsync(
-                            connection, _pgDeadlockRemaskCursor, remaskBudget.Token);
-                        _pgDeadlockRemaskCursor = next;
-                        _pgDeadlockRemaskLeftRows |= failed > 0;
-                        if (next is null)
-                        {
-                            _pgDeadlockRemaskDone = !_pgDeadlockRemaskLeftRows
-                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
-                            _pgDeadlockRemaskLeftRows = false;
-                        }
-
-                        if (rewritten > 0 || failed > 0)
-                        {
-                            _logger.LogInformation(
-                                "PostgreSQL deadlocks: re-masked {Rewritten} stored report row(s) of {Examined} examined, captured before this build, so their SQL literals and raw report hashes no longer sit in pg_deadlocks; {Failed} report(s) could not be rewritten and are retried{Remaining}.",
-                                rewritten, examined, failed, next is null ? "" : "; the rest follow on the next hourly passes");
-                        }
+                        _pgDeadlockRemaskNoKeyWarned = true;
+                        _logger.LogWarning(
+                            "PostgreSQL deadlocks: deadlock reports, alerts and findings stored before this build are not re-masked, because this service has no log-hash key (#4004), and a deadlock alert whose report is gone is re-keyed with it. The service log's start-up error names the key file and why it could not be used.");
                     }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException
-                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                else
                 {
-                    _logger.LogWarning(
-                        "PostgreSQL deadlocks: re-masking alerts and reports stored before this build failed, and is retried next hour: {Message}",
-                        ex.Message);
+                    if (connection.State != ConnectionState.Open)
+                    {
+                        await connection.CloseAsync();
+                        await connection.OpenAsync(budget.Token);
+                    }
+
+                    using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                    remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
+                    try
+                    {
+                        await PgDeadlockRemask.RunAsync(connection, _pgDeadlockRemask, logHashKey, _logger, remaskBudget.Token);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException
+                        || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                    {
+                        _logger.LogWarning(
+                            "PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed, and is retried next hour: {Message}",
+                            ex.Message);
+                    }
                 }
             }
 
