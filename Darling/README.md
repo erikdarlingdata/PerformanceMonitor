@@ -175,7 +175,7 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 ### Install as a Windows Service
 
-**Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\PerformanceMonitorDarling`), then from an elevated PowerShell in that folder run `.\install-darling.ps1`. It checks the install location and refuses anywhere the service could not read itself (see [below](#the-install-location-has-to-be-machine-scoped)), checks for `darling.json` (copying the sample and stopping for you to edit it on first run), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), locks the install folder so only SYSTEM, Administrators and the service account can change what runs from it ([#4034](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4034): a folder made directly under `C:\` otherwise lets any local user replace the service's binaries; the lock goes on before anything runs from the folder, and `upgrade-darling.ps1` applies it before laying a new build down, so an older install is closed at its next upgrade. No lock can undo a file swapped before it, so extract into a fresh folder and run the script straight away, and re-extract fresh if the folder has sat open on a box with other local users), starts it, and creates Desktop + Start Menu **Darling Viewer** shortcuts (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
+**Scripted (recommended):** the packaged zips ship `install-darling.ps1` beside the service exe. Extract the zip to its final location (e.g. `C:\Program Files\PerformanceMonitorDarling` — see [below](#the-install-location-has-to-be-machine-scoped) for why that is preferred over a folder made directly under `C:\`), then from an elevated PowerShell in that folder run `.\install-darling.ps1`. It refuses a folder ordinary local users can already write to before anything else runs ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)), checks the install location and refuses anywhere the service could not read itself (see [below](#the-install-location-has-to-be-machine-scoped)), checks for `darling.json` (copying the sample and stopping for you to edit it on first run), runs the `--test-connection` pre-flight, registers the Event Log source, creates the service under the virtual account (or upgrades an existing install's binPath in place, preserving config/store/credentials), locks the install folder so only SYSTEM, Administrators and the service account can change what runs from it ([#4034](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4034): a folder made directly under `C:\` otherwise lets any local user replace the service's binaries; the lock goes on before anything runs from the folder, and `upgrade-darling.ps1` applies it before laying a new build down, so an older install is closed at its next upgrade. No lock can undo a file swapped before it, which is what the #4043 check above catches instead — extract into a fresh folder and run the script straight away, and re-extract fresh if the folder has sat open on a box with other local users), starts it, and creates Desktop + Start Menu **Darling Viewer** shortcuts (pin to taskbar from the Start Menu entry — Windows does not allow programmatic pinning). `uninstall-darling.ps1` reverses it, deliberately leaving the store/config in place unless you pass `-PurgeData`.
 
 #### Upgrading an existing install
 
@@ -183,14 +183,20 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 > **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you are upgrading FROM one of those, see [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) below and use the manual procedure — the steps in this section describe a script you will not have.
 
-Extract the new zip to a **staging** folder and run *its* copy:
+Extract the new zip to a **staging** folder only an administrator can write to, from an **elevated** PowerShell, and run *its* copy (#4043): the folder you run the script from is the trust root, and anyone who can write to it can replace the script itself, so a folder under `C:\Program Files\` is required, not a folder made directly under `C:\`. (Windows UAC's split token is not a security boundary here: trusting the installing admin's account also trusts that same admin's non-elevated session, since both are the same account.)
 
 ```powershell
-Expand-Archive PerformanceMonitorDarling-3.5.1.zip -DestinationPath C:\staging\3.5.1
-C:\staging\3.5.1\upgrade-darling.ps1 -Source C:\staging\3.5.1
+Expand-Archive PerformanceMonitorDarling-3.5.1.zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1"
+& "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1\upgrade-darling.ps1" -Source "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1"
 ```
 
-It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (`-Source ...\PerformanceMonitorDarling-3.5.1.zip`, checked against `-Sha256` or a `SHA256SUMS.txt` beside it), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
+To verify the zip's SHA256 as part of the same run, point `-Source` at the downloaded zip itself instead of the extracted folder, with the hash from the release page — the script copies that zip into its own protected staging folder, hashes the copy, and extracts from it:
+
+```powershell
+& "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1\upgrade-darling.ps1" -Source C:\Users\you\Downloads\PerformanceMonitorDarling-3.5.1.zip -Sha256 <hash-from-the-release-page>
+```
+
+It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (checked against `-Sha256` or a `SHA256SUMS.txt` beside it, itself only trusted from a folder that passes the same writability check), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
 
 **It never kills a process**, and it checks for them twice. Before stopping anything it names processes running out of the install tree that a service stop will *not* close — your own `psql.exe`, a shell sitting in the folder, a Darling Viewer you left open — and refuses, costing nothing but a re-run. After the service is down it checks again with no exclusions; anything still there is usually a postmaster that outlived the stop, and that is exactly what must not be killed (the bundled PostgreSQL lives under `pg-runtime` and killing it takes the store down). Give it a few seconds and re-run.
 
@@ -205,8 +211,8 @@ Everything it can name provably came out of one of our own zips, because the man
 **Backups pile up, and nothing used to remove them.** A dogfood box was found carrying 46 of them, 5.48 GB, the oldest three weeks old, with the service naming every one on every start ([#2525](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2525)). Retention above fixes new deploys; boxes that already have a backlog clear it with the installed copy, which needs no staging folder and does not stop the service:
 
 ```powershell
-C:\PerformanceMonitorDarling\upgrade-darling.ps1 -ListRollbacks   # show what would go
-C:\PerformanceMonitorDarling\upgrade-darling.ps1 -PruneOnly       # remove all but the newest 3
+& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -ListRollbacks   # show what would go
+& "C:\Program Files\PerformanceMonitorDarling\upgrade-darling.ps1" -PruneOnly       # remove all but the newest 3
 ```
 
 The service reports the set once per start with a count, a total and that command — informational while you are within retention, a warning past it. It never deletes one itself: it did not create them.
@@ -247,20 +253,22 @@ overlay-upgraded tree.
 
 #### The install location has to be machine-scoped
 
-Extract to a local, machine-scoped path — `C:\PerformanceMonitorDarling` is the documented one. **Not** anywhere under a user profile (`C:\Users\...`, including your Desktop or Downloads), and not a UNC path or a mapped drive.
+Extract to a local, machine-scoped path. **Use `C:\Program Files\PerformanceMonitorDarling`**, not a folder made directly under `C:\` (the older documented example, `C:\PerformanceMonitorDarling`, which `install-darling.ps1` now refuses unless you pass `-AcceptWritableExtraction`): `C:\Program Files` denies write to ordinary local users by default, while a fresh folder directly under `C:\` inherits `Authenticated Users: Modify` from the volume root the instant it is extracted, before `install-darling.ps1` has run a single line ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043)). Either way, **not** anywhere under a user profile (`C:\Users\...`, including your Desktop or Downloads), and not a UNC path or a mapped drive.
 
-The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMonitor Darling`, never LocalSystem, because the bundled PostgreSQL refuses to run with administrative privileges. That account is not you, not SYSTEM, and not Administrators — and a user profile grants access to about those three and nobody else, so the service cannot read its own program files there. It installs cleanly and then fails: `initdb.exe` dies at `0xC0000135` (STATUS_DLL_NOT_FOUND) before it can report anything (#2185). A folder created under `C:\` inherits read + execute for `BUILTIN\Users` instead, which the virtual account is a member of, which is why the documented location works. Network paths fail for a related reason: a virtual account [reaches the network as the computer account](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions#virtual-accounts) rather than as you, and a mapped drive letter belongs to your logon session, which a service does not share.
+The service runs as the unprivileged virtual account `NT SERVICE\PerformanceMonitor Darling`, never LocalSystem, because the bundled PostgreSQL refuses to run with administrative privileges. That account is not you, not SYSTEM, and not Administrators — and a user profile grants access to about those three and nobody else, so the service cannot read its own program files there. It installs cleanly and then fails: `initdb.exe` dies at `0xC0000135` (STATUS_DLL_NOT_FOUND) before it can report anything (#2185). A folder created under `C:\` inherits read + execute for `BUILTIN\Users` instead, which the virtual account is a member of, which is why that documented location still works for the *service* — the residual is the *write* grant the same inheritance carries for every other local user, which is what `C:\Program Files` avoids and what the next paragraph checks for. Network paths fail for a related reason: a virtual account [reaches the network as the computer account](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/configure-windows-service-accounts-and-permissions#virtual-accounts) rather than as you, and a mapped drive letter belongs to your logon session, which a service does not share.
+
+**`install-darling.ps1` also refuses to run at all from a folder ordinary local users can already write to** ([#4043](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4043), checked before anything else, including the install-tree lock below (#4034)): the lock only stops writes from the moment it runs, so a folder that was writable by someone else *before* that — the usual case is a fresh extract directly under `C:\` — may already hold a swapped binary the lock can never undo. The refusal names the principals and points you at `C:\Program Files\...`. `-AcceptWritableExtraction` skips it for a dev loop that extracts somewhere deliberately writable; it is not for a real install.
 
 `install-darling.ps1` refuses a fresh install in any of these locations rather than leaving you a service that cannot start. A service registered by hand instead — the manual `sc create` path below, which the installer never sees — gets the same diagnosis from the service itself: on start, ahead of reading `darling.json` and long before the store bootstrap, it logs one critical line naming the path, why its own account cannot read it, and where to move it, so the cause is above the failure rather than three messages downstream of it. To move an existing install, stop the service, move the folder, and re-run `install-darling.ps1` from the new location — it updates the service's binPath in place and leaves your `darling.json`, store data, and credentials alone.
 
 **Manual:** publish (or copy the build output) to a stable path, put `darling.json` next to the exe (or set `DARLING_CONFIG` as a machine environment variable), then register it:
 
 ```
-dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o C:\PerformanceMonitorDarling
+dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -o "C:\Program Files\PerformanceMonitorDarling"
 ```
 
 ```
-sc create "PerformanceMonitor Darling" binPath= "C:\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" start= auto obj= "NT SERVICE\PerformanceMonitor Darling"
+sc create "PerformanceMonitor Darling" binPath= "\"C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe\"" start= auto obj= "NT SERVICE\PerformanceMonitor Darling"
 ```
 
 ```
@@ -300,7 +308,7 @@ With `"auth": "integrated"`, the monitoring identity **is** the service's Log On
 
    ```
    icacls "C:\ProgramData\PerformanceMonitorDarling" /grant "DOMAIN\svc-account:(OI)(CI)F"
-   icacls "C:\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
+   icacls "C:\Program Files\PerformanceMonitorDarling\darling.json" /grant "DOMAIN\svc-account:F"
    ```
 
    Adjust the second path to wherever `darling.json` sits beside the service exe; the first covers the logs and, in managed mode, the store's data directory. On its next start the service re-asserts the tight ACL itself — now including the new account — so this does not need repeating.

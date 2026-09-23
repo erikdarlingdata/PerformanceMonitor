@@ -27,7 +27,7 @@ what the gate prevents. The release is a backfill.
 From the install folder, with the service installed:
 
 ```powershell
-cd C:\PerformanceMonitorDarling    # your install folder may differ
+cd "C:\Program Files\PerformanceMonitorDarling"    # your install folder may differ
 
 # 1. See which rollups have gaps, and what a backfill would do. Changes nothing.
 .\PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run
