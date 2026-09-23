@@ -174,21 +174,21 @@ public class PostgresTargetConfigTests
     public void DerivesStorageIdentityThroughTheSharedRule()
     {
         var server = PgServer();
-        server.Database = "segments_horizon";
+        server.Database = "segments_example";
         server.ReadOnlyIntent = true;
 
         /* #2218: ":pg" sits between the database and ":RO". A PostgreSQL instance and a SQL Server on one host
            used to derive ONE server_id and interleave their histories; the engine token is what separates them,
            and its position is fixed so two callers with the same facts cannot produce two names. */
         Assert.Equal(
-            "segments-multi-1.cluster-x.us-east-1.rds.amazonaws.com:segments_horizon:pg:RO",
+            "segments-multi-1.cluster-x.us-east-1.rds.amazonaws.com:segments_example:pg:RO",
             server.StorageName);
 
         /* A port appends after the engine when one is set — the second half of #2218, for two PostgreSQL
            instances on one host. */
         server.Port = 6432;
         Assert.Equal(
-            "segments-multi-1.cluster-x.us-east-1.rds.amazonaws.com:segments_horizon:pg:6432:RO",
+            "segments-multi-1.cluster-x.us-east-1.rds.amazonaws.com:segments_example:pg:6432:RO",
             server.StorageName);
     }
 
