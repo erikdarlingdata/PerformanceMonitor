@@ -54,10 +54,15 @@ public static class DailySummarySql
             LEFT JOIN wait_top tp ON tp.d = t.d
         ),
         queries AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
-            FROM v_query_stats
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
+            /* #3905: distinct (day, hash) pairs, then counted -- the distinct-hash count per day, in a shape
+               the planner can hash rather than sort. See DailySummarySql.QueriesCteRaw. */
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
+                FROM v_query_stats
+                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            ) AS x
+            GROUP BY x.d
         ),
         deadlocks AS (
             SELECT date_trunc('day', collection_time) AS d, COUNT(*) AS c
@@ -202,13 +207,37 @@ public static class DailySummarySql
     /// The <c>queries</c> CTE exactly as it appears in <see cref="RangeSql"/> — the ONE part of the
     /// daily summary that reads a table subject to the 4-day raw drop. Every other source here (wait_stats,
     /// deadlocks, alerts, memory) keeps <c>DarlingRetention</c>'s 30-day default, so they need no routing.
+    ///
+    /// <para><b>No other CTE has a tier to route to (#3905, checked rather than assumed).</b> The continuous
+    /// aggregates over this statement's other sources are the anomaly baseline's per-collection supplies and
+    /// the fleet card's collection-health rollup, and none of them answers its CTE exactly: the wait supply
+    /// sums every wait type into one figure (no top wait), the blocked-process supply counts reports but
+    /// carries no wait time (no peak block), the deadlock supply's 35-day horizon is shorter than a raw
+    /// retention an operator may lengthen, and <c>collection_health_hourly</c> keeps eight days of a month.
+    /// CPU, memory pressure and the DMV blocking snapshots have no aggregate at all. The eight raw CTEs are a
+    /// bounded per-server read of the window; what made the month read slow was this CTE's routed form (the
+    /// not-carried probes, <see cref="QueriesCteForCagg"/>) and the sort its <c>COUNT(DISTINCT)</c> forced,
+    /// both fixed here.</para>
+    ///
+    /// <para><b>Distinct pairs, then counted (#3905).</b> <c>COUNT(x.query_hash)</c> over the distinct
+    /// <c>(day, query_hash)</c> pairs is <c>COUNT(DISTINCT query_hash)</c> per day, NULL hash included (both
+    /// skip it), but PostgreSQL evaluates a DISTINCT aggregate by SORTING every input row of its group, while
+    /// a <c>SELECT DISTINCT</c> can be hashed. On a busy server's month of hourly rollup rows that sort was
+    /// the calendar's largest remaining cost once the probes were fixed: 1.10 s for 573,600 rows on the rig
+    /// against 0.24 s for the same rows hashed, and 140 ms against 48 ms for a single raw day. The same shape
+    /// is used on every tier, so every tier still counts the same thing.</para>
     /// </summary>
     private const string QueriesCteRaw = """
         queries AS (
-            SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
-            FROM v_query_stats
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-            GROUP BY 1
+            /* #3905: distinct (day, hash) pairs, then counted -- the distinct-hash count per day, in a shape
+               the planner can hash rather than sort. See DailySummarySql.QueriesCteRaw. */
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
+                FROM v_query_stats
+                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+            ) AS x
+            GROUP BY x.d
         ),
         """;
 
@@ -270,9 +299,25 @@ public static class DailySummarySql
     /// by its retention state. A day BELOW the relation's floor that the source still holds
     /// (the straddle the router's essay accepts "with no signal to the caller") answers the same two probes
     /// the same way, so this is also that reader's partial-coverage notice, for as long as the source holds
-    /// the day. Each probe is one index range per day — the materialization's <c>(server_id, bucket)</c>
-    /// group index, the source's <c>(server_id, time)</c> index — over a series of at most a year of days, so
-    /// the cost follows the window's length and not the tables' weight, the scan's own argument.</para>
+    /// the day.</para>
+    ///
+    /// <para><b>Each probe is one index range per day, and the SQL has to say so (#3905).</b> This paragraph
+    /// used to end "each probe is one index range per day, so the cost follows the window's length and not the
+    /// tables' weight". That was the intent, not the plan. Written as a bare <c>EXISTS</c> and <c>NOT EXISTS</c>,
+    /// PostgreSQL pulls both up into a semi-join and an anti-join, and neither join can push its per-day range
+    /// into the scan, so the planner materialized the server's ENTIRE history in the probed relation (the
+    /// source's four days of raw rows, or the rollup's 90 days) and rescanned it once per day of the window.
+    /// That is O(days × retained rows), and past <c>work_mem</c> it spills and rereads a temp file per day. On
+    /// the rig (one busy server: 570,600 raw rows, 880,800 hourly) this member alone was 4.5 s of a cold 6.1 s
+    /// month read, 32,678 temp blocks read, and a 120-day read at the daily tier, whose source probe runs over
+    /// the hourly's 90 days, took 12.4 s. On DARLING01's busiest server it was 629 of 873 ms. So each probe now
+    /// carries <c>OFFSET 0</c>. PostgreSQL refuses to pull a sub-select with an OFFSET into a join
+    /// (<c>simplify_EXISTS_query</c>: "OFFSET 0 ... traditionally is used as an optimization fence"), which
+    /// leaves each probe a SubPlan run once per candidate day: an index range on the materialization's
+    /// <c>(server_id, bucket)</c> index and on the source's time index, pruned to one chunk at run time. The
+    /// candidate days are fenced the same way, so the source probe runs only for the days the rollup probe
+    /// found empty, which on a covered window is none. At that scale the member is now 10 ms, the month read
+    /// 186 ms and the 120-day read 161 ms, whatever the relations weigh.</para>
     ///
     /// <para><b>A bucket holding zero distinct hashes is not a case.</b> The rollup groups by <c>query_hash</c>,
     /// so a bucket exists only where a source row did, and every bucket carries at least one hash: a row in the
@@ -311,33 +356,48 @@ public static class DailySummarySql
             WHERE server_id = $1
         ),
         queries AS (
-            SELECT date_trunc('day', bucket) AS d, COUNT(DISTINCT query_hash) AS c
-            FROM collect.{relation}
-            WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
-            GROUP BY 1
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
+                FROM collect.{relation}
+                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3
+            ) AS x
+            GROUP BY x.d
             UNION ALL
-            SELECT date_trunc('day', collection_time) AS d, COUNT(DISTINCT query_hash) AS c
-            FROM v_query_stats
-            WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-              AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
-            GROUP BY 1
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
+                FROM v_query_stats
+                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
+            ) AS x
+            GROUP BY x.d
             UNION ALL
             /* #3653 A6: the days at or below this server's ceiling that the rollup holds NO row for while its
                source still holds rows the rollup's own WHERE admits -- "not carried at this tier". One row per
                such day with a NULL count; the outer select passes it through as unique_queries = NULL and the
                readers list the day in days_missing[]. The two probes are the hole scan's
                (TimescaleSupport.MaterializationHoleScanSql, the #3731 repair), per server, at day grain. A day
-               the source has no admitted row for is not named: the rollup is honestly empty there. */
+               the source has no admitted row for is not named: the rollup is honestly empty there.
+               #3905: every OFFSET 0 below is load-bearing. It keeps each probe a per-day index probe instead of
+               a join over the server's whole history, and the source is probed only on the days the rollup
+               probe found empty. */
             SELECT b.d, NULL::bigint AS c
-            FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS b(d)
-            WHERE b.d < $3
-              AND b.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
-              AND NOT EXISTS (
-                SELECT 1 FROM collect.{relation} AS r
-                WHERE r.server_id = $1 AND r.bucket >= b.d AND r.bucket < b.d + INTERVAL '1 day')
-              AND EXISTS (
+            FROM (
+                SELECT g.d
+                FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS g(d)
+                WHERE g.d < $3
+                  AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling), $2)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM collect.{relation} AS r
+                    WHERE r.server_id = $1 AND r.bucket >= g.d AND r.bucket < g.d + INTERVAL '1 day'
+                    OFFSET 0)
+                OFFSET 0
+            ) AS b
+            WHERE EXISTS (
                 SELECT 1 FROM collect.{target.Source} AS s
-                WHERE s.server_id = $1 AND s.{target.SourceTimeColumn} >= b.d AND s.{target.SourceTimeColumn} < b.d + INTERVAL '1 day'{sourceFilter})
+                WHERE s.server_id = $1 AND s.{target.SourceTimeColumn} >= b.d AND s.{target.SourceTimeColumn} < b.d + INTERVAL '1 day'{sourceFilter}
+                OFFSET 0)
         ),
         """;
     }

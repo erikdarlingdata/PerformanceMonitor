@@ -483,8 +483,20 @@ export function fileIoPanel(server, ctx) {
 }
 
 /**
- * The Daily Health Calendar (#2484): the desktop viewer's month grid as a table, plus the one disclosure its
- * rows cannot carry on their own.
+ * The Overview tab's two daily-summary panels, today's tile and the Daily Health Calendar (#2484), over ONE
+ * fetch of get_daily_summary_range (#3905).
+ *
+ * They used to be two reads: get_daily_summary for the tile and the range for the grid. On the largest
+ * production store that pair was 26 of the tab's 28 seconds, mostly for store-side reasons fixed in the
+ * statement and the coverage gate, but the tile's read also recomputed a day the range had just computed. The
+ * range already holds today: its last day is the anchor day, `to_date`, banded against the same clock off the
+ * same aggregate. So the tile is that row, and the store runs one statement per load instead of two. One
+ * figure can change, and the change makes the two panels agree: the tile's unique_queries for today is now
+ * the range's own count, which comes from the rollup tier's materialized hours when the month routes to a
+ * rollup (#3653 A6), where the single-day read counted raw. Before, the tile and the grid's last row could
+ * print different numbers for the same day on the same page. The row is matched on the server's `to_date`
+ * rather than on a date the page computes (R1). A day with nothing collected yet has no row, and the tile
+ * says so rather than rendering dashes.
  *
  * #3653 A6: a day the store's rollup tier never materialized for this server answers `unique_queries: null`
  * (NOT 0 — the tier did not carry the day; nothing says the server ran no queries) and the read names every
@@ -496,33 +508,65 @@ export function fileIoPanel(server, ctx) {
  * 30 days and says so, deliberately not ctx.hours — the page's range tops out well short of a month, and a
  * calendar drawn over six hours is not a calendar.
  */
-export function dailyCalendarPanel(server) {
-  const { panel, body } = panelShell("Daily Health Calendar", "last 30 days (UTC)");
+export function dailySummaryPanels(server) {
+  const tile = panelShell("Daily Summary", "today (UTC)");
+  const calendar = panelShell("Daily Health Calendar", "last 30 days (UTC)");
   (async () => {
     const res = await readTool("get_daily_summary_range", { server, days_back: 30 });
-    if (res.kind === "error") return mount(body, readErrorStrip(res.message));
-    if (res.kind === "empty") return mount(body, emptyStrip(res.message));
+    if (res.kind === "error") {
+      mount(tile.body, readErrorStrip(res.message));
+      return mount(calendar.body, readErrorStrip(res.message));
+    }
+    if (res.kind === "empty") {
+      /* The range's "empty" sentence is about the span and ends in MCP parameter advice (widen days_back, move
+         as_of); for today's tile the fact is simpler. "unavailable" (nothing ever collected) says the same thing
+         to both panels, so it is the server's sentence on both. */
+      mount(tile.body, emptyStrip(res.status === "empty" ? "Nothing has been collected for this server today (UTC)." : res.message));
+      return mount(calendar.body, emptyStrip(res.message));
+    }
 
-    const grid = VIZ.table(res.data, {
-      rowsKey: "days",
-      columns: DAILY_RANGE_COLUMNS,
-      emptyText:
-        "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+    /* Each panel renders on its own, the way fanout() guards its specs: a render fault in one says so in that
+       panel instead of leaving both on their loading strips. */
+    const data = res.data || {};
+    const days = Array.isArray(data.days) ? data.days : [];
+    renderInto(tile.body, () => {
+      const today = days.find((day) => day.summary_date === data.to_date);
+      return today
+        ? VIZ.stat(today, { stats: DAILY_STATS })
+        : emptyStrip("Nothing has been collected for this server yet " + (data.to_date ? "on " + data.to_date : "today") + " (UTC).");
     });
 
-    const missing = Array.isArray(res.data.days_missing) ? res.data.days_missing : [];
-    if (!missing.length) return mount(body, grid);
-    const plural = missing.length === 1 ? "" : "s";
-    mount(body, [
-      noticeStrip(
-        "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
-          "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
-          " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
-      ),
-      grid,
-    ]);
+    renderInto(calendar.body, () => {
+      const grid = VIZ.table(data, {
+        rowsKey: "days",
+        columns: DAILY_RANGE_COLUMNS,
+        emptyText:
+          "No collected days in this range. A day with ANY collection appears here even when every signal was quiet, so a missing day is a gap in collection rather than a quiet one.",
+      });
+
+      const missing = Array.isArray(data.days_missing) ? data.days_missing : [];
+      if (!missing.length) return grid;
+      const plural = missing.length === 1 ? "" : "s";
+      return [
+        noticeStrip(
+          "Unique queries not materialized for " + missing.length + " day" + plural + " (" + missing.join(", ") + "): " +
+            "the rollup tier that answers this range never carried " + (plural ? "those days" : "that day") +
+            " for this server, so the cell says so rather than 0. The service's start-up repair closes such days the next time it runs."
+        ),
+        grid,
+      ];
+    });
   })();
-  return panel;
+  return [tile.panel, calendar.panel];
+}
+
+/** Mount what `render` returns into `body`, or an error strip naming the fault if it throws. */
+function renderInto(body, render) {
+  try {
+    mount(body, render());
+  } catch (e) {
+    mount(body, errorStrip("Could not render this panel: " + (e && e.message ? e.message : String(e))));
+  }
 }
 
 /** Reshape flat rows into per-series points, keeping the top `maxSeries` series by peak value. */
@@ -654,12 +698,11 @@ export const SERVER_TABS = [
         ctx.label,
         "No findings in this window. Findings are written by the analysis pass, which needs at least 24 hours of collected history."
       ),
-      stat("Daily Summary", "get_daily_summary", { server }, DAILY_STATS, "today (UTC)", 2),
-      /* #2484: the month range behind the desktop viewer's Performance Calendar. A SECOND read rather than a
-         wider get_daily_summary, which is also why it can sit beside the tile above: a tab must not fetch one
-         read twice, so the today tile and the month grid cannot be the same read. A composite since #3653 A6
-         (dailyCalendarPanel) so the read's days_missing[] can be rendered as one line above the grid. */
-      dailyCalendarPanel(server),
+      /* #2484: today's tile and the month range behind the desktop viewer's Performance Calendar. #3905: both
+         from ONE fetch of get_daily_summary_range, today's tile being the range's anchor-day row, where they
+         used to be two reads (get_daily_summary beside the range) that cost the store the day's aggregate
+         twice per load. See dailySummaryPanels. */
+      ...dailySummaryPanels(server),
     ],
   },
 
@@ -2379,7 +2422,7 @@ const PROPERTY_STATS = [
 
 const DAILY_STATS = [
   { key: "summary_date", label: "Date", format: "text", small: true },
-  /* One health card, not two. get_daily_summary returns overall_health as the band's LABEL
+  /* One health card, not two. The daily-summary row carried overall_health as the band's LABEL
      (DarlingHealthReader: OverallHealth => DailyHealthBandCalculator.Label(HealthBand)) — the same value
      health_band carries — so an "overall_health" card duplicated this one AND, formatted as num1, rendered
      the label "Critical" as NaN. #2807. A numeric health SCORE would be a new backend field, not this label. */
@@ -2402,7 +2445,7 @@ const DAILY_RANGE_COLUMNS = [
   { key: "total_wait_time_sec", label: "Total wait (s)", format: "int" },
   /* #3653 A6: null is "not carried at this tier" (the rollup never materialized this server's day), which is
      the opposite claim from 0 and from the page's "—" ("there was none of this"), so it gets its own words;
-     dailyCalendarPanel lists the same days above the grid from the read's days_missing[]. */
+     dailySummaryPanels lists the same days above the grid from the read's days_missing[]. */
   {
     key: "unique_queries",
     label: "Unique queries",

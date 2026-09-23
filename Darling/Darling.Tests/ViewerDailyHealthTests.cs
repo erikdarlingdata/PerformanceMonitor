@@ -43,8 +43,9 @@ public sealed class ViewerDailySummarySqlTests
         Assert.Contains("DISTINCT ON (d)", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY d, ms DESC", sql, StringComparison.Ordinal);
 
-        /* Distinct query count, deadlock count. */
-        Assert.Contains("COUNT(DISTINCT query_hash)", sql, StringComparison.Ordinal);
+        /* Distinct query count (the distinct day/hash pairs counted, #3905's hashable spelling), deadlock count. */
+        Assert.Contains("SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash", sql, StringComparison.Ordinal);
+        Assert.Contains("SELECT x.d, COUNT(x.query_hash) AS c", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_deadlocks", sql, StringComparison.Ordinal);
 
