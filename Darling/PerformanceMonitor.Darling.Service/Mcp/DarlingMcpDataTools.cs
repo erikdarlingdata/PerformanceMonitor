@@ -753,14 +753,15 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
+    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache, or exact stored-procedure attribution via module_name. Database and exact module filters are applied after interval deduplication and before ranking. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Filter to one exact Query Store module name before ranking, e.g. dbo.usp_ProcessOrder. Case-sensitive.")] string? module_name = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -769,12 +770,13 @@ public sealed class DarlingMcpDataTools
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
+        module_name = string.IsNullOrWhiteSpace(module_name) ? null : module_name;
 
         try
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name);
+            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, moduleName: module_name);
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
                say nothing about how far back the read reached -- the most expensive query in a month may have
@@ -782,7 +784,7 @@ public sealed class DarlingMcpDataTools
                and this tool has no rollup to fall back to (the corrected CAGGs carry no query_id or plan_id,
                and plan identity is the whole point of this tool). So the honest move is to report the window
                that was served rather than echo the one that was asked for. */
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, databaseName: database_name, moduleName: module_name);
             var effectiveStart = floor ?? requestedStart;
             var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
 
@@ -797,13 +799,19 @@ public sealed class DarlingMcpDataTools
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
-                    ?? McpHelpers.Status(
-                        "unavailable",
-                        $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
-                        "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
-                        "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
-                        "nothing was read for the older part of it. Try a shorter window before concluding the " +
-                        "queries did not run.");
+                    ?? (string.IsNullOrWhiteSpace(module_name)
+                        ? McpHelpers.Status(
+                            "unavailable",
+                            $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
+                            "may not be enabled on the target databases -- or the window reaches past what the raw tier " +
+                            "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
+                            "nothing was read for the older part of it. Try a shorter window before concluding the " +
+                            "queries did not run.")
+                        : McpHelpers.Status(
+                            "empty",
+                            $"No Query Store rows matched exact module_name '{module_name}' in the {hours_back}-hour window searched. " +
+                            "The module filter was applied after interval deduplication and before ranking; verify the exact " +
+                            "schema-qualified, case-sensitive module name and read effective_start before concluding the module did not run."));
 
             var result = rows.Select(r => new
             {
@@ -812,6 +820,7 @@ public sealed class DarlingMcpDataTools
                 plan_id = r.PlanId,
                 query_hash = r.QueryHash,
                 query_plan_hash = r.QueryPlanHash,
+                module_name = r.ModuleName,
                 execution_count = r.TotalExecutions,
                 avg_duration_ms = r.AvgDurationMs,
                 avg_cpu_ms = r.AvgCpuTimeMs,

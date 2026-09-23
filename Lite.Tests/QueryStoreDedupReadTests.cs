@@ -96,7 +96,8 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
         long? intervalId = null,
         DateTime? intervalStart = null,
         long avgWrites = 0,
-        long avgPhysicalReads = 0)
+        long avgPhysicalReads = 0,
+        string? moduleName = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -105,11 +106,11 @@ public sealed class QueryStoreDedupReadTests : IClassFixture<SharedDuckDbFixture
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name,
      query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
-     query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+     module_name, query_text, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      avg_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
      query_plan_hash, is_forced_plan, force_failure_count,
      runtime_stats_interval_id, interval_start_time_utc)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)";
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
@@ -120,6 +121,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         cmd.Parameters.Add(new DuckDBParameter { Value = "Regular" });
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)firstExecutionTime ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)moduleName ?? DBNull.Value });
         cmd.Parameters.Add(new DuckDBParameter { Value = $"SELECT {queryId}" });
         cmd.Parameters.Add(new DuckDBParameter { Value = queryHash });
         cmd.Parameters.Add(new DuckDBParameter { Value = executionCount });
@@ -250,6 +252,37 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.Equal(2.0, a.AvgDurationMs, precision: 6);
         Assert.Equal(7.0, b.AvgDurationMs, precision: 6);
         Assert.Equal(0.3, b.AvgCpuTimeMs, precision: 6);
+    }
+
+    [Fact]
+    public async Task TopQueries_ModuleFilterRunsBeforeRankingAndReturnsModuleName()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 101, 1001, FirstExecA, 100, 20_000, 50_000, 1,
+            "0xHIGH", intervalId: 9301, intervalStart: BucketStart, moduleName: "dbo.usp_HighCost");
+        await SeedAsync(BucketStart.AddMinutes(6), 102, 1002, FirstExecB, 2, 100, 200, 1,
+            "0xTARGET", intervalId: 9302, intervalStart: BucketStart, moduleName: "dbo.usp_Target");
+
+        var rows = await new LocalDataService(_duckDb).GetQueryStoreTopQueriesAsync(
+            ServerId, hoursBack: 24, top: 1, moduleName: "dbo.usp_Target");
+
+        var row = Assert.Single(rows);
+        Assert.Equal(102L, row.QueryId);
+        Assert.Equal("dbo.usp_Target", row.ModuleName);
+    }
+
+    [Fact]
+    public async Task TopQueries_ModuleFilterRunsAfterIntervalDedup()
+    {
+        await SeedAsync(BucketStart.AddMinutes(5), 104, 1004, FirstExecA, 10, 100, 200, 1,
+            "0xRENAMED", intervalId: 9304, intervalStart: BucketStart, moduleName: "dbo.usp_OldName");
+        await SeedAsync(BucketStart.AddMinutes(10), 104, 1004, FirstExecA, 40, 200, 300, 1,
+            "0xRENAMED", intervalId: 9304, intervalStart: BucketStart, moduleName: "dbo.usp_NewName");
+
+        var service = new LocalDataService(_duckDb);
+        Assert.Empty(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_OldName"));
+        var current = Assert.Single(await service.GetQueryStoreTopQueriesAsync(ServerId, 24, moduleName: "dbo.usp_NewName"));
+        Assert.Equal(40L, current.TotalExecutions);
+        Assert.Equal("dbo.usp_NewName", current.ModuleName);
     }
 
     [Fact]

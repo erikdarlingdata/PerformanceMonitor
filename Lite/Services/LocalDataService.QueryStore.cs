@@ -160,7 +160,7 @@ ORDER BY bucket";
         return items;
     }
 
-    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+    public async Task<List<QueryStoreRow>> GetQueryStoreTopQueriesAsync(int serverId, int hoursBack = 24, int top = 50, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, string? moduleName = null)
     {
         using var _q = TimeQuery("GetQueryStoreTopQueriesAsync", "v_query_store_stats top N");
         using var connection = await OpenConnectionAsync();
@@ -168,6 +168,10 @@ ORDER BY bucket";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 5, out var dbValues);
+        var moduleParameterIndex = 5 + dbValues.Count;
+        var moduleClause = string.IsNullOrWhiteSpace(moduleName)
+            ? ""
+            : $" AND module_name = ${moduleParameterIndex}";
 
         command.CommandText = @"
 WITH deduped AS (
@@ -259,7 +263,7 @@ ranked AS (
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
-    WHERE rn = 1
+    WHERE rn = 1" + moduleClause + @"
     GROUP BY database_name, query_id, plan_id, query_hash, replica_role
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
     LIMIT $4 + 5
@@ -340,6 +344,8 @@ LIMIT $4";
         command.Parameters.Add(new DuckDBParameter { Value = top });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        if (!string.IsNullOrWhiteSpace(moduleName))
+            command.Parameters.Add(new DuckDBParameter { Value = moduleName });
 
         var items = new List<QueryStoreRow>();
         using var reader = await command.ExecuteReaderAsync();
