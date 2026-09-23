@@ -239,13 +239,20 @@ public sealed class LocalClockBucketKeyTests
         Assert.Contains("EXTRACT(HOUR FROM " + PgBaselineProvider.LocalCollectionTime + ")::INT AS hh", PgBaselineProvider.RobustTierScaffold, StringComparison.Ordinal);
         Assert.Contains("EXTRACT(DOW FROM " + PgBaselineProvider.LocalCollectionTime + ")::INT AS dw", PgBaselineProvider.RobustTierScaffold, StringComparison.Ordinal);
         Assert.Contains(PgBaselineProvider.LocalCollectionTime + "::DATE AS d", PgBaselineProvider.RobustTierScaffold, StringComparison.Ordinal);
+
+        /* #3901: the per-member wrapper adds no clock of its own — the scaffold inside it is the one above, verbatim,
+           and the wrapper's own text never names a clock parameter. */
+        var perMember = PgBaselineProvider.PerMemberScaffold("\n    SELECT collection_time, v FROM members");
+        Assert.Contains(PgBaselineProvider.RobustTierScaffold, perMember, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(perMember, Regex.Escape(PgBaselineProvider.LocalCollectionTime)).Count);
+        Assert.DoesNotMatch(new Regex(@"\$[1-7]\b"), PgBaselineProvider.PerMemberScaffoldHead + PgBaselineProvider.PerMemberScaffoldClose);
     }
 
     /// <summary>
     /// The enforcement the engines do not provide. Every statement <c>ComputeBucketsAsync</c> can run — the SQL
     /// Server arms, the legacy arms, every PostgreSQL-target arm the derived provider answers with, and (#3691 lane
-    /// 33) every KEYED arm — keys on the local-time expression: by ending in the one scaffold, or (the two
-    /// event-family arms) by extracting from it by hand. And no arm anywhere still extracts from bare
+    /// 33) every KEYED arm — keys on the local-time expression: by ending in the one scaffold (a keyed arm: the one
+    /// scaffold run per member, #3901), or (the two event-family arms) by extracting from it by hand. And no arm anywhere still extracts from bare
     /// <c>collection_time</c>, which would run without complaint and key on UTC.
     ///
     /// <para><b>Two-armed on the parameters, never loosened (the Q6 owner's rule for the seam).</b> Neither PostgreSQL
@@ -271,7 +278,11 @@ public sealed class LocalClockBucketKeyTests
 
         foreach (var (owner, metric, sql, keyed) in statements)
         {
-            var endsInScaffold = sql.EndsWith(PgBaselineProvider.RobustTierScaffold, StringComparison.Ordinal);
+            /* #3901: a keyed arm runs the same scaffold once per member, so it ends in the scaffold AND the per-member
+               close — never the scaffold alone (that would be one member's series served for the whole set). */
+            var endsInScaffold = sql.EndsWith(
+                keyed ? PgBaselineProvider.RobustTierScaffold + PgBaselineProvider.PerMemberScaffoldClose : PgBaselineProvider.RobustTierScaffold,
+                StringComparison.Ordinal);
             var extractsLocal = sql.Contains("EXTRACT(HOUR FROM " + PgBaselineProvider.LocalCollectionTime + ")", StringComparison.Ordinal)
                              && sql.Contains("EXTRACT(DOW FROM " + PgBaselineProvider.LocalCollectionTime + ")", StringComparison.Ordinal);
 
@@ -285,11 +296,16 @@ public sealed class LocalClockBucketKeyTests
                 $"{owner}[{metric}] is {(keyed ? "keyed" : "unkeyed")} and references ${string.Join(", $", referenced)} — expected exactly $1..${(keyed ? 7 : 6)}");
         }
 
-        /* The keyed arms' $7 is the member predicate on the arm's own column, cast from the text the base binds — never
-           a second clock parameter or a bound the base does not supply. */
+        /* The keyed arms' $7 is the member SET (#3901): the text[] the base binds, unnested with its positions for the
+           per-member scaffold and cast per slot to the arm's own column for its one read — never a second clock
+           parameter, a bound the base does not supply, or a scalar key that would mean one statement per member. */
         foreach (var (owner, metric, sql, _) in statements.Where(s => s.Keyed))
         {
-            Assert.Contains("queryid = $7::BIGINT", sql, StringComparison.Ordinal);
+            Assert.Contains("FROM unnest($7::TEXT[]) WITH ORDINALITY AS k(member_key, n)", sql, StringComparison.Ordinal);
+            Assert.Contains("queryid = ($7::BIGINT[])[1]", sql, StringComparison.Ordinal);
+            Assert.Contains("queryid = ($7::BIGINT[])[" + PgBaselineProvider.KeyedSetWidth + "]", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("= $7", sql, StringComparison.Ordinal);
+            Assert.Single(Regex.Matches(sql, Regex.Escape(PgBaselineProvider.PerMemberScaffoldHead)));
             Assert.Equal("PgTargetBaselineProvider.Keyed", owner);
             Assert.Null(PgBaselineProvider.GetBaselineQuery(metric));
         }
