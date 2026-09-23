@@ -3661,8 +3661,8 @@ const PG_WRITE_STATS = [
   { key: "wal_records", label: "WAL records", format: "int" },
   { key: "wal_fpi", label: "WAL full-page images", format: "int" },
   { key: "counter_reset", label: "Counters reset", format: "bool", small: true },
-  /* #3955: a restart inside the window is why Requested and % Requested render blank — a shutdown checkpoint
-     is counted as requested and survives the restart. */
+  /* #3955: a restart inside the window is why Requested, % Requested, Checkpoint write and Buffers (checkpoint)
+     render blank: the shutdown checkpoint is counted as requested and its own write work lands in the same counters. */
   { key: "postmaster_restarted", label: "Restarted in window", format: "bool", small: true },
 ];
 

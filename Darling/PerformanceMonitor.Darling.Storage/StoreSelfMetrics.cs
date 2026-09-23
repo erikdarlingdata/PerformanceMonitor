@@ -506,8 +506,9 @@ AND   m.toast_bytes IS NOT NULL";
     /// force, and the Store Checkpointer Pressure self-alert fired on each service restart. The row therefore
     /// also stores <c>pg_postmaster_start_time()</c> as naive UTC (<c>AT TIME ZONE 'UTC'</c>, never a bare cast,
     /// which renders in the session's zone), and the reader applies <see cref="PostmasterRestart"/>: across a
-    /// restart the interval's requested count is unknown, while the write and sync phases, which include the
-    /// shutdown checkpoint's own, are still stated.</para>
+    /// restart the interval states no delta at all, because the shutdown checkpoint is in the requested count and
+    /// its own write and sync phases are in the other two counters. That skips one hourly interval per restart; the
+    /// next interval is judged normally.</para>
     ///
     /// <para>Single-row view, so no join and no filter. $1 metric_time.</para>
     /// </summary>
