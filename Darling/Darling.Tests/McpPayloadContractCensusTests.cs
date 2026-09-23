@@ -397,7 +397,7 @@ public sealed class McpPayloadContractCensusTests
     /// assignment of <c>x</c> before it — <c>var x = …</c>, <c>x = …</c>, or the destructure <c>var (…, x) = …</c>
     /// — and the producer on its right-hand side must be one of <see cref="SharedPassThroughProducer"/>'s: a
     /// resolver, a <c>McpHelpers</c> validator, the watch-state validator, a gate probe, or the health-parser
-    /// helper that carries one of those. A <c>??</c> chain counts when its first operand does. A pass-through
+    /// helper that carries one of those. A <c>??</c> chain counts only when EVERY operand does (#3897: a shared first operand used to vouch for a hand-built second one). A pass-through
     /// of anything else is a refusal built by hand somewhere the census cannot see, and fails by name.</item>
     /// <item><b>Every <c>return</c> whose expression begins a string literal</b> (<c>"</c>, <c>$"</c>, <c>@"</c>)
     /// is a bare sentence and must be in <see cref="BareSentenceReturns"/> — exactly, both ways.</item>
@@ -440,9 +440,13 @@ public sealed class McpPayloadContractCensusTests
                     continue;
                 }
 
-                if (!SharedPassThroughProducer.IsMatch(producer))
+                /* Every operand of a `??` chain, not just the first (#3897): the chain passes through whichever
+                   operand answers, so a hand-built refusal behind a shared first operand is still hand-built —
+                   get_query_heatmap's bucket_minutes answered a bare sentence that way on both SKUs until #3897. */
+                var unsharedOperand = CoalesceOperands(producer).FirstOrDefault(o => !SharedPassThroughProducer.IsMatch(o));
+                if (unsharedOperand is not null)
                 {
-                    unshared.Add($"{file} {tool}: {guard.Groups[1].Value} = {producer}");
+                    unshared.Add($"{file} {tool}: {guard.Groups[1].Value} = {producer} (not shared: {unsharedOperand.Trim()})");
                     continue;
                 }
 
@@ -627,10 +631,13 @@ public sealed class McpPayloadContractCensusTests
 
                 var homemade = group_by == "x" ? null : "group_by must be x";
                 if (homemade != null) return homemade;
+
+                var mixed = McpHelpers.ValidateWindow(hours_back, as_of, out var anchor) ?? ValidateBucketMinutes(bucket_minutes);
+                if (mixed != null) return mixed;
             """;
         var code = CSharpSourceWalker.StripCommentsAndStrings(Body);
         var guards = GuardedPassThrough.Matches(code);
-        Assert.Equal(5, guards.Count);
+        Assert.Equal(6, guards.Count);
 
         Assert.Matches(SharedPassThroughProducer, LastAssignmentOf(code, "error", guards[0].Index)!);
         Assert.Contains("ValidateWindow", LastAssignmentOf(code, "validation", guards[1].Index)!, StringComparison.Ordinal);
@@ -639,11 +646,52 @@ public sealed class McpPayloadContractCensusTests
         var homemade = LastAssignmentOf(code, "homemade", guards[4].Index);
         Assert.NotNull(homemade);
         Assert.DoesNotMatch(SharedPassThroughProducer, homemade!);
+
+        /* The #3897 case: the whole chain matches the producer pattern on its shared first operand, and only the
+           operand walk sees that its second one is hand-built. */
+        var mixed = LastAssignmentOf(code, "mixed", guards[5].Index)!;
+        Assert.Matches(SharedPassThroughProducer, mixed);
+        var operands = CoalesceOperands(mixed);
+        Assert.Equal(2, operands.Count);
+        Assert.Matches(SharedPassThroughProducer, operands[0]);
+        Assert.DoesNotMatch(SharedPassThroughProducer, operands[1]);
+        Assert.All(CoalesceOperands(LastAssignmentOf(code, "chained", guards[3].Index)!), o => Assert.Matches(SharedPassThroughProducer, o));
     }
 
     /// <summary>The right-hand side of the LAST assignment to <paramref name="name"/> that precedes
     /// <paramref name="before"/> in <paramref name="code"/> (strings and comments blanked): a declaration, a
     /// re-assignment, or a tuple destructure naming it in any position. Null when none precedes it.</summary>
+    /// <summary>The operands of a <c>??</c> chain at parenthesis depth zero — the whole expression when it has
+    /// none. Read off code whose strings and comments are blanked, so a <c>??</c> inside a literal cannot split it;
+    /// a conditional's single <c>?</c> and a null-conditional <c>?.</c> are not the operator.</summary>
+    private static List<string> CoalesceOperands(string expression)
+    {
+        var operands = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var i = 0; i < expression.Length; i++)
+        {
+            var c = expression[i];
+            if (c is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or ']' or '}')
+            {
+                depth--;
+            }
+            else if (c == '?' && depth == 0 && i + 1 < expression.Length && expression[i + 1] == '?')
+            {
+                operands.Add(expression[start..i]);
+                start = i + 2;
+                i++;
+            }
+        }
+
+        operands.Add(expression[start..]);
+        return operands;
+    }
+
     private static string? LastAssignmentOf(string code, string name, int before)
     {
         var escaped = Regex.Escape(name);

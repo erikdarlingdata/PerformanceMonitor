@@ -477,14 +477,18 @@ public sealed class McpQueryTools
                 cell cap.
             */
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
-                ?? McpHelpers.ValidateTop(limit)
-                ?? ValidateBucketMinutes(bucket_minutes);
+                ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
+
+            /* The bin-width bound, refused rather than clamped, and built where the sentence is — Darling's
+               twin's rule (#3897: it was a bare sentence behind a `??` chain). */
+            if (bucket_minutes < 1 || bucket_minutes > LocalDataService.MaxHeatmapBucketMinutes)
+                return McpHelpers.Refusal("bucket_minutes", $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.");
 
             /* A metric we do not know is REFUSED, not quietly turned into duration: a caller who asked for
                CPU and silently got elapsed time would read the wrong grid with nothing to tell them so. */
             if (!LocalDataService.TryParseHeatmapMetric(metric, out var parsedMetric))
-                return InvalidHeatmapMetric(metric!);
+                return McpHelpers.Refusal("metric", $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.");
 
             /*
                 Over-fetch by one. Comparing the row count to the cap reports truncation for a server that
@@ -618,19 +622,6 @@ public sealed class McpQueryTools
             "empty",
             $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.");
     }
-
-    /// <summary>The bin-width bound. Refuses out of range rather than clamping, for the same reason the row
-    /// cap does: a silently rewritten bin width draws a different grid than the one that was asked for. Through
-    /// <see cref="McpHelpers.Refusal"/>, like every other <c>bucket_minutes</c> refusal (#3897): it answered a bare
-    /// sentence, with no <c>invalid</c> status and no <c>hints.parameter</c>, behind a <c>??</c> chain whose first
-    /// operand the refusal census accepts.</summary>
-    private static string? ValidateBucketMinutes(int bucket_minutes) =>
-        bucket_minutes >= 1 && bucket_minutes <= LocalDataService.MaxHeatmapBucketMinutes
-            ? null
-            : McpHelpers.Refusal("bucket_minutes", $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.");
-
-    private static string InvalidHeatmapMetric(string metric) =>
-        McpHelpers.Refusal("metric", $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.");
 
     [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). Lite has one tier - nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryDurationTrend(

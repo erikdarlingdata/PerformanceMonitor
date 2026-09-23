@@ -92,6 +92,14 @@ public sealed class TrendPayloadBudgetLiveTests
                 }
             }
 
+            /* The large-server shape the issue extrapolated to 30 MB: the last four hours also hold 300 tenant
+               databases' 600 files. 609 series are active and ranked, and the answer is still five lines and
+               the fold — the payload does not grow with the number of files. */
+            var crowded = JsonDocument.Parse(await DarlingMcpTrendTools.GetFileIoTrend(postgres, ServerName, 4)).RootElement;
+            Assert.Equal(609, crowded.GetProperty("series_active").GetInt32());
+            Assert.Equal(604, crowded.GetProperty("series_folded").GetInt32());
+            Assert.Equal(6, crowded.GetProperty("series").GetArrayLength());
+
             /* A day at the budget is a real series, not a degenerate one: 145 ten-minute points on one line. */
             var lockDay = JsonDocument.Parse(await DarlingMcpBlockingTools.GetLockWaitTrend(postgres, ServerName, 24)).RootElement;
             Assert.InRange(lockDay.GetProperty("trend").GetArrayLength(), 140, 145);
@@ -154,7 +162,8 @@ public sealed class TrendPayloadBudgetLiveTests
     /// A week of one-minute collections (the raw query-stats tier holds four days, so its three days): twelve
     /// files in five databases (nine (database, file type) series, so file I/O folds to six lines), twelve LCK
     /// types of which six ever wait, three cached queries, one pg_stat_io pair over two object types, and one
-    /// database's pg_stat_database — counters cumulative where the collector stores them cumulative.
+    /// database's pg_stat_database — counters cumulative where the collector stores them cumulative. And, over
+    /// the last four hours only, 300 tenant databases with a data and a log file each: the 600-file server.
     /// </summary>
     private static async Task SeedAsync(NpgsqlConnection connection, DateTime end, CancellationToken ct)
     {
@@ -185,6 +194,20 @@ CROSS JOIN (VALUES
     (10, 'tempdb', 'templog.ldf', 'LOG'),
     (11, 'msdb', 'MSDBData.mdf', 'ROWS')
 ) AS f(i, db, file, kind)", 1_000_000L, weekStart, WeekMinutes);
+
+        await PlantAsync(connection, ct, @"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name, database_name, file_name, file_type,
+     physical_name, size_mb, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
+     delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
+SELECT $1 + n * 1000 + d.i * 2 + k.j, $2 + n * interval '1 minute', $3, $4,
+       'TenantDb' || lpad(d.i::text, 3, '0'), 'TenantDb' || lpad(d.i::text, 3, '0') || k.suffix, k.kind,
+       '/var/opt/mssql/data/TenantDb' || lpad(d.i::text, 3, '0') || k.suffix, 2048,
+       20 + (n + d.i) % 30, 5 + n % 5, (20 + (n + d.i) % 30) * 8192, (5 + n % 5) * 8192,
+       (20 + (n + d.i) % 30) * (1 + d.i % 7), (5 + n % 5) * 2, 60
+FROM generate_series(0, $5) AS n
+CROSS JOIN generate_series(0, 299) AS d(i)
+CROSS JOIN (VALUES (0, '.mdf', 'ROWS'), (1, '_log.ldf', 'LOG')) AS k(j, suffix, kind)", 6_000_000L, end.AddHours(-4), 240);
 
         await PlantAsync(connection, ct, @"
 INSERT INTO wait_stats
