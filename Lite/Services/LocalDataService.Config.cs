@@ -217,6 +217,15 @@ ORDER BY database_name, configuration_name";
 
     /// <summary>
     /// Gets the latest trace flags snapshot.
+    ///
+    /// <para>#3999: anchored on the trace_flags collector's newest SUCCESSFUL run, not the newest row - the
+    /// Darling twin of this read (<c>DarlingCurrentConfigReader.TraceFlagsSql</c> /
+    /// <c>ViewerDataService.Config.TraceFlagsSql</c>) carries the same fix, and the reasoning there applies
+    /// verbatim: a capture that finds every flag off writes ZERO rows, so a plain
+    /// <c>capture_time = MAX(capture_time)</c> falls back to an older capture that still had a flag on. The
+    /// second <c>AND</c> compares the newest row's timestamp against the newest SUCCESS this collector
+    /// logged in <c>v_collection_log</c>; if that run is newer, it found nothing on, and the whole predicate
+    /// goes false so the read reports no flags rather than a stale one.</para>
     /// </summary>
     public async Task<List<TraceFlagRow>> GetLatestTraceFlagsAsync(int serverId)
     {
@@ -227,6 +236,10 @@ SELECT trace_flag, status, is_global, is_session, capture_time
 FROM v_trace_flags
 WHERE server_id = $1
 AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
+AND   (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1) >= COALESCE(
+          (SELECT MAX(collection_time) FROM v_collection_log
+           WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'),
+          TIMESTAMP '1900-01-01')
 ORDER BY trace_flag";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
