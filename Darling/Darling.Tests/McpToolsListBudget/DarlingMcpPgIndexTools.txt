@@ -1,5 +1,5 @@
 # DarlingMcpPgIndexTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_column_stats 1105
+tool get_pg_column_stats 566
 param get_pg_column_stats.as_of 167
 param get_pg_column_stats.hours_back 78
 param get_pg_column_stats.limit 35
