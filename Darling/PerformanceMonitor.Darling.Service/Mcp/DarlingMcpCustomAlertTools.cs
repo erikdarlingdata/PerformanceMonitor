@@ -148,7 +148,9 @@ public sealed class DarlingMcpCustomAlertTools
         "validate_custom_alert_rule); an invalid definition returns {status:\"invalid\", ...} and saves " +
         "nothing. On success returns the stored rule (id, version 1, and the definition). A name collision " +
         "returns {status:\"conflict\", ...}. The rule is stamped as MCP-authored. A rule created enabled starts " +
-        "being evaluated on the next sweep; pass enabled=false to stage it paused.")]
+        "being evaluated on the next sweep; pass enabled=false to stage it paused. With 100 rules already enabled " +
+        "fleet-wide, an enabled create is refused as {status:\"invalid\", ...}; paused rules do not count, so " +
+        "enabled=false still saves.")]
     public static async Task<string> CreateCustomAlertRule(
         NpgsqlDataSource postgres,
         [Description("The rule name - unique across all rules, max 200 characters.")] string name,
