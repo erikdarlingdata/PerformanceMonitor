@@ -858,10 +858,8 @@ public sealed class DarlingWorker : BackgroundService
        migration): each stage is done after a whole walk that rewrote nothing, and a restart walks again. */
     private readonly PgDeadlockRemask.RemaskProgress _pgDeadlockRemask = new();
 
-    /* #4012: the re-mask keys an alert whose report is gone under the store's log-hash key, so without one it
-       does not run; said once per process. */
-    private bool _pgDeadlockRemaskNoKeyWarned;
-
+    /* #4012: the re-mask keys an alert whose report is gone under the store's log-hash key. Null when the service
+       has none; every other stage runs without it (#4012's review, finding 1). */
     private PgLogHashKey? _pgDeadlockRemaskKey;
 
     /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
@@ -7003,36 +7001,28 @@ LIMIT 1";
                quietly on its cap and keeps each walk's cursor; a stage's own failures are counted and logged there. */
             if (!_pgDeadlockRemask.Done)
             {
-                if (_pgDeadlockRemaskKey is not { } logHashKey)
+                if (connection.State != ConnectionState.Open)
                 {
-                    if (!_pgDeadlockRemaskNoKeyWarned)
-                    {
-                        _pgDeadlockRemaskNoKeyWarned = true;
-                        _logger.LogWarning(
-                            "PostgreSQL deadlocks: deadlock reports, alerts and findings stored before this build are not re-masked, because this service has no log-hash key (#4004), and a deadlock alert whose report is gone is re-keyed with it. The service log's start-up error names the key file and why it could not be used.");
-                    }
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
                 }
-                else
-                {
-                    if (connection.State != ConnectionState.Open)
-                    {
-                        await connection.CloseAsync();
-                        await connection.OpenAsync(budget.Token);
-                    }
 
-                    using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
-                    remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
-                    try
-                    {
-                        await PgDeadlockRemask.RunAsync(connection, _pgDeadlockRemask, logHashKey, _logger, remaskBudget.Token);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException
-                        || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
-                    {
-                        _logger.LogWarning(
-                            "PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed, and is retried next hour: {Message}",
-                            ex.Message);
-                    }
+                /* #4012's review, finding 1: no key is no reason to skip the pass. The key file can be unusable for
+                   good (an untrusted directory or ACL, an unreadable file, DPAPI after the service moved machines),
+                   and the reports, alerts, findings and finding alerts need no key; only the alert-key stage waits
+                   for one, and RunAsync says so once. */
+                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
+                try
+                {
+                    await PgDeadlockRemask.RunAsync(connection, _pgDeadlockRemask, _pgDeadlockRemaskKey, _logger, remaskBudget.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                {
+                    _logger.LogWarning(
+                        "PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed, and is retried next hour: {Message}",
+                        ex.Message);
                 }
             }
 

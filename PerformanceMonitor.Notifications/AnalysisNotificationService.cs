@@ -930,21 +930,7 @@ internal static class FindingMessageFormatter
         {
             foreach (var (key, value) in finding.DrillDown)
             {
-                if (value is null)
-                    continue;
-
-                var item = new AlertDetailItem { Heading = Humanize(key) };
-                try
-                {
-                    FlattenInto(item, JsonSerializer.SerializeToElement(value));
-                }
-                catch
-                {
-                    /* Unexpected value shape — skip this drill-down entry, keep the rest. */
-                    continue;
-                }
-
-                if (item.Fields.Count > 0)
+                if (value is not null && DrillDownItem(key, value) is { } item)
                     context.Details.Add(item);
             }
         }
@@ -1099,6 +1085,31 @@ internal static class FindingMessageFormatter
     /// reader see what they saw — and the records are only populated when every kept element is an object,
     /// so a mixed or scalar array keeps the flat shape alone (a scalar has no record to be).</para>
     /// </summary>
+    /// <summary>
+    /// One drill-down section as a finding alert's detail item carries it: <see cref="DrillDownHeading"/> over the
+    /// section flattened by <see cref="FlattenInto"/>. Null when its shape is unexpected (the entry is skipped and the
+    /// rest kept) or it flattens to nothing. Shared with the Darling re-mask of finding alerts stored before #4005
+    /// (#4012's review), so a rewritten row holds exactly what this builds from the normalized section.
+    /// </summary>
+    internal static AlertDetailItem? DrillDownItem(string key, object value)
+    {
+        var item = new AlertDetailItem { Heading = DrillDownHeading(key) };
+        try
+        {
+            FlattenInto(item, JsonSerializer.SerializeToElement(value));
+        }
+        catch
+        {
+            /* Unexpected value shape — skip this drill-down entry, keep the rest. */
+            return null;
+        }
+
+        return item.Fields.Count > 0 ? item : null;
+    }
+
+    /// <summary>The heading a drill-down section's detail item carries: its key, humanized.</summary>
+    internal static string DrillDownHeading(string key) => Humanize(key);
+
     private static void FlattenInto(AlertDetailItem item, JsonElement element)
     {
         var fields = item.Fields;
