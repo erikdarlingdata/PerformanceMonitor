@@ -155,13 +155,13 @@ public sealed class DarlingMcpAgToolsSurfaceTests
         Assert.Contains("is_suspended", description, StringComparison.Ordinal);
         Assert.Contains("0 lag while data movement is suspended", description, StringComparison.Ordinal);
 
-        /* The instructions' AG paragraph is the other text an agent reads first; it carries the same two traps
-           in its own words, and the perspective trap (LOCAL-replica-only columns) it always had. */
-        var instructions = DarlingMcpInstructions.Text;
-        Assert.Contains("lag and queue depth are NOT banded", instructions, StringComparison.Ordinal);
-        Assert.Contains("the DMV reports lag as 0 (not null) while data movement is suspended", instructions, StringComparison.Ordinal);
-        Assert.Contains("keeps returning its last non-empty snapshot", instructions, StringComparison.Ordinal);
-        Assert.Contains("populated only for the LOCAL replica", instructions, StringComparison.Ordinal);
+        /* #3898 Phase 2 (D5): the instructions' per-tool AG paragraph is gone — the tool's own description is
+           now the ONLY surface, so the perspective trap (LOCAL-replica-only columns) moved onto it here rather
+           than staying duplicated. All four traps checked in one place. */
+        Assert.Contains("lag and queue depth are NOT banded", description, StringComparison.Ordinal);
+        Assert.Contains("the DMV reports 0 lag while data movement is suspended", description, StringComparison.Ordinal);
+        Assert.Contains("keeps returning its last non-empty snapshot", description, StringComparison.Ordinal);
+        Assert.Contains("populated only for the LOCAL replica", description, StringComparison.Ordinal);
     }
 }
 

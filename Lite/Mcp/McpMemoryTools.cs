@@ -176,7 +176,7 @@ Indicator scale (applies to both memory_indicators_process and memory_indicators
 memory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).
 memory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).
 
-Not available on Azure SQL DB (ring buffer not exposed). For actionable interpretation and suggested follow-up tools, see the 'Interpreting Memory Pressure Events' section of the server instructions.")]
+Not available on Azure SQL DB (ring buffer not exposed). Process pressure: check get_memory_grants and get_memory_clerks. System pressure with process normal: check get_server_properties (likely another process on the box, not SQL Server).")]
     public static async Task<string> GetMemoryPressureEvents(
         LocalDataService dataService,
         ServerManager serverManager,
