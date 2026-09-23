@@ -1,5 +1,5 @@
 # DarlingMcpFleetSweepTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_sweep_reports 2274
+tool get_sweep_reports 612
 param get_sweep_reports.as_of 167
 param get_sweep_reports.hours_back 80
 param get_sweep_reports.sweep_id 178
