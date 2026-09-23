@@ -12,7 +12,9 @@ using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
@@ -38,6 +40,23 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
         PgReadBinaryFileCapability.Reset();
         PgReadBinaryFileCapability.CacheTtl = TimeSpan.FromHours(1);
     }
+
+    /// <summary>A runtime keyed as <paramref name="storageName"/>. The cache helpers take the runtime, not a
+    /// key (#4051 round-2 review), so a test builds one.</summary>
+    internal static ServerRuntime Runtime(
+        string storageName,
+        CollectorTargetEngine engine = CollectorTargetEngine.PostgreSql,
+        string? connectedDatabase = null) => new()
+    {
+        Config = new MonitoredServer { Name = storageName, Host = "h" },
+        ConnectionString = "Host=h",
+        Target = new CollectorTargetInfo { Engine = engine },
+        StorageName = storageName,
+        ServerId = 1,
+        ConnectedDatabase = connectedDatabase,
+    };
+
+    private static PostgresException Pg(string sqlState) => new("boom", "ERROR", "ERROR", sqlState);
 
     /// <summary>
     /// A fake ADO.NET connection whose only load-bearing behavior is counting how many times a command
@@ -230,20 +249,21 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
             Deltas = new CollectorDeltaCalculator(),
         };
 
-        await PerformanceMonitor.Darling.Service.DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync(
-            context, engine, collectorName, connection, "gate-target", CancellationToken.None);
+        await DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync(
+            context, collectorName, connection, Runtime("gate-target", engine), CancellationToken.None);
 
         Assert.Equal(expectedGranted, context.PgReadBinaryFileGranted);
         Assert.Equal(expectedProbes, connection.ExecuteCount);
     }
 
     /// <summary>
-    /// #4051 review L4: the probe answers NULL for a database that is not UTF8, where the binary route would
-    /// decode the database's own non-ASCII text wrongly. That target stays on the text route, the advisory reads
-    /// it as nothing to advise, and the NULL is cached like any verdict, so it costs no extra round trip.
+    /// #4051 review L4: the probe answers NULL for a database that is neither UTF8 nor SQL_ASCII, where the binary
+    /// route would decode the database's own non-ASCII text wrongly. That target stays on the text route, the
+    /// advisory reads it as nothing to advise, and the NULL is cached like any verdict, so it costs no extra round
+    /// trip. The cache also reports it as an encoding the byte route does not serve (#4051 round-2 review, L-1).
     /// </summary>
     [Fact]
-    public async Task ANonUtf8DatabaseStaysOnTheTextRouteAndIsNotAdvised()
+    public async Task ADatabaseTheByteRouteDoesNotServeStaysOnTheTextRouteAndIsNotAdvised()
     {
         var connection = new FakeScalarConnection { Scalar = DBNull.Value };
 
@@ -251,14 +271,32 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
         Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "latin1-target", CancellationToken.None));
         Assert.Equal(1, connection.ExecuteCount);
         Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("latin1-target", out _));
+        Assert.True(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("latin1-target"));
     }
 
-    /// <summary>The probe asks the database's encoding first, and only a UTF8 database gets a grant answer.</summary>
+    /// <summary>Only a NULL verdict reads as an encoding the byte route does not serve. A granted target, an
+    /// ungranted one, and one that was never checked all read false.</summary>
     [Fact]
-    public void TheProbeGatesTheGrantAnswerOnAUtf8Database()
+    public async Task OnlyANullVerdictReadsAsAnUnsupportedEncoding()
+    {
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = true }, "granted", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = false }, "ungranted", default);
+
+        Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("granted"));
+        Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("ungranted"));
+        Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("never-checked"));
+    }
+
+    /// <summary>
+    /// The probe asks the database's encoding first, and a UTF8 or a SQL_ASCII database gets a grant answer
+    /// (#4051 round-2 review, M-1). PostgreSQL checks SQL_ASCII text as UTF-8 on its way to a UTF8 client, so
+    /// the text route there meets the same planted-byte failure, and the byte route is the fix there too.
+    /// </summary>
+    [Fact]
+    public void TheProbeAnswersTheGrantOnUtf8AndSqlAsciiDatabasesOnly()
     {
         Assert.Contains(
-            "current_setting('server_encoding') = 'UTF8'", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
+            "current_setting('server_encoding') IN ('UTF8', 'SQL_ASCII')", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
         Assert.Contains(
             "'pg_catalog.pg_read_binary_file(text, bigint, bigint)'", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
     }
@@ -296,9 +334,72 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
         var connection = new FakeScalarConnection { Scalar = cachedGranted };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "stale-target", CancellationToken.None);
 
-        PerformanceMonitor.Darling.Service.DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(
-            collectorName, sqlState, "stale-target");
+        Exception fault = sqlState is null ? new InvalidOperationException("not a server fault") : Pg(sqlState);
+        DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, fault, Runtime("stale-target"));
 
         Assert.Equal(!expectForgotten, PgReadBinaryFileCapability.TryGetCachedVerdict("stale-target", out _));
+    }
+
+    /// <summary>
+    /// #4051 round-2 review: two 22021s that leave the cached verdict alone. One is proven to come from a write
+    /// to the STORE, so it says nothing about the target's log. The other is on a database whose encoding the
+    /// byte route does not serve, where a re-check would only find the same NULL.
+    /// </summary>
+    [Fact]
+    public async Task A22021FromTheStoreOrOnAnUnservedEncodingKeepsTheVerdict()
+    {
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = false }, "store-target", default);
+        var storeWrite = Pg("22021");
+        CollectorFaultCopyPhase.Stamp(storeWrite, StoreCopyPhase.Data);
+
+        DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict("pg_log_events", storeWrite, Runtime("store-target"));
+
+        Assert.True(PgReadBinaryFileCapability.TryGetCachedVerdict("store-target", out _));
+
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = DBNull.Value }, "euc-target", default);
+
+        DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict("pg_log_events", Pg("22021"), Runtime("euc-target"));
+
+        Assert.True(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("euc-target"));
+    }
+
+    /// <summary>
+    /// #4051 round-2 review: the general handler's one call for a log-tail fault. It builds the sentence before
+    /// it drops the verdict, because the sentence depends on that verdict.
+    /// <list type="bullet">
+    /// <item>On a UTF8 or SQL_ASCII database, a planted byte gets the grant sentence, and the cached verdict is
+    /// dropped, so a grant made in answer takes effect on the next cycle.</item>
+    /// <item>On an encoding the byte route does not serve, the sentence says the grant does not help and names
+    /// #4062, and the verdict stays.</item>
+    /// <item>Any other fault, or any other collector, gets null and changes nothing.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public async Task TheGeneralHandlersLogTailCallPicksTheSentenceThenDropsOnlyAStaleVerdict()
+    {
+        var planted = new PostgresException("invalid byte sequence for encoding UTF8: 0xff", "ERROR", "ERROR", "22021");
+
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = false }, "utf8-target", default);
+        var grant = DarlingWorker.LogTailGeneralFault(planted, "pg_deadlocks", Runtime("utf8-target", connectedDatabase: "appdb"));
+
+        Assert.NotNull(grant);
+        Assert.Contains("EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", grant, StringComparison.Ordinal);
+        Assert.Contains("database 'appdb'", grant, StringComparison.Ordinal);
+        Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("utf8-target", out _));
+
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = DBNull.Value }, "euc-target", default);
+        var noRemedy = DarlingWorker.LogTailGeneralFault(planted, "pg_deadlocks", Runtime("euc-target"));
+
+        Assert.NotNull(noRemedy);
+        Assert.Contains("does not help", noRemedy, StringComparison.Ordinal);
+        Assert.Contains("#4062", noRemedy, StringComparison.Ordinal);
+        Assert.DoesNotContain("Grant EXECUTE", noRemedy, StringComparison.Ordinal);
+        Assert.True(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("euc-target"));
+
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = true }, "other-target", default);
+
+        Assert.Null(DarlingWorker.LogTailGeneralFault(new InvalidOperationException("not a server fault"), "pg_deadlocks", Runtime("other-target")));
+        Assert.Null(DarlingWorker.LogTailGeneralFault(planted, "pg_database_stats", Runtime("other-target")));
+        Assert.True(PgReadBinaryFileCapability.TryGetCachedVerdict("other-target", out _));
     }
 }

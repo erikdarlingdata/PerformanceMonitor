@@ -35,12 +35,17 @@ namespace PerformanceMonitor.Collectors;
 /// and <see cref="PgServerLogTail.TailCteBinarySql"/> call the function with, so the answer is exact for
 /// the overload actually used.</para>
 ///
-/// <para><b>UTF8 databases only.</b> The binary route decodes the log as UTF-8, which is right when the database
-/// the collector connects to is UTF8 and wrong otherwise: a LATIN1 database's own non-ASCII text would come
-/// back as U+FFFD. LATIN1 also accepts every byte but NUL as valid text, so its text route never meets the
-/// 22021 this check exists for. <see cref="ProbeSql"/> therefore
-/// answers NULL for a database that is not UTF8. <see cref="IsGrantedAsync"/> reads that as "stay on the text
-/// route", and <see cref="TryGetCachedVerdict"/> as "nothing to advise".</para>
+/// <para><b>UTF8 and SQL_ASCII databases only.</b> The binary route decodes the log as UTF-8. That is right when
+/// the database the collector connects to is UTF8. It is right for SQL_ASCII too (#4051 round-2 review, M-1):
+/// PostgreSQL does not convert SQL_ASCII text for a UTF8 client, but it still checks the text as UTF-8 on the way
+/// out, so the text route meets the same 22021 there, and any text it does return is already valid UTF-8. For
+/// any other encoding, UTF-8 decoding is wrong: a LATIN1 database's own non-ASCII text would come back as
+/// U+FFFD. <see cref="ProbeSql"/> therefore answers NULL for any other encoding. <see cref="IsGrantedAsync"/>
+/// reads that as "stay on the text route", <see cref="TryGetCachedVerdict"/> as "nothing to advise", and
+/// <see cref="IsCachedAsUnsupportedEncoding"/> lets a fault message say that the grant does not help. LATIN1's
+/// text route never meets the 22021, because it accepts every byte but NUL and converts every byte to UTF-8.
+/// EUC encodings and WIN1252 can still be blinded on the text route; #4062 tracks decoding in the database's
+/// own encoding.</para>
 ///
 /// <para><b>The cache, not the connect-time <see cref="CollectorTargetInfo"/> facts.</b> Facts like
 /// <c>HasPgWaitSamplingExtension</c> are probed once when a target's <see cref="ServerRuntime"/> attaches
@@ -57,17 +62,17 @@ public static class PgReadBinaryFileCapability
     /// The exact argument types <see cref="PgServerLogTail.TailCteBinarySql"/> calls
     /// <c>pg_read_binary_file</c> with, so the privilege check answers for the overload actually used
     /// rather than for the function name alone (PostgreSQL grants are per-overload). NULL when the database is
-    /// not UTF8, which the binary route never serves (see the type's remarks). The CASE is safe here, unlike
+    /// neither UTF8 nor SQL_ASCII, which the binary route never serves (see the type's remarks). The CASE is safe here, unlike
     /// around the read itself: <c>has_function_privilege</c> is callable by any role.
     /// </summary>
     public const string ProbeSql =
-        "SELECT CASE WHEN pg_catalog.current_setting('server_encoding') = 'UTF8' "
+        "SELECT CASE WHEN pg_catalog.current_setting('server_encoding') IN ('UTF8', 'SQL_ASCII') "
         + "THEN pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_read_binary_file(text, bigint, bigint)', 'EXECUTE') END";
 
     /// <summary>Cache TTL — a target's verdict is re-checked after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
-    /* Granted is null when the database is not UTF8: the binary route does not apply there at all. */
+    /* Granted is null when the database is neither UTF8 nor SQL_ASCII: the binary route does not apply there. */
     private sealed record CacheEntry(bool? Granted, DateTime CheckedAtUtc);
 
     /* Process-wide and static, like PgBaselineProvider's cache: "reset on restart" is then simply what a
@@ -122,8 +127,8 @@ public static class PgReadBinaryFileCapability
     /// this for calls it before <c>BuildQuery</c>), so a second probe would be redundant. Returns false with
     /// <paramref name="granted"/> unset when nothing is cached — which is also the honest answer for a target
     /// this capability was never checked for, e.g. a managed target that reaches its log through the RDS API
-    /// and never calls <see cref="IsGrantedAsync"/> at all. It also returns false for a database that is not
-    /// UTF8, where the grant would change nothing.
+    /// and never calls <see cref="IsGrantedAsync"/> at all. It also returns false for a database that is neither
+    /// UTF8 nor SQL_ASCII, where the grant would change nothing.
     /// </summary>
     public static bool TryGetCachedVerdict(string targetKey, out bool granted)
     {
@@ -137,5 +142,18 @@ public static class PgReadBinaryFileCapability
 
         granted = false;
         return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="targetKey"/>'s cached check found a database encoding that the binary route
+    /// does not serve (neither UTF8 nor SQL_ASCII). A grant cannot change that, so a fault message says so
+    /// instead of recommending the grant, and a planted-byte fault leaves this entry in place rather than
+    /// dropping it for a re-check that would give the same answer. Like <see cref="TryGetCachedVerdict"/>, it
+    /// takes no round trip and does not refresh an expired entry.
+    /// </summary>
+    public static bool IsCachedAsUnsupportedEncoding(string targetKey)
+    {
+        ArgumentNullException.ThrowIfNull(targetKey);
+        return s_cache.TryGetValue(targetKey, out var cached) && cached.Granted is null;
     }
 }

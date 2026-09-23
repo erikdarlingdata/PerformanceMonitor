@@ -34,6 +34,11 @@ public class PostgresFaultOutcomeTests
     /* A collector that does NOT opt into the lock-timeout yield, so 55P03 stays an error for it. */
     private const string PlainCollector = "pg_wait_stats";
 
+    /* The runtime the planted-byte sentence reads. Its storage name is never cached by any test, so the
+       sentence takes its UTF8 branch here whatever the statics collection is doing in parallel. */
+    private static readonly ServerRuntime FaultRuntime =
+        PgReadBinaryFileCapabilityTests.Runtime("fault-outcome-tests", connectedDatabase: "appdb");
+
     /* The 42P01 the companion arm is written for, spelled once because #3830's pins assert whole
        sentences and the message is the first clause of every one of them. */
     private const string CompanionMissingMessage = "relation \"public.pg_stat_statements_info\" does not exist";
@@ -210,7 +215,7 @@ public class PostgresFaultOutcomeTests
     public void ALogReader22021NamesThePlantedByteAndTheBinaryGrant(string collectorName)
     {
         var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
-            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, "appdb");
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, FaultRuntime);
 
         Assert.NotNull(explanation);
         Assert.Contains("22021", explanation, StringComparison.Ordinal);
@@ -222,19 +227,37 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
+    /// #4051 round-2 review, L-1: a 22P05 is a WIN1252 byte with no UTF-8 equivalent, on a database the byte route
+    /// does not serve. The sentence says that the grant does not help there, and it names #4062.
+    /// </summary>
+    [Fact]
+    public void ALogReader22P05SaysTheGrantDoesNotHelp()
+    {
+        var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22P05", "character with byte sequence 0x81 in encoding WIN1252 has no equivalent in encoding UTF8"),
+            "pg_log_events", FaultRuntime);
+
+        Assert.NotNull(explanation);
+        Assert.Contains("22P05", explanation, StringComparison.Ordinal);
+        Assert.Contains("does not help", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4062", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Grant EXECUTE", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The sentence must not widen: a 22021 on a collector that is not one of the three log-tail readers, any
     /// other SQLSTATE on one that is, and a fault that is not a PostgresException all keep the general
     /// handler's own message.
     /// </summary>
     [Fact]
-    public void TheUndecodableByteSentenceIsForALogReaders22021Only()
+    public void TheUndecodableByteSentenceIsForALogReadersPlantedByteFaultsOnly()
     {
         Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
-            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector, "appdb"));
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector, FaultRuntime));
         Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
-            Pg("58P01", "could not open file"), "pg_log_events", "appdb"));
+            Pg("58P01", "could not open file"), "pg_log_events", FaultRuntime));
         Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
-            new InvalidOperationException("not a server fault"), "pg_log_events", "appdb"));
+            new InvalidOperationException("not a server fault"), "pg_log_events", FaultRuntime));
     }
 
     /// <summary>
@@ -247,7 +270,7 @@ public class PostgresFaultOutcomeTests
         var fault = Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0x00");
         CollectorFaultCopyPhase.Stamp(fault, StoreCopyPhase.Data);
 
-        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(fault, "pg_log_events", "appdb"));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(fault, "pg_log_events", FaultRuntime));
     }
 
     /// <summary>
@@ -1083,8 +1106,9 @@ public class PostgresFaultOutcomeTests
         var worker = ReadSource(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        /* Exactly two fault arms name a database, and both read it through the helper. */
-        Assert.Equal(2, Regex.Matches(
+        /* Three call sites name a database, and all three read it through the helper: the two fault arms, and
+           the planted-byte sentence that the general arm records for a log-tail read (#4046, #4051). */
+        Assert.Equal(3, Regex.Matches(
             worker, @"CollectorFaultDatabase\.For\(ex, runtime\.ConnectedDatabase\)").Count);
 
         /* And neither passes the runtime's field straight into a fault message. These are the two

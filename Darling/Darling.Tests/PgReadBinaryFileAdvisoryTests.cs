@@ -80,7 +80,7 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
         var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = true };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", default);
 
-        var result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), "target-a");
+        var result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), PgReadBinaryFileCapabilityTests.Runtime("target-a"));
 
         Assert.Null(result.HostNote);
     }
@@ -93,11 +93,11 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
         var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = false };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", default);
 
-        var first = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), "target-a");
+        var first = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), PgReadBinaryFileCapabilityTests.Runtime("target-a"));
         Assert.Contains("pg_read_binary_file", first.HostNote, StringComparison.Ordinal);
         Assert.Contains("#4046", first.HostNote, StringComparison.Ordinal);
 
-        var second = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), "target-a");
+        var second = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), PgReadBinaryFileCapabilityTests.Runtime("target-a"));
         Assert.Null(second.HostNote);
     }
 
@@ -106,7 +106,7 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
     [Fact]
     public void ANeverCheckedTargetNeverNotes()
     {
-        var result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), "managed-target");
+        var result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), PgReadBinaryFileCapabilityTests.Runtime("managed-target"));
 
         Assert.Null(result.HostNote);
     }

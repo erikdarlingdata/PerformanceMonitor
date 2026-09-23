@@ -110,9 +110,12 @@ login can plant with nothing but a bad role or database name — fails the WHOLE
 byte sits in the window, blinding all three collectors at once. `pg_read_binary_file()` returns `bytea`,
 which carries no such check, and the three collectors switch to it on their own once it is granted, with no
 restart and no config change: on the next cycle after a read that failed on such a byte, otherwise within an
-hour. That applies to a database whose encoding is UTF8. In any other encoding the collectors stay on
-`pg_read_file()`, which suits that encoding's own text; LATIN1, for one, accepts every byte but NUL, so the
-planted byte never fails its read.
+hour. That applies to a database whose encoding is UTF8 or SQL_ASCII. PostgreSQL checks SQL_ASCII text as
+UTF-8 on its way to the collector, so a SQL_ASCII database meets the same failure and gets the same fix. In any
+other encoding, the collectors stay on `pg_read_file()`, because the binary route decodes the log as UTF-8.
+LATIN1 accepts every byte except NUL, so a planted byte never fails its read. The EUC encodings and WIN1252 can
+still fail it, and the grant does not help there. The fault message says so, and
+[#4062](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4062) tracks a fix.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
 identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from

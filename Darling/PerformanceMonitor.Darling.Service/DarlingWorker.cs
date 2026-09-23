@@ -9088,12 +9088,32 @@ LIMIT 1";
         }
     }
     /// <summary>
-    /// #4046 part 1c: the sentence for a log-tail read whose text the server refused to decode (22021), or null
-    /// for any other fault. <c>pg_read_file()</c> returns text, which PostgreSQL validates against the database
-    /// encoding before this process sees a byte. A failed login can plant one byte that is not valid UTF-8
-    /// (0xFF) in the FATAL message's unescaped %u/%d echo, under any log_line_prefix, and that byte fails the
-    /// WHOLE tail read for as long as it sits inside the window. Every reader sharing PgServerLogTail's tail CTE
-    /// goes blind, not just the one that read this cycle.
+    /// #4046 part 1c: the general handler's one call for a fault on a log-tail read (#4051 round-2 review). It
+    /// returns <see cref="LogTailUndecodableByteExplanation"/>'s sentence, or null, and it drops a stale
+    /// pg_read_binary_file verdict through <see cref="DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict"/>.
+    /// The sentence is built first, because it reads the verdict that the second step can drop. Nothing here
+    /// allocates on the way to null for a fault that is not a <see cref="PostgresException"/>, because the general
+    /// handler is also the OutOfMemoryException landing pad.
+    /// </summary>
+    internal static string? LogTailGeneralFault(Exception ex, string collectorName, ServerRuntime runtime)
+    {
+        var explanation = LogTailUndecodableByteExplanation(ex, collectorName, runtime);
+        DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+        return explanation;
+    }
+
+    /// <summary>
+    /// #4046 part 1c: the sentence for a log-tail read that PostgreSQL refused because of one byte, or null for
+    /// any other fault. <c>pg_read_file()</c> returns text, which PostgreSQL checks before this process sees a
+    /// byte. A failed login can plant a bad byte in the FATAL message's unescaped %u/%d echo, under any
+    /// log_line_prefix, and that byte fails the WHOLE tail read for as long as it sits inside the window. Every
+    /// reader sharing PgServerLogTail's tail CTE goes blind, not just the one that read this cycle.
+    ///
+    /// <para><b>Two sentences.</b> On a UTF8 or SQL_ASCII database the fault is a 22021, and the sentence names
+    /// the pg_read_binary_file grant that moves the reader to the byte route. On any other encoding the byte
+    /// route does not apply (<see cref="PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding"/>), and the
+    /// fault is a 22021 (EUC encodings) or a 22P05 (a WIN1252 byte with no UTF-8 equivalent). There the sentence
+    /// says that the grant does not help and names #4062 (#4051 round-2 review, L-1).</para>
     ///
     /// <para><b>ERROR, not PERMISSIONS (#4051 review M1).</b> The general handler records this under ERROR with
     /// the sentence as its message, rather than PostgresFaultOutcome giving it a PERMISSIONS arm. Anyone who can
@@ -9105,24 +9125,36 @@ LIMIT 1";
     /// raises is not about the target's log. The checks run cheapest first and allocate nothing on the way to
     /// null, because the general handler is also the OutOfMemoryException landing pad.</para>
     /// </summary>
-    internal static string? LogTailUndecodableByteExplanation(Exception ex, string collectorName, string? connectedDatabaseFallback)
+    internal static string? LogTailUndecodableByteExplanation(Exception ex, string collectorName, ServerRuntime runtime)
     {
-        if (ex is not PostgresException { SqlState: "22021" } pg
+        if (ex is not PostgresException { SqlState: "22021" or "22P05" } pg
             || !ReadsServerLogWithPgReadFile(collectorName)
             || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
         {
             return null;
         }
 
-        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}) — the log tail this cycle read contains a byte "
-            + "that is not valid UTF-8. pg_read_file() returns text and PostgreSQL rejects it before "
-            + "this collector sees a row, even though only one byte, anywhere in the 4 MB window, is "
-            + "bad; a client can plant one with nothing but a failed login, since a role or database "
-            + "name it supplies lands unescaped in the FATAL message (#4046). Grant "
-            + "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint) "
-            + WhereToGrantIt(CollectorFaultDatabase.For(ex, connectedDatabaseFallback))
-            + " From the next cycle this collector reads the same bytes as bytea instead, which carries no "
-            + "encoding check — an invalid byte renders as U+FFFD rather than blinding the read.";
+        const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "
+            + "database name that the client sends lands unescaped in the FATAL message (#4046).";
+
+        if (pg.SqlState == "22P05" || PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(runtime.StorageName))
+        {
+            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte "
+                + "that this database's encoding cannot pass to this collector, so PostgreSQL refused the whole read."
+                + Planted
+                + " Granting pg_read_binary_file does not help on this database. The binary route decodes the log as "
+                + "UTF-8, so it serves only UTF8 and SQL_ASCII databases. The read fails until the line with the byte "
+                + "leaves the 4 MB tail window. #4062 tracks reading the log in the database's own encoding.";
+        }
+
+        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte that "
+            + "is not valid UTF-8, so PostgreSQL refused the whole read. pg_read_file() returns text, and PostgreSQL "
+            + "checks text before this collector sees a row, even when only one byte in the 4 MB window is bad."
+            + Planted
+            + " Grant EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint) to the monitoring role "
+            + WhereToGrantIt(CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase))
+            + " From the next cycle, this collector reads the same bytes as bytea, which PostgreSQL does not check. "
+            + "An invalid byte then shows as U+FFFD instead of stopping the read.";
     }
 
     /// <summary>
@@ -9549,7 +9581,7 @@ LIMIT 1";
                nothing for them. */
             if (string.Equals(collectorName, "pg_log_events", StringComparison.Ordinal))
             {
-                result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(result, runtime.StorageName);
+                result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(result, runtime);
             }
 
             /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
@@ -9887,7 +9919,7 @@ LIMIT 1";
 
             /* #4051 review L1: a 42501 while the binary route is in use means that grant is gone, so the
                cached verdict must not outlive it by up to an hour. */
-            DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex.SqlState, runtime.StorageName);
+            DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
 
             if (status == "YIELDED")
             {
@@ -10020,16 +10052,12 @@ LIMIT 1";
                because this arm is also the OutOfMemoryException landing pad. */
             var message = CollectorFaultCopyPhase.Describe(ex);
 
-            /* #4046 part 1c: a 22021 on a log-tail read keeps ERROR, with the planted-byte sentence. */
-            message = LogTailUndecodableByteExplanation(ex, collectorName, runtime.ConnectedDatabase) ?? message;
+            /* #4046 part 1c: a planted byte on a log-tail read keeps ERROR, with its own sentence, and drops a
+               stale pg_read_binary_file verdict so a grant made in answer takes effect next cycle. */
+            message = LogTailGeneralFault(ex, collectorName, runtime) ?? message;
 
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
                 server.Config.DisplayName, collectorName, message);
-
-            /* #4051 review L1: after a 22021 the next cycle re-checks the grant, so one made in answer to the
-               sentence above takes effect then rather than up to an hour later. */
-            DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(
-                collectorName, (ex as PostgresException)?.SqlState, runtime.StorageName);
 
             /* A dead connection poisons every collector — force a reconnect + reprobe. The Postgres arm
                matters as much as the SQL Server one and is deliberately NARROWER than "any
