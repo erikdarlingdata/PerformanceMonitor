@@ -63,7 +63,7 @@ public sealed class DarlingMcpHealthParserTools
     /// </summary>
     private const string SystemHealthCollectorName = "system_health_events";
 
-    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health extended event data: overall health indicators captured by sp_HealthParser. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_system_health"), Description("Gets parsed system_health health indicators (the sp_server_diagnostics component results) over an event_time window ending at as_of, newest first. Ungated: every parsed event is returned. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets parsed system_health extended event data: overall health indicators captured by sp_HealthParser. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSystemHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -116,7 +116,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_system_health", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health: stack dumps, non-yielding schedulers, and other critical SQL Server events. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_severe_errors"), Description("Gets severe errors from system_health over an event_time window ending at as_of, newest first. Gated: severity 19 or higher only, benign connection-reset error numbers excluded, so a lower-severity error is never listed. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets severe errors from system_health: stack dumps, non-yielding schedulers, and other critical SQL Server events. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSevereErrors(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -174,7 +174,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_severe_errors", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O-related issues from system_health: 15-second I/O warnings, long I/O requests, and stalled I/O subsystems. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_io_issues"), Description("Gets I/O issues from system_health (IO_SUBSYSTEM component results) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets I/O-related issues from system_health: 15-second I/O warnings, long I/O requests, and stalled I/O subsystems. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetIOIssues(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -217,7 +217,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_io_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler issues from system_health: non-yielding schedulers, deadlocked schedulers, and scheduler monitor events. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler issues from system_health (non-yielding schedulers, scheduler-monitor warnings) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets scheduler issues from system_health: non-yielding schedulers, deadlocked schedulers, and scheduler monitor events. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSchedulerIssues(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -261,7 +261,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_scheduler_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_conditions"), Description("Gets memory condition events from system_health: low memory notifications, memory broker adjustments, and memory pressure indicators. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_memory_conditions"), Description("Gets memory-condition snapshots from system_health over an event_time window ending at as_of, newest first. Gated: only snapshots whose last notification is RESOURCE_MEMPHYSICAL_LOW. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets memory condition events from system_health: low memory notifications, memory broker adjustments, and memory pressure indicators. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryConditions(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -328,7 +328,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_conditions", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_cpu_tasks"), Description("Gets CPU task events from system_health: long-running CPU-bound tasks, high CPU worker threads, and process utilization snapshots. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_cpu_tasks"), Description("Gets CPU task results from system_health (QUERY_PROCESSING component) over an event_time window ending at as_of, newest first. Gated: WARNING-state results with at least 10 pending tasks only. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets CPU task events from system_health: long-running CPU-bound tasks, high CPU worker threads, and process utilization snapshots. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetCPUTasks(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -374,7 +374,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_cpu_tasks", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker events from system_health: cache shrink/grow notifications, memory clerk adjustments, and broker-mediated memory redistribution. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_memory_broker"), Description("Gets memory broker notifications from system_health over an event_time window ending at as_of, newest first. Gated: RESOURCE_MEMPHYSICAL_LOW notifications only. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets memory broker events from system_health: cache shrink/grow notifications, memory clerk adjustments, and broker-mediated memory redistribution. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryBroker(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -422,7 +422,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_broker", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_memory_node_oom"), Description("Gets memory-node out-of-memory events from system_health over an event_time window ending at as_of, newest first. Ungated: every recorded OOM is returned. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets memory node OOM events from system_health: out-of-memory conditions on specific NUMA nodes. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetMemoryNodeOOM(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -487,7 +487,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) { return McpHelpers.FormatError("get_health_parser_memory_node_oom", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background — the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. Every answer carries source_observed (whether this server's system_health session has EVER been read into the store) and last_captured_at (the collector's newest capture): an empty window on a server whose session was never read is status unavailable, not a clean bill; an empty window on one that has been read says whether the category was captured and gated out, captured before this window, or never recorded by the engine.")]
+    [McpServerTool(Name = "get_health_parser_significant_waits"), Description("Gets individual waits from system_health, one row per wait_info event with the waiting statement's SQL text, over an event_time window ending at as_of, newest first. Floors: a real session, a non-BACKUP statement, at least 500 ms, and a wait type off the idle/background list; shorter waits are never listed. get_wait_stats has the instance-wide totals. An empty answer is not a clean bill: read status, source_observed and last_captured_at. <<GUIDE>> Gets significant individual waits from system_health: one row per wait_info event where a real session's non-BACKUP statement waited at least 500 ms on a wait type that is not idle/background — the wait type, total and signal duration, the wait resource, the session id and the waiting statement. get_wait_stats gives the instance-wide totals and can never name the statement that paid them; this is the individual waits, with their SQL text. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSignificantWaits(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,

@@ -398,8 +398,9 @@ public sealed class McpZeroIsAMeasurementTests
 
     /// <summary>The string literal of a tool body's <c>Description("…")</c> attribute; the PVS tools spell it
     /// on its own line after the attribute's opening, so the match is anchored on the closing <c>")]</c>.</summary>
+    /// <remarks>#3898 D3: the served head, as <see cref="DescriptionOf"/>: pvs_measured is a guardrail.</remarks>
     private static string ToolDescription(string body) =>
-        Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""\)\]", RegexOptions.Singleline).Groups[1].Value;
+        McpToolGuide.Split(Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""\)\]", RegexOptions.Singleline).Groups[1].Value).Head;
 
     [Fact]
     public void ThePvsReason_IsNullOnlyWhenTheShareIsDefined_IncludingADefinedZero()
@@ -517,14 +518,17 @@ public sealed class McpZeroIsAMeasurementTests
         return next < 0 ? source[start..] : source[start..next];
     }
 
-    /// <summary>The Description literal of one tool, whichever side of a line break it sits on (Lite's
-    /// get_pvs_stats opens its string on the next line).</summary>
+    /// <summary>The SERVED head of one tool's Description literal, whichever side of a line break it sits on
+    /// (Lite's get_pvs_stats opens its string on the next line). #3898 D3 re-pointed this deliberately from the
+    /// whole literal to the head: every fact these pins hold (the source witness, unrated_points, the regression
+    /// percent's null) is a zero-is-a-measurement guardrail, so it must reach tools/list, not only get_tool_guide.
+    /// For an unconverted tool the head is the whole literal, as before.</summary>
     private static string DescriptionOf(string source, string toolName)
     {
         var body = ToolBody(source, toolName);
         var match = Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
         Assert.True(match.Success, $"{toolName} has no Description literal");
-        return match.Groups[1].Value;
+        return McpToolGuide.Split(match.Groups[1].Value).Head;
     }
 
     private static string Strip(string source) =>

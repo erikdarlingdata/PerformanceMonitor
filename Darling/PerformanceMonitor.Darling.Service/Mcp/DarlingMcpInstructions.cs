@@ -63,7 +63,7 @@ internal static class DarlingMcpInstructions
 
         ## Tools
 
-        This server exposes 158 tools. 87 are the same names Performance Monitor Lite exposes. The remaining 71 are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning and server-onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.
+        This server exposes 159 tools. 88 are the same names Performance Monitor Lite exposes. The remaining 71 are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning and server-onboarding tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` — Availability Groups — `get_sweep_reports`, `get_store_metrics`, `get_store_log`). `get_blocking` = Lite's `get_blocked_process_reports`.
 
         ### Reading an empty result
 
