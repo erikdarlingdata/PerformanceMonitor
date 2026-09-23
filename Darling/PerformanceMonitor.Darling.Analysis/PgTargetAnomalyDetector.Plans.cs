@@ -129,8 +129,8 @@ FROM per_collection";
     ///
     /// <para><b>The keyed arm.</b> For each candidate — the flip set, bounded to
     /// <c>PgTargetFactCollector.TopStatementCount</c> by execution time — the statement's window peak and mean
-    /// per-call cost are graded against ITS OWN hour-of-week bucket through the keyed
-    /// <c>GetBaselineAsync(serverId, pg_statement_mean_ms, key: queryid, …)</c>. Lane 34's shape, file for file: the
+    /// per-call cost are graded against ITS OWN hour-of-week bucket, every candidate's read in one keyed
+    /// <c>GetBaselinesAsync(serverId, pg_statement_mean_ms, keys: the queryids, …)</c> (#3901). Lane 34's shape, file for file: the
     /// trust check PRECEDES the gate (an untrustworthy own-normal is recorded as <c>own_normal_&lt;queryid&gt; = 0</c>
     /// and never graded, so no statement is silently handed the server's grade), the absolute-fallback bar is
     /// <c>double.PositiveInfinity</c> — unreachable by construction on this arm — and the #3653 pair gate asks the
@@ -218,6 +218,12 @@ FROM per_collection";
                 }
             }
 
+            /* #3901: the flip set's own-normals in ONE keyed read (an empty set reads nothing) — asking per candidate
+               re-read the 30-day slice of pg_statement_stats once per statement. */
+            var keys = candidates.ConvertAll(candidate => candidate.QueryId.ToString(CultureInfo.InvariantCulture));
+            var keyedBaselines = await _baselineProvider.GetBaselinesAsync(
+                context.ServerId, MetricNames.PgStatementMeanMs, keys, context.TimeRangeStart, context.CancellationToken);
+
             var verdicts = new Dictionary<string, double>(StringComparer.Ordinal);
             var withoutBaseline = 0;
             var trustworthy = 0;
@@ -227,8 +233,7 @@ FROM per_collection";
             foreach (var candidate in candidates)
             {
                 var key = candidate.QueryId.ToString(CultureInfo.InvariantCulture);
-                var keyed = await _baselineProvider.GetBaselineAsync(
-                    context.ServerId, MetricNames.PgStatementMeanMs, key, context.TimeRangeStart, context.CancellationToken);
+                var keyed = keyedBaselines[key];
 
                 /* No trustworthy own-normal for this statement: recorded, never graded (lane 34's rule) — the
                    server-wide series is not a stand-in for one statement's history, it is the fallback for a server

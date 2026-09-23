@@ -93,6 +93,11 @@ public sealed class ViewerFleetRollupSqlTests
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
         Assert.Equal(2, CountOccurrences(sql, "event_time >= $1"));   // one per blocking source
         Assert.Equal(2, CountOccurrences(sql, "event_time <= $2"));
+        /* #3895: and each event-table scan carries the partition-column floor the event window cannot supply
+           (two blocking sources + the deadlock count), with no upper bound on it — a late collection is still
+           an event in the window. */
+        Assert.Equal(3, CountOccurrences(sql, "collection_time >= $3"));
+        Assert.DoesNotContain("collection_time <= $3", sql, StringComparison.Ordinal);
     }
 
     [Fact]

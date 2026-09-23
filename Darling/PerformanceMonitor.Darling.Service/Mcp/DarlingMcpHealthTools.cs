@@ -29,18 +29,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// into the SHARED composite health band (<c>DailyHealthBandCalculator</c>), so an agent gets the same
 /// Healthy / Warning / Critical verdict the Performance Calendar shows.
 ///
-/// <para><b>Why the range is a SIBLING rather than a wider get_daily_summary.</b> Four reasons, and the first
-/// two are mechanical. (1) The response SHAPE is the contract: get_daily_summary returns a flat object of
-/// scalars, which is what a stat tile consumes and what its own description promises; a range returns rows. A
-/// single tool that returned either depending on whether a span argument arrived would make every consumer
-/// branch on a parameter it may not have sent, and the web stat panel would simply stop rendering. (2) The web
-/// server page must not fetch one read twice — there is a pin for it — and the Overview tab already reads
-/// get_daily_summary for today's band, so the month grid beside it CANNOT be the same read. (3) They are
-/// different questions with different defaults: "how was Tuesday" versus "which of the last thirty days were
-/// bad", the second of which is a screening read whose answer is the shape of the month rather than one day's
-/// numbers. (4) get_daily_summary is a shipped name on both SKUs; changing its payload shape would break
-/// callers for no gain. The two share the ONE aggregate underneath (<c>DailySummarySql.RangeSql</c>), which is
-/// what stops them ever disagreeing about a day.</para>
+/// <para><b>Why the range is a SIBLING rather than a wider get_daily_summary.</b> Three reasons, and the first
+/// is mechanical. (1) The response SHAPE is the contract: get_daily_summary returns a flat object of scalars,
+/// which is what a stat tile consumes and what its own description promises; a range returns rows. A single
+/// tool that returned either depending on whether a span argument arrived would make every consumer branch on
+/// a parameter it may not have sent. (2) They are different questions with different defaults: "how was
+/// Tuesday" versus "which of the last thirty days were bad", the second of which is a screening read whose
+/// answer is the shape of the month rather than one day's numbers. (3) get_daily_summary is a shipped name on
+/// both SKUs; changing its payload shape would break callers for no gain. The two share the ONE aggregate
+/// underneath (<c>DailySummarySql.RangeSql</c>), which is what stops them ever disagreeing about a day. The web
+/// server page used to fetch both, the tile beside the month grid; since #3905 it draws the tile from the
+/// range's anchor-day row, one fetch for two panels, which changes neither tool.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpHealthTools

@@ -27,7 +27,7 @@
  * never clobbered by a background refresh.
  */
 
-import { el, mount, apiGet, readTool } from "./util.js";
+import { el, mount, apiGetFleet, readTool } from "./util.js";
 import { renderPanel, VIZ } from "./panels.js";
 import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
@@ -109,7 +109,7 @@ export async function renderEditor(main, id) {
    dropdown reads only value/label, so the extra fields are inert there. Exported so the notebook composer — which
    greys the same way — shares this one enrichment. */
 export async function loadFleetOptions() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
   return [...(res.data.cards || [])]
     .map((c) => ({
@@ -129,7 +129,7 @@ export async function loadFleetOptions() {
    <select> render the hierarchy with indentation. Cycle- and dangling-parent-safe, the same projection the
    fleet page groups with. Empty when no tags are defined. */
 export async function loadFleetTagOptions() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data" || !res.data) return [];
   const forest = Array.isArray(res.data.tags) ? res.data.tags : [];
   const known = new Set(forest.map((t) => t.id));

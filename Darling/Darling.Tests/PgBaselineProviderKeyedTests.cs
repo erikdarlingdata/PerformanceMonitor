@@ -26,12 +26,14 @@ namespace Darling.Tests;
 /// The per-KEY baseline seam (#3691 lane 33): <c>PgBaselineProvider.GetBaselineAsync</c> gains a five-argument
 /// overload keying a series on (server, metric, key), resolved through the third seam
 /// <c>ResolveKeyedBaselineQuery</c> and bound as <c>$7</c> after the Q6 clock parameters; the PostgreSQL provider
-/// declares two keyed arms for the statement family. Nothing consumes the seam yet — these pins and the two-armed
-/// census in <c>LocalClockBucketKeyTests</c> are its only callers — so what is pinned here is the CONTRACT lane 34
-/// and lane 27's follow-up will build on: the unkeyed overload byte-identical, two keys two caches, the seventh bind
-/// only on a keyed compute, the SQL Server store declaring no keyed metric, the two arms' shapes, and the cardinality
-/// note's arithmetic. The live class below drives the real provider over planted <c>pg_statement_stats</c> for two
-/// statements with different shares and reads two distinct buckets.
+/// declares two keyed arms for the statement family, consumed by lane 34's share detector and lane 39's keyed plan
+/// regression. Since #3901 a keyed compute is a member SET (<c>GetBaselinesAsync</c>; the five-argument overload is a
+/// set of one): <c>$7</c> is a <c>text[]</c>, each arm reads its table once for the set and runs the one scaffold per
+/// member. What is pinned here is the CONTRACT: the unkeyed overload byte-identical, two keys two caches, the seventh
+/// bind only on a keyed compute, the SQL Server store declaring no keyed metric, the two arms' shapes, and the
+/// cardinality note's arithmetic. The live class below drives the real provider over planted
+/// <c>pg_statement_stats</c> for two statements with different shares and reads two distinct buckets;
+/// <c>PgStatementKeyedSetLiveTests</c> holds the set to the per-statement arms it replaced.
 /// </summary>
 public sealed class PgBaselineProviderKeyedTests
 {
@@ -87,6 +89,9 @@ public sealed class PgBaselineProviderKeyedTests
 
         var code = CSharpSourceWalker.StripCommentsAndStrings(ProviderSource);
         Assert.Contains("var cacheKey = CacheKeyFor(serverId, metricName, key);", code, StringComparison.Ordinal);
+        Assert.Contains("var cacheKey = CacheKeyFor(serverId, metricName, key: null);", code, StringComparison.Ordinal);
+        /* #3901: a set's misses are cached one entry per key, under the same identity a single-key compute uses. */
+        Assert.Contains("_cache[CacheKeyFor(serverId, metricName, key)] = entry;", code, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── (2) the seam and the bind ───────────────────────── */
@@ -114,32 +119,39 @@ public sealed class PgBaselineProviderKeyedTests
         Assert.Null(PgBaselineProvider.GetBaselineQuery(MetricNames.PgStatementShare));
 
         var code = CSharpSourceWalker.StripCommentsAndStrings(ProviderSource);
-        Assert.Contains("var query = key is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);", code, StringComparison.Ordinal);
+        Assert.Contains("var query = keys is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);", code, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The seventh parameter is bound after the sixth, only when a key was passed, and exactly once — so an unkeyed
+    /// The seventh parameter is bound after the sixth, only when keys were passed, and exactly once — so an unkeyed
     /// compute binds precisely what it bound before the seam (the SQL Server pass is byte-identical at the wire),
-    /// and a keyed compute binds the key as the text the arms cast. The successor/legacy supply swap is skipped on a
-    /// keyed compute: it compares against the unkeyed successor text and could never match.
+    /// and a keyed compute binds its keys as the <c>text[]</c> the arms cast (#3901: the whole member set in one
+    /// statement). The successor/legacy supply swap is skipped on a keyed compute: it compares against the unkeyed
+    /// successor text and could never match.
     /// </summary>
     [Fact]
     public void TheBind_AddsTheSeventhParameterOnlyOnAKeyedCompute_AfterTheThreeClockParameters()
     {
+        const string seventhBind = "cmd.Parameters.AddWithValue(keys.ToArray());";
         var code = CSharpSourceWalker.StripCommentsAndStrings(ProviderSource);
         var sixth = code.IndexOf("cmd.Parameters.AddWithValue(clock.OffsetAfterMinutes);", StringComparison.Ordinal);
-        var seventh = code.IndexOf("cmd.Parameters.AddWithValue(key);", StringComparison.Ordinal);
-        Assert.True(sixth > 0 && seventh > sixth, "the key must be bound AFTER $6");
-        Assert.Single(Regex.Matches(code, Regex.Escape("cmd.Parameters.AddWithValue(key);")));
+        var seventh = code.IndexOf(seventhBind, StringComparison.Ordinal);
+        Assert.True(sixth > 0 && seventh > sixth, "the keys must be bound AFTER $6");
+        Assert.Single(Regex.Matches(code, Regex.Escape(seventhBind)));
+        /* The per-key bind is gone: a scalar $7 would be one statement per member again. */
+        Assert.DoesNotContain("cmd.Parameters.AddWithValue(key);", code, StringComparison.Ordinal);
 
         var between = code[(sixth + "cmd.Parameters.AddWithValue(clock.OffsetAfterMinutes);".Length)..seventh];
-        Assert.Contains("if (key is not null)", between, StringComparison.Ordinal);
+        Assert.Contains("if (keys is not null)", between, StringComparison.Ordinal);
         Assert.DoesNotContain("AddWithValue", between, StringComparison.Ordinal);
 
-        Assert.Contains("if (key is null)", code, StringComparison.Ordinal);
+        Assert.Contains("if (keys is null)", code, StringComparison.Ordinal);
         var swap = code.IndexOf("query = await ChooseSupplyAsync(", StringComparison.Ordinal);
-        var guard = code.LastIndexOf("if (key is null)", swap, StringComparison.Ordinal);
-        Assert.True(guard > 0 && swap - guard < 120, "ChooseSupplyAsync must sit under the key-is-null guard");
+        var guard = code.LastIndexOf("if (keys is null)", swap, StringComparison.Ordinal);
+        Assert.True(guard > 0 && swap - guard < 120, "ChooseSupplyAsync must sit under the keys-is-null guard");
+
+        /* The rows come back filed by member, read by NAME so the eight robust ordinals stay the reader's contract. */
+        Assert.Contains("var memberOrdinal = keys is null ? -1 : reader.GetOrdinal(\"member\");", ProviderSource, StringComparison.Ordinal);
 
         /* One classified catch still — the keyed compute degrades through the same one (AnalysisShutdownResidueTests
            pins the count too; stated here so the seam's own file says it). */
@@ -174,49 +186,93 @@ public sealed class PgBaselineProviderKeyedTests
 
     /// <summary>
     /// Both arms: the unkeyed contract (clean CTE, the one scaffold, half-open window on <c>$1..$3</c>, stored deltas,
-    /// no bare clock) plus the member predicate cast from the text bind. The share's numerator is a FILTER over the
-    /// same rows as its denominator and a collection this statement sat out is a ZERO sample; the mean's idle
-    /// collection is no sample at all — the two rules the arm docs give.
+    /// no bare clock) plus the member SET (#3901): <c>$7</c> unnested with its positions, the table read ONCE for the
+    /// whole set by the per-statement arm's own <c>GROUP BY collection_time</c> with one <c>FILTER</c> per member slot,
+    /// and each member's <c>clean</c> handed to the one scaffold through <c>PerMemberScaffold</c> — the read that fails
+    /// here on the old per-statement shape (a scalar <c>$7::BIGINT</c> and one statement per member) and on the
+    /// grouped-by-statement set shape measured slower at scale. The share's numerator is its own rows' sum beside the
+    /// collection's total, and a collection this statement sat out is a ZERO sample; the mean's idle collection is no
+    /// sample at all — the two rules the arm docs give.
     /// </summary>
     [Fact]
-    public void TheTwoKeyedArms_CarryTheUnkeyedContractPlusTheMemberPredicate()
+    public void TheTwoKeyedArms_CarryTheUnkeyedContractPlusTheMemberSet_AndReadTheirTableOnce()
     {
+        Assert.Equal(8, PgBaselineProvider.KeyedSetWidth);
+        var tail = PgBaselineProvider.RobustTierScaffold + PgBaselineProvider.PerMemberScaffoldClose;
+        static string Slot(int i) => $"queryid = ($7::BIGINT[])[{i}]";
         foreach (var metric in new[] { MetricNames.PgStatementShare, MetricNames.PgStatementMeanMs })
         {
             var sql = PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(metric)!;
-            Assert.EndsWith(PgBaselineProvider.RobustTierScaffold, sql, StringComparison.Ordinal);
-            var own = sql[..^PgBaselineProvider.RobustTierScaffold.Length];
-            Assert.Contains("clean AS (", own, StringComparison.Ordinal);
+            Assert.EndsWith(tail, sql, StringComparison.Ordinal);
+            Assert.Single(Regex.Matches(sql, Regex.Escape(PgBaselineProvider.PerMemberScaffoldHead)));
+            var head = sql.IndexOf(PgBaselineProvider.PerMemberScaffoldHead, StringComparison.Ordinal);
+            var own = sql[..head];
+            var clean = sql[(head + PgBaselineProvider.PerMemberScaffoldHead.Length)..^tail.Length];
+
+            /* ONE read of the table per compute, whatever the member count — the whole point of #3901 — and it is the
+               per-statement arm's read: grouped by collection alone, so it keeps the parallel streaming aggregate. */
+            Assert.Single(Regex.Matches(sql, @"\bFROM\s+pg_statement_stats\b"));
             Assert.Contains("FROM pg_statement_stats", own, StringComparison.Ordinal);
             Assert.Contains("server_id = $1 AND collection_time >= $2 AND collection_time < $3", own, StringComparison.Ordinal);
-            Assert.Contains("queryid = $7::BIGINT", own, StringComparison.Ordinal);
+            Assert.Single(Regex.Matches(own, @"GROUP BY collection_time\r?\n"));
+            Assert.DoesNotMatch(new Regex(@"GROUP BY [^\r\n]*queryid"), own);
+            Assert.Contains("FROM unnest($7::TEXT[]) WITH ORDINALITY AS k(member_key, n)", own, StringComparison.Ordinal);
+
+            /* One member predicate per slot, exactly as many slots as the provider packs keys into, cast from the array —
+               no scalar key anywhere. */
+            for (var i = 1; i <= PgBaselineProvider.KeyedSetWidth; i++)
+                Assert.Contains("FILTER (WHERE " + Slot(i) + ")", own, StringComparison.Ordinal);
+            Assert.DoesNotContain(Slot(PgBaselineProvider.KeyedSetWidth + 1), sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("$7::BIGINT)", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("= $7", sql, StringComparison.Ordinal);
+
             Assert.Contains("delta_total_exec_time_ms", own, StringComparison.Ordinal);
-            Assert.Contains("GROUP BY collection_time", own, StringComparison.Ordinal);
             Assert.Contains("DOUBLE PRECISION", own, StringComparison.Ordinal);
-            Assert.DoesNotContain("EXTRACT", own, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("now(", own, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("CURRENT_TIMESTAMP", own, StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("LAG(", own, StringComparison.OrdinalIgnoreCase);   /* stored deltas, never re-differenced */
-            Assert.DoesNotMatch(new Regex(@"\bFROM\s+v_"), own);
-            Assert.Single(Regex.Matches(own, Regex.Escape("$7")));
+            /* The member reads its OWN slot of what the arm read once, and nothing but that. */
+            Assert.Contains("[mem.member]", clean, StringComparison.Ordinal);
+            Assert.Contains("FROM per_collection", clean, StringComparison.Ordinal);
+            Assert.DoesNotContain("pg_statement_stats", clean, StringComparison.Ordinal);
+            foreach (var part in new[] { own, clean })
+            {
+                Assert.DoesNotContain("EXTRACT", part, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("now(", part, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("CURRENT_TIMESTAMP", part, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("LAG(", part, StringComparison.OrdinalIgnoreCase);   /* stored deltas, never re-differenced */
+                Assert.DoesNotMatch(new Regex(@"\bFROM\s+v_"), part);
+            }
         }
 
+        /* The share: the per-statement arm's numerator per slot, its denominator and busy-collection rule once. */
         var share = PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(MetricNames.PgStatementShare)!;
-        Assert.Contains("CAST(SUM(delta_total_exec_time_ms) FILTER (WHERE queryid = $7::BIGINT) AS DOUBLE PRECISION) AS stmt_ms", share, StringComparison.Ordinal);
         Assert.Contains("SUM(delta_total_exec_time_ms)::DOUBLE PRECISION AS total_ms", share, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(delta_total_exec_time_ms) FILTER (WHERE " + Slot(1) + ") AS DOUBLE PRECISION)", share, StringComparison.Ordinal);
+        Assert.Contains("] AS stmt_ms", share, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(delta_total_exec_time_ms) > 0", share, StringComparison.Ordinal);
-        Assert.Contains("coalesce(stmt_ms, 0) / total_ms AS v", share, StringComparison.Ordinal);
+        Assert.Contains("coalesce(stmt_ms[mem.member], 0) / total_ms AS v", share, StringComparison.Ordinal);
+        Assert.DoesNotContain("WHERE", share[share.IndexOf(PgBaselineProvider.PerMemberScaffoldHead, StringComparison.Ordinal)..share.IndexOf(PgBaselineProvider.RobustTierScaffold, StringComparison.Ordinal)], StringComparison.Ordinal);
         Assert.DoesNotContain("delta_calls", share, StringComparison.Ordinal);
+        Assert.DoesNotContain("ANY(", share, StringComparison.Ordinal);   /* the total needs every statement's rows */
 
+        /* The mean: lane 27's per-call quantity and no-calls rule, per slot. The slot expression IS the server-wide arm's
+           expression with the member's FILTER on both sums; the rule rides beside it as the member's calls sum. */
         var mean = PgTargetBaselineProvider.GetPgTargetKeyedBaselineQuery(MetricNames.PgStatementMeanMs)!;
-        Assert.Contains("SUM(delta_total_exec_time_ms)::DOUBLE PRECISION / SUM(delta_calls) AS mean_ms", mean, StringComparison.Ordinal);
-        Assert.Contains("AND   queryid = $7::BIGINT", mean, StringComparison.Ordinal);
-        Assert.Contains("HAVING SUM(delta_calls) > 0", mean, StringComparison.Ordinal);
-        /* Lane 27's arm and the keyed one agree on the per-call quantity — same numerator, same denominator, same
-           no-calls rule — and differ ONLY by the member predicate. */
         var serverWide = PgTargetBaselineProvider.GetPgTargetBaselineQuery(MetricNames.PgStatementMeanMs)!;
-        static string Lf(string text) => text.Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Equal(Lf(serverWide), Lf(mean).Replace("\n    AND   queryid = $7::BIGINT", "", StringComparison.Ordinal));
+        const string perCall = "SUM(delta_total_exec_time_ms)::DOUBLE PRECISION / SUM(delta_calls)";
+        Assert.Contains(perCall + " AS mean_ms", serverWide, StringComparison.Ordinal);
+        Assert.Contains("HAVING SUM(delta_calls) > 0", serverWide, StringComparison.Ordinal);
+        for (var i = 1; i <= PgBaselineProvider.KeyedSetWidth; i++)
+        {
+            var filter = " FILTER (WHERE " + Slot(i) + ")";
+            var keyedPerCall = perCall
+                .Replace("SUM(delta_total_exec_time_ms)::DOUBLE PRECISION", "CAST(SUM(delta_total_exec_time_ms)" + filter + " AS DOUBLE PRECISION)", StringComparison.Ordinal)
+                .Replace("SUM(delta_calls)", "SUM(delta_calls)" + filter, StringComparison.Ordinal);
+            Assert.Contains("CASE WHEN SUM(delta_calls)" + filter + " > 0 THEN " + keyedPerCall + " END", mean, StringComparison.Ordinal);
+        }
+        Assert.Contains("] AS mean_ms", mean, StringComparison.Ordinal);
+        Assert.Contains("] AS calls", mean, StringComparison.Ordinal);
+        Assert.Contains("AND   queryid = ANY($7::BIGINT[])", mean, StringComparison.Ordinal);
+        Assert.Contains("WHERE calls[mem.member] > 0", mean, StringComparison.Ordinal);
+        Assert.Contains("SELECT collection_time, mean_ms[mem.member] AS v", mean, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── (4) the cardinality note ───────────────────────── */
@@ -242,12 +298,23 @@ public sealed class PgBaselineProviderKeyedTests
         var above = source[..bar];
         var lines = above.Split('\n');
         Assert.Contains(lines.TakeLast(7), line => line.Contains("Chosen, not measured", StringComparison.Ordinal) || line.Contains("calibrate against", StringComparison.Ordinal));
-        var code = CSharpSourceWalker.StripCommentsAndStrings(source);
+        var code = CSharpSourceWalker.StripCommentsAndStrings(source).Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("_logger?.LogWarning(", code, StringComparison.Ordinal);
-        var stored = code.IndexOf("_cache[cacheKey] = entry;", StringComparison.Ordinal);
-        var noted = code.IndexOf("NoteKeyedCardinality(serverId, metricName);", StringComparison.Ordinal);
-        Assert.True(stored > 0 && noted > stored && noted - stored < 200, "the note is raised right after the keyed entry is stored");
-        Assert.Contains("if (key is not null)", code[stored..noted], StringComparison.Ordinal);
+        /* #3901: raised once per keyed compute, right after the set's entries are stored, inside the keyed path — and
+           never on the unkeyed one. */
+        Assert.Single(Regex.Matches(code, Regex.Escape("NoteKeyedCardinality(serverId, metricName);")));
+        var keyedStart = code.IndexOf("Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(", StringComparison.Ordinal);
+        var keyedEnd = code.IndexOf("\n    private ", keyedStart, StringComparison.Ordinal);
+        Assert.True(keyedStart > 0 && keyedEnd > keyedStart, "the keyed cache path moved");
+        var keyedPath = code[keyedStart..keyedEnd];
+        var stored = keyedPath.IndexOf("_cache[CacheKeyFor(serverId, metricName, key)] = entry;", StringComparison.Ordinal);
+        var noted = keyedPath.IndexOf("NoteKeyedCardinality(serverId, metricName);", StringComparison.Ordinal);
+        Assert.True(stored > 0 && noted > stored && noted - stored < 200, "the note is raised right after the keyed entries are stored");
+
+        var unkeyedStart = code.IndexOf("Task<CachedBaseline> GetOrComputeBaselinesAsync(", StringComparison.Ordinal);
+        var unkeyedPath = code[unkeyedStart..code.IndexOf("\n    private ", unkeyedStart, StringComparison.Ordinal)];
+        Assert.Contains("_cache[cacheKey] = entry;", unkeyedPath, StringComparison.Ordinal);
+        Assert.DoesNotContain("NoteKeyedCardinality(", unkeyedPath, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── helpers ───────────────────────── */

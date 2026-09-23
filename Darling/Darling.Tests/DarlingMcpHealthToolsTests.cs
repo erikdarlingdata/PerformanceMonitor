@@ -77,9 +77,9 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
     [InlineData("get_server_summary", "server_name")]
     [InlineData("get_daily_summary", "server_name,summary_date")]
     /* The range read is a SIBLING rather than a wider get_daily_summary: the single-day tool returns a flat
-       object of scalars and this returns rows, and the Overview tab reads both, which it could not do if they
-       were one read (no tab may fetch a read twice). Its span is in DAYS, so it carries the day-grained
-       anchor description rather than the hours one. */
+       object of scalars and this returns rows. (The Overview tab reads only this one since #3905, drawing
+       today's tile from its anchor-day row.) Its span is in DAYS, so it carries the day-grained anchor
+       description rather than the hours one. */
     [InlineData("get_daily_summary_range", "server_name,days_back,as_of")]
     public void ParamContract_MatchesContract(string toolName, string expectedCsv)
     {
@@ -112,6 +112,10 @@ public sealed class DarlingMcpHealthToolsSurfaceAndSqlTests
 
         Assert.Contains("FROM v_deadlocks", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time >= $2", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
+
+        /* #3895: every windowed count carries the partition-column floor the event window cannot supply. */
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(Reader.ServerSummaryBlockingSql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
+        Assert.Contains("deadlock_time >= $2 AND collection_time >= $3", Reader.ServerSummaryDeadlockSql, StringComparison.Ordinal);
 
         Assert.Contains("MAX(collection_time)", Reader.ServerSummaryLastCollectionSql, StringComparison.Ordinal);
     }

@@ -207,6 +207,11 @@ public class CrossAppGuardCiGateTests
             "WHOLE-TREE READ. The third key of that same bounded set (#3538 A5: its lineage census collects "
             + "the // run above each GetWaitThresholds entry), same sweep, same reason.",
 
+        [$"{LiteTestsDir}/CrossSkuSurfaceSourceTests.cs"] =
+            "LINKED COMPILE (#3938). Darling.Tests.csproj compiles this Lite.Tests file so its cross-SKU "
+            + "source-scan pins run on a Mac; an edit to it changes the Darling suite, and a Lite.Tests-only "
+            + "change is exactly the case darling-tree-guards runs the whole suite for.",
+
         [$"{LiteTestsDir} (directory)"] =
             "WHOLE-TREE READ, and the one #3076 made visible. ControlPlaneReloadDurabilityTests' "
             + "NeitherFixHasALiteTwinToDriftFrom sweeps { \"Lite\", \"Lite.Tests\", "
@@ -1231,10 +1236,9 @@ public class CrossAppGuardCiGateTests
                 /* #3059's linked compile, and the reference #3063 exists for. */
                 Named: (string?)$"{DarlingTestsDir}/CSharpSourceWalker.cs"),
             (Project: DarlingTestsDir, Other: LiteTrees, Manifest: $"{DarlingTestsDir}/Darling.Tests.csproj",
-                /* Darling.Tests' project names no file under Lite or Lite.Tests, so there is nothing to
-                   require by name here and a fabricated expectation would be worse than none. Its own arm
-                   of the #3067 floor in Check is taken over the C# population instead. */
-                Named: null),
+                /* #3938's linked compile, the mirror image of the one above: Darling.Tests compiles the
+                   cross-SKU source-scan pins out of Lite.Tests so they run on a Mac. */
+                Named: (string?)$"{LiteTestsDir}/CrossSkuSurfaceSourceTests.cs"),
         };
 
         foreach (var (project, other, manifest, named) in expectations)

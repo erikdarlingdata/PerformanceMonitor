@@ -35,7 +35,8 @@ namespace Darling.Tests;
 ///
 /// <para><b>Division of labour with the Lite side.</b> The cross-SKU censuses — both tools carry the block,
 /// identical field sets, the shared description documents it — live in <c>Lite.Tests</c>'
-/// <c>ServiceBuildSurfaceTests</c>, beside the #3013 parity family whose whole-tree discovery they reuse.
+/// <c>CrossSkuSurfaceSourceTests</c>, beside the #3013 parity family whose whole-tree discovery they reuse,
+/// and this project compiles that file through a linked <c>Compile</c> item (#3938).
 /// This file pins what only Darling can pin: its own surface's spellings, and the behaviour of the reads
 /// those spellings name.</para>
 /// </summary>

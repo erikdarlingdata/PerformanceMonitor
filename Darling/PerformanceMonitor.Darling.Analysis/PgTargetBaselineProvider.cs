@@ -15,8 +15,9 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <summary>
 /// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with THREE things swapped —
 /// which SQL computes a metric's hour×day-of-week buckets, where the target's clock is read from (#3691,
-/// <c>PgTargetBaselineProvider.Clock.cs</c>), and which SQL computes a metric's buckets for ONE member of a
-/// population when the caller passes a key (#3691 lane 33, <c>PgTargetBaselineProvider.Statements.cs</c>).
+/// <c>PgTargetBaselineProvider.Clock.cs</c>), and which SQL computes a metric's buckets for the MEMBERS of a
+/// population the caller passes keys for — one read for the whole set since #3901 (#3691 lane 33,
+/// <c>PgTargetBaselineProvider.Statements.cs</c>).
 /// Everything else is inherited by construction rather than copied:
 /// the bucket cache, the naive-UTC parameter binding, the eight-column robust reader, the timeout
 /// classification (<see cref="PgBaselineProvider.IsCommandTimeout"/> — one definition,
@@ -251,14 +252,16 @@ WITH clean AS (
     private static partial string? DatabaseGrowthBytesPerDayBaselineQuery();
 
     /// <summary>
-    /// The KEYED metric → SQL map (#3691 lane 33): the arms the five-argument
-    /// <see cref="PgBaselineProvider.GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/> resolves
-    /// through <see cref="PgBaselineProvider.ResolveKeyedBaselineQuery"/>, one per metric that has a per-member shape.
-    /// Internal so Darling.Tests can pin every keyed query's table and shape ungated, as the unkeyed map is pinned.
-    /// Each arm is the unkeyed contract plus one thing: its member predicate on <c>$7</c>, the key bound as text
-    /// and cast to the column (<c>queryid = $7::BIGINT</c>) — so a keyed arm references exactly <c>$1..$7</c> where an
-    /// unkeyed one references exactly <c>$1..$6</c>, and the two-armed census in <c>LocalClockBucketKeyTests</c> holds
-    /// both. Today the family is statements, keyed by <c>queryid</c> (<c>PgTargetBaselineProvider.Statements.cs</c>):
+    /// The KEYED metric → SQL map (#3691 lane 33): the arms <see cref="PgBaselineProvider.GetBaselinesAsync"/> (and the
+    /// five-argument <see cref="PgBaselineProvider.GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>,
+    /// a set of one) resolves through <see cref="PgBaselineProvider.ResolveKeyedBaselineQuery"/>, one per metric that
+    /// has a per-member shape. Internal so Darling.Tests can pin every keyed query's table and shape ungated, as the
+    /// unkeyed map is pinned. Each arm is the unkeyed contract plus the member set: its keys are <c>$7</c>, a
+    /// <c>text[]</c> whose keys it casts to the column's type (<c>($7::BIGINT[])[slot]</c>, one slot per member), its
+    /// table is read ONCE for all of them, and it ends in <see cref="PgBaselineProvider.PerMemberScaffold"/> (#3901) —
+    /// so a keyed arm references exactly
+    /// <c>$1..$7</c> where an unkeyed one references exactly <c>$1..$6</c>, and the two-armed census in
+    /// <c>LocalClockBucketKeyTests</c> holds both. Today the family is statements, keyed by <c>queryid</c> (<c>PgTargetBaselineProvider.Statements.cs</c>):
     /// <c>pg_statement_share</c>, the statement's share of the collection's total execution time (no unkeyed arm — the
     /// server's share of itself is 1.0), and <c>pg_statement_mean_ms</c>, the statement's per-call mean beside lane
     /// 27's server-wide unkeyed arm of the same name, so lane 27's detector can switch to the statement's own series

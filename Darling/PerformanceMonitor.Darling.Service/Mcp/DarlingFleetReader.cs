@@ -33,10 +33,19 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Scale lens (the plan's R6).</b> The WPF Overview fans out N servers x ~8 per-server reads on every
 /// refresh; that does not scale to a 500-server central store. Because Darling keys every row by
-/// <c>server_id</c> in ONE Postgres database, this reader instead runs a BOUNDED set of cross-server aggregates
-/// (one <c>DISTINCT ON (server_id)</c> latest-snapshot read per metric, one <c>GROUP BY server_id</c> windowed
-/// count per incident source, one cross-server collection-health aggregate) — a fixed ~9 round-trips regardless
-/// of fleet size — then assembles the per-server cards in C#.</para>
+/// <c>server_id</c> in ONE Postgres database, this reader instead runs a BOUNDED set of cross-server reads
+/// (one per-server newest-row probe per metric, driven from the registry in one statement; one
+/// <c>GROUP BY server_id</c> windowed count per incident source; one cross-server collection-health aggregate)
+/// — a fixed ~9 round-trips regardless of fleet size — then assembles the per-server cards in C#.</para>
+///
+/// <para><b>Every read is bounded by the fleet, never by the retention (#3895).</b> The newest-row reads were
+/// <c>DISTINCT ON (server_id)</c> over the whole table, which reads, decompresses and sorts every retained row
+/// to keep one per server; the windowed counts were bounded on the EVENT's timestamp, which no chunk is
+/// partitioned on. Both grew with servers x retained days, and a 43-server store measured 12.3 s cold for one
+/// overview. Now each newest-row read is a per-server <c>LATERAL ... LIMIT 1</c> (one index descent in the
+/// live chunk for a server that is collecting) and each windowed count also carries
+/// <see cref="EventWindowFloor"/> on the partition column. <c>FleetReadsAreBoundedByTheFleetTests</c> holds
+/// every statement here to one of those two shapes.</para>
 ///
 /// <para><b>Banding lives once.</b> Every band (per-metric severity, the card's overall band, collection
 /// freshness, the fleet band + worst-first score) comes from <see cref="ServerHealthClassifier"/> in
@@ -117,29 +126,63 @@ SELECT id, name, parent_id, sort_order, colour
 FROM server_tags
 ORDER BY sort_order, lower(name)";
 
+    /// <summary>The driver predicate of the four newest-row reads over SQL Server-only collector tables
+    /// (<see cref="FleetCpuSql"/>, <see cref="FleetMemorySql"/>, <see cref="FleetMemoryPressureSql"/>,
+    /// <see cref="FleetThreadsSql"/>): every registry row EXCEPT the ones the registry positively says are
+    /// PostgreSQL (#3895).
+    ///
+    /// <para><b>Why exclude anyone.</b> A per-server probe for a server with no row in the table has to walk
+    /// every retained chunk before it can say so, and on an uncompressed chunk the planner may take that walk
+    /// through the time index, filtering the whole chunk to find nothing: on DARLING01 the two PostgreSQL
+    /// targets were 16 of the 17 ms the memory probe cost. A PostgreSQL target never has a row here — its CPU
+    /// is <see cref="FleetPgCpuSql"/>'s, and it has no ring buffer, grant semaphores or schedulers to collect —
+    /// so skipping it changes no card, and a store monitoring a few SQL Servers beside fifty PostgreSQL
+    /// clusters does not pay fifty walks per metric.</para>
+    ///
+    /// <para><b>Only on a positive claim.</b> A NULL kind (never stamped) and an unrecognised one are probed,
+    /// the direction that cannot lose a SQL Server's reading. Normalised the way
+    /// <see cref="MonitoredEngineKind.IsPostgres"/> normalises — trim, then lowercase — so the SQL and the C#
+    /// give the same answer about the same row.</para></summary>
+    internal const string SqlServerCollectedTargetSql =
+        "(s.engine_kind IS NULL OR lower(btrim(s.engine_kind)) NOT IN ('"
+        + MonitoredEngineKind.Postgres + "', '" + MonitoredEngineKind.AuroraPostgres + "'))";
+
     /// <summary>Latest SQL + other-process CPU per server (newest ring-buffer sample). $ none.
     ///
     /// <para>The <c>collection_time</c> key, matching <see cref="FleetMemorySql"/> below, is here for the
-    /// FRAME rather than for the cost. <c>sample_time</c> is the monitored server's local wall clock, so
+    /// FRAME as well as for the cost. <c>sample_time</c> is the monitored server's local wall clock, so
     /// leading on it invites the bound that looks like the obvious optimisation and returns zero rows for
-    /// every server behind the store — and this is the one CPU read with no <c>server_id</c> filter, so it
-    /// would take the whole fleet at once. Ordering carries no clock frame; see
-    /// <c>DarlingWorker.LatestCpuSql</c> for the full reasoning and
-    /// <c>LatestCpuReadShapeSqlTests</c> for the guard.</para>
+    /// every server behind the store. Ordering carries no clock frame; see <c>DarlingWorker.LatestCpuSql</c>
+    /// for the full reasoning and <c>LatestCpuReadShapeSqlTests</c> for the guard.</para>
     ///
-    /// <para>It buys NO speed, and the doc says so rather than implying otherwise: <c>DISTINCT ON</c> with
-    /// <c>server_id</c> leading and no per-server <c>LIMIT</c> reads and sorts the whole relation whatever
-    /// the time key is (measured identical, 240,701 rows and 169 buffers either way at thirty chunks). The
-    /// per-server reads get ordered ChunkAppend from this same change because each has its own
-    /// <c>LIMIT 1</c>; this one would need a per-server lateral instead, which is a different query.</para>
+    /// <para><b>One probe per server, not one sort of the table</b> (#3895). This was <c>DISTINCT ON
+    /// (server_id)</c> over the whole view, which has no per-server <c>LIMIT</c> and so reads, decompresses and
+    /// sorts every retained row whatever the time key is: 260,291 rows, 26 MB and 188 ms (plus 63 ms of
+    /// planning) on DARLING01's nine servers, 1.2 s on a 43-server, thirty-day rig. Driven from the registry,
+    /// each server gets its own <c>LIMIT 1</c>, so TimescaleDB's ordered ChunkAppend walks that server's
+    /// chunks newest-first and stops at the first row: 28 buffers and 0.6 ms on DARLING01, 3 ms at 43
+    /// servers, and no longer a function of how many days are retained. The rows are identical: the registry
+    /// is where the cards come from, and <see cref="SqlServerCollectedTargetSql"/> skips only servers that
+    /// never write this table.</para>
     /// </summary>
-    public const string FleetCpuSql = @"
-SELECT DISTINCT ON (server_id)
-    server_id,
-    sqlserver_cpu_utilization,
-    other_process_cpu_utilization
-FROM v_cpu_utilization_stats
-ORDER BY server_id, collection_time DESC, sample_time DESC";
+    public const string FleetCpuSql = $@"
+SELECT
+    s.server_id,
+    latest.sqlserver_cpu_utilization,
+    latest.other_process_cpu_utilization
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT
+        sqlserver_cpu_utilization,
+        other_process_cpu_utilization
+    FROM v_cpu_utilization_stats
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC, sample_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>Latest instance CPU per PostgreSQL/Aurora target — the newest Performance Insights sample
     /// per server, within the freshness bound. $1 the freshness cutoff (naive UTC).
@@ -192,50 +235,103 @@ AND   sample_time >= $1
 AND   cpu_percent IS NOT NULL
 ORDER BY server_id, collection_time DESC, sample_time DESC";
 
-    /// <summary>Latest total server memory + buffer pool (MB) per server. $ none.</summary>
-    public const string FleetMemorySql = @"
-SELECT DISTINCT ON (server_id)
-    server_id,
-    CAST(total_server_memory_mb AS double precision),
-    CAST(buffer_pool_mb AS double precision)
-FROM v_memory_stats
-ORDER BY server_id, collection_time DESC";
+    /// <summary>Latest total server memory + buffer pool (MB) per server. $ none. The per-server probe
+    /// <see cref="FleetCpuSql"/> describes (#3895): 48.5 ms plus 42.4 ms of planning on DARLING01 as a
+    /// <c>DISTINCT ON</c> over every retained row, one index descent per collecting server now.</summary>
+    public const string FleetMemorySql = $@"
+SELECT
+    s.server_id,
+    latest.total_server_memory_mb,
+    latest.buffer_pool_mb
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT
+        CAST(total_server_memory_mb AS double precision) AS total_server_memory_mb,
+        CAST(buffer_pool_mb AS double precision) AS buffer_pool_mb
+    FROM v_memory_stats
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>Latest resource-semaphore pressure per server — grant waiters / timeout + forced-grant deltas /
-    /// granted MB, summed across every pool at each server's newest grant-snapshot instant. $ none.</summary>
-    public const string FleetMemoryPressureSql = @"
+    /// granted MB, summed across every pool at each server's newest grant-snapshot instant. $ none.
+    ///
+    /// <para><b>Two probes per server, both bounded</b> (#3895): the newest instant, by the same per-server
+    /// <c>LIMIT 1</c> <see cref="FleetCpuSql"/> uses (it needs only the key, so it is an index-only descent),
+    /// then the pools AT that instant by equality, which TimescaleDB excludes to the one chunk holding it at
+    /// run time. This was a <c>MAX(collection_time)</c> over every retained row joined back to the same
+    /// table: 9,537 buffers and 256.6 ms on DARLING01, where the two probes take 44 buffers and 2.3 ms. The
+    /// price is planning, because each probe plans the table's chunk list: 15.9 ms against the join's 8.0 ms
+    /// warm. A server with no grant snapshot at all has no instant and so no row, exactly as the join had
+    /// none.</para></summary>
+    public const string FleetMemoryPressureSql = $@"
 SELECT
-    m.server_id,
-    CAST(COALESCE(SUM(m.waiter_count), 0) AS bigint),
-    CAST(COALESCE(SUM(m.timeout_error_count_delta), 0) AS bigint),
-    CAST(COALESCE(SUM(m.forced_grant_count_delta), 0) AS bigint),
-    CAST(COALESCE(SUM(m.granted_memory_mb), 0) AS double precision)
-FROM v_memory_grant_stats m
-JOIN
+    s.server_id,
+    pressure.waiter_count,
+    pressure.timeout_error_count,
+    pressure.forced_grant_count,
+    pressure.granted_memory_mb
+FROM servers AS s
+CROSS JOIN LATERAL
 (
-    SELECT server_id, MAX(collection_time) AS max_collection_time
+    SELECT collection_time
     FROM v_memory_grant_stats
-    GROUP BY server_id
-) latest
-    ON m.server_id = latest.server_id
-    AND m.collection_time = latest.max_collection_time
-GROUP BY m.server_id";
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+CROSS JOIN LATERAL
+(
+    SELECT
+        CAST(COALESCE(SUM(m.waiter_count), 0) AS bigint) AS waiter_count,
+        CAST(COALESCE(SUM(m.timeout_error_count_delta), 0) AS bigint) AS timeout_error_count,
+        CAST(COALESCE(SUM(m.forced_grant_count_delta), 0) AS bigint) AS forced_grant_count,
+        CAST(COALESCE(SUM(m.granted_memory_mb), 0) AS double precision) AS granted_memory_mb
+    FROM v_memory_grant_stats AS m
+    WHERE m.server_id = s.server_id
+    AND   m.collection_time = latest.collection_time
+) AS pressure
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
 
-    /// <summary>Latest worker-thread pressure per server (newest cpu_scheduler_stats snapshot). $ none.</summary>
-    public const string FleetThreadsSql = @"
-SELECT DISTINCT ON (server_id)
-    server_id,
-    max_workers_count,
-    total_current_workers_count,
-    total_runnable_tasks_count,
-    total_work_queue_count
-FROM v_cpu_scheduler_stats
-ORDER BY server_id, collection_time DESC";
+    /// <summary>Latest worker-thread pressure per server (newest cpu_scheduler_stats snapshot). $ none. The
+    /// per-server probe <see cref="FleetCpuSql"/> describes (#3895): 37.6 ms plus 46.0 ms of planning on
+    /// DARLING01 as a <c>DISTINCT ON</c> over every retained row.</summary>
+    public const string FleetThreadsSql = $@"
+SELECT
+    s.server_id,
+    latest.max_workers_count,
+    latest.total_current_workers_count,
+    latest.total_runnable_tasks_count,
+    latest.total_work_queue_count
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT
+        max_workers_count,
+        total_current_workers_count,
+        total_runnable_tasks_count,
+        total_work_queue_count
+    FROM v_cpu_scheduler_stats
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.is_enabled
+AND   {SqlServerCollectedTargetSql}";
 
     /// <summary>Blocking in the window per server from BOTH sources — XE blocked-process reports and the always-on
     /// DMV snapshot, each counted per <c>server_id</c> with its worst wait, lined up by a FULL OUTER JOIN so a
     /// server present in only one source still appears. The caller applies Lite's XE-preferred / DMV-fallback per
-    /// server. $1 window start, $2 window end (both naive UTC).</summary>
+    /// server. $1 window start, $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
+    ///
+    /// <para>$3 is the partition-column bound the event window cannot supply (#3895): without it both scans
+    /// open every retained chunk to count the last hour. It cannot drop a row the window wants —
+    /// <see cref="EventWindowFloor"/> says why.</para></summary>
     public const string FleetBlockingSql = @"
 SELECT
     COALESCE(xe.server_id, dmv.server_id) AS server_id,
@@ -249,6 +345,7 @@ FROM
     FROM v_blocked_process_reports
     WHERE event_time >= $1
     AND   event_time <= $2
+    AND   collection_time >= $3
     GROUP BY server_id
 ) AS xe
 FULL OUTER JOIN
@@ -257,11 +354,14 @@ FULL OUTER JOIN
     FROM v_dmv_blocking_snapshots
     WHERE event_time >= $1
     AND   event_time <= $2
+    AND   collection_time >= $3
     GROUP BY server_id
 ) AS dmv ON xe.server_id = dmv.server_id";
 
     /// <summary>Deadlocks in the window per server — count and newest deadlock instant (for each card's
-    /// "last seen" detail). $1 window start, $2 window end (both naive UTC).
+    /// "last seen" detail). $1 window start, $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all
+    /// naive UTC) — the partition-column bound <see cref="FleetBlockingSql"/> carries, for its reason (#3895):
+    /// 131 ms over every retained chunk on DARLING01 without it.
     ///
     /// <para><b>This view is the SQL Server extended-event capture and nothing else</b> (#3017).
     /// <c>v_deadlocks</c> is <c>SELECT * FROM deadlocks</c>, and <c>deadlocks</c> is written by exactly one
@@ -277,6 +377,7 @@ SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
 WHERE deadlock_time >= $1
 AND   deadlock_time <= $2
+AND   collection_time >= $3
 GROUP BY server_id";
 
     /// <summary>Deadlocks in the window per PostgreSQL server (#3539) — the same two columns as
@@ -374,13 +475,31 @@ WHERE id = 1";
     /// could render as "server 0"; the Viewer's twin of this read
     /// (<c>ViewerDataService.ServerFreshnessSql</c>) already carries the same clause. The rollup happens to
     /// read this map only by <c>TryGetValue</c> on a registry id today, so the phantom is currently inert —
-    /// which is exactly why the guard belongs in the SQL rather than in that reading habit.</para></summary>
+    /// which is exactly why the guard belongs in the SQL rather than in that reading habit.</para>
+    ///
+    /// <para><b>A bound is not a limit, and the 48 hours alone still read two days of the fleet's biggest
+    /// table</b> (#3895). As a <c>GROUP BY</c> the window aggregated every collector run of every server in it
+    /// — 490,940 rows and 103 MB on DARLING01's nine servers, for eleven timestamps — so it is now a
+    /// per-server <c>LIMIT 1</c> driven from the enabled registry, an index-only descent per server (0.25 ms
+    /// there; 160 ms to 1 ms on a 43-server rig). The window is KEPT, for the paragraph above: a server dark
+    /// for longer still falls out and reads as having no recent history, exactly as it did, and the planner
+    /// still excludes every chunk older than two days before it starts.</para></summary>
     public const string FleetLastCollectionSql = @"
-SELECT server_id, MAX(collection_time) AS last_collection_time
-FROM v_collection_log
-WHERE collection_time >= $1
-AND   server_id <> 0
-GROUP BY server_id";
+SELECT
+    s.server_id,
+    latest.collection_time AS last_collection_time
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT collection_time
+    FROM v_collection_log
+    WHERE server_id = s.server_id
+    AND   collection_time >= $1
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.is_enabled
+AND   s.server_id <> 0";
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
@@ -678,8 +797,9 @@ GROUP BY server_id, collector_name";
         /* #3735: the ONE read in this fan-out that does not depend on the caller's window — the 7-day
            collection-health aggregate is the same statement whatever hours_back was — and therefore the one
            that is single-flighted and memoized. Every other read above and below stays a per-call read: each
-           either carries the window or is a latest-snapshot DISTINCT ON that costs one index descent per
-           server. See CollectionHealthMemo for the production photo this answers. */
+           either carries the window (and, #3895, a partition-column floor for it) or is a per-server
+           newest-row probe that costs one index descent per collecting server. See CollectionHealthMemo for
+           the production photo this answers. */
         var (failingCollectors, collectionHealthAgeSeconds) = await CollectionHealthMemoFor(postgres).GetAsync(
             now,
             (scanNow, scanToken) => ReadFailingCollectorCountsAsync(postgres, scanNow, scanToken),
@@ -1381,6 +1501,7 @@ GROUP BY server_id, collector_name";
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1427,6 +1548,7 @@ GROUP BY server_id, collector_name";
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

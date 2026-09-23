@@ -395,9 +395,11 @@ public sealed class IntervalHonestHourlyRollupTests
         const string SourceProbeTail = "AND s.collection_time < b.d + INTERVAL '1 day'";
         var legacyRouted = DailySummarySql.RangeSqlFor(RetentionTier.Hourly);
         Assert.Equal(1, legacyRouted.Split(SourceProbeTail).Length - 1);
+        /* #3905: the probe now ends in its OFFSET 0 fence on the next line, so the filter is inserted after
+           the tail itself — which the count above proves appears exactly once. */
         var expectedSuccessorRouted = legacyRouted
             .Replace($"FROM collect.{legacy}", $"FROM collect.{successor}", StringComparison.Ordinal)
-            .Replace(SourceProbeTail + ")", SourceProbeTail + "\n          AND " + successorFilter + ")", StringComparison.Ordinal);
+            .Replace(SourceProbeTail, SourceProbeTail + "\n          AND " + successorFilter, StringComparison.Ordinal);
         Assert.Equal(expectedSuccessorRouted, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor));
         Assert.Contains(successor, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);
         Assert.DoesNotContain(legacy, DailySummarySql.RangeSqlFor(RetentionTier.Hourly, successor), StringComparison.Ordinal);

@@ -82,15 +82,19 @@ ORDER BY collection_time DESC
 LIMIT 1";
 
     /// <summary>Blocking counts in the window from both sources — XE blocked-process reports and the always-on
-    /// DMV snapshot; the caller applies Lite's XE-preferred, DMV-fallback rule. $1 server_id, $2 window start.</summary>
+    /// DMV snapshot; the caller applies Lite's XE-preferred, DMV-fallback rule. $1 server_id, $2 window start,
+    /// $3 the <see cref="EventWindowFloor"/> for $2 — the partition-column bound the event window cannot supply
+    /// (#3895, the fleet card's <c>DarlingFleetReader.FleetBlockingSql</c> carries the same one), so the counts
+    /// open the window's chunks rather than every retained one.</summary>
     public const string ServerSummaryBlockingSql = @"
 SELECT
-    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2),
-    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots  WHERE server_id = $1 AND event_time >= $2)";
+    (SELECT COUNT(*) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
+    (SELECT COUNT(*) FROM v_dmv_blocking_snapshots  WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3)";
 
-    /// <summary>Deadlock count in the window. $1 server_id, $2 window start.</summary>
+    /// <summary>Deadlock count in the window. $1 server_id, $2 window start, $3 the
+    /// <see cref="EventWindowFloor"/> for $2 (#3895).</summary>
     public const string ServerSummaryDeadlockSql = @"
-SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2";
+SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3";
 
     /// <summary>Newest collection time across all collectors for one server. $1 server_id.</summary>
     public const string ServerSummaryLastCollectionSql = @"
@@ -150,6 +154,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, windowStart);
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(windowStart));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -165,6 +170,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(command, serverId);
             DarlingMcpReadParameters.AddTimestamp(command, windowStart);
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(windowStart));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -381,10 +387,22 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
            a separate question — a rollup created over pre-existing history answers old windows with silence.
            BOTH gates or neither: this tool and the viewer's calendar answer the same question off the same SQL,
            so routing them differently would have them report different query counts for the same day on exactly
-           the affected stores, with no way to tell which was right. Probed per call, uncached: get_daily_health
-           runs at human/model cadence and these are two small lookups. */
-        var rollups = await TimescaleSupport.DetectRollupsAsync(postgres, cancellationToken);
-        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, rollups, cancellationToken);
+           the affected stores, with no way to tell which was right.
+
+           #3905: through ComposeStoreAvailability, the gate the compose panels already read: cached per data
+           source for its ReprobeInterval, one probe in flight at a time. This used to probe on every call on
+           the reasoning that it "runs at human/model cadence and these are two small lookups". The web server
+           page called it twice per load, and on the largest production store the coverage probe alone measured
+           >= 1.7 s, because each min() over a compressed oldest chunk seq-scans and sorts that chunk's batch
+           list. A cached floor cannot produce a wrong count, only a different tier for at most the interval:
+           a floor moves back only on a backfill (stale, it under-claims, so a window stays where it was or
+           degrades), and forward only on a retention drop, which RetentionTierRouter's one-day RouteMargin keeps
+           every age-routed window clear of. The query CTE's ceiling is read live in the statement, and a day a
+           tier never carried is named NULL either way. A cached FAILURE is another matter: its raw fallback
+           would print 0 for every day raw has purged, so the measured accessor probes again rather than route
+           on it, and a probe that fails again fails this call as it always did. The viewer's calendar has
+           cached the same gate for the same interval all along (ViewerDataService.GetRollupAvailabilityAsync). */
+        var (rollups, coverage) = await ComposeStoreAvailability.GetMeasuredRollupsAsync(postgres, cancellationToken);
         var tier = RetentionTierRouter.Resolve(
             DateTime.UtcNow, fromDate, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
@@ -453,7 +471,7 @@ SELECT MAX(collection_time) FROM v_collection_log WHERE server_id = $1";
     /// per-server read (#3466 lane 2), which is <see cref="GetDailySummaryRangeAsync"/> minus two
     /// choices that are the calendar's contract rather than the SQL's: the <c>.Date</c> truncation
     /// (a sweep span is sub-day and starts at the previous sweep's instant, not midnight) and the
-    /// per-call rollup probe (a sweep span ends at "now" and is capped at one day by
+    /// rollup-tier gate (a sweep span ends at "now" and is capped at one day by
     /// <c>FleetSweepCadence.IntervalMinutesCeiling</c>, so it always sits inside the 4-day raw window
     /// and the raw tier is correct by construction rather than by routing).
     ///

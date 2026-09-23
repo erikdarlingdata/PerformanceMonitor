@@ -31,7 +31,7 @@
  * would discard an in-progress edit — while the sidebar (server list + view list) still refreshes.
  */
 
-import { el, mount, apiGet, bandClass, localTime } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, bandClass, localTime } from "./util.js";
 import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -167,7 +167,7 @@ function updateViewActive(r) {
 /* ─────────────────────────── sidebar ─────────────────────────── */
 
 async function refreshSidebar() {
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind !== "data") {
     mount(serverList, el("div", { class: "muted", style: "padding:0.5rem 1.25rem", text: res.kind === "error" ? "Fleet unavailable" : "" }));
     updateStatusBar(null);
@@ -286,6 +286,8 @@ function updateStatusBar(d) {
 /* ─────────────────────────── refresh loop ─────────────────────────── */
 
 function refresh() {
+  /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
+     second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
   refreshSidebar();
   refreshViewList();
   refreshAgNav();
