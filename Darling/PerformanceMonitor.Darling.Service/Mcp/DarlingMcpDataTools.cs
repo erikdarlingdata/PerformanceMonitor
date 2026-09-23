@@ -770,9 +770,14 @@ public sealed class DarlingMcpDataTools
         if (validation != null) return validation;
         validation = McpHelpers.ValidateTop(top, "top");
         if (validation != null) return validation;
-        execution_type = NormalizeExecutionType(execution_type);
-        if (execution_type == "INVALID")
-            return McpHelpers.Refusal("execution_type", "execution_type must be Regular, Aborted, or Exception.");
+        /* A closed set, refused by name rather than applied (#3541 A13): an unknown outcome can never match, and
+           the empty answer under it would read as "no such executions". Downstream filters on the canonical
+           spelling, which is how the collector stores it. */
+        validation = McpHelpers.ValidateChoice(execution_type, McpHelpers.QueryStoreExecutionTypes, "execution_type");
+        if (validation != null) return validation;
+        execution_type = string.IsNullOrWhiteSpace(execution_type)
+            ? null
+            : McpHelpers.QueryStoreExecutionTypes.First(t => string.Equals(t, execution_type.Trim(), StringComparison.OrdinalIgnoreCase));
 
         try
         {
@@ -791,6 +796,15 @@ public sealed class DarlingMcpDataTools
             var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
 
             if (rows.Count == 0)
+            {
+                /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
+                   so an Aborted or Exception filter is empty far more often than not, and falling through to the
+                   chain below ended at "Query Store may not be enabled" -- false, whenever the same read without
+                   the filter has rows. One unfiltered top-1 read tells the two apart; it runs only on this path. */
+                if (execution_type != null
+                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name)).Count > 0)
+                    return McpHelpers.QueryStoreExecutionTypeEmpty(execution_type, hours_back, database_name);
+
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
                        read had no way to find out. The store has known all along -- query_store_health
@@ -808,6 +822,7 @@ public sealed class DarlingMcpDataTools
                         "retains (query_store_stats is dropped at 4 days when the rollups are armed), in which case " +
                         "nothing was read for the older part of it. Try a shorter window before concluding the " +
                         "queries did not run.");
+            }
 
             var result = rows.Select(r => new
             {
@@ -860,15 +875,6 @@ public sealed class DarlingMcpDataTools
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
-    }
-
-    private static string? NormalizeExecutionType(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        if (value.Equals("Regular", StringComparison.OrdinalIgnoreCase)) return "Regular";
-        if (value.Equals("Aborted", StringComparison.OrdinalIgnoreCase)) return "Aborted";
-        if (value.Equals("Exception", StringComparison.OrdinalIgnoreCase)) return "Exception";
-        return "INVALID";
     }
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */

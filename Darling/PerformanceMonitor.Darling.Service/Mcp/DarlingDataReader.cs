@@ -1348,11 +1348,12 @@ internal static class DarlingDataReader
     /// <summary>
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
-    /// (database, query_id, plan_id, query_hash, replica_role), average the per-interval metrics, rank by total duration
-    /// (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending, over-fetch by 5 for the WAITFOR
-    /// trim, cap at top. The avg columns are bigint (per-interval averages) → double precision before the
-    /// AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view). $1 server_id, $2/$3 window
-    /// (naive UTC), $4 top.
+    /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
+    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
+    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
+    /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way).
     /// </summary>
     public const string QueryStoreTopSql = """
         WITH deduped AS (
@@ -1380,6 +1381,10 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
+               so dropping the other outcomes first cannot change which row wins any partition, and the window
+               sort then sees only the outcome asked for. */
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         ranked AS (
             SELECT
@@ -1387,6 +1392,9 @@ internal static class DarlingDataReader
                 query_id,
                 plan_id,
                 query_hash,
+                /* A GROUP BY key, like replica_role below: Query Store keeps Regular, Aborted and Exception
+                   executions of one plan in separate runtime-stats rows, and averaging them together would
+                   blend a timeout's duration into the plan's normal cost. One row per outcome instead. */
                 execution_type_desc,
                 /* A GROUP BY key, not MAX(): an AG's Query Store for secondary replicas (2022+) keeps ONE
                    shared store on the primary holding every replica's rows, so grouping without it would
@@ -1404,7 +1412,6 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
-            AND   ($6::text IS NULL OR execution_type_desc = $6)
             GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5

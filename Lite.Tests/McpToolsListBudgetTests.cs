@@ -75,9 +75,11 @@ public sealed class McpToolsListBudgetTests
     /// <item>#4048 D9 round: the nine pilot heads' empty-answer sentence now ties to each tool's own gate (or
     /// floors, or the absence of one) instead of repeating one identical sentence, so a reader given only the
     /// head is not left to guess which of the four empty-window rungs applies. Raised deliberately.</item>
+    /// <item>#4060: get_query_store_top gains the optional execution_type parameter (one 72-character
+    /// description plus its schema entry, 124 bytes), the same on both SKUs. Raised deliberately.</item>
     /// </list>
     /// </summary>
-    private const int TotalCeilingBytes = 148_216;
+    private const int TotalCeilingBytes = 148_340;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

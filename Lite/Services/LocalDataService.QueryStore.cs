@@ -200,7 +200,7 @@ WITH deduped AS (
     FROM v_query_store_stats
     WHERE server_id = $1
     AND   collection_time >= $2
-    AND   collection_time <= $3" + dbClause + @"
+    AND   collection_time <= $3" + dbClause + executionTypeClause + @"
 ),
 ranked AS (
     SELECT
@@ -215,7 +215,12 @@ ranked AS (
            server every row shares one value (NULL, or 'Primary' on 2025), so the grouping is a no-op
            and the grid is unchanged. */
         replica_role,
-        module_name,
+        MAX(module_name) AS module_name,
+        /* A GROUP BY key, like replica_role above: Query Store keeps Regular, Aborted and Exception executions
+           of one plan in separate runtime-stats rows, and MAX() here showed Regular for any mixed group (it
+           sorts last) while the averages blended a timeout's duration into the plan's normal cost. One row per
+           outcome instead. The execution_type filter is applied in deduped, before the ROW_NUMBER: the column
+           is in the partition, so filtering first cannot change which row wins. */
         execution_type_desc,
         SUM(execution_count) AS total_executions,
         AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) / 1000.0 AS avg_duration_ms,
@@ -263,8 +268,8 @@ ranked AS (
         MIN(CAST(min_num_physical_io_reads AS DOUBLE PRECISION)) AS min_num_physical_io_reads,
         MAX(CAST(max_num_physical_io_reads AS DOUBLE PRECISION)) AS max_num_physical_io_reads
     FROM deduped
-    WHERE rn = 1" + executionTypeClause + @"
-    GROUP BY database_name, query_id, plan_id, query_hash, module_name, execution_type_desc, replica_role
+    WHERE rn = 1
+    GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
     ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS DOUBLE PRECISION)) DESC
     LIMIT $4 + 5
 )
