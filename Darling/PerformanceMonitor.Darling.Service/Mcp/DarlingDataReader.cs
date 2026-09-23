@@ -215,7 +215,7 @@ internal static class DarlingDataReader
     /// did not attribute the row (pre-2022, or a 2022 standalone).
     /// </summary>
     public sealed record QueryStoreRow(
-        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash,
+        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string? ModuleName,
         long TotalExecutions, double AvgDurationMs, double AvgCpuTimeMs, double AvgLogicalReads,
         double AvgLogicalWrites, double AvgPhysicalReads, double AvgRowcount, DateTime? LastExecutionTime, string QueryText,
         string? ReplicaRole);
@@ -1042,26 +1042,48 @@ internal static class DarlingDataReader
     /// row rather than reading the window. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
     public const string QueryStoreWindowFloorSql = """
+        WITH deduped AS (
+            SELECT
+                collection_time,
+                module_name,
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+                    ORDER BY collection_time DESC, execution_count DESC
+                ) AS rn
+            FROM query_store_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text IS NULL OR database_name = $4)
+        )
         SELECT MIN(collection_time)
-        FROM query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
+        FROM deduped
+        WHERE rn = 1
+        AND   ($5::text IS NULL OR module_name = $5)
         """;
 
     /// <summary>
-    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
-    /// reports as "nothing was read" rather than as an absence of activity.
+    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the filtered window holds nothing at all, which
+    /// the caller reports as "nothing was read" rather than as an absence of activity.
     /// </summary>
+    public static Task<DateTime?> GetQueryStoreWindowFloorAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        GetQueryStoreWindowFloorAsync(
+            postgres, serverId, startUtc, endUtc, databaseName: null, moduleName: null, cancellationToken);
+
     public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
+        string? databaseName, string? moduleName, CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(QueryStoreWindowFloorSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        DarlingMcpReadParameters.AddNullableText(command, databaseName);
+        DarlingMcpReadParameters.AddNullableText(command, moduleName);
         var value = await command.ExecuteScalarAsync(cancellationToken);
         return value is DateTime dt ? dt : null;
     }
@@ -1108,6 +1130,7 @@ internal static class DarlingDataReader
                 query_id,
                 plan_id,
                 query_hash,
+                MAX(module_name) AS module_name,
                 /* A GROUP BY key, not MAX(): an AG's Query Store for secondary replicas (2022+) keeps ONE
                    shared store on the primary holding every replica's rows, so grouping without it would
                    average primary and secondary workload into a single blended row. No-op on a
@@ -1124,6 +1147,7 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
+            AND   ($6::text IS NULL OR module_name = $6)
             GROUP BY database_name, query_id, plan_id, query_hash, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
@@ -1134,6 +1158,7 @@ internal static class DarlingDataReader
             r.plan_id,
             r.query_hash,
             r.query_plan_hash,
+            r.module_name,
             r.total_executions,
             r.avg_duration_ms,
             r.avg_cpu_time_ms,
@@ -1176,8 +1201,15 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top,
+        string? databaseName, CancellationToken cancellationToken = default) =>
+        GetQueryStoreTopAsync(
+            postgres, serverId, startUtc, endUtc, top, databaseName, moduleName: null, cancellationToken);
+
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top,
+        string? databaseName, string? moduleName, CancellationToken cancellationToken = default)
     {
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
@@ -1185,6 +1217,7 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        AddNullableText(command, moduleName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1194,16 +1227,17 @@ internal static class DarlingDataReader
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
                 reader.IsDBNull(4) ? "" : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
                 reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
                 reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
                 reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
                 reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? "" : reader.GetString(13),
-                reader.IsDBNull(14) ? null : reader.GetString(14)));
+                reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
+                reader.IsDBNull(13) ? null : reader.GetDateTime(13),
+                reader.IsDBNull(14) ? "" : reader.GetString(14),
+                reader.IsDBNull(15) ? null : reader.GetString(15)));
         }
 
         return rows;

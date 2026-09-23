@@ -217,7 +217,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database filtering.")]
+    [McpServerTool(Name = "get_query_store_top"), Description("Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache, or exact stored-procedure attribution via module_name. Requires Query Store enabled on target databases. Database and module filters are applied before ranking and limiting.")]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -225,7 +225,8 @@ public sealed class McpQueryTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top queries. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Filter to one exact Query Store module name before ranking, e.g. dbo.usp_ProcessOrder. Case-sensitive.")] string? module_name = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -237,8 +238,13 @@ public sealed class McpQueryTools
 
             var topError = McpHelpers.ValidateTop(top, "top");
             if (topError != null) return topError;
+            module_name = string.IsNullOrWhiteSpace(module_name) ? null : module_name;
 
-            var rows = await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
+            var rows = await dataService.GetQueryStoreTopQueriesAsync(
+                resolved.ServerId, hours_back, top,
+                databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
+                asOfUtc: windowEnd,
+                moduleName: module_name);
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
@@ -251,7 +257,13 @@ public sealed class McpQueryTools
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
                     ?? await McpRuntimePrecondition.StatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
-                    ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
+                    ?? (string.IsNullOrWhiteSpace(module_name)
+                        ? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.")
+                        : McpHelpers.Status(
+                            "empty",
+                            $"No Query Store rows matched exact module_name '{module_name}' in the {hours_back}-hour " +
+                            "window searched. The module filter was applied before ranking; verify the exact " +
+                            "schema-qualified, case-sensitive module name before concluding the module did not run."));
             }
 
             var result = rows.Select(r => new
@@ -261,6 +273,7 @@ public sealed class McpQueryTools
                 plan_id = r.PlanId,
                 query_hash = r.QueryHash,
                 query_plan_hash = r.QueryPlanHash,
+                module_name = r.ModuleName,
                 execution_count = r.TotalExecutions,
                 avg_duration_ms = r.AvgDurationMs,
                 avg_cpu_ms = r.AvgCpuTimeMs,
