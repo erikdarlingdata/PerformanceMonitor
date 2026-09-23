@@ -183,10 +183,18 @@ public sealed class StoreToastAndCheckpointerTests
     [Fact]
     public void TheLatestAndDailyReads_ProjectTheToastPairTrailing_AndNeverTheCheckpointerCounters()
     {
+        /* #3934 restructured StoreMetricsLatestSql into a recursive-CTE skip-scan, so its trailing three
+           columns sit in a nested LATERAL's SELECT list (indented under its own parens) rather than at the
+           flat top level StoreMetricsDailySql still has; the trailing-pair-before-FROM shape is checked
+           against each read's own indentation instead of one shared literal. */
+        var dailyNormalised = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes\nFROM collect.store_metrics", dailyNormalised, StringComparison.Ordinal);
+
+        var latestNormalised = DarlingStoreMetricsReader.StoreMetricsLatestSql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("        total_failures,\n        toast_bytes,\n        toast_live_bytes\n    FROM collect.store_metrics", latestNormalised, StringComparison.Ordinal);
+
         foreach (var sql in new[] { DarlingStoreMetricsReader.StoreMetricsLatestSql, DarlingStoreMetricsReader.StoreMetricsDailySql })
         {
-            var normalised = sql.Replace("\r\n", "\n", StringComparison.Ordinal);
-            Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes\nFROM collect.store_metrics", normalised, StringComparison.Ordinal);
             foreach (var counter in new[] { "checkpoint_write_ms", "checkpoint_sync_ms", "checkpoints_requested" })
             {
                 Assert.DoesNotContain(counter, sql, StringComparison.Ordinal);
