@@ -15,6 +15,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -254,7 +255,7 @@ LIMIT $2";
                 await using var reader = await command.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
-                    var text = reader.IsDBNull(10) ? "" : reader.GetString(10);
+                    var text = ShownText(reader.IsDBNull(10) ? "" : reader.GetString(10));
                     fetched.Add(new StatementRow(
                         Role: reader.GetString(0),
                         QueryId: reader.IsDBNull(1) ? null : reader.GetInt64(1),
@@ -407,6 +408,21 @@ LIMIT $2";
     }
 
     private static double Round(double value) => Math.Round(value, 2);
+
+    /// <summary>
+    /// The text shown for a reader row (#3920's fourth review): the two sentinels as they are, and every other
+    /// text masked by the SQL lexer (<see cref="PgLogTextRedactor.RedactStoredStatement"/>), withheld when it
+    /// cannot be read to its end. pg_stat_statements normally keeps a normalized text ($1 for every constant),
+    /// which comes through as it was, bar a bare number (<c>ORDER BY 1</c>) and collapsed whitespace. But it keeps
+    /// the RAW text, literals and all, when a statement's entry is gone at executor end: evicted during a long
+    /// execution on a busy store, or reset between a protocol Parse and its Execute (<c>pgss_store</c> with no
+    /// jumble state, PostgreSQL 18's pg_stat_statements.c). Such a text passes the reader's allowlist like any
+    /// SELECT. A caller of the reader function in SQL still reads it unmasked.
+    /// </summary>
+    internal static string ShownText(string text) =>
+        text.Length == 0 || text == InsufficientPrivilegeText || text == StoreStatementStats.WithheldText
+            ? text
+            : PgLogTextRedactor.RedactStoredStatement(text) ?? StoreStatementStats.WithheldText;
 
     private sealed record StatementRow(
         string Role,

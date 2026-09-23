@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -628,7 +629,7 @@ FROM
     }
 
     /// <summary>PostgreSQL 18's marker for a squashed constant list in normalized text.</summary>
-    private const string InListMarker = "/*, ... */";
+    private const string InListMarker = PgLogTextRedactor.NormalizedInListMarker;
 
     /* Once per process: a store that tracks utility statements is told at its first pass, not every hour. */
     private static int s_utilityTrackingWarned;

@@ -387,6 +387,37 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
+    /// #3920's fourth review (M4, L1), through the store log's own capture. A value whose closing quote never
+    /// arrived is masked to the end of its field, not kept, in the message and in the sample alike. A LOCATION line
+    /// is kept as written only when it has the shape PostgreSQL writes, a function and a source file and line;
+    /// anything else there (a command's stderr) is masked as prose.
+    /// </summary>
+    [Fact]
+    public void AnUnclosedValueAndAForeignLocation_AreMaskedWithTheEntry()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  invalid input syntax for type integer: \"4111111111111111",
+            DefaultPrefix + "ERROR:  canceling statement due to statement timeout",
+            DefaultPrefix + "LOCATION:  ProcessInterrupts, postgres.c:3383",
+            DefaultPrefix + "ERROR:  canceling statement due to lock timeout",
+            DefaultPrefix + "LOCATION:  cp: cannot stat 'Leak3920w': No such file or directory",
+            "",
+        ]));
+
+        var retained = census.Groups.Where(g => g.MessageText is not null).ToList();
+        foreach (var group in retained)
+        {
+            Assert.DoesNotContain("4111111111111111", group.MessageText + group.SampleLine, StringComparison.Ordinal);
+            Assert.DoesNotContain("Leak3920w", group.MessageText + group.SampleLine, StringComparison.Ordinal);
+        }
+
+        Assert.Contains(retained, g => g.MessageText == "invalid input syntax for type integer: \"?\"");
+        Assert.Contains(retained, g => g.SampleLine!.EndsWith("LOCATION:  ProcessInterrupts, postgres.c:3383", StringComparison.Ordinal));
+        Assert.Contains(retained, g => g.SampleLine!.EndsWith("LOCATION:  cp: cannot stat '?': No such file or directory", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// One slow query is ONE row however often it ran (#3904's review): the first version grouped by the
     /// duration line, so a panel polled every minute filled the 20-row budget with one statement and pushed the
     /// real signal out as "40 further distinct messages". Two different statements stay two rows.
