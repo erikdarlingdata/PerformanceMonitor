@@ -704,6 +704,14 @@ public sealed class DarlingMcpAlertTools
     };
 
     [McpServerTool(Name = "update_alert_settings"), Description(
+        "PARTIAL update of the single global alert-settings row the service delivers on. Call " +
+        "get_alert_settings FIRST; send back only the changed fields, in the same nested shape; " +
+        "omitted fields stay unchanged. An invalid value or unknown field writes NOTHING; returns " +
+        "status invalid. poison_wait.threshold_ms is RETIRED: accepted with a warnings entry but " +
+        "never changes when the Poison Wait alert fires; poison_wait.enabled governs it. " +
+        "health_bands and fleet_sweep are NOT alert families: health_bands only sets card bands " +
+        "(delivers nothing); alerts_enabled does not govern fleet_sweep." +
+        "<<GUIDE>>" +
         "Tunes the alert engine's configuration — a PARTIAL update of the single global alert-settings row. Call " +
         "get_alert_settings FIRST, change only the fields you want, and pass THOSE fields back here as JSON in the " +
         "SAME nested shape get_alert_settings returns (e.g. {\"cpu\":{\"threshold_percent\":90},\"cooldown_minutes\":10}); " +
@@ -1157,6 +1165,13 @@ public sealed class DarlingMcpAlertTools
     }
 
     [McpServerTool(Name = "update_mute_rule"), Description(
+        "Edits an existing alert mute rule IN PLACE by its id — changes shared alert configuration. PARTIAL " +
+        "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
+        "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
+        "here — use set_mute_rule_enabled instead. created_at_utc never moves, whatever changes. Clearing " +
+        "scope fields WIDENS the rule — one left with none mutes EVERY alert. Returns updated, unchanged " +
+        "(nothing to write), not_found, or invalid (nothing written)." +
+        "<<GUIDE>>" +
         "Edits an existing alert mute rule IN PLACE by its id (from get_mute_rules or create_mute_rule) — the " +
         "changes the enabled flag cannot express: narrowing or correcting a pattern, rewording a reason, adding " +
         "an expires_at_utc to a rule that should stop being permanent, or clearing one so it stays. A PARTIAL " +

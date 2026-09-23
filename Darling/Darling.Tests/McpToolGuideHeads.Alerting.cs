@@ -28,6 +28,8 @@ public sealed class McpToolGuideHeadsAlertingTests
     [
         "get_alert_settings",
         "get_notification_routes",
+        "update_alert_settings",
+        "update_mute_rule",
     ];
 
     [Fact]
@@ -88,5 +90,63 @@ public sealed class McpToolGuideHeadsAlertingTests
         Assert.Contains("matching the metric EXACTLY, then one matching its FAMILY, then the parent", routesTail, StringComparison.Ordinal);
         Assert.Contains("Routing sits AFTER the cooldown", routesTail, StringComparison.Ordinal);
         Assert.Contains("are NOT reported", routesTail, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3b: update_alert_settings's head states the shared-row PARTIAL-update contract, the
+    /// all-or-nothing invalid/unknown-field outcome, the poison_wait.threshold_ms retirement, and that
+    /// health_bands/fleet_sweep are not alert families — the four facts a #3898 D9 pass found a model could get
+    /// wrong from the old head-less description alone.</summary>
+    [Fact]
+    public void UpdateAlertSettingsHead_StatesThePartialUpdateAndThePoisonWaitAndHealthBandsFacts()
+    {
+        var head = McpToolGuideTests.Served("update_alert_settings").Served;
+        Assert.Contains("PARTIAL update of the single global alert-settings row the service delivers on", head, StringComparison.Ordinal);
+        Assert.Contains("Call get_alert_settings FIRST", head, StringComparison.Ordinal);
+        Assert.Contains("omitted fields stay unchanged", head, StringComparison.Ordinal);
+        Assert.Contains("An invalid value or unknown field writes NOTHING; returns status invalid", head, StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED: accepted with a warnings entry", head, StringComparison.Ordinal);
+        Assert.Contains("poison_wait.enabled governs it", head, StringComparison.Ordinal);
+        Assert.Contains("health_bands and fleet_sweep are NOT alert families", head, StringComparison.Ordinal);
+        Assert.Contains("alerts_enabled does not govern fleet_sweep", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>#3898 lane L3b: update_mute_rule's head states it edits an existing rule in place (a PARTIAL
+    /// update where an unsent field stays as stored and an explicit null clears it), that it changes shared
+    /// alert configuration, that enabled cannot be changed here, and the widen-to-everything hazard of clearing
+    /// every scope field.</summary>
+    [Fact]
+    public void UpdateMuteRuleHead_StatesThePartialUpdateAndTheClearingAndEnabledFacts()
+    {
+        var head = McpToolGuideTests.Served("update_mute_rule").Served;
+        Assert.Contains("Edits an existing alert mute rule IN PLACE by its id", head, StringComparison.Ordinal);
+        Assert.Contains("changes shared alert configuration", head, StringComparison.Ordinal);
+        Assert.Contains("PARTIAL", head, StringComparison.Ordinal);
+        Assert.Contains("a field you do NOT send stays exactly as stored", head, StringComparison.Ordinal);
+        Assert.Contains("an EXPLICIT JSON null CLEARS that field", head, StringComparison.Ordinal);
+        Assert.Contains("enabled is NOT editable here", head, StringComparison.Ordinal);
+        Assert.Contains("created_at_utc never moves", head, StringComparison.Ordinal);
+        Assert.Contains("Clearing scope fields WIDENS the rule", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>D9: load-bearing facts that moved off the head stay reachable in Darling's own tail for the two
+    /// write tools (no Lite twin exists for either — verified by <c>git grep -n 'Name = "update_alert_settings"'
+    /// -- Lite/Mcp</c> finding nothing — so there is no Lite copy of this pin).</summary>
+    [Fact]
+    public void DarlingTails_StillCarryTheUpdateToolsKnobsAndCautions()
+    {
+        var settingsTail = McpToolGuideTests.Served("update_alert_settings").Tail!;
+        Assert.Contains("self_alerts", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("health_bands.deadlock_warn_per_hour", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("fleet_sweep.enabled", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route (#3712)", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("DEFAULTS from a 7-day production read", settingsTail, StringComparison.Ordinal);
+        Assert.Contains("Pass the FULL list each time", settingsTail, StringComparison.Ordinal);
+
+        var muteRuleTail = McpToolGuideTests.Served("update_mute_rule").Tail!;
+        Assert.Contains("USE THIS", muteRuleTail, StringComparison.Ordinal);
+        Assert.Contains("Stale Mute Rules self-alert ages a rule from its creation date", muteRuleTail, StringComparison.Ordinal);
+        Assert.Contains("a whole-fleet silence", muteRuleTail, StringComparison.Ordinal);
+        Assert.Contains("must match the alert rows' spelling EXACTLY", muteRuleTail, StringComparison.Ordinal);
     }
 }
