@@ -52,11 +52,14 @@
       `pg_upgrade --check` refuses unless that version's library is in the new runtime. The update
       to $tsVersion follows, before the store opens. Measured: the two DLLs are enough, the
       version's timescaledb--<v>.sql is not needed.
-    - Releases 3.3.x to 3.8.x, if an operator rolls back to one. They adopt an extracted runtime
-      whose first timescaledb-*.dll matches their own bundle instead of swapping it out (see
-      RuntimeStampFileName), and without the carried library they would swap back to a runtime
-      that cannot load the store's newer extension.
-  A carried version stays forever: dropping one breaks both readers for every store still on it.
+    - A store whose update to $tsVersion fails. Nothing is reverted: the store opens on its own
+      version through the carried library, and the service raises a Critical alert and retries
+      the update on its next start (DarlingStoreUpgrade.UpdateTimescaleQuiescedAsync). Without
+      the carried library that store could not open at all.
+  Both DLLs are required for a version to count as carried (the TSL one holds compression and
+  continuous aggregates). A carried version stays forever: dropping one breaks both readers for
+  every store still on it. Rolling back to an older release is a separate guard, not this one
+  (DarlingStoreUpgrade.LegacyRuntimeStampFileName).
 
 .PARAMETER OutputDirectory
   Where pg-runtime.zip lands. Defaults to Darling\artifacts (gitignored). Packaging copies or

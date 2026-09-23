@@ -905,7 +905,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 12),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 13),
     };
 
     /// <summary>
@@ -1000,6 +1000,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store disk-pressure self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Custom-alert rule-health self-alert failed"] = "handed its evidence (the report) as a parameter; the report-building read is in CustomAlertEvaluator, outside this census",
         ["Store runtime upgrade self-alert failed"] = "handed its evidence as parameters",
+        ["Store TimescaleDB self-alert failed"] = "handed its evidence as parameters; the version was read by the bootstrap (#3908)",
         /* #3816 renamed this line with the check: the same catch, one family over — the self-heal now covers
            every policy family, so "Compression-job health" would have named a third of what it isolates. */
         ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
