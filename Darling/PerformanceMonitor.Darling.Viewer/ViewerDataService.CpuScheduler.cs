@@ -74,6 +74,11 @@ public sealed partial class ViewerDataService
     /// over the window, from the <c>v_cpu_scheduler_stats</c> passthrough view. A point-in-time collector
     /// (single row per collection), so the three counts plot directly — no delta normalization.
     /// $1 server_id, $2 window start, $3 window end (all naive UTC).
+    ///
+    /// <para>#3936: <c>collection_id</c> is a secondary sort, not a filter — a same-instant collision (rare,
+    /// see <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots,
+    /// just in a deterministic left-to-right order instead of whatever physical row order the plan happens
+    /// to return them in.</para>
     /// </summary>
     public const string CpuSchedulerTrendSql = """
         SELECT
@@ -85,12 +90,18 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY collection_time
+        ORDER BY collection_time, collection_id
         """;
 
     /// <summary>
     /// The CPU Scheduler latest-snapshot read: the single most recent cpu_scheduler_stats row in the
     /// window (all pressure columns), for the metric grid. $1 server_id, $2 start, $3 end (naive UTC).
+    ///
+    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
+    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
+    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
+    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
+    /// <c>LIMIT 1</c> returning either one depending on physical row order.</para>
     /// </summary>
     public const string CpuSchedulerSnapshotSql = """
         SELECT
@@ -125,7 +136,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY collection_time DESC
+        ORDER BY collection_time DESC, collection_id DESC
         LIMIT 1
         """;
 

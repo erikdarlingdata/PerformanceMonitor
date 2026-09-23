@@ -124,6 +124,12 @@ AND   collection_time = (SELECT MAX(collection_time) FROM v_memory_grant_stats W
     /// starved of a worker (<c>total_work_queue_count</c>). A point-in-time snapshot collector, so the
     /// newest row is the current state. NULL/absent on Azure SQL DB (the collector does not apply there),
     /// which the card renders as "--". $1 server_id.
+    ///
+    /// <para>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
+    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
+    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
+    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
+    /// <c>LIMIT 1</c> returning either one depending on physical row order.</para>
     /// </summary>
     public const string ServerSummaryThreadsSql = @"
 SELECT
@@ -133,7 +139,7 @@ SELECT
     total_work_queue_count
 FROM v_cpu_scheduler_stats
 WHERE server_id = $1
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
     /// <summary>

@@ -916,7 +916,12 @@ public sealed class DarlingCollectorRunner
         ServerRuntime server,
         CancellationToken cancellationToken)
     {
-        var collectionTime = DateTime.UtcNow;
+        /* #3936: nudged forward (by, in practice, a handful of ticks) rather than a bare DateTime.UtcNow
+           when it would collide with this SAME (server, collector) pair's last stamp — see
+           CollectionTimeClock's own remarks for the run-overlap and clock-resolution cases that used to
+           store two different snapshots under one collection_time, making "the newest reading" ambiguous
+           for every reader downstream. */
+        var collectionTime = CollectionTimeClock.NextStrictlyAfter(server.ServerId, definition.Name, DateTime.UtcNow);
 
         /* Some collectors don't exist on some targets (e.g. ring buffers on Azure SQL DB) —
            skip the cycle entirely, matching Lite. CollectorCatalog.AppliesTo composes the

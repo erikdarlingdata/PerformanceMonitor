@@ -71,13 +71,20 @@ LIMIT 1";
         }
     }
 
+    /// <summary>#3936: the tiebreak is <c>collection_id DESC</c>, not a second <c>collection_time</c>. A
+    /// run-overlap or clock-resolution collision can store two DIFFERENT snapshots under one
+    /// <c>collection_time</c> — <c>collection_id</c> is the per-process monotonic counter every row already
+    /// carries, so it orders two same-instant rows the same way on every read instead of a bare
+    /// <c>LIMIT 1</c> returning either one depending on physical row order, which would otherwise make the
+    /// RUNNABLE_TASKS fact (and the THREADPOOL amplifier reading its warning flag) flip between two answers
+    /// across analysis passes with no change in the server.</summary>
     public const string RunnableTaskStatsSql = @"
 SELECT total_runnable_tasks_count, runnable_tasks_warning
 FROM cpu_scheduler_stats
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
-ORDER BY collection_time DESC
+ORDER BY collection_time DESC, collection_id DESC
 LIMIT 1";
 
     /// <summary>
