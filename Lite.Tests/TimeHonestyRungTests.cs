@@ -134,9 +134,11 @@ public sealed class TimeHonestyRungTests
     public void TheOverviewRead_ProjectsTheTwinBesideTheLocalStamp_AndTheSnapshotFoldsThem()
     {
         var overview = Lite.Tests.ParitySource.ReadFile("Lite/Services/LocalDataService.Overview.cs");
+        /* #3895: the relation is the hot table first, then the archive view — the same statement over each. */
         Assert.Contains(
-            "SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time, sample_time_utc\nFROM v_cpu_utilization_stats",
+            "SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time, sample_time_utc\nFROM \" + relation + @\"",
             overview.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("foreach (var relation in NewestFirstRelations(\"cpu_utilization_stats\"))", overview, StringComparison.Ordinal);
         Assert.Contains("ORDER BY sample_time DESC\nLIMIT 1", overview.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.DoesNotContain("ORDER BY sample_time_utc", overview, StringComparison.Ordinal);
         Assert.DoesNotContain("ORDER BY COALESCE", overview, StringComparison.Ordinal);

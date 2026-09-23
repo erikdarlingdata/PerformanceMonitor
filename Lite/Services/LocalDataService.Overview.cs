@@ -44,12 +44,15 @@ public partial class LocalDataService
            the snapshot (MainWindow.AlertEngine) exactly as Darling resolves its own read. The ORDER BY stays
            on the local stamp on purpose: every row has it, and ordering on the twin or a COALESCE of the two
            would compare a pre-rung local stamp against a post-rung UTC one and, east of UTC, sort a stale
-           pre-rung row as newest for one offset's worth of hours after the upgrade. */
-        using (var cmd = connection.CreateCommand())
+           pre-rung row as newest for one offset's worth of hours after the upgrade.
+
+           #3895: hot table first, then the archive view — see NewestFirstRelations. */
+        foreach (var relation in NewestFirstRelations("cpu_utilization_stats"))
         {
+            using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT sqlserver_cpu_utilization, other_process_cpu_utilization, sample_time, collection_time, sample_time_utc
-FROM v_cpu_utilization_stats
+FROM " + relation + @"
 WHERE server_id = $1
 ORDER BY sample_time DESC
 LIMIT 1";
@@ -74,15 +77,17 @@ LIMIT 1";
                    into it so the summary says which clock each value is in; the alert snapshot does the
                    folding (twin ?? local) where the gate's identity is built. */
                 cpuSampleTimeUtc = reader.IsDBNull(4) ? null : reader.GetDateTime(4);
+                break;
             }
         }
 
-        /* Latest SQL Memory */
-        using (var cmd = connection.CreateCommand())
+        /* Latest SQL Memory — hot table first (#3895). */
+        foreach (var relation in NewestFirstRelations("memory_stats"))
         {
+            using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT total_server_memory_mb, collection_time
-FROM v_memory_stats
+FROM " + relation + @"
 WHERE server_id = $1
 ORDER BY collection_time DESC
 LIMIT 1";
@@ -92,6 +97,7 @@ LIMIT 1";
             {
                 memoryMb = reader.IsDBNull(0) ? null : ToDouble(reader.GetValue(0));
                 memoryCollectionTime = reader.GetDateTime(1);
+                break;
             }
         }
 
@@ -123,18 +129,21 @@ AND   deadlock_time >= $2";
             deadlockCount = result != null ? Convert.ToInt32(result) : 0;
         }
 
-        /* Last collection time from collection_log */
-        using (var cmd = connection.CreateCommand())
+        /* Last collection time from collection_log — hot table first (#3895). A miss on both leaves the CPU
+           stamp above in place, exactly as the single view read did. */
+        foreach (var relation in NewestFirstRelations("collection_log"))
         {
+            using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 SELECT MAX(collection_time)
-FROM v_collection_log
+FROM " + relation + @"
 WHERE server_id = $1";
             cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync();
             if (result != null && result != DBNull.Value)
             {
                 lastCollection = Convert.ToDateTime(result);
+                break;
             }
         }
 
@@ -162,6 +171,21 @@ WHERE server_id = $1";
         summary.ApplyCollectionFreshness(DateTime.UtcNow);
         return summary;
     }
+
+    /// <summary>
+    /// Where a newest-row read looks, in order (#3895): the hot table, then the <c>v_</c> view that unions it
+    /// with every archived parquet file. The Lite twin of Darling's per-server <c>LIMIT 1</c> fleet probes.
+    ///
+    /// <para><b>Why the hot table can answer alone.</b> <c>ArchiveService</c> moves only rows OLDER than its
+    /// cutoff out of the hot table, so whenever the hot table holds a row for a server, that server's newest
+    /// row is among the hot rows and the archive cannot outrank it. The view read it replaced scanned every
+    /// archived month on every Overview refresh for a value the hot table already held: on a store holding
+    /// June-to-September archives it cost 5-28 ms per read against about 1 ms hot, three reads per server.
+    /// The view stays the fallback, so a server with nothing hot — one that stopped reporting before the last
+    /// archive cycle, or any server just after the emergency reset — still reads its newest archived row,
+    /// exactly as before.</para>
+    /// </summary>
+    private static string[] NewestFirstRelations(string table) => new[] { table, "v_" + table };
 }
 
 /// <summary>One tag pill on an Overview card (#2020 2b-i): the tag name plus the brushes to render it,

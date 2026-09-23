@@ -97,6 +97,10 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("FROM v_dmv_blocking_snapshots", sql, StringComparison.Ordinal);
         Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("server_id = $1", sql, StringComparison.Ordinal);
+        /* #3895: every WINDOWED read carries the partition-column floor, and the two "ever" reads none — a
+           floor would change what "newest event ever" answers. */
+        Assert.Equal(4, System.Text.RegularExpressions.Regex.Matches(sql, @"event_time >= \$2 AND collection_time >= \$3\)").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"\(SELECT MAX\(event_time\)\s+FROM \w+\s+WHERE server_id = \$1\)").Count);
     }
 
     [Fact]
@@ -109,6 +113,9 @@ public sealed class ViewerOverviewSqlTests
         Assert.Contains("deadlock_time >= $2", sql, StringComparison.Ordinal);
         /* Newest deadlock ever (unbounded) for the "Last: N ago" detail. */
         Assert.Contains("MAX(deadlock_time)", sql, StringComparison.Ordinal);
+        /* #3895: the windowed count carries the partition-column floor; the "ever" read does not. */
+        Assert.Contains("deadlock_time >= $2 AND collection_time >= $3)", sql, StringComparison.Ordinal);
+        Assert.Matches(@"\(SELECT MAX\(deadlock_time\) FROM v_deadlocks WHERE server_id = \$1\)", sql);
     }
 
     /// <summary>

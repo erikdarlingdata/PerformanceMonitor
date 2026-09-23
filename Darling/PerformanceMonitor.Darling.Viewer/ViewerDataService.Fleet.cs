@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using System.Windows.Media;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -64,7 +65,12 @@ public sealed partial class ViewerDataService
     /// use — positive differences only, so a statistics reset drops its interval rather than subtracting a
     /// lifetime — so the fleet total reconciles with the sum of the card counts on both engines. Never a
     /// <c>SUM(deadlocks)</c>: the column is a lifetime counter repeated in every sample. $1 window start,
-    /// $2 window end (both naive UTC).
+    /// $2 window end, $3 the <see cref="EventWindowFloor"/> for $1 (all naive UTC).
+    ///
+    /// <para>$3 bounds the three event-table scans on the partition column (#3895), the bound the service's
+    /// fleet reader carries on the same counts: bounded on <c>event_time</c> alone they open every retained
+    /// chunk to count the last hour — 69.8 ms on DARLING01, 1.1 ms with it. The PostgreSQL arm is already
+    /// windowed on <c>collection_time</c> and needs no floor.</para>
     /// </summary>
     public const string FleetTotalsSql = @"
 SELECT
@@ -82,6 +88,7 @@ SELECT
                 FROM v_blocked_process_reports
                 WHERE event_time >= $1
                 AND   event_time <= $2
+                AND   collection_time >= $3
                 GROUP BY server_id
             ) AS xe
             FULL OUTER JOIN
@@ -90,6 +97,7 @@ SELECT
                 FROM v_dmv_blocking_snapshots
                 WHERE event_time >= $1
                 AND   event_time <= $2
+                AND   collection_time >= $3
                 GROUP BY server_id
             ) AS dmv ON xe.server_id = dmv.server_id
         ) AS per_server
@@ -99,6 +107,7 @@ SELECT
         FROM v_deadlocks
         WHERE deadlock_time >= $1
         AND   deadlock_time <= $2
+        AND   collection_time >= $3
     )
     +
     (
@@ -129,6 +138,7 @@ SELECT
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (await reader.ReadAsync(cancellationToken))

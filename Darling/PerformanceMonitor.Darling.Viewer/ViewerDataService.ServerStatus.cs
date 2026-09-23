@@ -24,18 +24,36 @@ namespace PerformanceMonitor.Darling.Viewer;
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// Newest collection time per server across all collectors, in one pass — the sidebar dots and the
-    /// status bar's collection field derive freshness from this (the same <c>MAX(collection_time)</c> the
+    /// Newest collection time per server across all collectors, in one statement — the sidebar dots and the
+    /// status bar's collection field derive freshness from this (the same newest <c>collection_time</c> the
     /// Overview cards use per server, so a dot and its card agree). Timestamps are the store's naive UTC.
     /// Excludes <c>server_id = 0</c>, the fleet-level retention run-record sentinel
     /// (<c>DarlingObservability.FleetServerId</c>) — it is not a real server, so it must not appear as a
     /// phantom key a future key-iterating consumer could render as "server 0".
+    ///
+    /// <para><b>One probe per registered server, not an aggregate over the log</b> (#3895). This was a
+    /// <c>GROUP BY server_id</c> over every retained row of <c>collection_log</c> — the store's biggest
+    /// table, re-read on every refresh tick for a handful of timestamps: 93.8 ms of planning and 129.5 ms on
+    /// DARLING01, and linear in servers x retained days on a field store. Now each registry row gets its own
+    /// <c>LIMIT 1</c>, an index-only descent in the newest chunk for a server that is collecting (2.5 ms and
+    /// 6.4 ms there). Every registry row, enabled or not, because Manage Servers shows a disabled server's
+    /// last collection too; unbounded, because that "last collected" may be weeks old and is still the
+    /// answer. The two callers look up registry ids only, so the rows they read are identical.</para>
     /// </summary>
     public const string ServerFreshnessSql = @"
-SELECT server_id, MAX(collection_time)
-FROM v_collection_log
-WHERE server_id <> 0
-GROUP BY server_id";
+SELECT
+    s.server_id,
+    latest.collection_time
+FROM servers AS s
+CROSS JOIN LATERAL
+(
+    SELECT collection_time
+    FROM v_collection_log
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS latest
+WHERE s.server_id <> 0";
 
     /// <summary>The store's on-disk size in bytes (status-bar Database field). No parameters.</summary>
     public const string StoreSizeSql = "SELECT pg_database_size(current_database())";

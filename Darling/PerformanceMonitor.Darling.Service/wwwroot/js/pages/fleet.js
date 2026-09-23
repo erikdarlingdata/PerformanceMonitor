@@ -13,7 +13,7 @@
  * API reports it (band = Warning, status text verbatim) — never the red offline treatment.
  */
 
-import { el, mount, apiGet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, localTime, localClock, relTime, fmtInt, fmtNum, fmtPct, fmtMb, fmtMs, bandClass, rollupTextId } from "../util.js";
 import { VIZ, navigateServer } from "../panels.js";
 
 const BAND_RANK = { Offline: 0, Critical: 1, Warning: 2, Healthy: 3 };
@@ -165,7 +165,7 @@ function tagPills(c) {
 export async function renderFleet(main) {
   mount(main, [pageHead(null), loadingStrip("Loading fleet…")]);
 
-  const res = await apiGet("/api/fleet");
+  const res = await apiGetFleet();
   if (res.kind === "error") {
     mount(main, [pageHead(null), errorStrip(res.message)]);
     return;

@@ -145,25 +145,32 @@ LIMIT 1";
     /// collector runs every cycle for its watermark), for the Dashboard's "Last: N ago" detail when the
     /// window is clear. The caller applies the fallback in C# (identical to Lite's
     /// <c>COALESCE(NULLIF(xe,0), dmv)</c>: use XE when it has any row, else DMV). $1 server_id, $2 window
-    /// start (naive UTC).
+    /// start, $3 the <see cref="EventWindowFloor"/> for $2 (both naive UTC).
+    ///
+    /// <para>$3 is the partition-column bound the four windowed reads cannot get from <c>event_time</c>
+    /// (#3895, the service's <c>DarlingFleetReader.FleetBlockingSql</c> carries the same one), so they plan
+    /// and probe the window's chunks instead of every retained one. The two "ever" reads keep no bound:
+    /// they ask for the newest event in all of history, which a floor would change the answer to.</para>
     /// </summary>
     public const string ServerSummaryBlockingSql = @"
 SELECT
-    (SELECT COUNT(*)          FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2),
-    (SELECT MAX(wait_time_ms) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2),
-    (SELECT COUNT(*)          FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2),
-    (SELECT MAX(wait_time_ms) FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2),
+    (SELECT COUNT(*)          FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
+    (SELECT MAX(wait_time_ms) FROM v_blocked_process_reports WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
+    (SELECT COUNT(*)          FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
+    (SELECT MAX(wait_time_ms) FROM v_dmv_blocking_snapshots   WHERE server_id = $1 AND event_time >= $2 AND collection_time >= $3),
     (SELECT MAX(event_time)   FROM v_blocked_process_reports WHERE server_id = $1),
     (SELECT MAX(event_time)   FROM v_dmv_blocking_snapshots   WHERE server_id = $1)";
 
     /// <summary>
     /// Deadlock count in the window plus the newest deadlock ever — the windowed count for the card value,
     /// and the unbounded MAX(deadlock_time) for the Dashboard's "Last: N ago" detail. $1 server_id, $2
-    /// window start (naive UTC).
+    /// window start, $3 the <see cref="EventWindowFloor"/> for $2 (both naive UTC) — on the windowed count
+    /// only, for <see cref="ServerSummaryBlockingSql"/>'s reason (#3895): 18.8 ms of planning over every
+    /// retained chunk on DARLING01 without it, 1.5 ms with it.
     /// </summary>
     public const string ServerSummaryDeadlockSql = @"
 SELECT
-    (SELECT COUNT(*)           FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2),
+    (SELECT COUNT(*)           FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND collection_time >= $3),
     (SELECT MAX(deadlock_time) FROM v_deadlocks WHERE server_id = $1)";
 
     /// <summary>
@@ -241,6 +248,7 @@ WHERE server_id = $1";
            expressions of "one hour" is how a denominator drifts away from its numerator. */
         var window = ServerHealthThresholds.DeadlockRateMinimumWindow;
         var windowStart = DateTime.SpecifyKind(nowUtc - window, DateTimeKind.Unspecified);
+        var collectionFloor = EventWindowFloor.For(windowStart);
 
         double? cpuPercent = null;
         double? otherProcessCpuPercent = null;
@@ -352,6 +360,7 @@ WHERE server_id = $1";
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = collectionFloor });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
@@ -393,6 +402,7 @@ WHERE server_id = $1";
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = collectionFloor });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {

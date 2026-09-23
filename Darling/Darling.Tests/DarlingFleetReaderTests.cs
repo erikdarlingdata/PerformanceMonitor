@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -83,15 +84,57 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Equal(expectAzureMi, isAzureMi);
     }
 
-    [Fact]
-    public void LatestSnapshotReads_AreDistinctOnPerServer()
+    /// <summary>
+    /// #3895: each newest-row read is ONE probe per registry server — a <c>LATERAL</c> with its own
+    /// <c>LIMIT 1</c>, ordered on the partition column so ordered ChunkAppend stops in the newest chunk — and
+    /// never the <c>DISTINCT ON (server_id)</c> it replaced, which read, decompressed and sorted every
+    /// retained row of the table to keep one per server. Driven from the enabled registry (the servers the
+    /// cards are built for) minus the targets the registry says are PostgreSQL, which never write these
+    /// tables.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(DarlingFleetReader.FleetCpuSql), "FROM v_cpu_utilization_stats", "ORDER BY collection_time DESC, sample_time DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetMemorySql), "FROM v_memory_stats", "ORDER BY collection_time DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetThreadsSql), "FROM v_cpu_scheduler_stats", "ORDER BY collection_time DESC")]
+    [InlineData(nameof(DarlingFleetReader.FleetMemoryPressureSql), "FROM v_memory_grant_stats", "ORDER BY collection_time DESC")]
+    public void LatestSnapshotReads_AreOnePerServerProbeFromTheRegistry(string constName, string source, string ordering)
     {
-        Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
-        /* collection_time leads, matching FleetMemorySql; sample_time is the within-batch tiebreak. For the
-           frame, not the cost - LatestCpuReadShapeSqlTests and the constant's own doc carry both halves. */
-        Assert.Contains("ORDER BY server_id, collection_time DESC, sample_time DESC", DarlingFleetReader.FleetCpuSql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetMemorySql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (server_id)", DarlingFleetReader.FleetThreadsSql, StringComparison.Ordinal);
+        var sql = (string)typeof(DarlingFleetReader).GetField(constName, BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!;
+
+        Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains(source, sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE server_id = s.server_id", sql, StringComparison.Ordinal);
+        /* collection_time leads for the frame AND the cost; on the CPU read sample_time is the within-batch
+           tiebreak — LatestCpuReadShapeSqlTests carries the frame half. The LIMIT belongs to the probe. */
+        Assert.Matches(Regex.Escape(ordering) + @"\s+LIMIT 1\s+\) AS latest", sql);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains(DarlingFleetReader.SqlServerCollectedTargetSql, sql, StringComparison.Ordinal);
+
+        /* The replaced shape, in any spelling that sorts the whole relation to keep one row per server. */
+        Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3895: the driver skips exactly the servers the registry POSITIVELY says are PostgreSQL, spelled from
+    /// the vocabulary's own constants and normalised the way <see cref="MonitoredEngineKind.IsPostgres"/>
+    /// normalises. The live arm (<c>FleetReadsAreBoundedLivePostgresTests</c>) evaluates the predicate for
+    /// every token and holds its answer to the C# one row by row.
+    /// </summary>
+    [Fact]
+    public void SqlServerTargetFilter_ExcludesOnlyAPositivePostgresClaim()
+    {
+        var predicate = DarlingFleetReader.SqlServerCollectedTargetSql;
+
+        Assert.StartsWith("(s.engine_kind IS NULL OR ", predicate, StringComparison.Ordinal);
+        Assert.Contains("lower(btrim(s.engine_kind)) NOT IN ('" + MonitoredEngineKind.Postgres + "', '" + MonitoredEngineKind.AuroraPostgres + "')", predicate, StringComparison.Ordinal);
+
+        /* Every PostgreSQL token the vocabulary has is named, and no SQL Server one. */
+        foreach (var kind in MonitoredEngineKind.All)
+        {
+            Assert.Equal(MonitoredEngineKind.IsPostgres(kind), predicate.Contains("'" + kind + "'", StringComparison.Ordinal));
+        }
     }
 
     [Fact]
@@ -105,6 +148,10 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("event_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $2", sql, StringComparison.Ordinal);
+        /* #3895: both scans carry the partition-column floor, and neither an upper bound on it: a late
+           collection is still an event in the window. */
+        Assert.Equal(2, Regex.Matches(sql, @"collection_time >= \$3").Count);
+        Assert.DoesNotContain("collection_time <", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -115,15 +162,26 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time >= $1", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_time <= $2", sql, StringComparison.Ordinal);
+        /* #3895: FleetBlockingSql's floor, for its reason. */
+        Assert.Contains("collection_time >= $3", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time <", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3895: the newest grant-snapshot instant per server is found by the per-server probe, and the pools are
+    /// summed AT that instant by equality — never a <c>MAX(collection_time)</c> over every retained row joined
+    /// back to the table, which is what this was.
+    /// </summary>
     [Fact]
     public void FleetMemoryPressureSql_SumsAtNewestSnapshotPerServer()
     {
         var sql = DarlingFleetReader.FleetMemoryPressureSql;
-        Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY m.server_id", sql, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(sql, "FROM v_memory_grant_stats").Count);
+        Assert.Contains("AND   m.collection_time = latest.collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(m.waiter_count)", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(m.granted_memory_mb)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -147,8 +205,16 @@ public sealed class DarlingFleetReaderSqlTests
     {
         var sql = DarlingFleetReader.FleetLastCollectionSql;
         Assert.Contains("FROM v_collection_log", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
+        /* #3895: bounded is not enough — as a GROUP BY the 48 hours still aggregated every collector run of
+           every server in them (490,940 rows on DARLING01) for one timestamp each. One probe per enabled
+           registry server, the window kept so a long-dark server still falls out exactly as it did. */
+        Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
+        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Matches(@"ORDER BY collection_time DESC\s+LIMIT 1", sql);
+        Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
+        Assert.Contains("s.server_id <> 0", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("GROUP BY", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
