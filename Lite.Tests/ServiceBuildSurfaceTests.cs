@@ -23,7 +23,7 @@ namespace Lite.Tests;
 
 /// <summary>
 /// #3453's parity half: <c>get_collection_health</c> exists on BOTH SKUs with byte-identical descriptions
-/// (pinned by <see cref="AlertReadFailureSurfaceTests.BothSkusToolDescriptions_StayByteIdentical"/>), so a
+/// (pinned by <see cref="CrossSkuSurfaceSourceTests.BothSkusToolDescriptions_StayByteIdentical"/>), so a
 /// <c>service</c> block the shared text documents has to exist on both — a description that promises a
 /// block only one SKU renders is the contract lying to the other SKU's callers, which is worse than the
 /// gap #3453 closes. These censuses hold the block to the same discipline the #3013 family holds
