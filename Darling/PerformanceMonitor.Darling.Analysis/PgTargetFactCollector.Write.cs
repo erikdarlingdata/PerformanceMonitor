@@ -47,15 +47,16 @@ public sealed partial class PgTargetFactCollector
     /// store's ways of saying "not reported": the trackedness decision itself is <see cref="WalIsTracked"/>, shared
     /// with the WAL-volume read, and it needs both sums.</para>
     ///
-    /// <para><b>A restart-spanning interval's requested figure is unknown, not pressure (#3955).</b> A clean restart
-    /// leaves every <c>stats_reset</c> stamp where it was, so the reset guards above cannot see it, and it ADDS a
-    /// requested checkpoint: PostgreSQL counts the shutdown checkpoint in <c>num_requested</c> and keeps the count
-    /// across the restart. <c>restart_here</c> is <see cref="PostmasterRestart.SpansSql"/> over the V139
-    /// <c>postmaster_start_time</c> column, and the requested sum leaves those intervals out, the way a reset
-    /// interval contributes nothing: one interval's evidence, not the window's. The timed count, the write and sync
-    /// time and the WAL figures still sum every interval. <c>postmaster_restart_count</c> rides LAST, after
-    /// <c>wal_records</c>, so the earlier ordinals did not move, and the fact carries it so the advice can say the
-    /// requested total excludes those intervals.</para>
+    /// <para><b>A restart-spanning interval's checkpoint figures are unknown, not pressure (#3955).</b> A clean restart
+    /// leaves every <c>stats_reset</c> stamp where it was, so the reset guards above cannot see it, and it ADDS the
+    /// shutdown checkpoint to counters that kept running: one more requested checkpoint, plus that checkpoint's own
+    /// write and sync time and the buffers it flushed, none of which can be told apart from the live checkpoints'.
+    /// <c>restart_here</c> is <see cref="PostmasterRestart.SpansSql"/> over the V139 <c>postmaster_start_time</c>
+    /// column, and the requested, write-time, sync-time and checkpoint-buffer sums leave those intervals out, the
+    /// way a reset interval contributes nothing. The cost is one skipped collection interval per restart; every
+    /// other interval of the window still counts. The timed count (a restart does not move it) and the WAL figures
+    /// still sum every interval. <c>postmaster_restart_count</c> rides LAST, after <c>wal_records</c>, so the earlier
+    /// ordinals did not move, and the fact carries it so the advice can say those intervals were left out.</para>
     /// </summary>
     public const string PgTargetCheckpointSql = $@"
 WITH sampled AS (
@@ -84,9 +85,9 @@ WITH sampled AS (
 SELECT
     CAST(coalesce(SUM(GREATEST(raw_requested, 0)) FILTER (WHERE NOT restart_here), 0) AS bigint) AS checkpoints_requested,
     CAST(coalesce(SUM(GREATEST(raw_timed, 0)), 0) AS bigint)        AS checkpoints_timed,
-    coalesce(SUM(GREATEST(raw_write_ms, 0)), 0)                     AS checkpoint_write_ms,
-    coalesce(SUM(GREATEST(raw_sync_ms, 0)), 0)                      AS checkpoint_sync_ms,
-    CAST(coalesce(SUM(GREATEST(raw_ckpt_buffers, 0)), 0) AS bigint) AS checkpoint_buffers_written,
+    coalesce(SUM(GREATEST(raw_write_ms, 0)) FILTER (WHERE NOT restart_here), 0) AS checkpoint_write_ms,
+    coalesce(SUM(GREATEST(raw_sync_ms, 0)) FILTER (WHERE NOT restart_here), 0)  AS checkpoint_sync_ms,
+    CAST(coalesce(SUM(GREATEST(raw_ckpt_buffers, 0)) FILTER (WHERE NOT restart_here), 0) AS bigint) AS checkpoint_buffers_written,
     coalesce(SUM(GREATEST(raw_wal_bytes, 0)), 0)                    AS wal_bytes,
     CAST(coalesce(SUM(GREATEST(raw_wal_fpi, 0)), 0) AS bigint)      AS wal_fpi,
     CAST(count(*) FILTER (WHERE ck_reset_here) AS integer)          AS checkpointer_reset_count,
@@ -159,8 +160,8 @@ SELECT
     /// something asked for one — a base backup, a <c>CHECKPOINT</c> statement, a shutdown); a window in which
     /// requested checkpoints dominate is a window in which WAL volume, not the clock, is deciding when the
     /// server flushes every dirty buffer. The shutdown one is the kind a read can recognise, by the postmaster
-    /// restart it spans, and the requested count leaves those intervals out (#3955; <c>postmaster_restart_count</c>
-    /// says how many). <see cref="Fact.Value"/> is the REQUESTED SHARE, Δrequested /
+    /// restart it spans, and the requested count and the checkpoint write, sync and buffer figures leave those
+    /// intervals out (#3955; <c>postmaster_restart_count</c> says how many). <see cref="Fact.Value"/> is the REQUESTED SHARE, Δrequested /
     /// (Δrequested + Δtimed) in [0, 1], and the scorer grades that share; every raw figure rides as metadata
     /// so the advice can say what the server measured rather than what folklore expects.
     ///
@@ -261,7 +262,8 @@ SELECT
         var walAnyNonNull = !reader.IsDBNull(9) && reader.GetBoolean(9);
         var walRecords = ToInt64(reader.GetValue(11));
         var walTracked = WalIsTracked(walAnyNonNull, walBytes, walRecords);
-        /* #3955: the intervals that spanned a postmaster restart, whose requested count the sum above left out. */
+        /* #3955: the intervals that spanned a postmaster restart, which the requested, write, sync and checkpoint-buffer
+           sums above left out. */
         var postmasterRestarts = Convert.ToInt32(reader.GetValue(12));
 
         var observedSeconds = context.ObservedDurationMs / 1000.0;

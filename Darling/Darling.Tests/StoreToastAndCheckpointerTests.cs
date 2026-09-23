@@ -424,13 +424,13 @@ public sealed class StoreToastAndCheckpointerTests
 
     /// <summary>
     /// The issue's own interval (DARLING01, 2026-09-22): two shutdown checkpoints (the service stop and the #3908
-    /// update's private-port stop) and nothing WAL forced. Across the restart the reading is still Observed, keeps
-    /// the write and sync deltas, carries the raw counter, and states NO requested count — so it is not pressure.
-    /// The same deltas on one postmaster ARE pressure (the control), and a sync phase over the bar across a restart
-    /// still is.
+    /// update's private-port stop) and nothing WAL forced. Across the restart the reading is Restarted: no delta at
+    /// all, because the shutdown checkpoint is in all three counters, so it is not pressure however slow its sync
+    /// was. The raw counters, the span's two stamps and the postmaster start still ride along. The same counters on
+    /// one postmaster ARE pressure (the control).
     /// </summary>
     [Fact]
-    public void TheCheckpointerReading_AcrossARestart_WithholdsRequested_AndKeepsTheWriteAndSyncDeltas()
+    public void TheCheckpointerReading_AcrossARestart_StatesNoDelta_AndIsNotPressure_EvenOnASlowSync()
     {
         var t0 = new DateTime(2026, 9, 22, 20, 14, 0, DateTimeKind.Unspecified);
         var t1 = t0.AddMinutes(7.1);
@@ -439,12 +439,16 @@ public sealed class StoreToastAndCheckpointerTests
 
         var restarted = DarlingStoreMetricsReader.CheckpointerReading.From(
             new(t1, 12_700, 3_450, 42, after), new(t0, 12_600, 3_400, 40, before));
-        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, restarted.Status);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted, restarted.Status);
         Assert.True(restarted.PostmasterRestarted);
         Assert.Null(restarted.Requested);
-        Assert.Equal(100, restarted.WriteMs);
-        Assert.Equal(50, restarted.SyncMs);
+        Assert.Null(restarted.WriteMs);
+        Assert.Null(restarted.SyncMs);
+        Assert.Null(restarted.IntervalSeconds);
+        Assert.Equal(DateTime.SpecifyKind(t0, DateTimeKind.Utc), restarted.PreviousAt);
+        Assert.Equal(DateTime.SpecifyKind(t1, DateTimeKind.Utc), restarted.ObservedAt);
         Assert.Equal(42, restarted.CumulativeRequested);
+        Assert.Equal(3_450, restarted.CumulativeSyncMs);
         Assert.Equal(DateTime.SpecifyKind(after, DateTimeKind.Utc), restarted.PostmasterStartTime);
         Assert.Equal(DateTimeKind.Utc, restarted.PostmasterStartTime!.Value.Kind);
         Assert.False(restarted.IsPressure, "two shutdown checkpoints are not WAL pressure");
@@ -452,32 +456,35 @@ public sealed class StoreToastAndCheckpointerTests
         /* The control: the same counters on ONE postmaster are two requested checkpoints, and that IS pressure. */
         var sameProcess = DarlingStoreMetricsReader.CheckpointerReading.From(
             new(t1, 12_700, 3_450, 42, before), new(t0, 12_600, 3_400, 40, before));
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, sameProcess.Status);
         Assert.False(sameProcess.PostmasterRestarted);
         Assert.Equal(2, sameProcess.Requested);
+        Assert.Equal(50, sameProcess.SyncMs);
         Assert.True(sameProcess.IsPressure);
+
+        /* A shutdown checkpoint's fsync past the bar is still not judged: nothing separates it from the live
+           checkpoints' sync, and a fast shutdown flushes with every client already gone. */
+        var slowSync = DarlingStoreMetricsReader.CheckpointerReading.From(
+            new(t1, 12_700, 3_400 + 25_200, 41, after), new(t0, 12_600, 3_400, 40, before));
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted, slowSync.Status);
+        Assert.Null(slowSync.SyncMs);
+        Assert.False(slowSync.IsPressure);
 
         /* The upgrade interval: the older row predates V139 and was taken before the newer row's postmaster started. */
         var upgrade = DarlingStoreMetricsReader.CheckpointerReading.From(
             new(t1, 12_700, 3_450, 42, after), new(t0, 12_600, 3_400, 40));
-        Assert.True(upgrade.PostmasterRestarted);
-        Assert.Null(upgrade.Requested);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted, upgrade.Status);
         Assert.False(upgrade.IsPressure);
 
         /* Rows written before V139 on both sides: no evidence, judged exactly as before. */
         var legacy = DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 12_700, 3_450, 42), new(t0, 12_600, 3_400, 40));
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, legacy.Status);
         Assert.False(legacy.PostmasterRestarted);
         Assert.Null(legacy.PostmasterStartTime);
         Assert.Equal(2, legacy.Requested);
         Assert.True(legacy.IsPressure);
 
-        /* Across a restart the sync arm still judges: a shutdown checkpoint's fsync past the bar is still over it. */
-        var slowSync = DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t1, 12_700, 3_400 + 25_200, 41, after), new(t0, 12_600, 3_400, 40, before));
-        Assert.Null(slowSync.Requested);
-        Assert.Equal(25_200, slowSync.SyncMs);
-        Assert.True(slowSync.IsPressure);
-
-        /* A crash restart discards the statistics, so the counters fall: Reset, as before, and now it says the
+        /* A crash restart discards the statistics, so the counters fall: Reset, as before, and it says the
            postmaster did restart. NoPrevious carries the start time and no restart. */
         var crash = DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 3, 4, 1, after), new(t0, 115, 78, 2, before));
         Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Reset, crash.Status);
@@ -493,30 +500,40 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     [Fact]
-    public void TheCheckpointerNote_AcrossARestart_SaysTheRequestedCountIsWithheld_AndWhy()
+    public void TheCheckpointerNote_AcrossARestart_StatesNoDelta_AndSaysWhy()
     {
         var t0 = new DateTime(2026, 9, 22, 20, 14, 0, DateTimeKind.Unspecified);
         var t1 = t0.AddHours(1);
         var before = new DateTime(2026, 9, 1, 8, 0, 0, DateTimeKind.Unspecified);
         var after = t0.AddMinutes(30);
 
-        var quiet = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t1, 2_000, 3_000, 7, after), new(t0, 1_000, 1_000, 5, before)));
-        Assert.Contains("spent 2.0s in its sync (fsync) phase and 1.0s in its write phase. The store's postmaster RESTARTED inside this interval", quiet, StringComparison.Ordinal);
-        Assert.Contains("(it started at 2026-09-22T20:44:00.0000000Z)", quiet, StringComparison.Ordinal);
-        Assert.Contains("counts the shutdown checkpoint as REQUESTED and keeps the count across the restart", quiet, StringComparison.Ordinal);
-        Assert.Contains("withheld (requested is null) rather than judged", quiet, StringComparison.Ordinal);
-        Assert.Contains("both phases above include that shutdown checkpoint's own write and sync", quiet, StringComparison.Ordinal);
-        Assert.Contains("neither fires nor recovers on this interval", quiet, StringComparison.Ordinal);
-        /* Never the zero that would read as a clean arm, and never the pressure prose. */
-        Assert.DoesNotContain("checkpoint(s) were REQUESTED", quiet, StringComparison.Ordinal);
-        Assert.DoesNotContain("CHECKPOINTER PRESSURE", quiet, StringComparison.Ordinal);
+        foreach (var syncMs in new[] { 3_000L, 26_200L })
+        {
+            var note = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(
+                new(t1, 2_000, syncMs, 7, after), new(t0, 1_000, 1_000, 5, before)));
+            Assert.Contains("the store's postmaster RESTARTED (it started at 2026-09-22T20:44:00.0000000Z)", note, StringComparison.Ordinal);
+            Assert.Contains("counts the shutdown checkpoint as REQUESTED and keeps the count across the restart", note, StringComparison.Ordinal);
+            Assert.Contains("checkpoint's own write and sync phases land in the same counters", note, StringComparison.Ordinal);
+            Assert.Contains("no delta is stated for this interval (write_ms, sync_ms and requested are null)", note, StringComparison.Ordinal);
+            Assert.Contains("judges neither arm: a standing alert neither fires nor recovers on it", note, StringComparison.Ordinal);
+            Assert.Contains("That costs one skipped hourly interval; the next sweep differences cleanly against the post-restart row and is judged normally.", note, StringComparison.Ordinal);
+            /* Never a figure, never the pressure prose, whatever the sync did. */
+            Assert.DoesNotContain("checkpoint(s) were REQUESTED", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("in its sync (fsync) phase", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("CHECKPOINTER PRESSURE", note, StringComparison.Ordinal);
+        }
 
-        var storm = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t1, 2_000, 26_200, 7, after), new(t0, 1_000, 1_000, 5, before)));
-        Assert.Contains("RESTARTED inside this interval", storm, StringComparison.Ordinal);
-        Assert.Contains("CHECKPOINTER PRESSURE", storm, StringComparison.Ordinal);
-        Assert.Contains("25.2 s and 14.0 s sync phases", storm, StringComparison.Ordinal);
+        /* Five statuses, five different notes: the Restarted one says something none of the others do. */
+        var notes = new[]
+        {
+            DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.Absent),
+            DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 1, 1, 1, after), null)),
+            DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 0, 0, 0), new(t0, 5, 5, 5))),
+            DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 3_000, 7, after), new(t0, 1_000, 1_000, 5, before))),
+            DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 3_000, 7), new(t0, 1_000, 1_000, 5))),
+        };
+        Assert.Equal(5, Enum.GetValues<DarlingStoreMetricsReader.CheckpointerDeltaStatus>().Length);
+        Assert.Equal(notes.Length, notes.Distinct(StringComparer.Ordinal).Count());
 
         /* A crash restart is a Reset, and the note names the restart as the cause it was. */
         var crash = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(
@@ -649,13 +666,13 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     /// <summary>
-    /// #3955: the checkpointer block publishes WHY a requested count is null on an Observed interval — the restart
-    /// flag and the newest row's postmaster start — and the description a caller reads before trusting the number
-    /// says what a null requested means there. Read off the DescriptionAttribute itself, not the source file, so a
-    /// comment repeating the sentence cannot stand in for it.
+    /// #3955: the checkpointer block publishes WHY an interval states no delta across a restart — the Restarted
+    /// status, the restart flag and the newest row's postmaster start — and the description a caller reads before
+    /// trusting the number names the fifth status and says what it means. Read off the DescriptionAttribute itself,
+    /// not the source file, so a comment repeating the sentence cannot stand in for it.
     /// </summary>
     [Fact]
-    public void TheTool_PublishesTheRestartFields_AndTheDescriptionSaysWhatANullRequestedMeans()
+    public void TheTool_PublishesTheRestartFields_AndTheDescriptionSaysWhatRestartedMeans()
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpStoreMetricsTools.cs"));
@@ -665,9 +682,12 @@ public sealed class StoreToastAndCheckpointerTests
         var method = typeof(DarlingMcpStoreMetricsTools).GetMethod(nameof(DarlingMcpStoreMetricsTools.GetStoreMetrics))!;
         var description = ((System.ComponentModel.DescriptionAttribute)Attribute.GetCustomAttribute(
             method, typeof(System.ComponentModel.DescriptionAttribute))!).Description;
-        Assert.Contains("An Observed interval that spans a store restart carries postmaster_restarted true and requested null", description, StringComparison.Ordinal);
+        Assert.Contains("Restarted (the store's postmaster restarted between the two sweeps, postmaster_restarted true", description, StringComparison.Ordinal);
         Assert.Contains("PostgreSQL counts the shutdown checkpoint as requested and keeps the count across the restart", description, StringComparison.Ordinal);
-        Assert.Contains("write_ms and sync_ms are still stated and judged, and include the shutdown checkpoint's own phases", description, StringComparison.Ordinal);
+        Assert.Contains("that checkpoint's own write and sync phases land in the same counters, so no delta is stated and the self-alert judges neither arm", description, StringComparison.Ordinal);
+        Assert.Contains("the next sweep's interval is judged normally", description, StringComparison.Ordinal);
+        /* The Observed-with-a-null-requested shape this replaced is gone from what callers read. */
+        Assert.DoesNotContain("requested null", description, StringComparison.Ordinal);
     }
 
     /* ---- the two informational self-alerts ------------------------------------------------------------- */
@@ -931,8 +951,8 @@ public sealed class StoreToastAndCheckpointerTests
     /// <summary>
     /// #3955, the issue's headline: every service restart that stops the store puts a shutdown checkpoint in
     /// <c>num_requested</c>, and the alert fired "2 WAL-forced checkpoint(s) in the last 7.1 min" on DARLING01 for an
-    /// interval with no WAL-triggered checkpoint in it. Across a restart the requested arm is not judged, so the
-    /// same counters no longer fire; the SAME counters on one postmaster still do, exactly as before.
+    /// interval with no WAL-triggered checkpoint in it. Across a restart neither arm is judged, so the same counters
+    /// no longer fire; the SAME counters on one postmaster still do, exactly as before.
     /// </summary>
     [Fact]
     public async Task CheckpointerPressure_AnIntervalSpanningARestart_DoesNotFireOnTheShutdownCheckpoints()
@@ -956,32 +976,37 @@ public sealed class StoreToastAndCheckpointerTests
     }
 
     /// <summary>
-    /// Across a restart the SYNC arm still judges — the write and sync phases are real and unaffected by the rule
-    /// — and the words say the interval spanned a restart and that its requested count is not stated, rather than
-    /// printing a zero beside "WAL-forced".
+    /// Across a restart the SYNC arm is not judged either: the shutdown checkpoint's own fsync lands in the same
+    /// counter as the live checkpoints' and nothing separates them, and a fast shutdown flushes every dirty buffer
+    /// with every client already gone. So a sync phase far past the bar, the 25.2 s the production read kills sat
+    /// inside, fires nothing on an interval that spans a restart. The control is the next test's.
     /// </summary>
     [Fact]
-    public async Task CheckpointerPressure_ARestartSpanningInterval_StillFiresOnTheSyncArm_AndSaysSo()
+    public async Task CheckpointerPressure_ARestartSpanningInterval_DoesNotFireEvenOnASlowSync()
     {
         var h = new Harness();
         await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: true), Ct);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_TheSameSlowSyncWithoutARestart_StillFires()
+    {
+        var h = new Harness();
+        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: false), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("sync 25.2s in 60.0 min (across a store restart)", fired.CurrentValue);
-        Assert.Contains("(across a store restart)", fired.ShortMessage!, StringComparison.Ordinal);
-        Assert.Contains("the store RESTARTED inside that interval (it started at 2026-09-20 12:30:00 UTC)", fired.DetailText!, StringComparison.Ordinal);
-        Assert.Contains("requested-checkpoint count is not stated", fired.DetailText!, StringComparison.Ordinal);
-        Assert.Contains("include that shutdown checkpoint's own write and sync", fired.DetailText!, StringComparison.Ordinal);
-        Assert.DoesNotContain("WAL-forced", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.DoesNotContain("of its checkpoints in that interval were REQUESTED", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Equal("sync 25.2s and 1 WAL-forced checkpoint(s) in 60.0 min", fired.CurrentValue);
+        Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
-    /// A clean sync phase across a restart is half a measurement: the requested arm was not measured. So a standing
-    /// alert neither re-fires nor recovers on it (the non-measurement discipline), and the next interval on one
-    /// postmaster that reads clean on both arms is what writes the Recovered row.
+    /// A restart interval is a non-measurement on BOTH arms, so a standing alert neither re-fires on it (even past
+    /// the cooldown, even with a slow sync) nor recovers on it (even with a clean one). The cost is that one hourly
+    /// interval: the next interval on one postmaster is judged normally, and a clean one writes the Recovered row.
     /// </summary>
     [Fact]
-    public async Task CheckpointerPressure_ACleanSyncAcrossARestart_NeitherFiresNorResolvesAStandingAlert()
+    public async Task CheckpointerPressure_ARestartSpanningInterval_NeitherFiresNorResolvesAStandingAlert()
     {
         var h = new Harness();
         h.Settings.CooldownMinutes = 5;
@@ -991,7 +1016,8 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Single(h.Deliverer.Outcomes);
 
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 1, restarted: true), Ct);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: true), Ct);
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 0, restarted: true), Ct);
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
@@ -1048,9 +1074,10 @@ public sealed class StoreToastAndCheckpointerTests
         Row(StoreSelfMetrics.DimensionObjectKind, name, file, live);
 
     /// <summary>
-    /// An Observed one-hour interval with the given deltas, built through the real differencer. <paramref name="restarted"/>
+    /// A one-hour interval with the given counter movements, built through the real differencer. <paramref name="restarted"/>
     /// (#3955): null leaves both rows unstamped, the pre-V139 shape every earlier test was written against; false
-    /// stamps both with one postmaster; true stamps them with two, the newer started half an hour into the interval.
+    /// stamps both with one postmaster; both of those are Observed. True stamps them with two, the newer started
+    /// half an hour into the interval, which is Restarted.
     /// </summary>
     private static DarlingStoreMetricsReader.CheckpointerReading Interval(long syncMs, long requested, bool? restarted = null)
     {
@@ -1066,7 +1093,9 @@ public sealed class StoreToastAndCheckpointerTests
 
         var reading = DarlingStoreMetricsReader.CheckpointerReading.From(
             new(t0.AddHours(1), 10_000 + 2_500, 500_000 + syncMs, 40 + requested, newestStart), new(t0, 10_000, 500_000, 40, previousStart));
-        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
+        Assert.Equal(
+            restarted is true ? DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted : DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed,
+            reading.Status);
         Assert.Equal(restarted is true, reading.PostmasterRestarted);
         return reading;
     }
@@ -1293,16 +1322,17 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
     /// <summary>
     /// #3955 against a real server: the sweep's checkpointer row carries the server's OWN
     /// <c>pg_postmaster_start_time()</c> as naive UTC (and no other kind's row carries one), and the real pair read
-    /// differences a planted pre-restart sample against it — one requested checkpoint fewer, the shape a fast stop
-    /// leaves — into an Observed interval that states NO requested count and is not pressure. The same planted
-    /// sample stamped with the SAME postmaster is one requested checkpoint and IS pressure (the control), and the
-    /// upgrade shape (an older row written before V139, taken before the postmaster started) is a restart too.
+    /// takes a planted pre-restart sample against it (one requested checkpoint fewer, the shape a fast stop leaves)
+    /// as a Restarted interval that states NO delta at all, no requested count and no write or sync time, and is not
+    /// pressure. The same planted sample stamped with the SAME postmaster is one requested checkpoint and IS pressure
+    /// (the control), and the upgrade shape (an older row written before V139, taken before the postmaster started)
+    /// is a restart too.
     /// The restart itself is not performed here: the shared cluster cannot be bounced under a running suite, and
     /// the counter's behaviour across a fast stop is the measurement the rule rests on (PostmasterRestart's doc).
     /// Own store through <c>ScratchPostgres</c>, like the test above.
     /// </summary>
     [Fact]
-    public async Task TheCheckpointerRow_CarriesThePostmasterStart_AndAPairAcrossARestart_StatesNoRequestedCount_AgainstDevPostgres()
+    public async Task TheCheckpointerRow_CarriesThePostmasterStart_AndAPairAcrossARestart_StatesNoDelta_AgainstDevPostgres()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -1358,12 +1388,15 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
         await PlantCheckpointerRowAsync(connection, previousAt, write, sync, requested - 1, serverStart.AddDays(-1), ct);
 
         var restarted = await DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
-        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, restarted.Status);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted, restarted.Status);
         Assert.True(restarted.PostmasterRestarted);
         Assert.Null(restarted.Requested);
-        Assert.Equal(0, restarted.WriteMs);
-        Assert.Equal(0, restarted.SyncMs);
+        Assert.Null(restarted.WriteMs);
+        Assert.Null(restarted.SyncMs);
+        Assert.Equal(DateTime.SpecifyKind(previousAt, DateTimeKind.Utc), restarted.PreviousAt);
+        Assert.Equal(DateTime.SpecifyKind(sweptAt, DateTimeKind.Utc), restarted.ObservedAt);
         Assert.Equal(requested, restarted.CumulativeRequested);
+        Assert.Equal(sync, restarted.CumulativeSyncMs);
         Assert.Equal(DateTime.SpecifyKind(serverStart, DateTimeKind.Utc), restarted.PostmasterStartTime);
         Assert.False(restarted.IsPressure, "a shutdown checkpoint across a restart is not WAL pressure");
 
@@ -1372,8 +1405,11 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
             $"UPDATE collect.store_metrics SET postmaster_start_time = $1 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}' AND metric_time = $2",
             serverStart, previousAt);
         var sameProcess = await DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, sameProcess.Status);
         Assert.False(sameProcess.PostmasterRestarted);
         Assert.Equal(1, sameProcess.Requested);
+        Assert.Equal(0, sameProcess.WriteMs);
+        Assert.Equal(0, sameProcess.SyncMs);
         Assert.True(sameProcess.IsPressure);
 
         /* The upgrade shape: the earlier row was written before V139 (no start) and taken before this postmaster
@@ -1383,9 +1419,11 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
             previousAt);
         await PlantCheckpointerRowAsync(connection, serverStart.AddMinutes(-1), write, sync, requested - 1, null, ct);
         var upgrade = await DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
-        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, upgrade.Status);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted, upgrade.Status);
         Assert.True(upgrade.PostmasterRestarted);
         Assert.Null(upgrade.Requested);
+        Assert.Null(upgrade.WriteMs);
+        Assert.Null(upgrade.SyncMs);
         Assert.False(upgrade.IsPressure);
     }
 

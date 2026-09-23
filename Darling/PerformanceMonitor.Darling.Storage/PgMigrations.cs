@@ -1763,8 +1763,10 @@ ALTER TABLE collect.pg_server_config
     /// server log held one timed checkpoint and two <c>shutdown immediate</c> ones, and no WAL-triggered checkpoint
     /// at all. Every host restarts when it upgrades. The monitored-target write reads difference the same counter,
     /// so a monitored server's restart read as WAL pressure in <c>PG_CHECKPOINT_PRESSURE</c> and in
-    /// <c>get_pg_write_stats</c> the same way. <see cref="PostmasterRestart"/> is the rule those readers now share;
-    /// this rung is the evidence it reads.</para>
+    /// <c>get_pg_write_stats</c> the same way. The shutdown checkpoint's own write and sync phases land in the
+    /// counters beside it, where nothing can separate them from the live checkpoints'. <see cref="PostmasterRestart"/>
+    /// is the rule those readers now share, and across a restart they state none of those figures and judge
+    /// neither arm; this rung is the evidence the rule reads.</para>
     ///
     /// <para><b>Why a stored column rather than a read of <c>pg_postmaster_start_time()</c> at read time.</b> A
     /// live read says when the CURRENT postmaster started, which dates the newest sample only if nothing restarted
@@ -1796,10 +1798,10 @@ ALTER TABLE collect.pg_server_config
     /// passthrough refresh</b>: neither table has a <c>v_</c> view (<c>PgSchemaGenerator.AllPassthroughViews</c>
     /// agrees), so the V14 frozen-column-list problem cannot arise.</para>
     ///
-    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill. It does not change how the write
-    /// and sync phases are judged: a restart-spanning interval still states and judges them, and they include the
-    /// shutdown checkpoint's own phases. It does not touch the counter-reset handling (the Reset status, the
-    /// <c>stats_reset</c> guards), which a crash still reaches first. It adds no alert, knob or Viewer column.</para>
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill. It does not touch the
+    /// counter-reset handling (the Reset status, the <c>stats_reset</c> guards), which a crash still reaches first.
+    /// It adds no alert, knob or Viewer column. The price of the rule it feeds is one unjudged interval per
+    /// restart, which the readers say rather than hide.</para>
     /// </summary>
     private const string V139Sql = @"
 /* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row only,

@@ -18,19 +18,26 @@ namespace PerformanceMonitor.Darling.Storage;
 /// and <see cref="DarlingPgWriteStatsReader.PgWriteStatsSql"/>). Written once in C# (<see cref="Spans"/>) and once
 /// in SQL (<see cref="SpansSql"/>), and the two are held to one truth table by test.
 ///
-/// <para><b>Why a restart makes the requested count unknown.</b> PostgreSQL counts a SHUTDOWN checkpoint in
+/// <para><b>Why a restart makes the checkpoint figures unknown.</b> PostgreSQL counts a SHUTDOWN checkpoint in
 /// <c>pg_stat_checkpointer.num_requested</c> (<c>pg_stat_bgwriter.checkpoints_req</c> through 16), and a clean
 /// shutdown writes the statistics out, so the count survives the restart. Measured on the bundled 18.6: a fresh
 /// cluster read <c>num_timed | num_requested | num_done</c> as 0|0|0, then 0|1|0 after one fast stop and start and
-/// 0|2|0 after a second, with nothing in the server log but <c>checkpoint starting: shutdown immediate</c>. A
-/// crash adds one the other way: an immediate stop discards the statistics and the end-of-recovery checkpoint is
-/// counted as requested on the fresh counters. So an interval that spans a restart carries requested checkpoints
-/// that WAL volume did not force, and the counter cannot say which of its increments they were. That interval's
-/// requested figure is UNKNOWN: never zero, and never evidence that the server outran <c>max_wal_size</c>.
-/// <c>num_timed</c> does not move on a restart. The write and sync phases DO include the shutdown checkpoint's
-/// own (measured on the same cluster: 45 ms of write and 47 ms of sync landed in the counters with that
-/// checkpoint's 5,029 buffers). They stay stated and judged, and every reader that states them across a restart
-/// says so.</para>
+/// 0|2|0 after a second, with nothing in the server log but <c>checkpoint starting: shutdown immediate</c>; 17.10
+/// read the same. A crash adds one the other way: an immediate stop discards the statistics and the
+/// end-of-recovery checkpoint is counted as requested on the fresh counters. The shutdown checkpoint's own work
+/// lands in the same counters as well: its write and sync phases (measured: 45 ms and 47 ms landed in
+/// <c>write_time</c> and <c>sync_time</c> with that checkpoint's 5,029 buffers) and the buffers it flushed. A fast
+/// shutdown flushes every dirty buffer at once with every client already gone, so on a large, slow store that
+/// work can be seconds of fsync no reader sat inside. Nothing separates any of it from the live checkpoints' work,
+/// so an interval that spans a restart has an UNKNOWN requested count, write time, sync time and checkpoint buffer
+/// count: never zero, and never evidence of WAL or I/O pressure. The readers state none of them and judge neither
+/// arm of any condition over them. <c>num_timed</c> (and <c>num_done</c>, 18+) does not move on a restart.</para>
+///
+/// <para><b>The cost</b> is one skipped interval per restart: the store's own hourly self-metrics interval, or one
+/// collection interval of a monitored target's series. The next interval is judged normally. A read that
+/// differences a whole window's edges rather than each interval (<see cref="DarlingPgWriteStatsReader"/>) withholds
+/// those figures for any window that holds a restart, and states them again for a window that starts after
+/// it.</para>
 ///
 /// <para><b>The rule.</b> Every sample carries <c>pg_postmaster_start_time()</c> beside its counters, as naive UTC
 /// in the <c>postmaster_start_time</c> column V139 added to <c>collect.store_metrics</c> (the <c>checkpointer</c>

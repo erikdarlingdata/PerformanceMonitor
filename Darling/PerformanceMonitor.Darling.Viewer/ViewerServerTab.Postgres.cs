@@ -826,7 +826,7 @@ public partial class ViewerServerTab
     /// quiet one; and a row whose <c>ResetDuringWindow</c> is set has had at least one statistics family
     /// reset underneath it, so those metrics are blank rather than wrong. A row whose
     /// <c>PostmasterRestartedDuringWindow</c> is set (#3955) spans a restart, which leaves the reset stamps alone
-    /// and blanks the requested count only, so the note says that separately.</para>
+    /// and blanks the checkpoint figures the shutdown checkpoint lands in, so the note says that separately.</para>
     /// </summary>
     private async Task LoadPgWriteStatsAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -856,8 +856,9 @@ public partial class ViewerServerTab
                   + "value is a metric this PostgreSQL version does not expose, which is not zero.")
               + (row.PostmasterRestartedDuringWindow
                   /* #3955: a restart leaves the reset stamps alone, so it needs its own sentence. */
-                  ? " PostgreSQL RESTARTED inside this window: a shutdown checkpoint is counted as requested and "
-                    + "survives the restart, so Requested is left blank rather than read as WAL pressure."
+                  ? " PostgreSQL RESTARTED inside this window: the shutdown checkpoint is counted as requested and its "
+                    + "own write, sync and buffer work lands in the same counters, so the checkpoint Requested, Write "
+                    + "Time, Sync Time and buffer figures are left blank rather than read as the workload's."
                   : string.Empty);
     }
 
