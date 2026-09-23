@@ -223,7 +223,9 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Rec
             $result += "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
         }
     }
-    return @($result)
+    # Each finding once: a folder made under C:\ inherits BUILTIN\Users as two ACEs (one grants append, one
+    # grants write), and without this every caller named that principal twice for the same path.
+    return @($result | Select-Object -Unique)
 }
 
 # Every SID that is a DIRECT member of BUILTIN\Administrators right now (round-1 review, #4043, M2): an
@@ -1611,7 +1613,6 @@ else {
     # same override.
     if (-not $AcceptWritableExtraction) {
         $writable = @(Get-UntrustedWriteGrantees $Source $preLockTrusted -Recurse)
-        $writable = @($writable | Select-Object -Unique)
         if ($writable.Count -gt 0) {
             $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
             $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }

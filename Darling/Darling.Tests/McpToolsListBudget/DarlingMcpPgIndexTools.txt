@@ -5,9 +5,9 @@ param get_pg_column_stats.hours_back 78
 param get_pg_column_stats.limit 35
 param get_pg_column_stats.server_name 28
 
-tool get_pg_index_bloat 3491
-param get_pg_index_bloat.answered_only 563
+tool get_pg_index_bloat 613
+param get_pg_index_bloat.answered_only 129
 param get_pg_index_bloat.as_of 167
 param get_pg_index_bloat.hours_back 78
-param get_pg_index_bloat.limit 285
+param get_pg_index_bloat.limit 65
 param get_pg_index_bloat.server_name 28

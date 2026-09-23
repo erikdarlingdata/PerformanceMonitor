@@ -59,7 +59,7 @@ public sealed class DarlingPgOperationalAlertTests
             CapturedAt: capturedAt ?? new DateTime(2026, 8, 31, 0, 0, 0, DateTimeKind.Utc),
             RootBackendId: rootBackendId,
             RootPid: rootPid,
-            Databases: databases ?? new[] { "eden" },
+            Databases: databases ?? new[] { "sales" },
             RootUsername: "app",
             RootApplicationName: "webapi",
             RootState: "active",
@@ -168,8 +168,8 @@ public sealed class DarlingPgOperationalAlertTests
            situations that both happen to hit this case in the same window (different pids) must both
            survive; a plain GroupBy-by-RootBackendId would wrongly merge them (the review finding this test
            pins) — dedup for the sentinel case is by RootPid instead, so different pids stay distinct. */
-        var unrelatedIncidentOne = BlockingRow(rootBackendId: 0, rootPid: 111, databases: new[] { "eden" });
-        var unrelatedIncidentTwo = BlockingRow(rootBackendId: 0, rootPid: 222, databases: new[] { "sky" });
+        var unrelatedIncidentOne = BlockingRow(rootBackendId: 0, rootPid: 111, databases: new[] { "sales" });
+        var unrelatedIncidentTwo = BlockingRow(rootBackendId: 0, rootPid: 222, databases: new[] { "billing" });
         var rows = new[] { unrelatedIncidentOne, unrelatedIncidentTwo };
 
         var worst = DarlingWorker.WorstPgBlockingChainPerRoot(rows);
@@ -227,19 +227,19 @@ public sealed class DarlingPgOperationalAlertTests
     public void BuildPgBlockingIncident_IncludesDatabaseRootPidVictimCountAndQuery()
     {
         var incident = DarlingWorker.BuildPgBlockingIncident(
-            BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 5, databases: new[] { "eden" }, rootQuery: "SELECT * FROM x"));
+            BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 5, databases: new[] { "sales" }, rootQuery: "SELECT * FROM x"));
 
-        Assert.Equal("root pid 42 blocking 5 session(s) in [eden]: SELECT * FROM x", incident.InvolvedObjects[0]);
-        Assert.Equal("eden", incident.Database);
+        Assert.Equal("root pid 42 blocking 5 session(s) in [sales]: SELECT * FROM x", incident.InvolvedObjects[0]);
+        Assert.Equal("sales", incident.Database);
     }
 
     [Fact]
     public void BuildPgBlockingIncident_OmitsTrailingQueryClause_WhenRootQueryIsMissing()
     {
         var incident = DarlingWorker.BuildPgBlockingIncident(
-            BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 2, databases: new[] { "eden" }, rootQuery: null));
+            BlockingRow(rootBackendId: 1, rootPid: 42, totalVictims: 2, databases: new[] { "sales" }, rootQuery: null));
 
-        Assert.Equal("root pid 42 blocking 2 session(s) in [eden]", incident.InvolvedObjects[0]);
+        Assert.Equal("root pid 42 blocking 2 session(s) in [sales]", incident.InvolvedObjects[0]);
     }
 
     [Fact]
@@ -279,7 +279,7 @@ public sealed class DarlingPgOperationalAlertTests
     // ── Long-Running Query (#2711) ───────────────────────────────────────────────────────────────
 
     private static DarlingPgSessionStatesReader.LongRunningSessionRow LongRunningRow(
-        long backendId = 1001, int pid = 100, string? databaseName = "eden", string? commandTag = "SELECT",
+        long backendId = 1001, int pid = 100, string? databaseName = "sales", string? commandTag = "SELECT",
         long queryDurationMs = 2_100_000) =>
         new(backendId, pid, databaseName, "appuser", "myapp", commandTag, queryDurationMs);
 
@@ -315,9 +315,9 @@ public sealed class DarlingPgOperationalAlertTests
     [Fact]
     public void BuildPgLongRunningQueryIncident_CarriesTheDatabaseName()
     {
-        var incident = DarlingWorker.BuildPgLongRunningQueryIncident(LongRunningRow(databaseName: "sky"));
+        var incident = DarlingWorker.BuildPgLongRunningQueryIncident(LongRunningRow(databaseName: "billing"));
 
-        Assert.Equal("sky", incident.Database);
+        Assert.Equal("billing", incident.Database);
     }
 
     // ── #3653 (A8e): the tier each PostgreSQL host arm fires at ──────────────────────────────────
