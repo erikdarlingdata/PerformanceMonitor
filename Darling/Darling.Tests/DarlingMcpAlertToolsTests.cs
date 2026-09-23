@@ -455,11 +455,11 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
            null-clears arm, and no trace of the retired FILE-LEVEL sentence. */
         var read = ToolDescription("get_alert_settings");
         var write = ToolDescription("update_alert_settings");
-        Assert.Contains("analysis.uncorroborated_route (#3712)", read, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes", read, StringComparison.Ordinal);
         Assert.Contains("the STORE winning", read, StringComparison.Ordinal);
         Assert.Contains("analysis.uncorroborated_route_source", read, StringComparison.Ordinal);
         Assert.Contains("'store', 'file' or 'default'", read, StringComparison.Ordinal);
-        Assert.Contains("analysis.uncorroborated_route (#3712) is WRITABLE since V137", write, StringComparison.Ordinal);
+        Assert.Contains("analysis.uncorroborated_route is WRITABLE since V137", write, StringComparison.Ordinal);
         Assert.Contains("null CLEARS the column", write, StringComparison.Ordinal);
         Assert.Contains("uncorroborated_route_source", write, StringComparison.Ordinal);
         foreach (var description in new[] { read, write })
@@ -535,9 +535,9 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         Assert.Empty(noteWarnings);
 
         /* Both descriptions say it, in the same words, where an agent reads before calling. */
-        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
         Assert.Contains("threshold_ms_note", ToolDescription("get_alert_settings"), StringComparison.Ordinal);
-        Assert.Contains("poison_wait.threshold_ms is RETIRED (#3593)", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
+        Assert.Contains("poison_wait.threshold_ms is RETIRED", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
         Assert.Contains("warnings:[...]", ToolDescription("update_alert_settings"), StringComparison.Ordinal);
 
         /* The premise. Comments and strings blanked, so the member's own summary and the two engines' rationale

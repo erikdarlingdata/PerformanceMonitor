@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -16,6 +17,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -152,7 +154,7 @@ public sealed class McpToolGuideTests
         var catalog = HostCatalog();
         using var doc = JsonDocument.Parse(DarlingMcpToolGuideTools.GetToolGuide(
             catalog,
-            ["GET_HEALTH_PARSER_CPU_TASKS", "get_health_parser_cpu_tasks", "list_servers", "no_such_tool"],
+            ["GET_HEALTH_PARSER_CPU_TASKS", "get_health_parser_cpu_tasks", "get_cpu_utilization", "no_such_tool"],
             ["system_health_empty_windows", "no_such_topic"]));
         var root = doc.RootElement;
 
@@ -161,7 +163,7 @@ public sealed class McpToolGuideTests
         Assert.Single(tools);
         Assert.Equal("get_health_parser_cpu_tasks", tools[0].GetProperty("name").GetString());
         Assert.Equal(Served("get_health_parser_cpu_tasks").Tail, tools[0].GetProperty("guide").GetString());
-        Assert.Equal(new[] { "list_servers" }, root.GetProperty("no_separate_guide").EnumerateArray().Select(e => e.GetString()).ToArray());
+        Assert.Equal(new[] { "get_cpu_utilization" }, root.GetProperty("no_separate_guide").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(new[] { "no_such_tool" }, root.GetProperty("unknown_tools").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(new[] { "no_such_topic" }, root.GetProperty("unknown_topics").EnumerateArray().Select(e => e.GetString()).ToArray());
         Assert.Equal(McpToolGuideTopics.SystemHealthEmptyWindows, root.GetProperty("topics")[0].GetProperty("guide").GetString());
@@ -171,14 +173,17 @@ public sealed class McpToolGuideTests
     public void GetToolGuide_WithNoArguments_IsTheIndex()
     {
         /* HostCatalog wires up exactly DarlingMcpHealthParserTools, DarlingMcpDataTools and
-           DarlingMcpToolGuideTools, so this fixture's own guide-bearing roster is a local, self-contained fact
-           about THIS test's host, not a family pin (that lives in McpToolGuideHeadsHealthParserTests). */
-        var fixtureToolsWithGuides = new[]
-        {
-            "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
-            "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
-            "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
-        };
+           DarlingMcpToolGuideTools, so the expected roster is every tool on those
+           types whose Description carries the marker. It is derived, not hand-kept: a hand-kept roster made
+           every content PR that converts one of these tools edit the same lines (#3898). */
+        var fixtureToolsWithGuides = new[] { typeof(DarlingMcpHealthParserTools), typeof(DarlingMcpDataTools), typeof(DarlingMcpToolGuideTools) }
+            .SelectMany(type => type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
+            .Select(method => (Tool: method.GetCustomAttribute<McpServerToolAttribute>(), Description: method.GetCustomAttribute<DescriptionAttribute>()))
+            .Where(m => m.Tool?.Name is not null && m.Description?.Description.Contains(McpToolGuide.Marker, StringComparison.Ordinal) == true)
+            .Select(m => m.Tool!.Name!)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Contains("get_health_parser_system_health", fixtureToolsWithGuides);
 
         using var doc = JsonDocument.Parse(DarlingMcpToolGuideTools.GetToolGuide(HostCatalog(), null, null));
         var withGuides = doc.RootElement.GetProperty("tools_with_guides").EnumerateArray().Select(e => e.GetString()).ToArray();
@@ -342,6 +347,12 @@ public sealed class McpToolGuideTests
                 var end = idx + 1 < anchors.Count ? anchors[idx + 1].Index : src.Length;
                 Assert.True(files.TryAdd(name, file), $"duplicate MCP tool name '{name}' under {string.Join("/", segments)}");
                 hasMarker[name] = src[anchors[idx].Index..end].Contains(McpToolGuide.Marker, StringComparison.Ordinal);
+                /* The marker is written INSIDE the Description literal (D3). A concatenated McpToolGuide.Marker
+                   compiles to the same string, but this scan (and `grep <<GUIDE>>`) would read the tool as
+                   unconverted, so the cross-SKU identity check above would silently skip it. */
+                Assert.False(
+                    Regex.IsMatch(src[anchors[idx].Index..end], @"\+\s*McpToolGuide\.Marker|McpToolGuide\.Marker\s*\+"),
+                    $"{name}: write {McpToolGuide.Marker} inside the Description literal; a concatenated McpToolGuide.Marker hides the tool from the source scans.");
             }
         }
 

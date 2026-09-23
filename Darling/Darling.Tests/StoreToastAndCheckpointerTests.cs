@@ -642,11 +642,15 @@ public sealed class StoreToastAndCheckpointerTests
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
         foreach (var phrase in new[]
         {
-            "TOAST UTILISATION (V137, #3783)",
+            /* #3898: TOAST UTILISATION and CHECKPOINTER used to cite their own issue number, (V137, #3783); D4
+               takes the issue tag off the wire (the schema-version fact, V137, stays load-bearing and is kept).
+               The two motivating anecdotes below the block headers - the 40%/154GB TOAST measurement and the
+               25.2s/14.0s checkpoint sync-phase incident - are D4 "story of why" removals too: each one's RULE
+               (the VACUUM/free-space behavior; the sync_ms/requested self-alert gate) stays in the description,
+               only the specific past incident's numbers are gone. See the #3898 PR body's D4 section. */
+            "TOAST UTILISATION (V137)",
             "they live in its TOAST file, and pg_total_relation_size says how big that file is and nothing about how FULL it is",
             "ordinary VACUUM returns to the table and never to the operating system",
-            "~40 % utilisation (154 GB holding ~61 GB of live chunks)",
-            "~93 GB of slack",
             "toast_utilisation_pct is toast_live_bytes / toast_bytes (one decimal)",
             "pg_freespacemap extension, which the bundled store image ships and does not install",
             "NOTHING is computed from total_bytes or a tuple share",
@@ -654,11 +658,10 @@ public sealed class StoreToastAndCheckpointerTests
             "ACCESS EXCLUSIVE lock",
             "This tool never reclaims anything by itself.",
             "Hypertable, aggregate, table and catch-all objects carry the four TOAST fields as null",
-            "CHECKPOINTER (V137, #3783)",
+            "CHECKPOINTER (V137)",
             "interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence)",
             "Reset (a counter went backwards",
-            "sync phases of 25.2 s and 14.0 s",
-            "WAL sizing (#3802) and refresh slicing (#3745)",
+            "WAL sizing and refresh slicing",
             "The checkpointer row is never an object row",
         })
         {

@@ -243,6 +243,17 @@ public sealed class CollectorContext
     public bool CapturePlanXml { get; init; }
 
     /// <summary>
+    /// Whether this target has granted <c>pg_read_binary_file</c> (#4046 part 1c), resolved by the host
+    /// through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// the three collectors that read <see cref="PgServerLogTail"/>'s tail. False (the default, and what
+    /// every host that never sets this leaves it at) keeps today's <see cref="PgServerLogTail.TailCteSql"/>
+    /// route; true switches <c>BuildQuery</c> to <see cref="PgServerLogTail.TailCteBinarySql"/>. Settable
+    /// rather than init-only because the host resolves it on the connection it is about to hand the
+    /// definition, the same shape as <see cref="CurrentDatabaseName"/> and <see cref="Watermark"/>.
+    /// </summary>
+    public bool PgReadBinaryFileGranted { get; set; }
+
+    /// <summary>
     /// The store's log-hash key (#4004): the secret the <c>pg_log_events</c> collector keys its two stored identities
     /// with, <c>raw_line_hash</c> and <c>statement_fingerprint</c>. The host loads it once at start from outside the
     /// store and hands the same instance to every run. Null means the host has none (Lite never collects PostgreSQL

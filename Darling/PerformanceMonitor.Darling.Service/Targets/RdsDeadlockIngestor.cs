@@ -63,6 +63,7 @@ public sealed class RdsDeadlockIngestor
         int serverId,
         string storageName,
         string host,
+        bool logTimezoneIsUtc = false,
         CancellationToken cancellationToken = default)
     {
         RdsLogSource.LogChunk? chunk;
@@ -95,7 +96,7 @@ public sealed class RdsDeadlockIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+        var (written, foreignZoneLines) = await StoreAsync(serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
            either in the store or was nothing to store; anything else threw out of StoreAsync above and
@@ -107,7 +108,7 @@ public sealed class RdsDeadlockIngestor
            every deadlock in it was gone with no error naming the loss. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return RdsIngestOutcome.Read(written);
+        return RdsIngestOutcome.Read(written, foreignZoneLines);
     }
 
     /// <summary>
@@ -116,15 +117,16 @@ public sealed class RdsDeadlockIngestor
     /// deadlocks in it — is a legitimate zero that loses nothing, and every way it can FAIL leaves via an
     /// exception rather than a zero the caller would have to tell apart from those.
     /// </summary>
-    private async Task<int> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines)> StoreAsync(
         int serverId,
         string storageName,
         string text,
+        bool logTimezoneIsUtc,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(text))
         {
-            return 0;
+            return (0, 0);
         }
 
         /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
@@ -135,12 +137,12 @@ public sealed class RdsDeadlockIngestor
            ahead of the commit rather than around it: a refused zone that consumed the window would discard
            every report in it, and the setting that caused the refusal is fixable, so those reports are
            worth still being there afterwards (#3008). */
-        var deadlocks = PgDeadlockLogParser.Extract(text);
+        var deadlocks = PgDeadlockLogParser.Extract(text, logTimezoneIsUtc, out var foreignZoneLines);
 
         if (deadlocks.Count == 0)
         {
             /* A log slab with no deadlocks in it is the ordinary case. Not worth a log line every cycle. */
-            return 0;
+            return (0, foreignZoneLines);
         }
 
         var rows = new List<PgDeadlocksCollector.Row>(deadlocks.Count);
@@ -158,7 +160,7 @@ public sealed class RdsDeadlockIngestor
                 GraphText: deadlock.GraphText));
         }
 
-        return await WriteAsync(serverId, storageName, rows, cancellationToken);
+        return (await WriteAsync(serverId, storageName, rows, cancellationToken), foreignZoneLines);
     }
 
     /// <summary>

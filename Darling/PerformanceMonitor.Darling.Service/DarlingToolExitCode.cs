@@ -201,7 +201,8 @@ internal static class DarlingToolExitCode
             .Append(". Packaging bundles vcruntime140.dll, vcruntime140_1.dll and msvcp140.dll there so the box needs no prerequisite — ")
             .Append("if any of the three is absent the install tree is a partial or damaged extract, so redeploy the package, or install the Microsoft Visual C++ 2015-2022 x64 redistributable.\n");
         builder.Append("  (2) The service account cannot read the install tree. The service runs as the virtual account NT SERVICE\\PerformanceMonitor Darling, which is neither you nor Administrators, ")
-            .Append("so an install under a user profile (Desktop, Downloads, anywhere below C:\\Users) is unreadable to it — reinstall to a machine-scoped path such as C:\\PerformanceMonitorDarling.\n");
+            .Append("so an install under a user profile (Desktop, Downloads, anywhere below C:\\Users) is unreadable to it — reinstall to a machine-scoped path such as ")
+            .Append(DarlingInstallPaths.DocumentedInstallDirectory).Append(".\n");
 
         builder.Append("Two checks that tell them apart:\n");
         builder.Append("  (a) Run \"").Append(exePath).Append("\" --version from an elevated prompt. Failing there too means (1). Succeeding points at (2) — and note that these tools re-execute themselves ")

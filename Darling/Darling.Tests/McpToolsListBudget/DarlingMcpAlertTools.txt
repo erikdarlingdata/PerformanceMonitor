@@ -22,12 +22,12 @@ param get_alert_history.include_dismissed 360
 param get_alert_history.limit 133
 param get_alert_history.server_name 90
 
-tool get_alert_settings 7530
+tool get_alert_settings 607
 
 tool get_mute_rules 274
 param get_mute_rules.enabled_only 54
 
-tool get_notification_routes 1746
+tool get_notification_routes 502
 
 tool set_mute_rule_enabled 1477
 param set_mute_rule_enabled.enabled 88
@@ -37,9 +37,9 @@ tool set_notification_route_enabled 841
 param set_notification_route_enabled.enabled 85
 param set_notification_route_enabled.route_id 65
 
-tool update_alert_settings 8123
+tool update_alert_settings 610
 param update_alert_settings.settings_json 199
 
-tool update_mute_rule 2530
+tool update_mute_rule 583
 param update_mute_rule.changes_json 196
 param update_mute_rule.rule_id 74
