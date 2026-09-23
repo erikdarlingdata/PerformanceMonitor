@@ -228,7 +228,7 @@ public sealed class PgDeadlockRemaskTests
         /* The keyed value is the store's own: another key gives another value, and it is not the raw-line subkey's. */
         var otherKey = new PgLogHashKey(Enumerable.Repeat((byte)7, PgLogHashKey.KeyLength).ToArray());
         Assert.NotEqual(s_key.DeadlockAlertKey(goneHash), otherKey.DeadlockAlertKey(goneHash));
-        Assert.NotEqual(PgLogHashKey.DeadlockAlertKeyPrefix + s_key.RawLineHash(goneHash), s_key.DeadlockAlertKey(goneHash));
+        Assert.NotEqual(PgLogHashKey.DeadlockAlertKeyTag + s_key.RawLineHash(goneHash), s_key.DeadlockAlertKey(goneHash));
         Assert.False(PgDeadlockRemask.IsReportHash(s_key.DeadlockAlertKey(goneHash)));
 
         static PgDeadlockRemask.ResolvedReport Current(string key) => new(PgDeadlockRemask.ReportState.Current, null);
@@ -552,7 +552,7 @@ public sealed class PgDeadlockRemaskTests
         var namedAfter = await ReadAlertsAsync(connection, ct);
         var namedIncident = Assert.Single(
             namedAfter.Select(a => AlertContextSerializer.TryDeserialize(a.Context, out var c) ? c.Incidents!.Single() : null),
-            i => i is not null && !i.DedupKey.StartsWith(PgLogHashKey.DeadlockAlertKeyPrefix, StringComparison.Ordinal));
+            i => i is not null && !i.DedupKey.StartsWith(PgLogHashKey.DeadlockAlertKeyTag, StringComparison.Ordinal));
         Assert.Equal(expected.DedupKey, namedIncident!.DedupKey);
         Assert.Equal(expected.InvolvedObjects, namedIncident.InvolvedObjects);
         Assert.Equal((long)(PgDeadlockRemask.MaxAlertRowsPerPass + 20), await ScalarAsync(connection,

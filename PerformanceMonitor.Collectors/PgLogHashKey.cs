@@ -86,7 +86,7 @@ public sealed class PgLogHashKey
 
     /// <summary>What <see cref="DeadlockAlertKey"/>'s value starts with. Never the shape of a report hash (32 hex
     /// characters) or a report identity (<c>at-</c>), so a key rewritten once is not taken for either again.</summary>
-    public const string DeadlockAlertKeyPrefix = "hk-";
+    public const string DeadlockAlertKeyTag = "hk-";
 
     /// <summary>
     /// A stored deadlock alert's incident key whose report can no longer be found, keyed (#4012's review). Such a key
@@ -98,7 +98,7 @@ public sealed class PgLogHashKey
     public string DeadlockAlertKey(string reportKey)
     {
         ArgumentNullException.ThrowIfNull(reportKey);
-        return DeadlockAlertKeyPrefix
+        return DeadlockAlertKeyTag
             + Convert.ToHexString(HMACSHA256.HashData(_deadlockAlertKey, Encoding.UTF8.GetBytes(reportKey)), 0, HashBytes);
     }
 
