@@ -551,6 +551,9 @@ function Get-CimInstance {
 
         Assert.Equal(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"), ExtractFunction(upgrade, "Get-UntrustedWriteGrantees"));
         Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"), ExtractFunction(upgrade, "Get-DarlingPreLockTrustedSids"));
+        Assert.Equal(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"), ExtractFunction(upgrade, "Get-LocalAdministratorsDirectMemberSids"));
+        Assert.Equal(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"), ExtractFunction(upgrade, "Resolve-DarlingServiceAccountSid"));
+        Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"), ExtractFunction(upgrade, "Get-DarlingPreLockTrustedSidsForRerun"));
     }
 
     /// <summary>
@@ -566,6 +569,8 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
@@ -651,6 +656,8 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine("""
             $ErrorActionPreference = 'Stop'
@@ -755,6 +762,8 @@ function Get-CimInstance {
     {
         var probe = new StringBuilder();
         probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
         probe.AppendLine("""
@@ -803,6 +812,8 @@ function Get-CimInstance {
     public void ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl()
     {
         var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
         probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
         probe.AppendLine("""
             function Get-Acl {
@@ -827,6 +838,193 @@ function Get-CimInstance {
 
         Assert.Contains("count=1", answers);
         Assert.Contains(answers, a => a.StartsWith("text=", StringComparison.Ordinal) && a.Contains("owned by BUILTIN\\Users", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// #4043 round-1 review, M2: the pre-lock check is now a RECURSIVE walk, not just the root and the
+    /// service exe - a child with an untrusted OWNER, or an EXPLICIT (non-inherited) write grant to an
+    /// untrusted principal, must be reported even when the root's own DACL is perfectly clean; a clean
+    /// recursive tree must stay silent; a junction below the root is reported, not silently skipped.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_Recurses_AndCatchesAChildTheRootDoesNotShow()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm4043-m2-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path "$root\clean", "$root\owned" -Force | Out-Null
+                Set-Content -LiteralPath "$root\clean\a.txt" -Value 'x'
+                Set-Content -LiteralPath "$root\owned\evil.dll" -Value 'x'
+                $trusted = Get-DarlingPreLockTrustedSids
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+
+                # $root itself is fully clean and protected - only a CHILD carries the problem.
+                $rootSec = New-Object System.Security.AccessControl.DirectorySecurity
+                $rootSec.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $rootSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                Set-Acl -LiteralPath $root -AclObject $rootSec
+                Set-Acl -LiteralPath "$root\clean" -AclObject $rootSec
+                icacls.exe "$root\clean\a.txt" /reset /Q 2>&1 | Out-Null
+
+                # Explicit write grant to Authenticated Users on a child file, root untouched.
+                $fileSec = New-Object System.Security.AccessControl.FileSecurity
+                $fileSec.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $fileSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
+                $fileSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'Allow')))
+                Set-Acl -LiteralPath "$root\owned\evil.dll" -AclObject $fileSec
+
+                # A junction below the root - never descended, but reported on sight.
+                & cmd.exe /c mklink /J "$root\link" "$root\clean" | Out-Null
+
+                'cleanTreeOnlyCount=' + @(Get-UntrustedWriteGrantees "$root\clean" $trusted -Recurse).Count
+                $found = @(Get-UntrustedWriteGrantees $root $trusted -Recurse)
+                'fullTreeCount=' + $found.Count
+                'namesAuthUsers=' + (($found -join ';') -match 'Authenticated Users')
+                'namesJunction=' + (($found -join ';') -match '\(a junction or link\)')
+                'nonRecurseStaysSilent=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+            }
+            finally {
+                if (Test-Path -LiteralPath "$root\link") { & cmd.exe /c rmdir "$root\link" | Out-Null }
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("cleanTreeOnlyCount=0", answers);
+        var full = int.Parse(answers.Find(a => a.StartsWith("fullTreeCount=", StringComparison.Ordinal))!.Substring("fullTreeCount=".Length));
+        Assert.True(full >= 2, "the recursive walk must report both the explicit grant on the child file and the junction: " + string.Join(" | ", answers));
+        Assert.Contains("namesAuthUsers=True", answers);
+        Assert.Contains("namesJunction=True", answers);
+        Assert.Contains("nonRecurseStaysSilent=0", answers);
+    }
+
+    /// <summary>
+    /// #4043 round-1 review, M2: a principal that is a DIRECT member of BUILTIN\Administrators is trusted as
+    /// an owner even though it is not the account running this script and not one of the four base SIDs -
+    /// an admin can already do anything on the box, so a tree a DIFFERENT admin extracted is not a finding.
+    /// The current user stands in for "a direct member" since <c>Get-DarlingPreLockTrustedSidsForRerun</c>'s
+    /// probe process always runs as an actual member of that group on a dev/CI box.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_TrustsADirectAdministratorsMember_AsOwner()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $members = Get-LocalAdministratorsDirectMemberSids
+            'count=' + $members.Count
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            'meIsDirectMember=' + ($members -contains $me)
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.True(int.Parse(answers.Find(a => a.StartsWith("count=", StringComparison.Ordinal))!.Substring("count=".Length)) > 0,
+            "BUILTIN\\Administrators must enumerate at least one member on a real Windows box: " + string.Join(" | ", answers));
+    }
+
+    /// <summary>
+    /// #4043 round-1 review, L3/L4: a re-run must fail with a message NAMING the problem, not silently
+    /// mis-trust or mis-refuse. L3: the service is registered but its logon account cannot be read at all -
+    /// same message as step 1b2. L4: the logon account is readable but will not resolve to a SID (a
+    /// stand-in for an unreachable-domain gMSA) - names the account instead of showing a raw SID later.
+    /// </summary>
+    [Fact]
+    public void GetDarlingPreLockTrustedSidsForRerun_FailsWithANamedReason_RatherThanSilentlyDroppingTheAccount()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"));
+        probe.AppendLine("""
+            function Fail([string]$message) { Write-Host ('FAILCALLED:' + $message); exit 7 }
+
+            # L3: Get-DarlingServiceLogonName returns nothing.
+            function Get-DarlingServiceLogonName([string]$name) { return $null }
+            & { $null = Get-DarlingPreLockTrustedSidsForRerun 'Some Service' ([pscustomobject]@{ Name = 'Some Service' }) }
+            'l3ExitCode=' + $LASTEXITCODE
+            """);
+
+        var l3 = RunWindowsPowerShell(probe.ToString());
+        Assert.Contains(l3, a => a.StartsWith("FAILCALLED:", StringComparison.Ordinal) && a.Contains("sc.exe qc", StringComparison.Ordinal));
+
+        var probe2 = new StringBuilder();
+        probe2.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe2.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe2.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe2.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"));
+        probe2.AppendLine("""
+            function Fail([string]$message) { Write-Host ('FAILCALLED:' + $message); exit 7 }
+
+            # L4: a name is returned but will never translate - stands in for a gMSA an unreachable DC cannot answer for.
+            function Get-DarlingServiceLogonName([string]$name) { return 'CONTOSO\doesnotexist-4043-round1$' }
+            & { $null = Get-DarlingPreLockTrustedSidsForRerun 'Some Service' ([pscustomobject]@{ Name = 'Some Service' }) }
+            'l4ExitCode=' + $LASTEXITCODE
+            """);
+
+        var l4 = RunWindowsPowerShell(probe2.ToString());
+        Assert.Contains(l4, a => a.StartsWith("FAILCALLED:", StringComparison.Ordinal) && a.Contains("CONTOSO\\doesnotexist-4043-round1$", StringComparison.Ordinal));
+    }
+
+    /// <summary>#4043 round-1 review, H1: the zip-staging folder's ACL is protected - SYSTEM and
+    /// Administrators only, full control, inheritance removed, Administrators as owner.</summary>
+    [Fact]
+    public void ProtectDarlingStagingFolder_LocksTheFolderToSystemAndAdministratorsOnly()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(upgrade, "Protect-DarlingStagingFolder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $path = Join-Path $env:TEMP ('pm4043-h1-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+            try {
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                # /setowner to BUILTIN\Administrators needs an ELEVATED token (the group is only marked
+                # owner-capable there) - not tested end to end on a non-elevated dev box, same reasoning
+                # ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl documents.
+                # The inheritance-removal and the two grants happen BEFORE /setowner, so they are still
+                # checked below even when this throws on a non-elevated run.
+                try { Protect-DarlingStagingFolder $path } catch { 'protectThrew=' + $_.Exception.Message }
+                $acl = Get-Acl -LiteralPath $path
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                'protected=' + $acl.AreAccessRulesProtected
+                'ownerIsAdmins=' + ($acl.GetOwner($sidType) -eq $adminsSid)
+                $rules = @($acl.GetAccessRules($true, $false, $sidType))
+                'ruleCount=' + $rules.Count
+                'allFullControl=' + (@($rules | Where-Object { $_.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl }).Count -eq 0)
+            }
+            finally {
+                icacls.exe $path /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("protected=True", answers);
+        Assert.Contains("ruleCount=2", answers);
+        Assert.Contains("allFullControl=True", answers);
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Contains("ownerIsAdmins=True", answers);
+        }
     }
 
     /// <summary>

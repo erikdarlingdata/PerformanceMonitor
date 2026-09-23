@@ -183,14 +183,20 @@ Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs n
 
 > **`upgrade-darling.ps1` does not exist in 3.5.0 or earlier.** It was added after 3.5.0 was tagged, so a build up to and including 3.5.0 does not contain it and neither does its zip. If you are upgrading FROM one of those, see [upgrading from a build that predates the script](#upgrading-from-a-build-that-predates-the-script) below and use the manual procedure — the steps in this section describe a script you will not have.
 
-Extract the new zip to a **staging** folder and run *its* copy:
+Extract the new zip to a **staging** folder only an administrator can write to, from an **elevated** PowerShell, and run *its* copy (#4043): the folder you run the script from is the trust root, and anyone who can write to it can replace the script itself, so a folder under `C:\Program Files\` is required, not a folder made directly under `C:\`. (Windows UAC's split token is not a security boundary here: trusting the installing admin's account also trusts that same admin's non-elevated session, since both are the same account.)
 
 ```powershell
-Expand-Archive PerformanceMonitorDarling-3.5.1.zip -DestinationPath C:\staging\3.5.1
-C:\staging\3.5.1\upgrade-darling.ps1 -Source C:\staging\3.5.1
+Expand-Archive PerformanceMonitorDarling-3.5.1.zip -DestinationPath "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1"
+& "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1\upgrade-darling.ps1" -Source "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1"
 ```
 
-It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (`-Source ...\PerformanceMonitorDarling-3.5.1.zip`, checked against `-Sha256` or a `SHA256SUMS.txt` beside it), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
+To verify the zip's SHA256 as part of the same run, point `-Source` at the downloaded zip itself instead of the extracted folder, with the hash from the release page — the script copies that zip into its own protected staging folder, hashes the copy, and extracts from it:
+
+```powershell
+& "C:\Program Files\PerformanceMonitorDarling-staging\3.5.1\upgrade-darling.ps1" -Source C:\Users\you\Downloads\PerformanceMonitorDarling-3.5.1.zip -Sha256 <hash-from-the-release-page>
+```
+
+It resolves the install directory from the registered service, verifies the zip's SHA256 when you point it at one (checked against `-Sha256` or a `SHA256SUMS.txt` beside it, itself only trusted from a folder that passes the same writability check), backs the install root's files up to `_rollback_manual_<stamp>`, prunes the backups past the newest `-KeepRollbacks` (3), lays the new build down, confirms `darling.json` is byte-identical, and starts the service. Re-running after a failure is safe and is the intended recovery: a backup taken in the last `-BackupWindowMinutes` (60) is reused rather than replaced, so a re-run cannot overwrite the good pre-upgrade copy with a copy of a half-upgraded tree.
 
 **It never kills a process**, and it checks for them twice. Before stopping anything it names processes running out of the install tree that a service stop will *not* close — your own `psql.exe`, a shell sitting in the folder, a Darling Viewer you left open — and refuses, costing nothing but a re-run. After the service is down it checks again with no exclusions; anything still there is usually a postmaster that outlived the stop, and that is exactly what must not be killed (the bundled PostgreSQL lives under `pg-runtime` and killing it takes the store down). Give it a few seconds and re-run.
 

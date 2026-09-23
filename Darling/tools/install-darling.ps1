@@ -12,9 +12,10 @@ C:\PerformanceMonitorDarling). What it does, in order:
      and stops so you can edit it - the service is not installed with an unedited sample).
   1a. REFUSES an install tree an ordinary local user can ALREADY write to, before anything - including
      the lock at 1b2 - has run (#4043): the usual case is Authenticated Users: Modify, inherited from
-     C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this checks the
-     root and the service exe's own ACL and refuses outright, naming the principals, unless
-     -AcceptWritableExtraction is passed (a dev loop that extracts somewhere deliberately writable).
+     C:\. A lock closes FURTHER writes; it cannot undo one made before it existed, so this recursively
+     checks every file and directory's owner and explicit ACEs and refuses outright, naming the
+     principals, unless -AcceptWritableExtraction is passed (a dev loop that extracts somewhere
+     deliberately writable).
   1b. REFUSES an install directory the service account can never read: anywhere under a user profile
      (C:\Users\...), or a UNC / mapped-drive path. The service runs as an unprivileged virtual account
      that is neither you nor an administrator, and a profile folder grants nothing to it, so the
@@ -100,17 +101,27 @@ function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor 
 # $trusted, right now, before anything is locked or a service account even exists? #4038's lock only stops
 # FURTHER writes - it never inspects what is already on disk, so a binary swapped in the gap between
 # extracting the zip and running this script survives the lock untouched. This is the check that catches
-# that gap, called at 1a on the root and the service exe before the lock ever runs.
+# that gap, called at 1a on the install root before the lock ever runs.
 #
-# Only those two paths, never a recursive walk: Expand-Archive does not stamp per-file ACLs, so nothing
-# under an ordinary extraction should carry a wider grant than the root itself, and a full recursive
-# pre-lock walk would just re-do Lock-DarlingInstallTree's own post-lock verification for no benefit.
+# -Recurse walks every file and directory below $path too (round-1 review, #4043, M2). Checking only the
+# root and the service exe missed the case where the root was RE-PERMISSIONED after extraction and the lock
+# then erases the evidence: Lock-DarlingInstallTree's own walk resets every child's owner and explicit write
+# grants as it goes, so once a tree has been through it once, a child a stranger created or replaced no
+# longer shows anything at the root to catch - re-doing that same post-lock verification here, before the
+# lock has run, is not redundant, it is the only time this evidence still exists. A descendant's OWNER is
+# always checked (ownership is never inherited, so a re-permissioned root cannot paper over who created a
+# child), but only its EXPLICIT (non-inherited) write grants are - an inherited ACE just repeats whatever
+# $path's own DACL already says, which this function checks on $path directly; re-checking the same fact on
+# every descendant of a tree the size of a shipped pg-runtime would cost real time for nothing new to learn.
+# A junction or link below $path is never descended into (same rule Lock-DarlingInstallTree's own walk
+# applies) and is reported on sight instead - a real install never holds one.
 #
-# The write-rights bitmask mirrors Lock-DarlingInstallTree's: the named rights (write, append/create,
-# delete, change-permissions, take-ownership) plus the two generic bits an inherited ACE can carry instead
-# of the specific ones. The return is principal NAMES, not SIDs: this fires as a refusal an operator has to
-# act on, and 'S-1-5-11' means nothing to most of them, so each is translated back to an account or group
-# name where Windows can, and left as the raw SID only when it can't (an orphaned SID from a deleted account).
+# The write-rights bitmask mirrors Lock-DarlingInstallTree's: the named rights (write, append/create, the
+# two attribute bits, delete, change-permissions, take-ownership) plus the two generic bits an inherited ACE
+# can carry instead of the specific ones. The return is principal NAMES, not SIDs: this fires as a refusal
+# an operator has to act on, and 'S-1-5-11' means nothing to most of them, so each is translated back to an
+# account or group name where Windows can, and left as the raw SID only when it can't (an orphaned SID from
+# a deleted account).
 #
 # CREATOR OWNER, CREATOR GROUP and their two SERVER twins (S-1-3-0..3) are excluded by SID, not by leaving
 # them out of $trusted: they are inherit-only templates that grant nothing on an object that already
@@ -125,9 +136,8 @@ function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor 
 # itself never names the real risk either way - what matters is WHO the owner is. An owner outside $trusted
 # holds WRITE_DAC and WRITE_OWNER implicitly and can grant itself anything regardless of what the DACL
 # currently says, the same fact Lock-DarlingInstallTree's own post-lock walk already acts on ("owned by").
-# So the owner is checked directly here too, on both $root and the service exe, rather than trying to read
-# that ACE.
-function Get-UntrustedWriteGrantees([string]$path, [array]$trusted) {
+# So the owner is checked directly here too, rather than trying to read that ACE.
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse) {
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -137,37 +147,100 @@ function Get-UntrustedWriteGrantees([string]$path, [array]$trusted) {
         (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupSid, $null)),
         (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerServerSid, $null)),
         (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupServerSid, $null)))
-    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
-    try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
-    catch { return @("$path (its permissions could not be read: $($_.Exception.Message))") }
-    $bad = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
-        $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
-    $result = @($bad | ForEach-Object {
-        $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
-        "$name on $path"
-    })
-    $owner = $acl.GetOwner($sidType)
-    if ($trusted -notcontains $owner) {
-        $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
-        $result += "$path (owned by $name)"
+    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+
+    function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited) {
+        try { $acl = Get-Acl -LiteralPath $itemPath -ErrorAction Stop }
+        catch { return @("$itemPath (its permissions could not be read: $($_.Exception.Message))") }
+        $bad = @($acl.GetAccessRules($true, $includeInherited, $sidType) | Where-Object {
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
+        $result = @($bad | ForEach-Object {
+            $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
+            "$name on $itemPath"
+        })
+        $owner = $acl.GetOwner($sidType)
+        if ($trusted -notcontains $owner) {
+            $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
+            $result += "$itemPath (owned by $name)"
+        }
+        return @($result)
+    }
+
+    $result = @(Get-DarlingOneObjectWriteFindings $path $true)
+    if ($Recurse) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue)) {
+            if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                $result += "$($child.FullName) (a junction or link)"
+                continue
+            }
+            $result += Get-DarlingOneObjectWriteFindings $child.FullName $false
+        }
     }
     return @($result)
 }
 
+# Every SID that is a DIRECT member of BUILTIN\Administrators right now (round-1 review, #4043, M2): an
+# owner or explicit grantee that IS an administrator, just not the one running this script, is not a
+# finding - that account could already do anything on this box, including replacing the very thing this
+# check exists to protect, so refusing a tree because a DIFFERENT admin extracted it would only teach
+# operators to reach for -AcceptWritableExtraction on sight. Nested and domain group membership are not
+# resolved - an Administrators member that is itself a group, or a domain group granted membership by GPO,
+# is not expanded - the refusal still NAMES the principal in that case, and -AcceptWritableExtraction is the
+# accepted way past it.
+#
+# ADSI, not Get-LocalGroupMember: the latter throws on an orphaned SID (a member whose account was since
+# deleted), which would take down this whole check over one stale membership. WinNT://./Administrators asks
+# each member for its objectSid directly, with no name lookup, so an orphaned SID cannot throw here; a
+# member that still fails to answer is skipped rather than failing the rest.
+#
+# $null (not an empty array) means the group itself could not be enumerated at all - a different failure
+# from "enumerated fine, zero members" - and the caller trusts NOBODY through this path when that happens
+# (fail closed): every principal it would have added stays untranslated by this path and is still named as
+# usual by Get-UntrustedWriteGrantees, never silently waved through.
+function Get-LocalAdministratorsDirectMemberSids {
+    try {
+        $group = [ADSI]"WinNT://./Administrators,group"
+        $sids = New-Object System.Collections.Generic.List[System.Security.Principal.SecurityIdentifier]
+        foreach ($member in @($group.Invoke('Members'))) {
+            try {
+                $bytes = $member.GetType().InvokeMember('objectSid', 'GetProperty', $null, $member, $null)
+                $sids.Add((New-Object System.Security.Principal.SecurityIdentifier($bytes, 0)))
+            }
+            catch { }
+        }
+        return , @($sids)
+    }
+    catch { return $null }
+}
+
+# Resolves $account (a service logon name, exactly as Windows reports it) to its SID, or $null when it will
+# not translate - a stale or unreachable account (a gMSA whose domain controller cannot be reached on this
+# re-run, round-1 review, #4043, L4). Normalizes the two spellings that never translate as written:
+# LocalSystem, and a leading .\ meaning this computer. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Resolve-DarlingServiceAccountSid([string]$account) {
+    if (-not $account) { return $null }
+    if ($account -eq 'LocalSystem') { $account = 'NT AUTHORITY\SYSTEM' }
+    $account = $account -replace '^\.\\', "$env:COMPUTERNAME\"
+    try { return (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]) }
+    catch { return $null }
+}
+
 # The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
-# SYSTEM, Administrators, TrustedInstaller, and whoever is running this script elevated right now - a
-# folder the installing admin's own account owns and can write to is exactly what a normal extraction
-# looks like, not a finding. Kept as its own function because install-darling.ps1 and upgrade-darling.ps1
-# both need it and must agree on it.
+# SYSTEM, Administrators, TrustedInstaller, whoever is running this script elevated right now, and every
+# direct member of BUILTIN\Administrators (round-1 review, M2) - a folder the installing admin's own account
+# owns and can write to, or one a DIFFERENT administrator's account owns, is exactly what a normal
+# extraction looks like, not a finding. Kept as its own function because install-darling.ps1 and
+# upgrade-darling.ps1 both need it and must agree on it.
 #
 # $existingServiceAccount adds one more, when the caller has one: the CURRENT logon account of an
 # ALREADY-REGISTERED Darling service (round-1 review, #4043). A re-run of install-darling.ps1 over a tree
 # #4038 already locked - a repair, or this script used as its own upgrade path - is not a fresh extraction:
 # the lock already granted that account Modify on $root, and without this, the very first re-run or repair
-# over an already-locked install would refuse itself over the grant #4038 itself made. Normalized the same
-# way Lock-DarlingInstallTree normalizes it (LocalSystem spelled out, a leading .\ read as this computer),
-# since neither spelling translates to a SID as written. A name that will not translate (a stale or
-# unreachable account) is left out rather than thrown on - the base four SIDs still apply either way.
+# over an already-locked install would refuse itself over the grant #4038 itself made. Resolved through
+# Resolve-DarlingServiceAccountSid; a name that will not translate is left out rather than thrown on here -
+# see Get-DarlingPreLockTrustedSidsForRerun for the caller that refuses instead of silently dropping it
+# (L4). The base set still applies either way.
 function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
     $wk = [System.Security.Principal.WellKnownSidType]
     $sidType = [System.Security.Principal.SecurityIdentifier]
@@ -177,12 +250,39 @@ function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
         (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType),
         [Security.Principal.WindowsIdentity]::GetCurrent().User)
     if ($existingServiceAccount) {
-        if ($existingServiceAccount -eq 'LocalSystem') { $existingServiceAccount = 'NT AUTHORITY\SYSTEM' }
-        $existingServiceAccount = $existingServiceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
-        try { $trusted += (New-Object System.Security.Principal.NTAccount($existingServiceAccount)).Translate($sidType) }
-        catch { }
+        $serviceSid = Resolve-DarlingServiceAccountSid $existingServiceAccount
+        if ($serviceSid) { $trusted += $serviceSid }
     }
+    $adminMembers = Get-LocalAdministratorsDirectMemberSids
+    if ($adminMembers) { $trusted += $adminMembers }
     return $trusted
+}
+
+# The pre-lock trusted set for a RE-RUN over a possibly-already-registered service, failing closed with a
+# clear message instead of silently mis-trusting or mis-refusing (round-1 review, #4043, L3/L4). Two
+# distinct ways the existing service's account can defeat the pre-lock check if let through quietly:
+# Windows cannot say what it is AT ALL (L3 - Get-DarlingServiceLogonName returns nothing; this is 1b2's own
+# failure, reached here first and worded the same way so it is recognisable as the same problem), or it
+# names an account that will not translate to a SID (L4 - most often a gMSA whose domain controller this
+# box cannot reach right now). Either one, left unresolved, makes the lock's own grant to that account look
+# exactly like a stranger's - a misleading "ordinary users can already write here" refusal that sends an
+# operator to re-extract a perfectly good install, or worse, trains them to reach for
+# -AcceptWritableExtraction on sight.
+#
+# $existingService is the Get-Service result (or $null) the caller already has, not re-queried here, so a
+# caller that already asked does not ask Windows the same question again on every call. Kept byte-identical
+# in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingService) {
+    if (-not $existingService) { return Get-DarlingPreLockTrustedSids $null }
+
+    $existingAccount = Get-DarlingServiceLogonName $serviceName
+    if (-not $existingAccount) {
+        Fail "Could not read which account the existing '$serviceName' service logs on as, so the install folder cannot be locked without taking that account's access away. Nothing was changed. Check it with: sc.exe qc `"$serviceName`", then re-run this script."
+    }
+    if (-not (Resolve-DarlingServiceAccountSid $existingAccount)) {
+        Fail "The existing '$serviceName' service logs on as '$existingAccount', which could not be resolved to a SID right now (its domain may be unreachable, or the account may no longer exist). The install folder cannot be safely checked or locked without knowing whether its own grant belongs to that account. Verify the account is reachable, then re-run this script."
+    }
+    return Get-DarlingPreLockTrustedSids $existingAccount
 }
 
 # True when $candidate IS $parent or sits underneath it.
@@ -587,14 +687,17 @@ $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 # So this checks the one thing that actually predicts the risk: is the tree ALREADY writable by someone
 # outside SYSTEM, Administrators, TrustedInstaller and the admin running this script, right now, before
 # anything has run. That fires on every risky extraction, attack or not, and does not depend on an attacker
-# having left anything else untouched. The service exe is checked as well as the root: an inherited grant is
-# not the only way in, and #4038's own review flagged checking only the root as incomplete.
+# having left anything else untouched. The walk is RECURSIVE (round-1 review, #4043, M2): the root alone
+# stops showing anything once it has been re-permissioned by hand or re-inherited after a move, while a file
+# under it keeps whatever owner or explicit grant it already had - see Get-UntrustedWriteGrantees for why
+# checking every file, not just the root and the exe, is not the redundant work it looks like.
 if (-not $AcceptWritableExtraction) {
     # $existing (resolved above, before this step) makes a re-run over an already-locked tree trust exactly
-    # what that lock granted, rather than refusing the service account's own Modify grant as a stranger's.
-    $existingAccount = if ($existing) { Get-DarlingServiceLogonName $serviceName } else { $null }
-    $preLockTrusted = Get-DarlingPreLockTrustedSids $existingAccount
-    $writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted) + @(Get-UntrustedWriteGrantees $serviceExe $preLockTrusted)
+    # what that lock granted, rather than refusing the service account's own Modify grant as a stranger's -
+    # and refuses outright, with 1b2's own message, when that account cannot be read or resolved at all
+    # (round-1 review, L3/L4), rather than silently mis-judging the walk below.
+    $preLockTrusted = Get-DarlingPreLockTrustedSidsForRerun $serviceName $existing
+    $writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted -Recurse)
     $writable = @($writable | Select-Object -Unique)
     if ($writable.Count -gt 0) {
         $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
@@ -609,9 +712,10 @@ script applies next (1b2) only stops FURTHER writes, it does not check what is a
 the usual shape of a folder made directly under C:\, which inherits Authenticated Users: Modify from the
 volume root.
 
-Extract the zip under C:\Program Files\<something>, or another folder only an administrator can write to,
-and run this script from there instead. If this folder is deliberately writable (a dev loop) and you
-accept the risk, re-run with -AcceptWritableExtraction.
+Do NOT try to repair this folder's permissions in place: fixing the ACL cannot undo a file that was already
+replaced, and cannot prove none was. Extract the zip fresh under C:\Program Files\<something>, or another
+folder only an administrator can write to, and run this script from there instead. If this folder is
+deliberately writable (a dev loop) and you accept the risk, re-run with -AcceptWritableExtraction.
 
 Nothing was installed or changed.
 "@
