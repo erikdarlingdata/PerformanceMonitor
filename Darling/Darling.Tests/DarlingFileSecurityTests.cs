@@ -207,8 +207,9 @@ public sealed class DarlingFileSecurityTests
        darling.json carries every monitored server's encryptedPassword plus the MCP and web tokens, all under
        DPAPI LocalMachine scope with an entropy constant published in this repo, so READ access to the file IS
        the secret. It never got an ACL: it sits beside the binary, and the documented install (extract to
-       C:\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from the root DACL. The service now
-       hardens it at startup and raises a Critical when it is still exposed — this is the check behind that. */
+       C:\Program Files\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from Program Files. The
+       service now hardens it at startup and raises a Critical when it is still exposed — this is the check behind
+       that. */
 
     /// <summary>
     /// #3914 review F6: <see cref="DarlingFileSecurity.CreateHardenedFile"/> applies the harden's ACL AT creation. In

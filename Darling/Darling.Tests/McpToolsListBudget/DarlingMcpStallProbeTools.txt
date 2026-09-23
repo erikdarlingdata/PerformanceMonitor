@@ -1,0 +1,5 @@
+# DarlingMcpStallProbeTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_collector_stall_probes 2678
+param get_collector_stall_probes.days_back 64
+param get_collector_stall_probes.limit 42
+param get_collector_stall_probes.server_name 64

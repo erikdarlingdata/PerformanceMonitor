@@ -52,8 +52,9 @@ failure rather than leaving you to guess.
 
 .PARAMETER Source
 The new build: either the .zip as downloaded, or a folder you already extracted it into. Defaults to the
-folder this script is in, which is what you get by extracting the new zip to a staging directory and running
-ITS copy of this script.
+folder this script is in, which is what you get by extracting the new zip to a staging folder ONLY AN
+ADMINISTRATOR CAN WRITE TO (e.g. under C:\Program Files\) and running ITS copy of this script - the folder
+you run the script from is the trust root, and anyone who can write to it can replace the script itself.
 
 .PARAMETER InstallRoot
 The install directory to upgrade. Defaults to the directory of the registered service's executable, which is
@@ -96,6 +97,20 @@ Proceed with a source zip whose SHA256 could not be verified.
 Proceed even though processes are running out of the install tree. Almost always the wrong answer - the
 copy will fail on a locked file and leave mixed binaries - but there is no way to be sure from here that
 your case is not the exception.
+
+.PARAMETER AcceptWritableExtraction
+Skip three checks that all ask the same question of a different folder (#4043): is it ALREADY writable by
+ordinary local users, right now? A zip -Source's own CONTENT is always covered regardless of who could
+write to the folder it sits in - it is copied into a private, protected folder and hashed and extracted
+from THAT copy - but a FOLDER -Source has no content check at all: this script only confirms the service
+exe is present in it, so a folder that ever inherited a broad write grant (extracted directly under C:\, or
+into a folder in your own profile such as Downloads, which is writable by anything already running as you,
+elevated or not) may already hold a swapped binary between whenever it was extracted and now. The existing
+-InstallRoot gets the same check, before this script's own lock runs: an install made before #4038 shipped
+was writable by ordinary users for its entire life until the day it is first locked, and an in-place
+upgrade's overlay does not verify anything already in the tree besides what it replaces. Passing this
+switch accepts the risk for whichever of the three applies - verify the zip's SHA256 instead where that
+option exists.
 #>
 [CmdletBinding()]
 param(
@@ -110,7 +125,8 @@ param(
     [switch]$ListRollbacks,
     [switch]$RemoveStaleFiles,
     [switch]$SkipHashCheck,
-    [switch]$SkipStopGuard
+    [switch]$SkipStopGuard,
+    [switch]$AcceptWritableExtraction
 )
 
 $ErrorActionPreference = 'Stop'
@@ -121,6 +137,200 @@ $manifestName = 'darling-install-manifest.txt'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
 function Note([string]$message) { Write-Host $message }
+
+# Read-only counterpart to Lock-DarlingInstallTree, for #4043: is $path ALREADY writable by someone outside
+# $trusted, right now, before anything is locked or a service account even exists? #4038's lock only stops
+# FURTHER writes - it never inspects what is already on disk, so a binary swapped in the gap between
+# extracting the zip and running this script survives the lock untouched. This is the check that catches
+# that gap, called at 1a on the install root before the lock ever runs.
+#
+# -Recurse walks every file and directory below $path too (round-1 review, #4043, M2). Checking only the
+# root and the service exe missed the case where the root was RE-PERMISSIONED after extraction and the lock
+# then erases the evidence: Lock-DarlingInstallTree's own walk resets every child's owner and explicit write
+# grants as it goes, so once a tree has been through it once, a child a stranger created or replaced no
+# longer shows anything at the root to catch - re-doing that same post-lock verification here, before the
+# lock has run, is not redundant, it is the only time this evidence still exists. A descendant's OWNER is
+# always checked (ownership is never inherited, so a re-permissioned root cannot paper over who created a
+# child), but only its EXPLICIT (non-inherited) write grants are - an inherited ACE just repeats whatever
+# $path's own DACL already says, which this function checks on $path directly; re-checking the same fact on
+# every descendant of a tree the size of a shipped pg-runtime would cost real time for nothing new to learn.
+# A junction or link below $path is never descended into (same rule Lock-DarlingInstallTree's own walk
+# applies) and is reported on sight instead - a real install never holds one.
+#
+# The write-rights bitmask mirrors Lock-DarlingInstallTree's: the named rights (write, append/create, the
+# two attribute bits, delete, change-permissions, take-ownership) plus the two generic bits an inherited ACE
+# can carry instead of the specific ones. The return is principal NAMES, not SIDs: this fires as a refusal
+# an operator has to act on, and 'S-1-5-11' means nothing to most of them, so each is translated back to an
+# account or group name where Windows can, and left as the raw SID only when it can't (an orphaned SID from
+# a deleted account).
+#
+# CREATOR OWNER, CREATOR GROUP and their two SERVER twins (S-1-3-0..3) are excluded by SID, not by leaving
+# them out of $trusted: they are inherit-only templates that grant nothing on an object that already
+# exists, only rights a CHILD inherits when someone later CREATES one under this path - and creating that
+# child needs write/create rights on THIS path, which the rest of this check already tests for every other
+# principal. Flagging the template ACE itself refused C:\Program Files and C:\Program Files\dotnet on this
+# machine (round-1 review, #4043) - the very fix the refusal below recommends, both carrying CREATOR OWNER
+# by default.
+#
+# OWNER RIGHTS (S-1-3-4) is different and is NOT in that exclusion list: unlike the four above it can
+# redefine what the OWNER may do instead of the implicit full control an owner otherwise gets, so the ACE
+# itself never names the real risk either way - what matters is WHO the owner is. An owner outside $trusted
+# holds WRITE_DAC and WRITE_OWNER implicitly and can grant itself anything regardless of what the DACL
+# currently says, the same fact Lock-DarlingInstallTree's own post-lock walk already acts on ("owned by").
+# So the owner is checked directly here too, rather than trying to read that ACE.
+function Get-UntrustedWriteGrantees([string]$path, [array]$trusted, [switch]$Recurse) {
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $inheritOnlyTemplates = @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerServerSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorGroupServerSid, $null)))
+    $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::WriteAttributes -bor $rights::WriteExtendedAttributes -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+
+    function Get-DarlingOneObjectWriteFindings([string]$itemPath, [bool]$includeInherited) {
+        try { $acl = Get-Acl -LiteralPath $itemPath -ErrorAction Stop }
+        catch { return @("$itemPath (its permissions could not be read: $($_.Exception.Message))") }
+        $bad = @($acl.GetAccessRules($true, $includeInherited, $sidType) | Where-Object {
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference -and $inheritOnlyTemplates -notcontains $_.IdentityReference })
+        $result = @($bad | ForEach-Object {
+            $name = try { $_.IdentityReference.Translate([System.Security.Principal.NTAccount]).Value } catch { $_.IdentityReference.Value }
+            "$name on $itemPath"
+        })
+        $owner = $acl.GetOwner($sidType)
+        if ($trusted -notcontains $owner) {
+            $name = try { $owner.Translate([System.Security.Principal.NTAccount]).Value } catch { $owner.Value }
+            $result += "$itemPath (owned by $name)"
+        }
+        return @($result)
+    }
+
+    $result = @(Get-DarlingOneObjectWriteFindings $path $true)
+    if ($Recurse) {
+        # -ErrorVariable, so a folder the walk cannot list is a finding of its own (#4043 round-2 review).
+        # Skipped silently, nothing under it reached the checks above and the tree read as clean.
+        foreach ($child in @(Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable listFailures)) {
+            if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                $result += "$($child.FullName) (a junction or link)"
+                continue
+            }
+            $result += Get-DarlingOneObjectWriteFindings $child.FullName $false
+        }
+        foreach ($failure in @($listFailures)) {
+            $unlisted = if ($failure.TargetObject) { "$($failure.TargetObject)" } else { $path }
+            $result += "$unlisted (its contents could not be listed: $($failure.CategoryInfo.Reason))"
+        }
+    }
+    return @($result)
+}
+
+# Every SID that is a DIRECT member of BUILTIN\Administrators right now (round-1 review, #4043, M2): an
+# owner or explicit grantee that IS an administrator, just not the one running this script, is not a
+# finding - that account could already do anything on this box, including replacing the very thing this
+# check exists to protect, so refusing a tree because a DIFFERENT admin extracted it would only teach
+# operators to reach for -AcceptWritableExtraction on sight. Nested and domain group membership are not
+# resolved - an Administrators member that is itself a group, or a domain group granted membership by GPO,
+# is not expanded - the refusal still NAMES the principal in that case, and -AcceptWritableExtraction is the
+# accepted way past it.
+#
+# ADSI, not Get-LocalGroupMember: the latter throws on an orphaned SID (a member whose account was since
+# deleted), which would take down this whole check over one stale membership. WinNT://./Administrators asks
+# each member for its objectSid directly, with no name lookup, so an orphaned SID cannot throw here; a
+# member that still fails to answer is skipped rather than failing the rest.
+#
+# $null (not an empty array) means the group itself could not be enumerated at all - a different failure
+# from "enumerated fine, zero members" - and the caller trusts NOBODY through this path when that happens
+# (fail closed): every principal it would have added stays untranslated by this path and is still named as
+# usual by Get-UntrustedWriteGrantees, never silently waved through.
+function Get-LocalAdministratorsDirectMemberSids {
+    try {
+        $group = [ADSI]"WinNT://./Administrators,group"
+        $sids = New-Object System.Collections.Generic.List[System.Security.Principal.SecurityIdentifier]
+        foreach ($member in @($group.Invoke('Members'))) {
+            try {
+                $bytes = $member.GetType().InvokeMember('objectSid', 'GetProperty', $null, $member, $null)
+                $sids.Add((New-Object System.Security.Principal.SecurityIdentifier($bytes, 0)))
+            }
+            catch { }
+        }
+        return , @($sids)
+    }
+    catch { return $null }
+}
+
+# Resolves $account (a service logon name, exactly as Windows reports it) to its SID, or $null when it will
+# not translate - a stale or unreachable account (a gMSA whose domain controller cannot be reached on this
+# re-run, round-1 review, #4043, L4). Normalizes the two spellings that never translate as written:
+# LocalSystem, and a leading .\ meaning this computer. Kept byte-identical in install-darling.ps1 and
+# upgrade-darling.ps1.
+function Resolve-DarlingServiceAccountSid([string]$account) {
+    if (-not $account) { return $null }
+    if ($account -eq 'LocalSystem') { $account = 'NT AUTHORITY\SYSTEM' }
+    $account = $account -replace '^\.\\', "$env:COMPUTERNAME\"
+    try { return (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]) }
+    catch { return $null }
+}
+
+# The trusted set for Get-UntrustedWriteGrantees BEFORE a service account exists to add to it (#4043):
+# SYSTEM, Administrators, TrustedInstaller, whoever is running this script elevated right now, and every
+# direct member of BUILTIN\Administrators (round-1 review, M2) - a folder the installing admin's own account
+# owns and can write to, or one a DIFFERENT administrator's account owns, is exactly what a normal
+# extraction looks like, not a finding. Kept as its own function because install-darling.ps1 and
+# upgrade-darling.ps1 both need it and must agree on it.
+#
+# $existingServiceAccount adds one more, when the caller has one: the CURRENT logon account of an
+# ALREADY-REGISTERED Darling service (round-1 review, #4043). A re-run of install-darling.ps1 over a tree
+# #4038 already locked - a repair, or this script used as its own upgrade path - is not a fresh extraction:
+# the lock already granted that account Modify on $root, and without this, the very first re-run or repair
+# over an already-locked install would refuse itself over the grant #4038 itself made. Resolved through
+# Resolve-DarlingServiceAccountSid; a name that will not translate is left out rather than thrown on here -
+# see Get-DarlingPreLockTrustedSidsForRerun for the caller that refuses instead of silently dropping it
+# (L4). The base set still applies either way.
+function Get-DarlingPreLockTrustedSids([string]$existingServiceAccount) {
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $trusted = @(
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
+        (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)),
+        (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType),
+        [Security.Principal.WindowsIdentity]::GetCurrent().User)
+    if ($existingServiceAccount) {
+        $serviceSid = Resolve-DarlingServiceAccountSid $existingServiceAccount
+        if ($serviceSid) { $trusted += $serviceSid }
+    }
+    $adminMembers = Get-LocalAdministratorsDirectMemberSids
+    if ($adminMembers) { $trusted += $adminMembers }
+    return $trusted
+}
+
+# The pre-lock trusted set for a RE-RUN over a possibly-already-registered service, failing closed with a
+# clear message instead of silently mis-trusting or mis-refusing (round-1 review, #4043, L3/L4). Two
+# distinct ways the existing service's account can defeat the pre-lock check if let through quietly:
+# Windows cannot say what it is AT ALL (L3 - Get-DarlingServiceLogonName returns nothing; this is 1b2's own
+# failure, reached here first and worded the same way so it is recognisable as the same problem), or it
+# names an account that will not translate to a SID (L4 - most often a gMSA whose domain controller this
+# box cannot reach right now). Either one, left unresolved, makes the lock's own grant to that account look
+# exactly like a stranger's - a misleading "ordinary users can already write here" refusal that sends an
+# operator to re-extract a perfectly good install, or worse, trains them to reach for
+# -AcceptWritableExtraction on sight.
+#
+# $existingService is the Get-Service result (or $null) the caller already has, not re-queried here, so a
+# caller that already asked does not ask Windows the same question again on every call. Kept byte-identical
+# in install-darling.ps1 and upgrade-darling.ps1.
+function Get-DarlingPreLockTrustedSidsForRerun([string]$serviceName, $existingService) {
+    if (-not $existingService) { return Get-DarlingPreLockTrustedSids $null }
+
+    $existingAccount = Get-DarlingServiceLogonName $serviceName
+    if (-not $existingAccount) {
+        Fail "Could not read which account the existing '$serviceName' service logs on as, so the install folder cannot be locked without taking that account's access away. Nothing was changed. Check it with: sc.exe qc `"$serviceName`", then re-run this script."
+    }
+    if (-not (Resolve-DarlingServiceAccountSid $existingAccount)) {
+        Fail "The existing '$serviceName' service logs on as '$existingAccount', which could not be resolved to a SID right now (its domain may be unreachable, or the account may no longer exist). The install folder cannot be safely checked or locked without knowing whether its own grant belongs to that account. Verify the account is reachable, then re-run this script."
+    }
+    return Get-DarlingPreLockTrustedSids $existingAccount
+}
 function Good([string]$message) { Write-Host $message -ForegroundColor Green }
 function Warn([string]$message) { Write-Host "WARNING: $message" -ForegroundColor Yellow }
 
@@ -392,7 +602,8 @@ function Test-DarlingSamePath([string]$left, [string]$right) {
 # Where the service is ACTUALLY installed, read from the registered ImagePath rather than guessed from
 # where this script happens to be sitting. Returns $null when the service is not installed.
 #
-# The ImagePath is quoted when it contains spaces and 'C:\PerformanceMonitorDarling' usually does not, so
+# The ImagePath is quoted when it contains spaces (the documented 'C:\Program Files\PerformanceMonitorDarling' does; an older
+# folder made directly under C:\ usually does not), so
 # both spellings are handled; a path that cannot be parsed returns $null and the caller asks for
 # -InstallRoot rather than upgrading a directory it guessed at.
 function Get-DarlingInstallRootFromService([string]$name) {
@@ -1179,6 +1390,89 @@ if ($ListRollbacks -or $PruneOnly) {
     exit 0
 }
 
+# Applies the H1 staging ACL to $path: SYSTEM and Administrators only, full control, inheritance removed,
+# and Administrators as owner (#4043 round-1 review). Used only for the private folder a zip -Source is
+# copied into before it is hashed and extracted - the zip is hashed and expanded from THAT copy, never the
+# original, so a folder anyone else can write to between the hash and the extract cannot swap what actually
+# lands on disk. icacls, not Set-Acl, for the same reason Lock-DarlingInstallTree uses it: it is what the
+# fix-it-by-hand advice would tell an operator to run, and it needs no SeSecurityPrivilege. $path must
+# already exist; the caller owns its lifetime and deletes it when done.
+#
+# /reset comes first because /inheritance:r strips only INHERITED entries. A folder created under a parent
+# that passes nothing on gets its creator's default DACL as EXPLICIT entries (the creating account with full
+# control, among them), and those survived the strip; CI's elevated runner is one such parent. /reset
+# replaces every explicit entry with what the parent passes on, which /inheritance:r then removes, so the
+# two grants below are the whole DACL.
+function Protect-DarlingStagingFolder([string]$path) {
+    $wk = [System.Security.Principal.WellKnownSidType]
+    $systemSid = (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)).Value
+    $adminsSid = (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)).Value
+
+    $steps = @(
+        @('/reset'),
+        @('/inheritance:r'),
+        @('/grant', "*${systemSid}:(OI)(CI)F", '/grant', "*${adminsSid}:(OI)(CI)F"),
+        @('/setowner', "*$adminsSid"))
+    foreach ($step in $steps) {
+        $output = & icacls.exe $path @step 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "icacls $($step -join ' ') on '$path' failed: $($output -join ' ')" }
+    }
+}
+
+# A fresh, empty, protected folder under the machine temp directory for H1's zip staging copy. Elevation is
+# assumed (this script requires it), so setting Administrators as owner needs no extra privilege - the same
+# fact Lock-DarlingInstallTree's own /setowner already relies on.
+function New-DarlingProtectedStagingFolder {
+    $path = Join-Path $env:TEMP ('darling-upgrade-staging-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    Protect-DarlingStagingFolder $path
+    return $path
+}
+
+# ============================ the install root has to already be trustworthy (#4043, M3) ============================
+#
+# #4038's lock (below, before the backup and the copy) only stops FURTHER writes to $InstallRoot. An install
+# made before #4038 shipped was writable by ordinary local users for its entire life until the day it is
+# first locked - which, for an existing install, is THIS run - so a binary in it may already have been
+# swapped, and an in-place upgrade's overlay would not notice: it replaces what the new build ships and
+# verifies nothing else already in the tree. install-darling.ps1 already refuses to (re-)install over a tree
+# like this at its own step 1a; this is the same check, on the same tree, before this script's own lock runs.
+#
+# Skipped for -PruneOnly and -ListRollbacks, which exit above this and touch nothing but the rollback
+# backups this script itself created.
+#
+# $preLockTrusted is computed once, here, and reused below for the -Source folder check too - both ask the
+# same question of the same registered service, and there is no reason to query it twice.
+$preLockTrusted = Get-DarlingPreLockTrustedSidsForRerun $serviceName (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
+if (-not $AcceptWritableExtraction) {
+    $writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted -Recurse)
+    if ($writable.Count -gt 0) {
+        $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
+        $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
+        Fail @"
+This install directory is already writable by ordinary users, before this upgrade has locked anything down:
+
+$lines$more
+
+A tree installed before #4038 was writable by the principals above for its whole life, so files in it may
+already have been replaced with something other than what an earlier build shipped - an in-place upgrade
+only overlays what THIS build ships, it does not verify the rest.
+
+The safe path is a fresh install into a folder only an administrator can write to (install-darling.ps1 into
+a new folder), not an upgrade over this one. If you accept the risk of upgrading this tree in place anyway,
+re-run with -AcceptWritableExtraction.
+
+This only fires once for a given tree: the lock this upgrade applies next closes it against further writes,
+so a later upgrade of this same install will already be locked and pass straight through.
+
+Nothing has been stopped or copied.
+"@
+    }
+}
+else {
+    Warn '-AcceptWritableExtraction - not checking whether the existing install directory was already writable by other local users before this upgrade.'
+}
+
 # ============================ the source build ============================
 
 if ([string]::IsNullOrWhiteSpace($Source)) {
@@ -1194,6 +1488,14 @@ if (-not (Test-Path -LiteralPath $Source)) {
 
 $sourceIsZip = (Test-Path -LiteralPath $Source -PathType Leaf) -and $Source.EndsWith('.zip', [StringComparison]::OrdinalIgnoreCase)
 $sourceRoot = if ($sourceIsZip) { [IO.Path]::GetDirectoryName($Source) } else { $Source }
+$zipStagingFolder = $null
+
+# Everything from here to the end of the script runs inside this try - deliberately NOT re-indented, to keep
+# this change reviewable as a diff rather than touching every line that follows - so that $zipStagingFolder,
+# once H1's staging copy below creates it, is ALWAYS removed on the way out, including every Fail() between
+# here and the extraction that uses it: Fail() calls exit, and exit still runs an enclosing finally (verified
+# empirically; PowerShell's `trap` does NOT catch it, which is why this is a finally and not a trap).
+try {
 
 # THE SELF-OVERWRITE REFUSAL.
 #
@@ -1213,7 +1515,7 @@ $sourceRoot = if ($sourceIsZip) { [IO.Path]::GetDirectoryName($Source) } else { 
 # installed copy is exactly the right thing to run for those - and it is the one the service's report names.
 $runningFrom = $PSScriptRoot
 if (Test-DarlingSamePath $runningFrom $InstallRoot) {
-    Fail "This script is running from the install directory, so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder (e.g. C:\staging\<version>) and run ITS upgrade-darling.ps1 instead. To prune rollback backups from the installed copy, use -PruneOnly, which copies nothing."
+    Fail "This script is running from the install directory, so the upgrade would write the new build over the copy of itself that PowerShell is currently reading. Extract the new zip to a staging folder only an administrator can write to (e.g. C:\Program Files\PerformanceMonitorDarling-staging\<version>, never a folder made directly under C:\) and run ITS upgrade-darling.ps1 instead. To prune rollback backups from the installed copy, use -PruneOnly, which copies nothing."
 }
 
 # And the degenerate case the rule above does not cover: a source folder that IS the install directory,
@@ -1223,11 +1525,42 @@ if (-not $sourceIsZip -and (Test-DarlingSamePath $sourceRoot $InstallRoot)) {
 }
 
 if ($sourceIsZip) {
+    # #4043 round-1 review, H1: the zip is copied into a staging folder ONLY SYSTEM and Administrators can
+    # write to before it is hashed, and is hashed and extracted from THAT copy alone, never the original
+    # path. Without this, a zip sitting in a folder ordinary users can write to is hashed once here and read
+    # AGAIN by Expand-Archive far below, after the stop guard, the service stop and the backup - nothing
+    # holds the file open in between, so a zip that others can write is never proven to be the file that
+    # actually gets extracted, no matter how good the hash check looks on screen.
+    $zipStagingFolder = New-DarlingProtectedStagingFolder
+    $stagedZip = Join-Path $zipStagingFolder ([IO.Path]::GetFileName($Source))
+    Copy-Item -LiteralPath $Source -Destination $stagedZip -Force
+
     $expected = $Sha256
 
     if ([string]::IsNullOrWhiteSpace($expected)) {
-        $sums = Join-Path ([IO.Path]::GetDirectoryName($Source)) 'SHA256SUMS.txt'
+        # SHA256SUMS.txt is trusted only when the folder it sits in is (#4043 round-1 review, H1): without
+        # -Sha256, that sidecar file is the ENTIRE proof, and anyone who could write a swapped zip into this
+        # folder could write a line into SHA256SUMS.txt saying it is fine. -Sha256 skips this folder check
+        # entirely: the hash of the PROTECTED COPY above is already proof enough, independent of where the
+        # original sat.
+        $sums = Join-Path $sourceRoot 'SHA256SUMS.txt'
         if (Test-Path -LiteralPath $sums) {
+            $sumsFolderWritable = @(Get-UntrustedWriteGrantees $sourceRoot $preLockTrusted -Recurse)
+            if ($sumsFolderWritable.Count -gt 0) {
+                $lines = ($sumsFolderWritable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
+                $more = if ($sumsFolderWritable.Count -gt 20) { "`n  ...and $($sumsFolderWritable.Count - 20) more." } else { '' }
+                Fail @"
+SHA256SUMS.txt sits in a folder ordinary users can already write to:
+
+$lines$more
+
+That file is the only proof this script has without -Sha256, and anyone who could write a swapped zip into
+this folder could write a line into SHA256SUMS.txt saying it is fine.
+
+Pass -Sha256 <hash> instead, using the hash published on the release's GitHub page. Nothing has been
+stopped or copied.
+"@
+            }
             $leaf = [IO.Path]::GetFileName($Source)
             foreach ($line in (Get-Content -LiteralPath $sums)) {
                 # '<hash>  <name>' and '<hash> *<name>' are both in the wild; splitting on whitespace and
@@ -1243,23 +1576,64 @@ if ($sourceIsZip) {
 
     if ([string]::IsNullOrWhiteSpace($expected)) {
         if (-not $SkipHashCheck) {
-            Fail "No SHA256 for '$Source' - pass -Sha256 <hash>, put SHA256SUMS.txt beside the zip, or say -SkipHashCheck. This overwrites the binaries of a running monitoring host; an unverified zip is not something to find out about afterwards."
+            Fail "No SHA256 for '$Source' - pass -Sha256 <hash>, using the hash published on the release's GitHub page, put a SHA256SUMS.txt in a folder only an administrator can write to, or say -SkipHashCheck. This overwrites the binaries of a running monitoring host; an unverified zip is not something to find out about afterwards."
         }
         Warn "Proceeding with an UNVERIFIED source zip (-SkipHashCheck)."
     }
     else {
-        $actual = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
+        # Hashed from the STAGED COPY, not $Source - that is the entire point of H1's fix: proving the bytes
+        # about to be extracted below are the ones just hashed, with nothing else able to touch them in
+        # between.
+        $actual = (Get-FileHash -LiteralPath $stagedZip -Algorithm SHA256).Hash
         if (-not $actual.Equals($expected.Trim(), [StringComparison]::OrdinalIgnoreCase)) {
             Fail "SHA256 mismatch on '$Source'. Expected $expected, got $actual. Nothing has been stopped or copied."
         }
         Good "Source zip SHA256 verified."
     }
+
+    # From here on, the STAGED, hashed, admin-only copy is what gets extracted - never the original path,
+    # which nothing has held open since the hash above ran.
+    $Source = $stagedZip
 }
 else {
     if (-not (Test-Path -LiteralPath (Join-Path $Source $serviceExeName))) {
         Fail "'$Source' does not hold $serviceExeName, so it is not an extracted Darling build."
     }
     Warn "The source is a folder, so this script cannot verify it - verify the zip's SHA256 before you extract it."
+
+    # A zip -Source is covered above regardless of who could write to the folder it sits in, because it is
+    # copied into a protected folder and hashed there. A folder -Source has no content check at all - only
+    # that the exe is present - so this is its own pre-lock writable-extraction window (#4043): if the folder
+    # ever inherited a broad write grant (extracted directly under C:\, or into a folder in your own profile
+    # such as Downloads, which is writable by anything already running as you, elevated or not) between
+    # whenever it was made and now, a local user could have swapped a binary in it, and nothing above would
+    # notice. Same recursive check install-darling.ps1 runs at 1a (round-1 review, M2), same trusted set,
+    # same override.
+    if (-not $AcceptWritableExtraction) {
+        $writable = @(Get-UntrustedWriteGrantees $Source $preLockTrusted -Recurse)
+        $writable = @($writable | Select-Object -Unique)
+        if ($writable.Count -gt 0) {
+            $lines = ($writable | Select-Object -First 20 | ForEach-Object { "  $_" }) -join "`n"
+            $more = if ($writable.Count -gt 20) { "`n  ...and $($writable.Count - 20) more." } else { '' }
+            Fail @"
+Ordinary users can already write to the source folder '$Source':
+
+$lines$more
+
+This script only confirms $serviceExeName is present in a folder -Source - it does not, and cannot, verify
+its CONTENT the way a zip's SHA256 does. A binary here may already have been replaced. Do NOT try to repair
+this folder's permissions in place: fixing the ACL cannot undo a file that was already replaced. Extract the
+new build fresh under C:\Program Files\<something>, or another folder only an administrator can write to,
+and point -Source there instead - or verify the zip's SHA256 and pass the zip itself as -Source.
+
+If this folder is deliberately writable (a dev loop) and you accept the risk, re-run with
+-AcceptWritableExtraction. Nothing has been stopped or copied.
+"@
+        }
+    }
+    else {
+        Warn '-AcceptWritableExtraction - not checking whether the source folder was already writable by other local users.'
+    }
 }
 
 # ============================ the service has to exist ============================
@@ -1660,3 +2034,14 @@ Note "  2. COUNT(DISTINCT server_id) FROM collect.collection_log over the last 1
 Note "  3. COUNT(DISTINCT collector_name) over the same window is in the mid-30s, not single digits."
 Note "  4. Any non-SUCCESS rows since the restart are READ, not just counted - YIELDED is the lock-timeout guard working; anything else is a finding."
 Note "  5. If this build added a collector or a migration, one targeted probe that ITS table moved."
+
+}
+finally {
+    # H1's staging copy (#4043 round-1 review): best-effort, and expected to be a no-op on the folder
+    # -Source path, where $zipStagingFolder is never set. Administrators owns it and holds full control (see
+    # Protect-DarlingStagingFolder), and this script is already running elevated, so nothing here needs the
+    # icacls reset the Lock-DarlingInstallTree test cleanup uses for a non-admin test principal.
+    if ($zipStagingFolder -and (Test-Path -LiteralPath $zipStagingFolder)) {
+        Remove-Item -LiteralPath $zipStagingFolder -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

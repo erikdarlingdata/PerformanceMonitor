@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Common;
 
@@ -16,37 +17,29 @@ namespace PerformanceMonitor.Common;
 /// <c>const</c> so a converted tool's tail can include one verbatim (attribute arguments must be constants),
 /// which saves the caller a second call without a second copy of the sentence. Both SKUs serve the same set
 /// (D6 lockstep).
+///
+/// <para><b>#3898 step 0: a partial class, one file per lane.</b> Each family converted under #3898 gets its own
+/// <c>McpToolGuideTopics.&lt;Family&gt;.cs</c>, declaring that family's own <c>private static readonly
+/// McpToolGuideTopic[]</c> field (<see cref="s_healthParser"/> is the pilot's). A lane fills in its own,
+/// already-declared, already-empty array; it never edits this file or any other family's, so two families'
+/// topic work never conflicts.</para>
+///
+/// <para><b>Why <see cref="All"/> is built in a static constructor.</b> Static field initializers in different
+/// partial-class files run in an unspecified order, so an initializer here that read another part's array could
+/// observe it before that part's own initializer ran. A static constructor in the SAME type runs only after
+/// every part's field initializers have run, regardless of their relative order, so it is the one place that
+/// may safely read across parts.</para>
 /// </summary>
-public static class McpToolGuideTopics
+public static partial class McpToolGuideTopics
 {
-    /// <summary>The <see cref="SystemHealthEmptyWindows"/> topic's name.</summary>
-    public const string SystemHealthEmptyWindowsName = "system_health_empty_windows";
+    /// <summary>Every topic, in the order the index lists them: every family's array, family arrays in a fixed
+    /// order, each family's own topics in its own declared order.</summary>
+    public static IReadOnlyList<McpToolGuideTopic> All { get; }
 
-    /// <summary>
-    /// What zero rows means for a <c>get_health_parser_*</c> read: the four-rung ladder both SKUs'
-    /// <c>EmptyAsync</c> implement (#3541 A12). It was the same 400-character sentence in all nine
-    /// descriptions on both SKUs; the heads keep the guardrail (an empty answer is not a clean bill; read the
-    /// witness keys) and this carries the rungs.
-    /// </summary>
-    public const string SystemHealthEmptyWindows =
-        "Every get_health_parser_* answer carries source_observed (whether this server's system_health session has EVER " +
-        "been read into the store) and last_captured_at (the collector's newest capture), beside status on data and " +
-        "empty answers alike. Zero rows is one of four things. (1) Captured and gated out: events of the category were " +
-        "stored in the window and the significance gate kept none; healthy, and events_in_window says how many were " +
-        "captured. (2) Captured before, not in this window: a quiet window; last_captured_of_type_at says when the last " +
-        "one was stored, so move as_of or widen hours_back to reach it. (3) Never recorded, session alive: other " +
-        "categories are stored, so the ring buffer is being read and the engine has never recorded one of these; for a " +
-        "memory-node OOM or a severe error that is the healthy measurement. Those three answer status empty. (4) Nothing " +
-        "of any type, ever: a dead system_health session or a collector that never ran; status unavailable with " +
-        "source_observed false. That is not a clean bill of health; it is no evidence either way. An engine with no " +
-        "system_health session to read (Azure SQL Database) says so instead.";
-
-    /// <summary>Every topic, in the order the index lists them.</summary>
-    public static IReadOnlyList<McpToolGuideTopic> All { get; } =
-    [
-        new(
-            SystemHealthEmptyWindowsName,
-            "What an empty get_health_parser_* answer means: four different nothings, one of them no evidence at all.",
-            SystemHealthEmptyWindows),
-    ];
+    static McpToolGuideTopics()
+    {
+        All = new[] { s_healthParser, s_data, s_sqlCore, s_sqlTail, s_alerting, s_platform, s_pgA, s_pgB }
+            .SelectMany(topics => topics)
+            .ToList();
+    }
 }

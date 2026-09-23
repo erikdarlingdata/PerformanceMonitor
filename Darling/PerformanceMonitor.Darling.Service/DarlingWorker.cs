@@ -1448,7 +1448,7 @@ public sealed class DarlingWorker : BackgroundService
     /// ships in an open-source repo, so anything that can READ the file can unprotect all of it — the ACL is
     /// the access boundary, exactly as <see cref="DarlingFileSecurity"/> says of the credential files. It never
     /// got one: every harden call site targeted the credential directory, while the config sat beside the
-    /// binary, and the documented install (extract the zip to <c>C:\PerformanceMonitorDarling</c>) inherits
+    /// binary, and the documented install (extract the zip to <c>C:\Program Files\PerformanceMonitorDarling</c>) inherits
     /// <c>BUILTIN\Users: Read &amp; Execute</c> from the root DACL. Any local unprivileged user could read it,
     /// decrypt every SQL password, and lift the tokens that unlock the MCP write surface.
     ///

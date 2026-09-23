@@ -1,0 +1,27 @@
+# McpMemoryTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_memory_clerks 232
+param get_memory_clerks.server_name 28
+
+tool get_memory_grants 988
+param get_memory_grants.as_of 167
+param get_memory_grants.hours_back 120
+param get_memory_grants.server_name 28
+
+tool get_memory_pressure_events 1018
+param get_memory_pressure_events.as_of 167
+param get_memory_pressure_events.hours_back 29
+param get_memory_pressure_events.server_name 28
+
+tool get_memory_stats 480
+param get_memory_stats.server_name 28
+
+tool get_memory_trend 610
+param get_memory_trend.as_of 167
+param get_memory_trend.bucket_minutes 55
+param get_memory_trend.hours_back 29
+param get_memory_trend.server_name 28
+
+tool get_resource_semaphore 1310
+param get_resource_semaphore.as_of 167
+param get_resource_semaphore.hours_back 121
+param get_resource_semaphore.server_name 28
