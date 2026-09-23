@@ -883,6 +883,26 @@ ORDER BY local_bucket, story_path_hash";
     }
 
     /// <summary>
+    /// #3916 PR B: the muted story hashes for one server on a connection of its own — the read the shared
+    /// <c>AnalysisNotificationService</c> re-checks at its hold-back flush, so a mute applied inside the
+    /// window drops the queued page. Fails OPEN (an empty set, logged): the finding already passed the
+    /// queue-time mute filter, so an unreadable registry means "not muted", never "suppress the page".
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetMutedStoryHashesAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            return await GetMutedHashesAsync(connection, serverId, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[PgFindingStore] GetMutedStoryHashesAsync failed (treated as not muted): {Message}", ex.Message);
+            return new HashSet<string>();
+        }
+    }
+
+    /// <summary>
     /// Reads muted story hashes for a server on an already-open connection (the caller owns
     /// it, so the mute-filter read reuses the filter call's connection). Fails OPEN like both
     /// twins: an unreadable mute registry returns the hashes read so far (usually empty) and

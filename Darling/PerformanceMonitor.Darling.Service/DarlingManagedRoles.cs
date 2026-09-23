@@ -259,9 +259,29 @@ public static class DarlingManagedRoles
            any new machinery. A store whose config row is not seeded yet answers with the default. */
         var composeTimeoutSeconds = await ReadComposeStatementTimeoutAsync(connection, logger, cancellationToken);
 
+        /* #3910: the batch carries SCRAM-SHA-256 VERIFIERS, never a password, so no surface that records
+           statement text (the server log's STATEMENT lines, log_statement, auto_explain, pg_stat_statements
+           with utility tracking on) can capture a credential. And a role whose stored verifier already accepts
+           its credential file's password is not re-asserted at all: a steady-state start sends no PASSWORD
+           clause. The CREATE branch still carries a fresh verifier, for a role that does not exist yet. */
+        var stored = await ReadStoredRoleSecretsAsync(connection, logger, cancellationToken);
+        var reassert = PlanPasswordReassert(stored, adminPassword, viewerPassword, mcpPassword);
+
         await using var command = new NpgsqlCommand(
-            BuildProvisioningSql(adminPassword, viewerPassword, mcpPassword, composeTimeoutSeconds), connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+            BuildProvisioningSql(
+                ScramSha256Verifier.Create(adminPassword),
+                ScramSha256Verifier.Create(viewerPassword),
+                ScramSha256Verifier.Create(mcpPassword),
+                composeTimeoutSeconds,
+                reassert),
+            connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await command.ExecuteNonQueryAsync(cancellationToken);
+
+        logger.LogInformation(
+            "Role passwords: {Reasserted} (sent as SCRAM-SHA-256 verifiers, never as the password)",
+            reassert == PasswordReassert.None
+                ? "unchanged, the stored verifiers already accept every credential file"
+                : "re-asserted for " + DescribeReassert(reassert));
 
         logger.LogInformation(
             "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
@@ -566,11 +586,14 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     }
 
     /// <summary>
-    /// The idempotent, self-healing provisioning DDL with the role passwords injected. Passwords are
-    /// alnum-only (<see cref="DarlingManagedPostgres.GeneratePassword"/>), verified here before the
-    /// interpolation, so string-building the <c>PASSWORD '…'</c> literals is escaping-safe — the same
-    /// reasoning <see cref="DarlingManagedPostgres"/> relies on for <c>--pwfile</c>. Public + shape-pinnable
-    /// so a test can assert it without a live Postgres. The <c>mcp</c>-role INSERT grants reference
+    /// The idempotent, self-healing provisioning DDL with the role secrets injected. Each secret is a
+    /// SCRAM-SHA-256 VERIFIER (<see cref="ScramSha256Verifier"/>, #3910), never a password: PostgreSQL stores a
+    /// verifier as-is, so the password never appears in a statement any log or statistics view could record.
+    /// Anything that is not a verifier is REFUSED here, which is what keeps a future caller from passing the
+    /// password again; the verifier's shape admits no quote, so string-building the <c>PASSWORD '…'</c>
+    /// literals is escaping-safe. <paramref name="reassert"/> names the roles whose 1b <c>ALTER ROLE</c>
+    /// carries the verifier; the rest re-assert their attributes only. Public + shape-pinnable so a test can
+    /// assert it without a live Postgres. The <c>mcp</c>-role INSERT grants reference
     /// <c>collect.analysis_findings</c> / <c>config.analysis_muted</c> by qualified name, so the one-shot
     /// batch requires those tables to already exist — safe because provisioning runs AFTER migration (see
     /// <see cref="EnsureProvisionedAsync"/>); a dropped/recreated table re-grants on the next start.
@@ -585,12 +608,16 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     /// value rather than a sentinel integer because every integer in range is a legitimate ceiling.</para>
     /// </param>
     public static string BuildProvisioningSql(
-        string adminPassword, string viewerPassword, string mcpPassword,
-        int? composeStatementTimeoutSeconds = McpCommandDeadlines.ComposedQueryFallbackSeconds)
+        string adminVerifier, string viewerVerifier, string mcpVerifier,
+        int? composeStatementTimeoutSeconds = McpCommandDeadlines.ComposedQueryFallbackSeconds,
+        PasswordReassert reassert = PasswordReassert.All)
     {
-        RequireAlphanumeric(adminPassword, nameof(adminPassword));
-        RequireAlphanumeric(viewerPassword, nameof(viewerPassword));
-        RequireAlphanumeric(mcpPassword, nameof(mcpPassword));
+        RequireVerifier(adminVerifier, nameof(adminVerifier));
+        RequireVerifier(viewerVerifier, nameof(viewerVerifier));
+        RequireVerifier(mcpVerifier, nameof(mcpVerifier));
+
+        string PasswordClause(PasswordReassert role, string verifier) =>
+            (reassert & role) != 0 ? $" PASSWORD '{verifier}'" : "";
 
         const string owner = DarlingManagedPostgres.UserName;      // darling (owner/superuser)
         const string database = DarlingManagedPostgres.DatabaseName; // darling
@@ -630,32 +657,33 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
 DO $do$
 BEGIN
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{admin}') THEN
-      CREATE ROLE {admin} LOGIN NOSUPERUSER PASSWORD '{adminPassword}';
+      CREATE ROLE {admin} LOGIN NOSUPERUSER PASSWORD '{adminVerifier}';
       COMMENT ON ROLE {admin} IS '{marker}';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = '{admin}'), 'pg_authid') IS DISTINCT FROM '{marker}' THEN
       RAISE EXCEPTION 'Role ""{admin}"" already exists and was not created by Darling (missing the ''{marker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{viewer}') THEN
-      CREATE ROLE {viewer} LOGIN NOSUPERUSER PASSWORD '{viewerPassword}';
+      CREATE ROLE {viewer} LOGIN NOSUPERUSER PASSWORD '{viewerVerifier}';
       COMMENT ON ROLE {viewer} IS '{marker}';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = '{viewer}'), 'pg_authid') IS DISTINCT FROM '{marker}' THEN
       RAISE EXCEPTION 'Role ""{viewer}"" already exists and was not created by Darling (missing the ''{marker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{mcp}') THEN
-      CREATE ROLE {mcp} LOGIN NOSUPERUSER PASSWORD '{mcpPassword}';
+      CREATE ROLE {mcp} LOGIN NOSUPERUSER PASSWORD '{mcpVerifier}';
       COMMENT ON ROLE {mcp} IS '{marker}';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = '{mcp}'), 'pg_authid') IS DISTINCT FROM '{marker}' THEN
       RAISE EXCEPTION 'Role ""{mcp}"" already exists and was not created by Darling (missing the ''{marker}'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 END $do$;
 
--- 1b. Re-assert password + attributes every start (the credential file is the source of truth).
---     Only reached when the guard above passed (fresh + marked, or already Darling-marked).
-ALTER ROLE {admin}  LOGIN NOSUPERUSER PASSWORD '{adminPassword}';
-ALTER ROLE {viewer} LOGIN NOSUPERUSER PASSWORD '{viewerPassword}';
-ALTER ROLE {mcp}    LOGIN NOSUPERUSER PASSWORD '{mcpPassword}';
+-- 1b. Re-assert attributes every start, and the password (as a SCRAM-SHA-256 verifier, #3910) only for a
+--     role whose stored verifier does not already accept its credential file: the file is the source of
+--     truth. Only reached when the guard above passed (fresh + marked, or already Darling-marked).
+ALTER ROLE {admin}  LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Admin, adminVerifier)};
+ALTER ROLE {viewer} LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Viewer, viewerVerifier)};
+ALTER ROLE {mcp}    LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Mcp, mcpVerifier)};
 
 -- 1c. statement_timeout backstop on the composed-query identities (Custom Views v2, #1563). viewer is the web
 --     dashboard's DB identity and mcp the optional network MCP identity; both serve the network-reachable
@@ -903,27 +931,122 @@ $fn$;
 REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;";
 
     /// <summary>
-    /// The generated passwords are alnum by construction; this fails closed if that ever changes,
-    /// because the passwords are string-interpolated into DDL literals (belt: <c>quote_literal</c> if
-    /// the alphabet is ever widened).
+    /// Fails closed unless <paramref name="secret"/> is a SCRAM-SHA-256 verifier (#3910). This refuses a plain
+    /// password on purpose: the batch is recorded wherever statement text is (an ERROR's STATEMENT line in the
+    /// store's own log, which the store-log sweep keeps and the viewer role reads), so it must only ever carry
+    /// what PostgreSQL stores, not what a client logs in with. The verifier's shape admits no quote, which is
+    /// what makes the <c>PASSWORD '…'</c> interpolation escaping-safe.
     /// </summary>
-    private static void RequireAlphanumeric(string password, string parameterName)
+    private static void RequireVerifier(string secret, string parameterName)
     {
-        if (string.IsNullOrEmpty(password))
+        if (!ScramSha256Verifier.IsVerifier(secret))
         {
-            throw new ArgumentException("Role password must not be empty.", parameterName);
-        }
-
-        foreach (var c in password)
-        {
-            if (!char.IsLetterOrDigit(c) || c > 127)
-            {
-                throw new ArgumentException(
-                    "Role password must be ASCII alphanumeric (it is interpolated into DDL); use DarlingManagedPostgres.GeneratePassword.",
-                    parameterName);
-            }
+            throw new ArgumentException(
+                "Role secrets must be SCRAM-SHA-256 verifiers (ScramSha256Verifier.Create), never the password: the provisioning batch can be recorded by the store's own log.",
+                parameterName);
         }
     }
+
+    /// <summary>
+    /// Each managed role's stored secret (<c>pg_authid.rolpassword</c>), keyed by role; a role that does not
+    /// exist yet is absent. Needs a superuser, which the managed owner is. A read this role is refused
+    /// returns nothing, so every role is re-asserted: the safe direction, and the pre-#3910 behaviour.
+    /// </summary>
+    private static async Task<Dictionary<string, string?>> ReadStoredRoleSecretsAsync(
+        NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        var stored = new Dictionary<string, string?>(StringComparer.Ordinal);
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT rolname::text, rolpassword FROM pg_catalog.pg_authid WHERE rolname = ANY($1)", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+            command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                stored[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
+            }
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+        {
+            logger.LogDebug("Could not read the managed roles' stored verifiers ({Message}); re-asserting every role's password.", ex.Message);
+            stored.Clear();
+        }
+
+        return stored;
+    }
+
+    /// <summary>
+    /// Which roles need their password re-asserted (#3910): those whose stored secret is missing, is not a
+    /// SCRAM-SHA-256 verifier (an MD5 hash from an older store), or does not accept the credential file's
+    /// password (the file was regenerated). Pure, so the decision is pinned without a server.
+    /// </summary>
+    internal static PasswordReassert PlanPasswordReassert(
+        IReadOnlyDictionary<string, string?> stored, string adminPassword, string viewerPassword, string mcpPassword)
+    {
+        ArgumentNullException.ThrowIfNull(stored);
+
+        var reassert = PasswordReassert.None;
+        if (!ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.AdminRoleName), adminPassword))
+        {
+            reassert |= PasswordReassert.Admin;
+        }
+
+        if (!ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.ViewerRoleName), viewerPassword))
+        {
+            reassert |= PasswordReassert.Viewer;
+        }
+
+        if (!ScramSha256Verifier.Verifies(stored.GetValueOrDefault(DarlingManagedPostgres.McpRoleName), mcpPassword))
+        {
+            reassert |= PasswordReassert.Mcp;
+        }
+
+        return reassert;
+    }
+
+    private static string DescribeReassert(PasswordReassert reassert)
+    {
+        var roles = new List<string>(3);
+        if ((reassert & PasswordReassert.Admin) != 0)
+        {
+            roles.Add(DarlingManagedPostgres.AdminRoleName);
+        }
+
+        if ((reassert & PasswordReassert.Viewer) != 0)
+        {
+            roles.Add(DarlingManagedPostgres.ViewerRoleName);
+        }
+
+        if ((reassert & PasswordReassert.Mcp) != 0)
+        {
+            roles.Add(DarlingManagedPostgres.McpRoleName);
+        }
+
+        return string.Join(", ", roles);
+    }
+}
+
+/// <summary>
+/// The managed roles whose provisioning <c>ALTER ROLE</c> carries a password verifier this start (#3910).
+/// </summary>
+[Flags]
+public enum PasswordReassert
+{
+    /// <summary>No role: every stored verifier already accepts its credential file.</summary>
+    None = 0,
+
+    /// <summary>The <c>admin</c> role.</summary>
+    Admin = 1,
+
+    /// <summary>The <c>viewer</c> role.</summary>
+    Viewer = 2,
+
+    /// <summary>The <c>mcp</c> role.</summary>
+    Mcp = 4,
+
+    /// <summary>Every role: the default, and what a store without stored verifiers gets.</summary>
+    All = Admin | Viewer | Mcp,
 }
 
 /// <summary>

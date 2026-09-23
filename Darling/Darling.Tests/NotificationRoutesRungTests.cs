@@ -182,7 +182,7 @@ public sealed class NotificationRoutesRungTests
     [Fact]
     public void TheMcpRole_MayToggleAndDelete_AndMayNotAuthorOrRepoint()
     {
-        var sql = DarlingManagedRoles.BuildProvisioningSql("a", "b", "c", 15);
+        var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
 
         Assert.Contains($"GRANT UPDATE (enabled, modified_at), DELETE ON config.{Table} TO mcp;", sql, StringComparison.Ordinal);
         Assert.DoesNotContain($"GRANT INSERT, UPDATE, DELETE ON config.{Table}", sql, StringComparison.Ordinal);

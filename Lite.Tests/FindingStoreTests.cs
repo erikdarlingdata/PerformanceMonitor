@@ -723,13 +723,16 @@ VALUES ($1, $2, $3, $4, $5, $6)";
         /* The choice. The write lock is not banned outright — it is banned from these three without a
            reason, which is what a failing test forces someone to supply. */
         Assert.DoesNotContain("AcquireWriteLock", source, StringComparison.Ordinal);
-        /* Eight sites: the three write paths (#2455), the three read-backs, CountStoredFindingsAsync (#3541
+        /* Nine sites: the three write paths (#2455), the three read-backs, CountStoredFindingsAsync (#3541
            A14 — the mute verb's matched_now read, a READ taking the read lock, tokened), and — since #3653
            item 3 — GetPriorOccurrencesAsync, the recurrence labeler's prior-weeks read: a READ on the analysis
            pass, taking the read lock WITH the pass token like the mute filter beside it, so the pass-token
-           census needs no exemption for it either. The count is pinned so a new lock site is a decision
-           someone makes here, not a tidy-up. */
-        Assert.Equal(8, CountOf(source, "_duckDb.AcquireReadLock("));
+           census needs no exemption for it either. Nine since #3916: GetMutedStoryHashesAsync, the mute
+           registry re-read the analysis notification service makes at its hold-back flush, so a mute applied
+           inside the window drops the queued page. A READ, under the read lock like the mute filter it
+           mirrors, taking the flush's own token (there is no analysis pass at flush time). The count is pinned
+           so a new lock site is a decision someone makes here, not a tidy-up. */
+        Assert.Equal(9, CountOf(source, "_duckDb.AcquireReadLock("));
 
         /* The explanation, at the class and at each write site — whichever one a reader lands on. */
         Assert.Contains("The read lock around the WRITES is deliberate (#2455)", source, StringComparison.Ordinal);

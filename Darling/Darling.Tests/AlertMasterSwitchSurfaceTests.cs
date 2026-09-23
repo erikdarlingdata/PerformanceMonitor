@@ -57,7 +57,7 @@ public sealed class AlertMasterSwitchSurfaceTests
     /// comment-and-string-stripped source, so prose mentioning a seam is not a site.
     /// </summary>
     private static readonly Regex s_deliveryCall = new(
-        @"\??\.\s*(?:DeliverAsync|DeliverAndReportAsync|NotifyAsync|TrySendAlertEmailAsync|TrySendAsync|SendFindingAlertAsync|SendTestPagerDutyAsync|SendTestTeamsAsync|SendTestSlackAsync|SendTestGenericAsync)\s*\(",
+        @"\??\.\s*(?:DeliverAsync|DeliverAndReportAsync|NotifyAsync|TrySendAlertEmailAsync|TrySendAsync|SendFindingAlertAsync|SendFindingSummaryAsync|SendTestPagerDutyAsync|SendTestTeamsAsync|SendTestSlackAsync|SendTestGenericAsync)\s*\(",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>How a censused site pays for its place on a delivery path.</summary>
@@ -144,10 +144,19 @@ public sealed class AlertMasterSwitchSurfaceTests
             "the shared record-and-send seam; every caller of DeliverAsync is a censused site"),
         new("Darling/PerformanceMonitor.Darling.Service/DarlingFindingAlertSender.cs", "SendFindingAlertAsync", 1, GateMode.Funnel,
             "the analysis finding sender; reached only through AnalysisNotificationService, whose callers are censused"),
+        /* #3916: the over-the-cap summary — the same sender, the same sole caller (the service's flush). */
+        new("Darling/PerformanceMonitor.Darling.Service/DarlingFindingAlertSender.cs", "SendFindingSummaryAsync", 1, GateMode.Funnel,
+            "the analysis page summary; reached only through AnalysisNotificationService's flush, whose pages NotifyAsync's censused callers queued"),
         new("PerformanceMonitor.Notifications/AnalysisNotificationService.cs", "NotifyAsync", 1, GateMode.Funnel,
             "shared by both SKUs; the master consult lives at its two censused call sites, where each SKU's live settings are"),
+        /* #3916: the page road's hold-back flush — one individual send and one summary send, delivering only
+           what NotifyAsync queued, so its gate is NotifyAsync's (the page was notify-worthy when it queued). */
+        new("PerformanceMonitor.Notifications/AnalysisNotificationService.cs", "FlushPendingAsync", 2, GateMode.Funnel,
+            "delivers only pages NotifyAsync queued; NotifyAsync's callers are censused"),
         new("Lite/Services/EmailAlertService.cs", "TrySendAlertEmailAsync", 1, GateMode.Funnel,
             "Lite's record-and-send seam; every caller is a censused site"),
+        new("Lite/Services/EmailAlertService.cs", "SendFindingSummaryAsync", 1, GateMode.Funnel,
+            "#3916: Lite's analysis page summary; reached only through AnalysisNotificationService's flush"),
         new("Lite/Services/LiteAlertDeliverer.cs", "SendAlert", 1, GateMode.Funnel,
             "the shared engine's Lite deliverer, below the pinned EvaluateServerAsync master gate"),
 
