@@ -39,8 +39,8 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="ZoneText">The prefix's zone token as written — <c>log_timezone</c> rendered for THIS line.</param>
 /// <param name="OccurredAtUtc">The stamp, read as UTC. Kind is Utc.</param>
 /// <param name="Pid">The backend's <c>%p</c>.</param>
-/// <param name="PrefixRest">Whatever the prefix carried between the pid and the severity label — user@db
-/// under a <c>%u@%d</c> prefix, a query id under <c>%Q</c>, a SQLSTATE under <c>%e</c>. Best-effort
+/// <param name="PrefixRest">Whatever the prefix carried besides the stamp, the zone and the pid, before the pid and
+/// after it — user@db under a <c>%u@%d</c> prefix, a query id under <c>%Q</c>, a SQLSTATE under <c>%e</c>. Best-effort
 /// extraction from it lives on the assembler; the raw text is kept so a parser can ask for more.</param>
 /// <param name="Severity">PostgreSQL's own label: LOG, INFO, NOTICE, WARNING, ERROR, FATAL, PANIC (or a
 /// DEBUGn, which nothing stores).</param>
