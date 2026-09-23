@@ -54,10 +54,22 @@ public sealed class PgBinaryTailTextTests
         Assert.Equal("\uFFFD", PgBinaryTailText.UnescapeAndDecode("\\377"));
     }
 
+    /// <summary>
+    /// A NUL must not come out as U+0000: PostgreSQL refuses it in a text or jsonb column, so the store's
+    /// INSERT would throw 22021 every cycle — the byte route's blindness moved to the store.
+    /// </summary>
     [Fact]
-    public void UnescapeAndDecode_OctalEscapedNul_BecomesNulCharacter()
+    public void UnescapeAndDecode_OctalEscapedNul_BecomesReplacementCharacter()
     {
-        Assert.Equal("\u0000", PgBinaryTailText.UnescapeAndDecode("\\000"));
+        Assert.Equal("a�b", PgBinaryTailText.UnescapeAndDecode("a\\000b"));
+    }
+
+    [Fact]
+    public void DecodeWhole_NulByte_BecomesReplacementCharacter()
+    {
+        var bytes = new byte[] { (byte)'a', 0x00, (byte)'b' };
+
+        Assert.Equal("a�b", PgBinaryTailText.DecodeWhole(bytes));
     }
 
     /// <summary>

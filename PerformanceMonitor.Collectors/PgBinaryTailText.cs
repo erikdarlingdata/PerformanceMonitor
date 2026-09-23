@@ -26,7 +26,7 @@ public static class PgBinaryTailText
     public static string DecodeWhole(byte[] bytes)
     {
         ArgumentNullException.ThrowIfNull(bytes);
-        return Encoding.UTF8.GetString(bytes);
+        return WithoutNul(Encoding.UTF8.GetString(bytes));
     }
 
     /// <summary>
@@ -34,14 +34,14 @@ public static class PgBinaryTailText
     /// (<see cref="PgServerLogTail.TailCteBinarySql"/>'s deadlock/plan-capture route), then decodes the
     /// recovered bytes the same lenient way as <see cref="DecodeWhole"/>.
     ///
-    /// <para><b>Verified on the rig (PostgreSQL 18.6), not assumed:</b> <c>escape</c> leaves every
-    /// printable-ASCII byte (32-126) literal, INCLUDING control bytes like tab (0x09) and newline (0x0A) —
-    /// they are not octal-escaped — doubles a literal backslash (0x5C to two 0x5C bytes), and octal-escapes
-    /// (<c>\NNN</c>, exactly three digits) NUL and every byte at or above 0x80. That is why the existing
-    /// deadlock/plan-capture patterns, which match literal <c>\n</c>/<c>\t</c> bytes, run UNCHANGED over
-    /// this escaped text: those bytes never become a backslash sequence. Only backslash and <c>\NNN</c>
-    /// need reversing here, which is what this method does — every other character escape() emits is a
-    /// single printable ASCII code point, so casting it straight to <see cref="byte"/> is exact.</para>
+    /// <para><b>Verified on the rig (PostgreSQL 18.6), not assumed:</b> <c>escape</c> leaves every byte
+    /// from 0x01 to 0x7F literal except the backslash, control bytes like tab (0x09) and newline (0x0A)
+    /// included — they are not octal-escaped — doubles a literal backslash (0x5C to two 0x5C bytes), and
+    /// octal-escapes (<c>\NNN</c>, exactly three digits) NUL and every byte at or above 0x80. That is why the
+    /// existing deadlock/plan-capture patterns, which match literal <c>\n</c>/<c>\t</c> bytes, run UNCHANGED
+    /// over this escaped text: those bytes never become a backslash sequence. Only backslash and
+    /// <c>\NNN</c> need reversing here, which is what this method does — every other character escape()
+    /// emits is a single ASCII code point, so casting it straight to <see cref="byte"/> is exact.</para>
     /// </summary>
     public static string UnescapeAndDecode(string escaped)
     {
@@ -81,8 +81,17 @@ public static class PgBinaryTailText
             bytes[length++] = (byte)c;
         }
 
-        return Encoding.UTF8.GetString(bytes, 0, length);
+        return WithoutNul(Encoding.UTF8.GetString(bytes, 0, length));
     }
+
+    /// <summary>
+    /// A NUL byte decodes to U+0000, which PostgreSQL refuses in a text or jsonb column: the store's INSERT
+    /// would throw 22021 every cycle the byte sat in the window — the same blindness this route exists to
+    /// end, moved to the store and blamed on it. The text route never passed one through (pg_read_file
+    /// throws 22021 on it first), so NUL is the one character this route must not hand on; it becomes
+    /// U+FFFD like any other byte that is not valid text.
+    /// </summary>
+    private static string WithoutNul(string text) => text.Contains('\0') ? text.Replace('\0', '�') : text;
 
     private static bool IsOctalDigit(char c) => c is >= '0' and <= '7';
 }

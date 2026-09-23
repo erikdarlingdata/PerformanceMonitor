@@ -104,7 +104,7 @@ GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) T
 ```
 
 The third grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
-`pg_read_file()` returns `text`, which PostgreSQL validates against the client encoding before this
+`pg_read_file()` returns `text`, which PostgreSQL validates against the database encoding before this
 process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
 login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
 byte sits in the window, blinding all three collectors at once. `pg_read_binary_file()` returns `bytea`,
