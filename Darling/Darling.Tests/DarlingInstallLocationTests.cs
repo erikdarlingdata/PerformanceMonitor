@@ -722,13 +722,20 @@ function Get-CimInstance {
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
+            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+            /* A test host started from PowerShell 7 (CI's step shell) hands down a PSModulePath that points
+               Windows PowerShell 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it ships:
+               Get-Acl and Set-Acl, in Microsoft.PowerShell.Security, fail with "the module could not be loaded"
+               (#4038's first CI run). Without the variable, 5.1 builds its own default, as an operator's console
+               does. */
+            startInfo.Environment.Remove("PSModulePath");
+            using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 
             var stdout = process!.StandardOutput.ReadToEnd();
