@@ -1319,8 +1319,28 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
         Assert.Equal(full.Toast, half.Toast);
         Assert.NotNull(half.Live);
         var halfPct = DarlingStoreMetricsReader.ToastFacts.UtilisationPercentOf(half.Toast, half.Live)!.Value;
+        var horizon = halfPct is > 35 and < 65 ? string.Empty : await VacuumHorizonHoldersAsync(connection, ct);
         Assert.True(halfPct is > 35 and < 65,
-            $"after deleting half and vacuuming, the free-space map must read about half live (the rig read 48.4 %), not {halfPct} % — {half.Live} of {half.Toast} bytes");
+            $"after deleting half and vacuuming, the free-space map must read about half live (the rig read 48.4 %), not {halfPct} % — {half.Live} of {half.Toast} bytes{horizon}");
+
+        /* #3977's cause is unconfirmed. This database is the test's own, so another database's ordinary transaction
+           cannot hold its VACUUM back; only cluster-wide holders can: a replication slot's xmin, a prepared
+           transaction, a backend whose snapshot reaches every database. A failure names whichever it saw. */
+        static async Task<string> VacuumHorizonHoldersAsync(NpgsqlConnection connection, CancellationToken ct)
+        {
+            await using var probe = new NpgsqlCommand(@"
+SELECT concat_ws('; ',
+    (SELECT 'replication slots holding xmin: ' || string_agg(slot_name || ' xmin ' || xmin::text, ', ')
+     FROM pg_catalog.pg_replication_slots WHERE xmin IS NOT NULL),
+    (SELECT 'prepared transactions: ' || count(*)::text FROM pg_catalog.pg_prepared_xacts HAVING count(*) > 0),
+    (SELECT 'oldest backend_xmin: ' || string_agg(format('%s pid %s age %s (%s)', coalesce(a.datname, '-'), a.pid, age(a.backend_xmin), coalesce(a.state, '-')), ', ')
+     FROM (SELECT datname, pid, backend_xmin, state FROM pg_catalog.pg_stat_activity
+           WHERE backend_xmin IS NOT NULL ORDER BY age(backend_xmin) DESC LIMIT 3) AS a))", connection);
+            var text = await probe.ExecuteScalarAsync(ct) as string;
+            return string.IsNullOrEmpty(text)
+                ? " (no cluster-wide VACUUM horizon holder was visible at failure)"
+                : " — cluster-wide VACUUM horizon holders at failure: " + text;
+        }
         Assert.True(half.Live < full.Live, "live bytes must FALL when half the values are deleted");
 
         /* The proxy the rung measured as a lie, executed on the same relation at the same instant: after VACUUM the
