@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -361,12 +362,16 @@ internal static class DarlingTriageEndpoint
         S("Server summary", "get_server_summary"),
     };
 
-    /// <summary>The store self-alert family's sections (#2768) — both FLEET-LEVEL, so neither binds a server.
-    /// <c>get_store_metrics</c> is the store's own size/compression/growth series plus a row per TimescaleDB
-    /// background job; <c>get_collector_cost</c> is what drives the ingest volume those numbers move with.</summary>
+    /// <summary>The store self-alert family's sections (#2768), all FLEET-LEVEL, so none binds a server.
+    /// <c>get_store_metrics</c> twice: its summary (the store's size and growth, its largest objects first),
+    /// and its background jobs as a list of their own, because since #3903 the summary carries the jobs in a
+    /// nested list the card's table does not render, and the job-family alerts are about exactly those rows.
+    /// <c>get_collector_cost</c> is what drives the ingest volume those numbers move with.</summary>
     private static TriageSection[] StoreSections() => new[]
     {
-        F("Store size, growth and background jobs", "get_store_metrics", ("days_back", "30")),
+        F("Store size and growth", "get_store_metrics", ("days_back", "30")),
+        F("Background jobs (failing first, then closest to their cadence)", "get_store_metrics",
+            ("days_back", "30"), ("object_kind", StoreSelfMetrics.BackgroundJobObjectKind), ("limit", "25")),
         F("Collector cost (what drives store volume)", "get_collector_cost", ("days_back", "7")),
     };
 

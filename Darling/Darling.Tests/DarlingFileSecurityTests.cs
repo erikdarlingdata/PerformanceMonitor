@@ -210,6 +210,54 @@ public sealed class DarlingFileSecurityTests
        C:\PerformanceMonitorDarling) inherits BUILTIN\Users: Read & Execute from the root DACL. The service now
        hardens it at startup and raises a Critical when it is still exposed — this is the check behind that. */
 
+    /// <summary>
+    /// #3914 review F6: <see cref="DarlingFileSecurity.CreateHardenedFile"/> applies the harden's ACL AT creation. In
+    /// a folder whose DACL hands BUILTIN\Users an inheritable read, a file created the ordinary way is readable the
+    /// moment it exists (the control); the hardened create never is — its DACL is protected with no inherited ACE
+    /// before a byte is written — and it refuses a path that already exists rather than write through it.
+    /// </summary>
+    [Fact]
+    public void CreateHardenedFile_IsNeverReadableByOrdinaryUsers_EvenInAFolderThatWouldGiveThemRead()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var directory = Directory.CreateTempSubdirectory("darling-3914-acl-");
+        try
+        {
+            var exposed = directory.GetAccessControl();
+            exposed.AddAccessRule(new FileSystemAccessRule(
+                s_builtinUsers, FileSystemRights.Read, InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+            directory.SetAccessControl(exposed);
+
+            var ordinary = Path.Combine(directory.FullName, "ordinary");
+            File.WriteAllText(ordinary, "x");
+            Assert.True(
+                DarlingFileSecurity.IsReadableByOrdinaryUsers(ordinary),
+                "the folder's inheritable Users read must reach an ordinarily created file, or this test proves nothing");
+
+            var hardened = Path.Combine(directory.FullName, "hardened");
+            using (var stream = DarlingFileSecurity.CreateHardenedFile(hardened, allowInteractiveRead: false))
+            {
+                var atCreation = new FileInfo(hardened).GetAccessControl();
+                Assert.True(atCreation.AreAccessRulesProtected, "the DACL must be protected from the moment the file exists");
+                Assert.DoesNotContain(
+                    atCreation.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>(),
+                    rule => rule.IsInherited);
+                stream.WriteByte((byte)'x');
+            }
+
+            Assert.False(DarlingFileSecurity.IsReadableByOrdinaryUsers(hardened));
+            Assert.True(DarlingFileSecurity.IsTrustedOwner(hardened));
+            Assert.Equal("x", File.ReadAllText(hardened));
+            Assert.Throws<IOException>(() => DarlingFileSecurity.CreateHardenedFile(hardened, allowInteractiveRead: false).Dispose());
+        }
+        finally
+        {
+            DarlingManagedPostgresTests.TryDeleteRecursive(directory.FullName);
+        }
+    }
+
     [Fact]
     public void IsReadableByOrdinaryUsers_TrueWhenUsersHoldsAReadAce_FalseAfterHardening()
     {

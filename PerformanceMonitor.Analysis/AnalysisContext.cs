@@ -106,6 +106,65 @@ public class AnalysisContext
     public double PeriodDurationMs => (TimeRangeEnd - TimeRangeStart).TotalMilliseconds;
 
     /// <summary>
+    /// The shortest lookback a "latest value" read takes from <see cref="TimeRangeEnd"/> for each series'
+    /// newest sample (#3896): the database files summed into <c>DATABASE_TOTAL_SIZE_MB</c> and counted by
+    /// <c>FILE_AUTOGROWTH_PERCENT</c>, the volumes behind <c>DISK_SPACE</c>, the memory clerks, the plan-cache
+    /// snapshot and the memory_stats row.
+    ///
+    /// <para>Those reads used to take each series' newest row with only an upper bound, so they numbered
+    /// the server's ENTIRE retained history to keep a few dozen rows (1.2 s for the database-size read alone
+    /// on a 17-day DARLING01 store, most of it decompressing chunks) and, worse, answered "latest EVER": a
+    /// dropped database's files stayed in the size total until retention aged them out — 31% over on that
+    /// server.
+    /// With the bound the answer is "present within the lookback", which is the right meaning. A series
+    /// with no sample in the lookback is either gone or its collector is down, and in the second case the
+    /// fact is better absent than stale; the coverage machinery (#3524/#3551) already reports a dead
+    /// collector.</para>
+    ///
+    /// <para>A day at least, so a dropped database leaves the answer the next day; longer only for a
+    /// collector scheduled slower than twice a day (<see cref="LatestValueLookbackFor"/>). The on-load config
+    /// snapshots (server_config, database_config, trace_flags, server_properties) are NOT bounded this way:
+    /// they are written once per connect, so their newest capture can be weeks old on a healthy
+    /// server.</para>
+    /// </summary>
+    public static readonly TimeSpan LatestValueLookback = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// The lookback for a latest-value read fed by a collector that runs every
+    /// <paramref name="frequencyMinutes"/>: a day, or twice the collector's interval if that is longer
+    /// (#3896). Collector cadences are operator-editable and a steady-state collection advances by exactly
+    /// the interval (#1553), so a flat day would drop a daily collector's fact on every pass that landed
+    /// between the day and the next sample — and resolve, then re-fire, the findings built on it. Twice the
+    /// interval covers the gap between runs with a whole interval to spare for a late or failed one. Null
+    /// for an on-load collector (0), whose reads anchor on its newest capture instead, however old.
+    /// </summary>
+    public static TimeSpan? LatestValueLookbackFor(int frequencyMinutes) =>
+        frequencyMinutes <= 0
+            ? null
+            : TimeSpan.FromMinutes(Math.Max(LatestValueLookback.TotalMinutes, 2.0 * frequencyMinutes));
+
+    /// <summary>
+    /// Each latest-value read's lower bound for this pass, keyed by the collector that feeds it (#3896) —
+    /// <see cref="TimeRangeEnd"/> less that collector's <see cref="LatestValueLookbackFor"/>, or its newest
+    /// capture when it runs on load. Stamped once per pass by the SKU's fact collector from each collector's
+    /// EFFECTIVE schedule (the operator's override where one is set), and read by the drill-down that lists
+    /// the same rows, so a fact and its drill-down cannot disagree on which rows are current. Null until
+    /// stamped.
+    /// </summary>
+    public IReadOnlyDictionary<string, DateTime>? LatestValueStarts { get; set; }
+
+    /// <summary>
+    /// The lower bound a latest-value read over <paramref name="collectorName"/>'s table binds: the stamped
+    /// <see cref="LatestValueStarts"/> entry, else <see cref="TimeRangeEnd"/> less
+    /// <see cref="LatestValueLookback"/> — the stamp's own answer for every shipped default cadence. Anchored
+    /// on the window's END, not "now", so an anchored or historical window reads the state as it stood then.
+    /// </summary>
+    public DateTime LatestValueStartFor(string collectorName) =>
+        LatestValueStarts is not null && LatestValueStarts.TryGetValue(collectorName, out var start)
+            ? start
+            : TimeRangeEnd - LatestValueLookback;
+
+    /// <summary>
     /// How much of the window the collector actually observed, stamped by the fact collector at the
     /// start of every pass from the wait-stats collection series (see <see cref="WindowCoverage"/> for
     /// the measurement). Null until that stamp happens — a context that has not been through a collector

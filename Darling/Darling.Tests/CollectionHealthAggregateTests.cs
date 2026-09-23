@@ -93,10 +93,19 @@ public class CollectionHealthAggregateTests
 
     /// <summary>Builds a scratch store the product's way: migrations, TimescaleDB, the collection_log
     /// hypertable, then <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/> — which creates the
-    /// aggregate WITH NO DATA and adds its policy. The policy's background schedule is switched off so the
-    /// scheduler cannot race the test's own <c>CALL run_job</c>; returns the job id. NO hand
+    /// aggregate WITH NO DATA and adds its policy; returns the job id. NO hand
     /// <c>refresh_continuous_aggregate</c> backfill anywhere — a manual backfill is exactly what hid the
-    /// hole.</summary>
+    /// hole.
+    ///
+    /// <para><b>No run the test did not make (#3986).</b> The collection-health policy has no
+    /// <c>initial_start</c> (<see cref="TimescaleSupport.AddCollectionHealthRefreshPolicySql"/>), so TimescaleDB's
+    /// scheduler launches its first run the moment the ensure path commits it, before any park can land. That
+    /// launch collided with the test's <c>CALL run_job</c> (55P03, #3972's CI run), or refreshed while the test
+    /// was still planting and moved the watermark under rows a pre-run assertion then missed (342 of 360). So
+    /// the scratch database's scheduler is stopped before the ensure path runs. Measured on TimescaleDB 2.28.1,
+    /// and holding on CI's 2.30.1 runtime: <c>stop_background_workers()</c> stops only the current database's
+    /// scheduler, it stays down, the policy never runs on its own, and <c>CALL run_job</c> still runs in the
+    /// test's session. The park stays as a second guard.</para></summary>
     internal static async Task<(ScratchPostgres Scratch, NpgsqlConnection Connection, int JobId)?> OpenStoreAsync(CancellationToken ct)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -114,6 +123,12 @@ public class CollectionHealthAggregateTests
             await scratch.DisposeAsync();
             return null;
         }
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+        Assert.Equal(0L, await SchedulersAsync(connection, ct));
+
         Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         await using var job = new NpgsqlCommand(
@@ -142,10 +157,32 @@ CROSS JOIN generate_series((now() AT TIME ZONE 'UTC') - INTERVAL '{(long)fromAgo
         await plant.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary><c>CALL run_job</c> on the parked policy: the only run the aggregate gets, because
+    /// <see cref="OpenStoreAsync"/> stopped the scratch database's scheduler (#3986).</summary>
     internal static async Task RunPolicyAsync(NpgsqlConnection connection, int jobId, CancellationToken ct)
     {
         await using var run = new NpgsqlCommand($"CALL run_job({jobId})", connection);
         await run.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>TimescaleDB schedulers still running for this database, after up to five seconds for one being
+    /// stopped to exit.</summary>
+    private static async Task<long> SchedulersAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        long count = 0;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            await using var probe = new NpgsqlCommand(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", connection);
+            count = Convert.ToInt64(await probe.ExecuteScalarAsync(ct));
+            if (count == 0)
+            {
+                break;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+        }
+        return count;
     }
 
     /// <summary>(runs the aggregate serves over the 7-day consumer window, runs raw holds there).</summary>

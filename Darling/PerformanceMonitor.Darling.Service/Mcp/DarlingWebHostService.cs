@@ -67,7 +67,9 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// downgrades to serving the LAN over HTTP.</para>
 ///
 /// <para>The dashboard connects to the store as the least-privilege VIEWER role (not owner, not mcp) — a
-/// read-only pool. Static assets ship from <c>wwwroot</c> (a csproj Content copy) with the content root AND
+/// read-only pool — on a managed store and on the compose distribution's own store; on any other store as
+/// <c>postgres.webConnectionString</c>, or as the owner with a startup warning when that is unset
+/// (<see cref="DarlingStoreLogins"/>, #3914). Static assets ship from <c>wwwroot</c> (a csproj Content copy) with the content root AND
 /// web root pinned to <see cref="AppContext.BaseDirectory"/>: a Windows service's CWD is System32, so the
 /// parameterless builder would 404 every static file in production only.</para>
 /// </summary>
@@ -669,7 +671,15 @@ public sealed class DarlingWebHostService : BackgroundService
             }
             else
             {
-                storeConnectionString = config.Postgres.ConnectionString;
+                /* #3914: not the owner by default any more — postgres.webConnectionString, the viewer role the
+                   service provisioned on the compose store, or the owner with a warning, in that order. */
+                storeConnectionString = await DarlingStoreLogins.ResolveUnmanagedAsync(
+                    DarlingStoreLogins.Surface.Web, config.Postgres, _logger, stoppingToken);
+                if (storeConnectionString is null)
+                {
+                    await DisposeFailedStartAsync();
+                    return false;
+                }
             }
 
             /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. */

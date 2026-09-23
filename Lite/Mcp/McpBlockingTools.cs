@@ -427,13 +427,14 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_lock_wait_trend"), Description("Gets the AGGREGATE lock-wait rate over time for a server: every LCK% wait type's wait milliseconds per second at each collection, the viewer's Blocking Trends lock-wait chart. get_wait_trend charts ONE named wait type and get_blocking_trend counts incidents; this is the whole lock family at once, as a rate rather than a count. Use it to see whether a server's lock pressure is rising when no single wait type dominates, to tell a few long blocks from constant low-grade contention, and to pick which LCK type to hand to get_wait_trend next. The rate is delta wait time divided by the seconds since the previous collection, so it is comparable across servers collecting on different cadences.")]
+    [McpServerTool(Name = "get_lock_wait_trend"), Description("Gets the AGGREGATE lock-wait rate over time for a server: every LCK% wait type's wait summed, in milliseconds per second, plus a wait_types legend naming which types waited. get_wait_trend charts ONE named wait type and get_blocking_trend counts incidents; this is the whole lock family at once, as a rate rather than a count. Use it to see whether a server's lock pressure is rising when no single wait type dominates, to tell a few long blocks from constant low-grade contention, and to pick which LCK type to hand to get_wait_trend next. Rates are over each collection's measured interval, so they compare across servers on different cadences.")]
     public static async Task<string> GetLockWaitTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -443,8 +444,13 @@ public sealed class McpBlockingTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
-            var points = await dataService.GetLockWaitTrendAsync(
-                resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var budget = TrendBudget.Mcp(TrendBuckets.LockWaitMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            /* #3897: the family bucketed, not a row per (collection, type) — Darling's twin's reasoning. The
+               desktop chart's per-type read (GetLockWaitTrendAsync) is untouched. */
+            var points = await dataService.GetLockWaitFamilyTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes);
 
             if (points.Count == 0)
             {
@@ -476,22 +482,12 @@ public sealed class McpBlockingTools
                         $"No wait stats have EVER been recorded for {resolved.ServerName}, so this is NOT a report of a server without lock contention — nothing has been stored for it at all. Delta wait stats need a SECOND collection cycle before the first row exists, so on a newly added server this clears itself; otherwise check that collection is running and that the server is enabled.");
             }
 
-            /* Rows, not a pre-pivoted series per wait type. The caller decides whether to sum the family or
-               chart the members, and a pivot here would have to pick a top-N and silently drop the rest —
-               on a read whose premise is that no single LCK type dominates. */
-            var result = points.Select(p => new
-            {
-                collection_time = p.CollectionTime.ToString("o"),
-                wait_type = p.WaitType,
-                wait_time_ms_per_second = Math.Round(p.WaitTimeMsPerSecond, 3),
-            });
+            /* The family as the series, the members as a legend listing EVERY type that waited, so no member is
+               dropped to fit a top-N; one builder for both SKUs' envelope (TrendPayloads). */
+            var types = await dataService.GetLockWaitTypesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
 
-            return JsonSerializer.Serialize(new
-            {
-                server = resolved.ServerName,
-                hours_back,
-                trend = result
-            }, McpHelpers.JsonOptions);
+            return TrendPayloads.LockWaitTrend(
+                resolved.ServerName, hours_back, types, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
         catch (Exception ex)
         {

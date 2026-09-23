@@ -231,8 +231,9 @@ public sealed class McpZeroIsAMeasurementTests
         /* Lite's four differenced trends, read from source: every `AS interval_seconds` statement — the
            LAG-only Query Store shape (`))) AS interval_seconds`) and the three-state delta-family shape whose
            LAG is the pre-v61 fallback arm (`END AS interval_seconds`, #3540 / #3653 A11) — rates through a
-           no-ELSE CASE and none carries the fabricated 0. */
-        foreach (var file in new[] { "LocalDataService.QueryStats.cs", "LocalDataService.QueryStore.cs" })
+           no-ELSE CASE and none carries the fabricated 0. The bucketed reads behind the MCP tools (#3897) are
+           held to the same rule in their own file. */
+        foreach (var file in new[] { "LocalDataService.QueryStats.cs", "LocalDataService.QueryStore.cs", "LocalDataService.TrendBuckets.cs" })
         {
             var lite = ReadRepoFile("Lite", "Services", file);
             Assert.DoesNotMatch(FabricatedFirstPoint, lite);
@@ -255,6 +256,14 @@ public sealed class McpZeroIsAMeasurementTests
         var liteQueryStore = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStore.cs");
         Assert.Single(Regex.Matches(liteQueryStore, @"\)\)\) AS interval_seconds"));
         Assert.DoesNotMatch(new Regex(@"MAX\(sample_interval_seconds\)"), liteQueryStore);
+
+        /* #3897: the bucketed duration pair shares ONE read over both relations, and it takes the same
+           three-state interval — never the LAG-only shape, never the COALESCE that fabricates a restart's. */
+        var liteBuckets = ReadRepoFile("Lite", "Services", "LocalDataService.TrendBuckets.cs");
+        Assert.Single(Regex.Matches(liteBuckets, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL"));
+        Assert.Single(Regex.Matches(liteBuckets, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)"));
+        Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteBuckets);
+        Assert.DoesNotMatch(new Regex(@"COALESCE\(NULLIF\(sample_interval_seconds, 0\),\s*(CAST\()?extract"), liteBuckets);
 
         /* The readers carry the null through instead of re-fabricating it. */
         var point = typeof(DarlingTrendReader.QueryDurationTrendPoint);

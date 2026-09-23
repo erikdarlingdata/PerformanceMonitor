@@ -71,14 +71,17 @@ namespace PerformanceMonitor.Darling.Service;
 /// checks drive it exactly as <see cref="DarlingManagedPostgres.EnsureConfAppended"/> uses its conf
 /// marker.</para>
 ///
-/// <para>Provisioning is Windows-only (the DPAPI credential files), like every DPAPI surface here —
+/// <para>Managed provisioning is Windows-only (the DPAPI credential files), like every DPAPI surface here —
 /// carried on the provisioning members rather than the type, because the compose
 /// <c>statement_timeout</c> surface (<see cref="ShouldReassertComposeStatementTimeout"/> and friends)
 /// is platform-neutral SQL that the cross-platform control-plane reload calls (#2918), and a member
-/// cannot widen a type-level platform annotation. Managed mode provisions
-/// all three roles (admin/viewer/mcp); bring-your-own Postgres provisions admin + viewer out-of-band via
-/// <c>Darling/tools/provision-roles.sql</c> and correctly has NO <c>mcp</c> role — the network MCP endpoint
-/// is managed-mode-only, so a BYO operator's own PostgreSQL governs any MCP-role exposure it wants.</para>
+/// cannot widen a type-level platform annotation. Managed mode provisions all three roles
+/// (admin/viewer/mcp). So does the Linux compose distribution's own store (#3914,
+/// <see cref="EnsureComposeStoreProvisionedAsync"/>): the same batch, run as the store container's bootstrap
+/// superuser, with the passwords kept in plain owner-only files instead of DPAPI blobs. Any other
+/// bring-your-own store provisions the roles out-of-band with <c>Darling/tools/provision-roles.sql</c>, and
+/// its web dashboard and MCP server connect with <c>postgres.webConnectionString</c> /
+/// <c>postgres.mcpConnectionString</c> (<see cref="DarlingStoreLogins"/>).</para>
 /// </summary>
 public static class DarlingManagedRoles
 {
@@ -90,6 +93,16 @@ public static class DarlingManagedRoles
     /// makes provisioning fail loud rather than reset its password/privileges.
     /// </summary>
     public const string RoleMarker = "darling-managed";
+
+    /// <summary>
+    /// The marker on the roles the service provisions on the compose distribution's own store (#3914) — a
+    /// second value rather than <see cref="RoleMarker"/> because <c>tools/provision-roles.sql</c> stamps that one
+    /// too, and the service re-keys the roles it owns from its own credential files on every start. Sharing the
+    /// marker would let it take over roles an operator created with the script, reset their passwords and break
+    /// whatever logs in with them. With its own marker the service manages only roles it created on that store,
+    /// and leaves any other same-named role alone (<see cref="RefuseComposeStore"/>).
+    /// </summary>
+    public const string ComposeStoreRoleMarker = "darling-compose";
 
     /// <summary>
     /// The <c>config</c> tables that carry SECRET columns the read-only <c>viewer</c> role must never read,
@@ -252,6 +265,104 @@ public static class DarlingManagedRoles
             DarlingManagedPostgres.McpCredentialPathFor(dataDirectory), DarlingManagedPostgres.McpRoleName,
             allowInteractiveRead: false, logger);
 
+        return await ProvisionRolesAsync(
+            dataSource, adminPassword, viewerPassword, mcpPassword, ProvisioningTarget.Managed, logger, cancellationToken);
+    }
+
+    /// <summary>
+    /// Provisions the <c>admin</c>/<c>viewer</c>/<c>mcp</c> roles on the Linux compose distribution's own store
+    /// (#3914), the way <see cref="EnsureProvisionedAsync"/> does on the managed one, so the web dashboard and the
+    /// MCP server connect as <c>viewer</c> and <c>mcp</c> there instead of as the owner. Nothing to configure: the
+    /// caller runs it for a service in a container on a non-managed store, and this decides from the store itself.
+    ///
+    /// <para><b>Which store counts as the service's own.</b> One whose login is the cluster's BOOTSTRAP superuser
+    /// (oid 10, the role <c>initdb</c> created) on a cluster that holds no database but the store's own,
+    /// <c>postgres</c> and the templates. The compose file's store image runs <c>initdb --username
+    /// $POSTGRES_USER</c> with the service's login and creates the one database, so that is exactly the compose
+    /// store; a superuser granted on a cluster somebody else initialized never is, and neither is an operator's
+    /// multi-database cluster the service reaches as its bootstrap superuser. Anything else is refused with a
+    /// reason and nothing is written, so the surfaces keep the bring-your-own rules (<see cref="DarlingStoreLogins"/>).
+    /// A same-named role without <see cref="ComposeStoreRoleMarker"/> is refused the same way: re-keying it would
+    /// break whoever uses it.</para>
+    ///
+    /// <para><b>The credentials</b> are the <c>file:</c> secret shape (#1804): one plaintext password per file in
+    /// <paramref name="credentialDirectory"/> (<see cref="ComposeStoreCredentialFileName"/>), created owner-only.
+    /// Read when present and trusted, generated otherwise, and written only AFTER the batch has committed, so a
+    /// file on disk is always a password its role accepts. A lost file (a container recreated without the
+    /// credentials volume) regenerates and is re-asserted on the next start, which the marker makes safe. The
+    /// directory is set owner-only again before any file is read, and one that cannot be trusted
+    /// (<see cref="PrepareComposeCredentialDirectory"/>) has none of its files read: every role gets a new
+    /// password this start.</para>
+    ///
+    /// <para>The same batch as managed mode, with three differences carried by <see cref="ProvisioningTarget"/>:
+    /// the owner and database are the login's own names (the compose file can rename them), the marker is
+    /// <see cref="ComposeStoreRoleMarker"/>, and the database-level <c>REVOKE ALL … FROM PUBLIC</c> is left out,
+    /// because on this store other roles are the operator's (people read the store directly) and that statement
+    /// would take their <c>CONNECT</c> away.</para>
+    /// </summary>
+    /// <returns>Provisioned with the applied compose statement_timeout and the viewer/mcp passwords, or refused
+    /// with the reason. Throws on a hard failure; the caller degrades to the bring-your-own rules.</returns>
+    public static async Task<ComposeStoreProvisioning> EnsureComposeStoreProvisionedAsync(
+        NpgsqlDataSource dataSource, string credentialDirectory, ILogger logger, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentNullException.ThrowIfNull(logger);
+        if (string.IsNullOrWhiteSpace(credentialDirectory))
+        {
+            throw new ArgumentException("Credential directory is required.", nameof(credentialDirectory));
+        }
+
+        ComposeStoreFacts facts;
+        await using (var connection = await dataSource.OpenConnectionAsync(cancellationToken))
+        {
+            facts = await ReadComposeStoreFactsAsync(connection, cancellationToken);
+        }
+
+        if (RefuseComposeStore(facts) is { } refusal)
+        {
+            return ComposeStoreProvisioning.Refused(refusal);
+        }
+
+        /* One warning for the directory, not one per file it holds. */
+        var directory = PrepareComposeCredentialDirectory(credentialDirectory, create: true, logger);
+        if (directory.Distrust is { } distrust)
+        {
+            logger.LogWarning(
+                "The compose store's credentials directory {Directory} is not trusted ({Reason}), so no credential file in it is read this start: every role gets a new password, re-asserted on the role{Written}.",
+                credentialDirectory, distrust,
+                directory.MayWrite ? ", and the new files replace the old" : ", and none is written there, so every start does the same until the directory is fixed");
+        }
+
+        var readFiles = directory.Distrust is null;
+        var admin = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.AdminRoleName, readFiles, logger);
+        var viewer = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.ViewerRoleName, readFiles, logger);
+        var mcp = ReadOrGenerateComposeCredential(credentialDirectory, DarlingManagedPostgres.McpRoleName, readFiles, logger);
+
+        var applied = await ProvisionRolesAsync(
+            dataSource, admin.Password, viewer.Password, mcp.Password,
+            ProvisioningTarget.ComposeStore(facts.Login, facts.Database), logger, cancellationToken);
+
+        foreach (var credential in new[] { admin, viewer, mcp })
+        {
+            if (credential.Generated && directory.MayWrite)
+            {
+                PersistComposeCredential(credentialDirectory, credential, logger);
+            }
+        }
+
+        return ComposeStoreProvisioning.Succeeded(applied, viewer.Password, mcp.Password);
+    }
+
+    /// <summary>
+    /// The rest of provisioning once each role's password is in hand — shared by
+    /// <see cref="EnsureProvisionedAsync"/> and <see cref="EnsureComposeStoreProvisionedAsync"/> (#3914), which
+    /// differ only in where the passwords live and in <paramref name="target"/>. Returns the compose
+    /// statement_timeout it wrote onto the roles (see <see cref="EnsureProvisionedAsync"/>).
+    /// </summary>
+    private static async Task<int> ProvisionRolesAsync(
+        NpgsqlDataSource dataSource, string adminPassword, string viewerPassword, string mcpPassword,
+        ProvisioningTarget target, ILogger logger, CancellationToken cancellationToken)
+    {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         /* #2357: read the live knob rather than a constant. Ordering is what makes this safe -- migrations
            run before provisioning at startup, so the column exists by now -- and because this DDL is re-run
@@ -273,7 +384,8 @@ public static class DarlingManagedRoles
                 ScramSha256Verifier.Create(viewerPassword),
                 ScramSha256Verifier.Create(mcpPassword),
                 composeTimeoutSeconds,
-                reassert),
+                reassert,
+                target),
             connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         await command.ExecuteNonQueryAsync(cancellationToken);
 
@@ -284,7 +396,7 @@ public static class DarlingManagedRoles
                 : "re-asserted for " + DescribeReassert(reassert));
 
         logger.LogInformation(
-            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer and MCP host no longer connect as the superuser");
+            "Least-privilege roles ready (admin: read both schemas + write config; viewer: read-only + the narrow web-surface writes (custom_views, custom_alert_rules, database_state_expected, config_mute_rules + the reload beacon); mcp: viewer's reads + INSERT on analysis_findings/analysis_muted + write config.custom_views + tune alerting (config_mute_rules, config_alert_settings, config_notification.email_cooldown_minutes, config_service reload beacon) + onboard servers (config_monitored_servers)) — the Viewer, the web dashboard and the MCP host no longer connect as the superuser");
 
         /* CLAMPED, not raw: the batch above wrote the clamped form, so returning the raw read would hand the
            caller a baseline that differs from what the roles actually carry (a stored 0 provisions '15s').
@@ -382,18 +494,24 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     /// real operator change rather than a rounding artifact.
     /// </param>
     /// <param name="managedStore">
-    /// Managed mode only. A BYO store provisions these roles out-of-band via
+    /// Managed mode. Any other store provisions these roles out-of-band via
     /// <c>tools/provision-roles.sql</c> and names them itself, so <c>ALTER ROLE viewer</c> would be guessing
-    /// at an identity we do not own.
+    /// at an identity we do not own — unless <paramref name="composeStoreProvisioned"/> says otherwise.
     /// </param>
     /// <param name="isWindows">
-    /// Mirrors startup provisioning's own gate. Not because the SQL needs Windows — it does not — but
+    /// Mirrors managed provisioning's own gate. Not because the SQL needs Windows — it does not — but
     /// because provisioning is where these roles get CREATED, so off-Windows they may not exist at all and
     /// this would fail every reload.
     /// </param>
+    /// <param name="composeStoreProvisioned">
+    /// This process provisioned the roles on the compose distribution's own store at startup (#3914,
+    /// <see cref="EnsureComposeStoreProvisionedAsync"/>): they exist and are the service's, so the reload keeps
+    /// them current exactly as on a managed store. Set only on success, so a refused or failed provisioning
+    /// never has the reload writing to roles the service does not own.
+    /// </param>
     public static bool ShouldReassertComposeStatementTimeout(
-        int storeSeconds, int appliedSeconds, bool managedStore, bool isWindows) =>
-        managedStore && isWindows && storeSeconds != appliedSeconds;
+        int storeSeconds, int appliedSeconds, bool managedStore, bool isWindows, bool composeStoreProvisioned = false) =>
+        ((managedStore && isWindows) || composeStoreProvisioned) && storeSeconds != appliedSeconds;
 
     /// <summary>
     /// Re-asserts the compose <c>statement_timeout</c> on the viewer/mcp roles from a control-plane reload
@@ -607,10 +725,17 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
     /// silently disagree with the client-side deadline #2931 reads from the same column. It is a distinct
     /// value rather than a sentinel integer because every integer in range is a legitimate ceiling.</para>
     /// </param>
+    /// <param name="target">
+    /// Which store the batch is for (#3914): null or <see cref="ProvisioningTarget.Managed"/> renders the
+    /// managed batch exactly; <see cref="ProvisioningTarget.ComposeStore"/> names the compose store's own owner
+    /// and database, stamps <see cref="ComposeStoreRoleMarker"/>, and leaves the database-level PUBLIC revoke
+    /// out.
+    /// </param>
     public static string BuildProvisioningSql(
         string adminVerifier, string viewerVerifier, string mcpVerifier,
         int? composeStatementTimeoutSeconds = McpCommandDeadlines.ComposedQueryFallbackSeconds,
-        PasswordReassert reassert = PasswordReassert.All)
+        PasswordReassert reassert = PasswordReassert.All,
+        ProvisioningTarget? target = null)
     {
         RequireVerifier(adminVerifier, nameof(adminVerifier));
         RequireVerifier(viewerVerifier, nameof(viewerVerifier));
@@ -619,14 +744,22 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
         string PasswordClause(PasswordReassert role, string verifier) =>
             (reassert & role) != 0 ? $" PASSWORD '{verifier}'" : "";
 
-        const string owner = DarlingManagedPostgres.UserName;      // darling (owner/superuser)
-        const string database = DarlingManagedPostgres.DatabaseName; // darling
+        target ??= ProvisioningTarget.Managed;
+        var owner = target.OwnerIdentifier;          // darling (owner/superuser) on a managed store
+        var database = target.DatabaseIdentifier;    // darling on a managed store
         const string admin = DarlingManagedPostgres.AdminRoleName;
         const string viewer = DarlingManagedPostgres.ViewerRoleName;
         const string mcp = DarlingManagedPostgres.McpRoleName;
         const string collect = PgSchemaGenerator.CollectSchema;
         const string config = PgSchemaGenerator.ConfigSchema;
-        const string marker = RoleMarker;
+        var marker = target.RoleMarker;
+
+        /* #3914: the managed store is loopback-only and nothing but Darling's own logins connects to it, so it
+           takes CONNECT away from PUBLIC. The compose store is one people read directly with roles of their own,
+           and the same statement would silently take their CONNECT away, so there it is a comment instead. */
+        var publicDatabaseRevoke = target.RevokePublicDatabaseAccess
+            ? $"REVOKE ALL ON DATABASE {database} FROM PUBLIC;"
+            : "--     LEFT AS-IS on the compose store: its other roles are the operator's, and this would revoke their CONNECT.";
         /* #2357: was ComposeLimits.StatementTimeout, a bare "15s". Rendered by the SHARED builder rather
            than inline, because #2918 made the reload path re-assert the same two statements: two renderers
            for one pair of ALTER ROLEs is a drift waiting to happen, and the drift would be invisible (both
@@ -649,7 +782,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
 
         return $@"
 /* Least-privilege roles for the Darling security split (#1262). Idempotent + self-healing:
-   re-run every managed start, converging role state to the DPAPI credential files. */
+   re-run every start, converging role state to the service's credential files. */
 
 -- 1. Roles (CREATE ROLE has no IF NOT EXISTS -> guard with a DO block). The names are bare
 --    admin/viewer, so a fresh role is STAMPED with a marker comment and an existing SAME-NAMED role
@@ -680,10 +813,14 @@ END $do$;
 
 -- 1b. Re-assert attributes every start, and the password (as a SCRAM-SHA-256 verifier, #3910) only for a
 --     role whose stored verifier does not already accept its credential file: the file is the source of
---     truth. Only reached when the guard above passed (fresh + marked, or already Darling-marked).
-ALTER ROLE {admin}  LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Admin, adminVerifier)};
-ALTER ROLE {viewer} LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Viewer, viewerVerifier)};
-ALTER ROLE {mcp}    LOGIN NOSUPERUSER{PasswordClause(PasswordReassert.Mcp, mcpVerifier)};
+--     truth. Only reached when the guard above passed (fresh + marked, or already Darling-marked). Every
+--     attribute that widens a role is switched off by name (#3914), not only SUPERUSER: a role this batch
+--     ADOPTS (it already carries the marker) keeps whatever was granted to it since, and CREATEROLE, CREATEDB,
+--     REPLICATION or BYPASSRLS on viewer or mcp would outrank every grant below. Section 11 does the same for
+--     role memberships.
+ALTER ROLE {admin}  LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Admin, adminVerifier)};
+ALTER ROLE {viewer} LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Viewer, viewerVerifier)};
+ALTER ROLE {mcp}    LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS{PasswordClause(PasswordReassert.Mcp, mcpVerifier)};
 
 -- 1c. statement_timeout backstop on the composed-query identities (Custom Views v2, #1563). viewer is the web
 --     dashboard's DB identity and mcp the optional network MCP identity; both serve the network-reachable
@@ -738,7 +875,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {config}
 --    PUBLIC's implicit CONNECT, so admin/viewer are re-granted CONNECT explicitly (darling is
 --    superuser + owner and never needs it).
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-REVOKE ALL ON DATABASE {database} FROM PUBLIC;
+{publicDatabaseRevoke}
 GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer};
 
 -- 6. The mcp role (darling-network-endpoints, D3-role): the ONLY credential reachable (via the bearer
@@ -749,7 +886,7 @@ GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer};
 --    and what the mute tool writes (config.analysis_muted) -- no UPDATE/DELETE on EITHER analysis target (no
 --    MCP unmute tool exists; DELETE/unmute is viewer/admin only). The mcp role ALSO gets the narrow
 --    config.custom_views write in section 7 (for the MCP custom-view tools) -- likewise a single non-secret
---    config table, never the config_command pivot or the carved secret columns. EXPLICIT single-table grants
+--    config table, never the config_command pivot or the carved secret columns. EXPLICIT single-table WRITE grants
 --    with NO ALTER DEFAULT PRIVILEGES: ADP has no per-table
 --    form, so an ADP INSERT would broaden mcp to ALL of collect -- provisioning re-runs every start, so a
 --    recreated table re-grants (self-heal) without ADP. The two INSERT targets must already exist here, so
@@ -757,6 +894,14 @@ GRANT CONNECT ON DATABASE {database} TO {admin}, {viewer};
 GRANT USAGE ON SCHEMA {collect}, {config} TO {mcp};
 GRANT SELECT ON ALL TABLES IN SCHEMA {collect} TO {mcp};
 GRANT SELECT ON ALL TABLES IN SCHEMA {config}  TO {mcp};
+-- #3914: and SELECT on the collect relations created AFTER this batch, which the two grants above cannot
+-- reach until the next start. The continuous aggregates are the case: the TimescaleDB step creates them
+-- later in the SAME start, so on a fresh store every one was unreadable to the MCP tools for the whole first
+-- process lifetime (a container can run for months on one). Read-only, and collect holds no secrets, so this
+-- is viewer's own collect default; mcp still gets no default WRITE anywhere and no default read on config,
+-- whose secret columns are carved table by table.
+ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA {collect}
+   GRANT SELECT ON TABLES TO {mcp};
 {mcpColumnAcl}
 GRANT INSERT ON {collect}.analysis_findings TO {mcp};
 GRANT INSERT ON {config}.analysis_muted TO {mcp};
@@ -891,6 +1036,34 @@ GRANT INSERT, UPDATE, DELETE ON {config}.config_monitored_servers TO {mcp};
 --     probe rung + ladder fixture + version-pin tests for no gain.
 {BuildCustomAlertResolveFunctionSql(config)}
 GRANT EXECUTE ON FUNCTION {config}.record_custom_alert_resolution(integer, text, text, text) TO {viewer}, {mcp};
+
+-- 11. Role memberships (#3914): the three roles hold none. Nothing above grants one, so every membership in which
+--     admin, viewer or mcp is the MEMBER was given by someone else, and each outranks the grants above -- a
+--     pg_read_all_data undoes the secret-column carve, and membership in the owner is every privilege the owner
+--     has. A role this batch adopts would otherwise keep them, so every one is revoked, every start.
+--     GRANTED BY the recorded grantor: since PostgreSQL 16 a superuser's plain REVOKE removes only the grants
+--     recorded as the bootstrap superuser's, and leaves one made by any other role in place with a WARNING.
+--     CASCADE: a grant the member itself made with an ADMIN OPTION depends on that membership, and RESTRICT would
+--     fail the whole batch on it every start. A grantor that no longer exists (possible before 16, which ignores
+--     the grantor on REVOKE) is left out of the statement. A row an earlier CASCADE already removed draws a
+--     WARNING, never an error.
+DO $do$
+DECLARE
+   membership record;
+BEGIN
+   FOR membership IN
+      SELECT g.rolname AS granted, m.rolname AS member, b.rolname AS grantor
+      FROM pg_catalog.pg_auth_members AS a
+      JOIN pg_catalog.pg_roles AS g ON g.oid = a.roleid
+      JOIN pg_catalog.pg_roles AS m ON m.oid = a.member
+      LEFT JOIN pg_catalog.pg_roles AS b ON b.oid = a.grantor
+      WHERE m.rolname IN ('{admin}', '{viewer}', '{mcp}')
+   LOOP
+      EXECUTE format('REVOKE %I FROM %I', membership.granted, membership.member)
+         || CASE WHEN membership.grantor IS NULL THEN '' ELSE format(' GRANTED BY %I', membership.grantor) END
+         || ' CASCADE';
+   END LOOP;
+END $do$;
 ";
     }
 
@@ -1025,6 +1198,514 @@ REVOKE ALL ON FUNCTION {config}.record_custom_alert_resolution(integer, text, te
 
         return string.Join(", ", roles);
     }
+
+    /// <summary>
+    /// Where the compose distribution's store keeps the role passwords the service generates (#3914). A fixed
+    /// path, not a setting: the Dockerfile creates it owner-only and the compose file mounts the
+    /// <c>darling-credentials</c> volume on it, so a recreated container keeps its passwords. Without the volume
+    /// the files regenerate and are re-asserted, which costs one password re-assert per recreation and nothing
+    /// else. The Windows branch exists for the live tests, which run on the bundled Windows runtime.
+    /// </summary>
+    public static string ComposeStoreCredentialDirectory => OperatingSystem.IsWindows()
+        ? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "PerformanceMonitorDarling", "compose-credentials")
+        : "/var/lib/darling/credentials";
+
+    /// <summary>The compose store's credential file for <paramref name="role"/>: the managed file's name without
+    /// the <c>.dpapi</c> extension, because it holds the password itself (#3914).</summary>
+    public static string ComposeStoreCredentialFileName(string role) => $"pg-{role}-credential";
+
+    /// <summary>
+    /// What the store says about the login the service connects with, about the three role names, and about the
+    /// cluster's other databases, read in one statement before anything is written (#3914). oid 10 is
+    /// <c>BOOTSTRAP_SUPERUSERID</c>, the role <c>initdb</c> creates, fixed in every PostgreSQL version. The other
+    /// databases are every one but the store's own, <c>postgres</c> and the templates (<c>datistemplate</c>, and
+    /// <c>template0</c>/<c>template1</c> by name in case either lost the flag): the compose store's cluster holds
+    /// nothing else, and roles are cluster-wide.
+    /// </summary>
+    internal const string ComposeStoreFactsSql = @"
+SELECT
+    u.rolname::text,
+    pg_catalog.current_database()::text,
+    (u.oid = 10 AND u.rolsuper),
+    c.rolname::text,
+    pg_catalog.shobj_description(c.oid, 'pg_authid'),
+    (
+        SELECT
+            pg_catalog.array_agg(d.datname::text ORDER BY d.datname)
+        FROM pg_catalog.pg_database AS d
+        WHERE d.datname NOT IN (pg_catalog.current_database(), 'postgres', 'template0', 'template1')
+        AND   NOT d.datistemplate
+    )
+FROM pg_catalog.pg_roles AS u
+LEFT JOIN pg_catalog.pg_roles AS c
+    ON c.rolname = ANY ($1)
+WHERE u.rolname = current_user";
+
+    private static async Task<ComposeStoreFacts> ReadComposeStoreFactsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(ComposeStoreFactsSql, connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+        command.Parameters.AddWithValue(new[] { DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.McpRoleName });
+
+        string? login = null;
+        string? database = null;
+        var bootstrapSuperuser = false;
+        var markers = new Dictionary<string, string?>(StringComparer.Ordinal);
+        IReadOnlyList<string> otherDatabases = Array.Empty<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            login = reader.GetString(0);
+            database = reader.GetString(1);
+            bootstrapSuperuser = reader.GetBoolean(2);
+            if (!reader.IsDBNull(3))
+            {
+                markers[reader.GetString(3)] = reader.IsDBNull(4) ? null : reader.GetString(4);
+            }
+
+            /* array_agg over no rows is NULL, not an empty array. */
+            otherDatabases = reader.IsDBNull(5) ? Array.Empty<string>() : reader.GetFieldValue<string[]>(5);
+        }
+
+        if (login is null || database is null)
+        {
+            throw new InvalidOperationException("The store did not report the login this service connects as.");
+        }
+
+        return new ComposeStoreFacts(login, database, bootstrapSuperuser, markers, otherDatabases);
+    }
+
+    /// <summary>
+    /// Why the service must NOT provision roles on this store, or null when it may (#3914). Pure, so every refusal
+    /// is pinned without a server. The reason reaches the web and MCP hosts' startup warning, so it is written for
+    /// the operator reading it there.
+    /// </summary>
+    internal static string? RefuseComposeStore(ComposeStoreFacts facts)
+    {
+        ArgumentNullException.ThrowIfNull(facts);
+
+        if (!facts.BootstrapSuperuser)
+        {
+            return $"The service logs in to this store as '{facts.Login}', which is not the store's bootstrap superuser (the role initdb created, POSTGRES_USER in the compose file), so the store is not treated as the service's own and no roles were created on it.";
+        }
+
+        /* The bootstrap superuser alone does not make a cluster the compose store: a container that logs in to an
+           operator's own cluster as its bootstrap superuser (postgres, say) passes that test too. The compose store's
+           image creates one database and the service owns the cluster, so any other database means someone else's
+           cluster, and roles are cluster-wide: provisioning there would put admin/viewer/mcp on everything it
+           serves. */
+        if (facts.OtherDatabases.Count > 0)
+        {
+            return $"This cluster also holds {DescribeOtherDatabases(facts.OtherDatabases)} that the service does not own, so it is not treated as the service's own and no roles were created on it.";
+        }
+
+        /* The two names reach the batch as quoted identifiers; a control character is legal inside one but has
+           no business in a store the service provisions, and refusing it keeps every name the batch carries
+           printable. */
+        if (facts.Login.Any(char.IsControl) || facts.Database.Any(char.IsControl))
+        {
+            return "The store's login or database name contains a control character, so the service did not provision roles on it.";
+        }
+
+        var foreign = facts.ExistingRoleMarkers
+            .Where(role => !string.Equals(role.Value, ComposeStoreRoleMarker, StringComparison.Ordinal))
+            .OrderBy(role => role.Key, StringComparer.Ordinal)
+            .Select(role => $"'{role.Key}' ({DescribeForeignRoleMarker(role.Value)})")
+            .ToList();
+        if (foreign.Count > 0)
+        {
+            var one = foreign.Count == 1;
+            return $"This store already has {(one ? "a role" : "roles")} {string.Join(" and ", foreign)} that the service did not create on it, so it leaves {(one ? "it" : "them")} alone rather than re-key {(one ? "its password" : "their passwords")}. Drop or rename {(one ? "it" : "them")} to have the service provision its own.";
+        }
+
+        return null;
+    }
+
+    private static string DescribeForeignRoleMarker(string? marker) => marker switch
+    {
+        RoleMarker => "created by tools/provision-roles.sql",
+        null => "not created by Darling",
+        _ => $"comment '{marker}'",
+    };
+
+    /// <summary>How many of the cluster's other databases a refusal names before it counts the rest.</summary>
+    internal const int OtherDatabasesNamed = 3;
+
+    /// <summary>"the database 'a'", "the databases 'a' and 'b'", "the databases 'a', 'b', 'c' and 2 more". A
+    /// control character in a name is shown as '?', so a name cannot forge a line in the log it is written to.</summary>
+    private static string DescribeOtherDatabases(IReadOnlyList<string> names)
+    {
+        var shown = names
+            .Take(OtherDatabasesNamed)
+            .Select(name => "'" + new string(name.Select(c => char.IsControl(c) ? '?' : c).ToArray()) + "'")
+            .ToList();
+        var more = names.Count - shown.Count;
+        var list = more > 0
+            ? $"{string.Join(", ", shown)} and {more.ToString(CultureInfo.InvariantCulture)} more"
+            : shown.Count == 1
+                ? shown[0]
+                : $"{string.Join(", ", shown.Take(shown.Count - 1))} and {shown[^1]}";
+
+        return (names.Count == 1 ? "the database " : "the databases ") + list;
+    }
+
+    /// <summary>
+    /// The compose store's credential for <paramref name="role"/>: the trusted file's password, or a freshly
+    /// generated one that <see cref="PersistComposeCredential"/> writes once the batch has committed (#3914).
+    /// An untrusted file is discarded rather than read — the Unix equivalent of <see cref="EnsureRoleCredential"/>'s
+    /// pre-plant check (<see cref="UntrustedComposeCredentialReason"/>): a password someone else could have written
+    /// would be re-asserted on the role, and a new password costs only its re-assert. With
+    /// <paramref name="readFile"/> false (a directory that cannot be trusted) the file is not looked at.
+    /// </summary>
+    private static ComposeCredential ReadOrGenerateComposeCredential(string directory, string role, bool readFile, ILogger logger)
+    {
+        if (readFile)
+        {
+            var path = Path.Combine(directory, ComposeStoreCredentialFileName(role));
+            if (ReadTrustedComposeCredentialFile(path, out var untrusted) is { } password)
+            {
+                return new ComposeCredential(role, password, generated: false);
+            }
+
+            if (untrusted is not null)
+            {
+                logger.LogWarning(
+                    "The compose store's '{Role}' credential {File} is not trusted ({Reason}) — discarding it; a new password is generated and re-asserted on the role.",
+                    role, path, untrusted);
+                TryDelete(path, logger);
+            }
+        }
+
+        return new ComposeCredential(role, DarlingManagedPostgres.GeneratePassword(), generated: true);
+    }
+
+    /// <summary>
+    /// The password a web or MCP host connects with when this start did NOT provision the compose store's roles
+    /// (#3914): refused, failed, or a collector that stood down before it got there. The roles still hold what an
+    /// earlier start gave them. A credential file is written only after the batch that set its password committed,
+    /// for a role carrying <see cref="ComposeStoreRoleMarker"/>, so a trusted file is a login its role accepted when
+    /// it was written, and the surface stays on its least-privilege role instead of the owner. Trusted by the
+    /// worker's own checks: the directory set owner-only again first (<see cref="PrepareComposeCredentialDirectory"/>),
+    /// then the file (<see cref="UntrustedComposeCredentialReason"/>). Never deletes, generates or writes anything:
+    /// replacing a distrusted file is the next provisioning's job, and only the worker's batch ever sets a role's
+    /// password from a file, so the worst a planted file can do here is a login the store refuses.
+    /// </summary>
+    /// <returns>The password, or why there is none this surface can use.</returns>
+    internal static EarlierComposeCredential ReadEarlierComposeCredential(string directory, string role, ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+
+        var file = ComposeStoreCredentialFileName(role);
+        try
+        {
+            if (!Directory.Exists(directory) && new DirectoryInfo(directory).LinkTarget is null)
+            {
+                return EarlierComposeCredential.None($"{directory} does not exist");
+            }
+
+            var trust = PrepareComposeCredentialDirectory(directory, create: false, logger);
+            if (trust.Distrust is { } distrust)
+            {
+                return EarlierComposeCredential.None($"the credentials directory {directory} is not trusted ({distrust})");
+            }
+
+            var path = Path.Combine(directory, file);
+            if (ReadTrustedComposeCredentialFile(path, out var untrusted) is { } password)
+            {
+                return EarlierComposeCredential.Trusted(password);
+            }
+
+            return EarlierComposeCredential.None(untrusted is null
+                ? $"{path} does not exist"
+                : $"{path} is not trusted ({untrusted})");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return EarlierComposeCredential.None($"{file} could not be read ({ex.Message})");
+        }
+    }
+
+    /// <summary>
+    /// A trusted credential file's password (#3914), or null: <paramref name="untrusted"/> then says why the file
+    /// is not trusted, or is null when there is no file at all. Opens nothing it has not judged first, and deletes
+    /// nothing.
+    /// </summary>
+    private static string? ReadTrustedComposeCredentialFile(string path, out string? untrusted)
+    {
+        /* LinkTarget before Exists: File.Exists follows a link, so a dangling one reads as "no file"; and a
+           directory at the path is not a FileInfo that exists. */
+        var info = new FileInfo(path);
+        if (info.LinkTarget is null && !info.Exists && !Directory.Exists(path))
+        {
+            untrusted = null;
+            return null;
+        }
+
+        untrusted = UntrustedComposeCredentialReason(info);
+        if (untrusted is not null)
+        {
+            return null;
+        }
+
+        var password = File.ReadAllText(path).Trim();
+        if (password.Length > 0)
+        {
+            return password;
+        }
+
+        untrusted = "it holds no password";
+        return null;
+    }
+
+    /// <summary>
+    /// Why a compose-store credential file cannot be trusted, or null (#3914). It must be a regular file (not a
+    /// symbolic link, a directory, a device, a pipe or a socket) that no one else can reach: no group or other bits
+    /// on Unix; on Windows, owned by a trusted principal (<see cref="DarlingFileSecurity.IsTrustedOwner"/>) and not
+    /// readable by ordinary users (<see cref="DarlingFileSecurity.IsReadableByOrdinaryUsers"/>). A plaintext password
+    /// others could read may already be theirs, so such a file is distrusted and regenerated, not re-hardened.
+    ///
+    /// <para><b>What this cannot see.</b> Managed .NET cannot read a Unix file's owner, and this adds no native
+    /// interop to get it, so a file another user created with mode 0600 passes the mode check. What keeps anyone
+    /// else from creating one is the directory: the shipped <c>darling-credentials</c> named volume is seeded
+    /// root:root 0700 by the Dockerfile, and the service sets the directory owner-only again every start and
+    /// distrusts it when it cannot (<see cref="PrepareComposeCredentialDirectory"/>). A bind mount whose host
+    /// directory another host user owns or can write to is outside what either check can see.</para>
+    /// </summary>
+    private static string? UntrustedComposeCredentialReason(FileInfo info)
+    {
+        if (info.LinkTarget is not null)
+        {
+            return "it is a symbolic link";
+        }
+
+        if (Directory.Exists(info.FullName))
+        {
+            return "it is a directory";
+        }
+
+        /* A device, a pipe and a socket all stat at size 0, so the size turns them away before anything opens
+           them: reading a pipe that has no writer would block the start forever. */
+        if (info.Length == 0)
+        {
+            return "it is empty, or not a regular file";
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            if (!DarlingFileSecurity.IsTrustedOwner(info.FullName))
+            {
+                return "it is not owned by SYSTEM, Administrators or the service account";
+            }
+
+            return DarlingFileSecurity.IsReadableByOrdinaryUsers(info.FullName)
+                ? "ordinary local users can read it"
+                : null;
+        }
+
+        var mode = File.GetUnixFileMode(info.FullName);
+        return (mode & GroupOrOtherAccess) == 0 ? null : $"its mode {Octal(mode)} gives other users access";
+    }
+
+    /// <summary>
+    /// Sets the compose store's credentials directory owner-only again before any file in it is read, and says what
+    /// the service may do with it this start (#3914). A symbolic link is never followed: nothing in it is read or
+    /// written. Unix: 0700 is re-applied every start and the result read back
+    /// (<see cref="JudgeComposeCredentialDirectory"/>). Windows (the live tests' runtime): a directory the service
+    /// creates is hardened as it is created, and each file's owner and readability carry the rest.
+    /// <paramref name="create"/> makes a missing directory; only the worker passes it. Never throws: a directory
+    /// that cannot be created or checked (a read-only mount, say) is one nothing is read from or written to, and
+    /// the roles are still provisioned with this start's passwords, as they were when only the write could fail.
+    /// </summary>
+    private static ComposeCredentialDirectoryTrust PrepareComposeCredentialDirectory(string directory, bool create, ILogger logger)
+    {
+        try
+        {
+            var info = new DirectoryInfo(directory);
+            if (info.LinkTarget is not null)
+            {
+                return new ComposeCredentialDirectoryTrust("it is a symbolic link", MayWrite: false);
+            }
+
+            if (!info.Exists && !create)
+            {
+                return new ComposeCredentialDirectoryTrust(null, MayWrite: false);
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                if (!info.Exists)
+                {
+                    Directory.CreateDirectory(directory);
+                    try
+                    {
+                        DarlingFileSecurity.HardenDirectory(directory, allowInteractiveTraverse: false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        return new ComposeCredentialDirectoryTrust(
+                            $"it could not be restricted to SYSTEM, Administrators and the service account ({ex.Message})", MayWrite: false);
+                    }
+                }
+
+                return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+            }
+
+            if (!info.Exists)
+            {
+                Directory.CreateDirectory(directory, OwnerOnlyDirectory);
+            }
+
+            var before = File.GetUnixFileMode(directory);
+            try
+            {
+                File.SetUnixFileMode(directory, OwnerOnlyDirectory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                /* Neither its owner nor root: a rootless container on someone else's bind mount. The mode read back
+                   below decides. */
+                logger.LogDebug("Could not set {Directory} to owner-only: {Message}", directory, ex.Message);
+            }
+
+            return JudgeComposeCredentialDirectory(before, File.GetUnixFileMode(directory));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ComposeCredentialDirectoryTrust($"it could not be created or checked ({ex.Message})", MayWrite: false);
+        }
+    }
+
+    /// <summary>
+    /// The Unix credentials-directory verdict, pure so each arm is pinned without a Linux box (#3914).
+    /// <paramref name="before"/> is the mode the directory was found with, <paramref name="after"/> its mode once the
+    /// service set it to 0700.
+    /// <list type="bullet">
+    /// <item><description>Still reachable by other users afterwards (a filesystem that ignores Unix modes): none of
+    /// its files is read, and none is written there either, because a new one would be as reachable as the
+    /// old.</description></item>
+    /// <item><description>Writable by other users BEFORE: anyone could have put a file in it until now, and a planted
+    /// 0600 file passes the file check (<see cref="UntrustedComposeCredentialReason"/> cannot see its owner), so none
+    /// of its files is read this start. The new ones are written, since only the service can reach the directory
+    /// now, and they replace whatever was planted.</description></item>
+    /// </list>
+    /// </summary>
+    internal static ComposeCredentialDirectoryTrust JudgeComposeCredentialDirectory(UnixFileMode before, UnixFileMode after)
+    {
+        if ((after & GroupOrOtherAccess) != 0)
+        {
+            return new ComposeCredentialDirectoryTrust(
+                $"its mode is still {Octal(after)} after the service set it to owner-only, which a filesystem that ignores Unix modes does",
+                MayWrite: false);
+        }
+
+        if ((before & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+        {
+            return new ComposeCredentialDirectoryTrust(
+                $"its mode was {Octal(before)}, which let other users put files in it until the service set it to owner-only this start",
+                MayWrite: true);
+        }
+
+        return new ComposeCredentialDirectoryTrust(null, MayWrite: true);
+    }
+
+    private const UnixFileMode GroupOrOtherAccess =
+        UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
+        | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+
+    private const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+    /// <summary>A mode the way an operator types it, <c>0700</c>, rather than the enum's flag names.</summary>
+    internal static string Octal(UnixFileMode mode) => "0" + Convert.ToString((int)mode, 8);
+
+    /// <summary>
+    /// Writes a generated compose-store credential (#3914), owner-only from the moment it exists: created 0600 on
+    /// Unix (the <c>UnixCreateMode</c> applies at creation, so there is no window at the umask's mode), and created
+    /// with its ACL already applied on Windows (<see cref="DarlingFileSecurity.CreateHardenedFile"/>, so the folder's
+    /// inherited access never reaches it), then renamed over the old file so a reader never sees half of one. On
+    /// Windows the result is checked before it replaces anything, the managed files' verify-don't-assume rule: a file
+    /// ordinary users can still read after one more harden is not put in place. Best-effort: the role already has
+    /// this start's password, so a failure costs a re-assert on the next start and is logged. The directory is the
+    /// caller's (<see cref="PrepareComposeCredentialDirectory"/>).
+    /// </summary>
+    private static void PersistComposeCredential(string directory, ComposeCredential credential, ILogger logger)
+    {
+        var path = Path.Combine(directory, ComposeStoreCredentialFileName(credential.Role));
+        var temporary = path + ".tmp";
+        try
+        {
+            File.Delete(temporary);
+            if (OperatingSystem.IsWindows())
+            {
+                using (var stream = DarlingFileSecurity.CreateHardenedFile(temporary, allowInteractiveRead: false))
+                using (var writer = new StreamWriter(stream))
+                {
+                    writer.Write(credential.Password);
+                }
+
+                if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                {
+                    DarlingFileSecurity.HardenFile(temporary, allowInteractiveRead: false);
+                    if (DarlingFileSecurity.IsReadableByOrdinaryUsers(temporary))
+                    {
+                        throw new InvalidOperationException(
+                            "ordinary local users can read it even after it was created owner-only and hardened again"
+                            + DarlingFileSecurity.DescribeOwnerAndExposure(temporary));
+                    }
+                }
+            }
+            else
+            {
+                using var stream = new FileStream(temporary, new FileStreamOptions
+                {
+                    Mode = FileMode.CreateNew,
+                    Access = FileAccess.Write,
+                    UnixCreateMode = OwnerOnlyFile,
+                });
+                using var writer = new StreamWriter(stream);
+                writer.Write(credential.Password);
+            }
+
+            File.Move(temporary, path, overwrite: true);
+            logger.LogInformation(
+                "Generated the compose store's '{Role}' role credential ({File})", credential.Role, path);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(
+                "Could not write the compose store's '{Role}' credential {File} ({Message}). The role has this start's password; the next start generates a new one and re-asserts it.",
+                credential.Role, path, ex.Message);
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                logger.LogDebug("Could not remove {File}: {Message}", temporary, cleanup.Message);
+            }
+        }
+    }
+
+    /// <summary>One role's compose-store password and whether it was generated this start (#3914). A class, not
+    /// a record, so no generated <c>ToString</c> can put the password in a log line.</summary>
+    private sealed class ComposeCredential
+    {
+        public ComposeCredential(string role, string password, bool generated)
+        {
+            Role = role;
+            Password = password;
+            Generated = generated;
+        }
+
+        public string Role { get; }
+
+        public string Password { get; }
+
+        public bool Generated { get; }
+    }
 }
 
 /// <summary>
@@ -1059,3 +1740,122 @@ public enum PasswordReassert
 /// </summary>
 public sealed record ViewerSecretTableAcl(
     string Table, IReadOnlyList<string> NonSecretColumns, IReadOnlyList<string> SecretColumns);
+
+/// <summary>
+/// Which store a provisioning batch is written for (#3914): the managed store, or the compose distribution's own.
+/// A class with two factories rather than a record, so no caller can put an arbitrary marker into the batch's
+/// string literals or an unquoted name into its identifiers.
+/// </summary>
+public sealed class ProvisioningTarget
+{
+    private ProvisioningTarget(string ownerIdentifier, string databaseIdentifier, string roleMarker, bool revokePublicDatabaseAccess)
+    {
+        OwnerIdentifier = ownerIdentifier;
+        DatabaseIdentifier = databaseIdentifier;
+        RoleMarker = roleMarker;
+        RevokePublicDatabaseAccess = revokePublicDatabaseAccess;
+    }
+
+    /// <summary>The managed store: owner and database <c>darling</c>, bare, exactly as the batch always named
+    /// them, and <see cref="DarlingManagedRoles.RoleMarker"/>.</summary>
+    public static ProvisioningTarget Managed { get; } = new(
+        DarlingManagedPostgres.UserName, DarlingManagedPostgres.DatabaseName, DarlingManagedRoles.RoleMarker, revokePublicDatabaseAccess: true);
+
+    /// <summary>The compose store, named by the login and database the service is connected to, quoted, since
+    /// the compose file can rename both.</summary>
+    public static ProvisioningTarget ComposeStore(string login, string database) => new(
+        QuoteIdentifier(login), QuoteIdentifier(database), DarlingManagedRoles.ComposeStoreRoleMarker, revokePublicDatabaseAccess: false);
+
+    /// <summary>The role that creates the store's tables, as SQL: what <c>ALTER DEFAULT PRIVILEGES FOR ROLE</c> names.</summary>
+    public string OwnerIdentifier { get; }
+
+    /// <summary>The store's database, as SQL.</summary>
+    public string DatabaseIdentifier { get; }
+
+    /// <summary>The comment stamped on the roles this batch creates, and required on the ones it adopts.</summary>
+    public string RoleMarker { get; }
+
+    /// <summary>Whether the batch revokes PUBLIC's database-level access (<c>CONNECT</c>/<c>TEMPORARY</c>).</summary>
+    public bool RevokePublicDatabaseAccess { get; }
+
+    internal static string QuoteIdentifier(string name) => "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
+}
+
+/// <summary>The login and role facts <see cref="DarlingManagedRoles.RefuseComposeStore"/> decides on (#3914).</summary>
+/// <param name="Login">The role the service connects as.</param>
+/// <param name="Database">The database it is connected to.</param>
+/// <param name="BootstrapSuperuser">Whether that role is the cluster's bootstrap superuser (oid 10).</param>
+/// <param name="ExistingRoleMarkers">Each of admin/viewer/mcp that already exists, with its role comment.</param>
+/// <param name="OtherDatabases">The cluster's databases other than the store's own, <c>postgres</c> and the
+/// templates, by name.</param>
+internal sealed record ComposeStoreFacts(
+    string Login, string Database, bool BootstrapSuperuser, IReadOnlyDictionary<string, string?> ExistingRoleMarkers,
+    IReadOnlyList<string> OtherDatabases);
+
+/// <summary>
+/// What <see cref="DarlingManagedRoles.EnsureComposeStoreProvisionedAsync"/> did (#3914). A class, not a record, so
+/// no generated <c>ToString</c> can print the passwords into a log line.
+/// </summary>
+public sealed class ComposeStoreProvisioning
+{
+    private ComposeStoreProvisioning(bool provisioned, int appliedSeconds, string? viewerPassword, string? mcpPassword, string? refusalReason)
+    {
+        Provisioned = provisioned;
+        AppliedComposeStatementTimeoutSeconds = appliedSeconds;
+        ViewerPassword = viewerPassword;
+        McpPassword = mcpPassword;
+        RefusalReason = refusalReason;
+    }
+
+    /// <summary>The roles exist, carry the passwords below, and hold the managed grants.</summary>
+    public bool Provisioned { get; }
+
+    /// <summary>The compose statement_timeout written onto the roles, for the #2918 reload baseline.</summary>
+    public int AppliedComposeStatementTimeoutSeconds { get; }
+
+    /// <summary>The <c>viewer</c> role's password; null when refused.</summary>
+    public string? ViewerPassword { get; }
+
+    /// <summary>The <c>mcp</c> role's password; null when refused.</summary>
+    public string? McpPassword { get; }
+
+    /// <summary>Why nothing was provisioned; null when provisioned.</summary>
+    public string? RefusalReason { get; }
+
+    internal static ComposeStoreProvisioning Succeeded(int appliedSeconds, string viewerPassword, string mcpPassword) =>
+        new(true, appliedSeconds, viewerPassword, mcpPassword, null);
+
+    internal static ComposeStoreProvisioning Refused(string reason) =>
+        new(false, DarlingManagedRoles.ComposeStatementTimeoutUnknown, null, null, reason);
+}
+
+/// <summary>
+/// What the service holds from an earlier start for one of the compose store's roles (#3914,
+/// <see cref="DarlingManagedRoles.ReadEarlierComposeCredential"/>): a trusted credential file's password, or why
+/// there is none. A class, not a record, so no generated <c>ToString</c> can print the password.
+/// </summary>
+internal sealed class EarlierComposeCredential
+{
+    private EarlierComposeCredential(string? password, string? missingReason)
+    {
+        Password = password;
+        MissingReason = missingReason;
+    }
+
+    /// <summary>The role's password; null when there is none to use.</summary>
+    internal string? Password { get; }
+
+    /// <summary>Why there is none, for the owner-fallback warning; null when there is.</summary>
+    internal string? MissingReason { get; }
+
+    internal static EarlierComposeCredential Trusted(string password) =>
+        new(password ?? throw new ArgumentNullException(nameof(password)), null);
+
+    internal static EarlierComposeCredential None(string reason) =>
+        new(null, reason ?? throw new ArgumentNullException(nameof(reason)));
+}
+
+/// <summary>What the service may do with the compose store's credentials directory this start (#3914).</summary>
+/// <param name="Distrust">Why none of its files is read this start; null when they are.</param>
+/// <param name="MayWrite">Whether a credential generated this start is written there.</param>
+internal sealed record ComposeCredentialDirectoryTrust(string? Distrust, bool MayWrite);

@@ -621,12 +621,15 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
     [Fact]
     public async Task DailySummary_StopsPaintingPurgedDaysGreen_AndPublishesTheHorizon()
     {
-        var today = DateTime.UtcNow.Date;
-        var horizon = LocalDataService.DailySummaryRetentionHorizon(DateTime.UtcNow);
+        var now = DateTime.UtcNow;
+        var today = now.Date;
+        var horizon = LocalDataService.DailySummaryRetentionHorizon(now);
         var ghostDay = horizon.AddDays(-10);
         var uncollectedDay = today.AddDays(-3);
 
-        await SeedRunAsync(DateTime.UtcNow.AddMinutes(-2));
+        /* Today's run has to land on today: two minutes back crosses midnight UTC in a day's first two
+           minutes, which is how this failed CI at 00:01Z on #3942. */
+        await SeedRunAsync(now.AddMinutes(-2) < today ? now : now.AddMinutes(-2));
         await SeedRunAsync(ghostDay.AddHours(12));
         /* Signal rows and no run record: the spine holds the day from wait_stats alone. */
         await SeedWaitStatAsync(uncollectedDay.AddHours(12), "CXPACKET", 4000);
@@ -674,13 +677,21 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.StartsWith("Invalid summary_date value '01/02/2026'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetDailySummary(_dataService, _serverManager, ServerName, "01/02/2026")), StringComparison.Ordinal);
     }
 
-    /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock.</summary>
+    /// <summary>The Lite horizon is the archive retention constant, in months, from the reader's clock, rounded
+    /// up to the month start the whole-file archive cleanup actually keeps: the cutoff's own month is deleted
+    /// with its file, so a mid-month cutoff holds nothing until the next month begins.</summary>
     [Fact]
-    public void TheLiteHorizon_IsTheArchiveRetention_InMonths()
+    public void TheLiteHorizon_IsTheArchiveRetention_InMonths_FromTheFirstWholeMonthKept()
     {
-        var now = new DateTime(2026, 9, 18, 14, 30, 0, DateTimeKind.Utc);
-        Assert.Equal(now.AddMonths(-RetentionService.ArchiveRetentionMonths).Date, LocalDataService.DailySummaryRetentionHorizon(now));
         Assert.Equal(3, RetentionService.ArchiveRetentionMonths);
+
+        var midMonth = new DateTime(2026, 9, 18, 14, 30, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 7, 1), LocalDataService.DailySummaryRetentionHorizon(midMonth));
+        Assert.Equal(RetentionService.OldestRetainedInstant(midMonth), LocalDataService.DailySummaryRetentionHorizon(midMonth));
+
+        /* A cutoff that is itself a month start keeps that month: its file is not before the cutoff. */
+        var monthStart = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(new DateTime(2026, 6, 1), LocalDataService.DailySummaryRetentionHorizon(monthStart));
     }
 
     /* ───────────────────────── the contract, as a census ───────────────────────── */

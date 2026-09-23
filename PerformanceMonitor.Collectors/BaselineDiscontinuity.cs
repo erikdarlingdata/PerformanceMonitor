@@ -123,10 +123,16 @@ public static class BaselineDiscontinuities
 
     /// <summary>
     /// The one sentence every trend tool's description gains on both SKUs, naming the key and what a reader
-    /// should do with it. Spelled once so the twenty descriptions cannot drift, and pinned by the census.
+    /// should do with it. Spelled once so the sixteen descriptions (eight trend tools per SKU) cannot drift,
+    /// and pinned by the census.
+    ///
+    /// <para>Cut to the rule by #3898, because every one of those sixteen pays for each character. Each
+    /// entry's <c>detail</c> already says what moved and which family's baselines were forgotten, so the
+    /// sentence names the key, the closed <see cref="Reasons"/> vocabulary (all six words,
+    /// <see cref="IdentityReason"/> included) and what a step across a marker means.</para>
     /// </summary>
     public const string DescriptionSentence =
-        " discontinuities[] lists every baseline discontinuity inside the window as { at, reason, detail } — an instant where the target's identity epoch moved (restart, failover, rename, stats_reset, postmaster_restart) and every delta baseline for the affected family was forgotten, so the points on either side of it were measured against different instances or different counters and a step across it is the instrument re-baselining, not the workload changing. Empty when the window holds none.";
+        " discontinuities[] lists each baseline discontinuity in the window as { at, reason, detail } (reason: restart, failover, rename, identity, stats_reset, postmaster_restart): the delta baselines were reset at that instant, so a step across it is the instrument re-baselining, not the workload changing. Empty when none.";
 
     /// <summary>
     /// How far a carrier's persisted pair may sit from the marker row it belongs to and still be read as that

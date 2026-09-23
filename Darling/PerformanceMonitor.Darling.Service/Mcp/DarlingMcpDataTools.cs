@@ -955,7 +955,7 @@ public sealed class DarlingMcpDataTools
                    sql_version: "PostgreSQL 18" — so it is documented as deprecated everywhere the payload
                    is described, and retiring it belongs to a later major of the MCP contract, not here. */
                 sql_version = engineVersion,
-                status = FreshnessStatus(s.LastCollection, nowUtc),
+                status = FreshnessStatus(s.LastCollection, s.RegisteredAt, nowUtc),
                 read_only = s.ServerName.EndsWith(":RO", StringComparison.Ordinal),
                 last_collection = s.LastCollection?.ToString("o")
             };
@@ -1482,10 +1482,16 @@ public sealed class DarlingMcpDataTools
     /// it does NOT share is the vocabulary: <see cref="ServerCollectionStatusRules.McpToken"/> spells the
     /// never-collected state as one word because that value was published to MCP clients, and a status value
     /// a client keys on is a consumer API.</para>
+    ///
+    /// <para>#3967: the read has no window, but the collection log's retention bounds what it can see, so a
+    /// server whose whole history retention has dropped comes back null. Its registration tells that server
+    /// (Offline) from one that has never collected (AwaitingFirstCollection), through the same rule the fleet
+    /// card applies to its 48-hour window.</para>
     /// </summary>
-    private static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime nowUtc) =>
+    internal static string FreshnessStatus(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc) =>
         ServerCollectionStatusRules
-            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc))
+            .FromFreshness(ServerHealthClassifier.ClassifyFreshness(
+                lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc))
             .McpToken();
 
     /// <summary>

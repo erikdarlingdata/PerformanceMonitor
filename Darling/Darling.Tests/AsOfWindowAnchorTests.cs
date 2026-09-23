@@ -180,6 +180,56 @@ public sealed class AsOfWindowAnchorTests
         Assert.Equal(new DateTime(2026, 8, 18, 12, 30, 0, DateTimeKind.Utc), end.AddHours(-3));
     }
 
+    /* ── the published text (#3898) ── */
+
+    /// <summary>
+    /// The two shared <c>as_of</c> descriptions state the RULE inside the parameter budget, and the WHY they no
+    /// longer carry is still in both SKUs' server instructions.
+    ///
+    /// <para>#3898 cut <see cref="McpHelpers.AsOfDescription"/> from 379 characters to the rule, because it
+    /// rides on 91 Darling tools and 56 Lite ones and at that length was a tenth of Darling's
+    /// <c>tools/list</c>. A later cut that also dropped the rule would bring back what this file's live half
+    /// proves wrong (a wider <c>hours_back</c> standing in for an anchor), and no other test would notice:
+    /// every per-tool pin compares an attribute to the constant, so a constant that stops saying something
+    /// passes all of them. So the facts a caller acts on are pinned by their words: the anchor is the window's
+    /// END, a bare date is 00:00 UTC (the start of that day), omitting it means now, and the span is never
+    /// widened instead. The 200-character ceiling is the ruled parameter budget.</para>
+    ///
+    /// <para>The reason the rule holds lives once, in each SKU's "Asking about a PAST window" section, which
+    /// is pinned here too: Darling's through its compiled text, Lite's off its source, since this project does
+    /// not load the Lite assembly.</para>
+    /// </summary>
+    [Fact]
+    public void TheSharedAnchorDescriptions_StateTheRule_WithinTheParameterBudget_AndTheInstructionsKeepTheWhy()
+    {
+        const int ParameterBudget = 200;
+
+        var hours = McpHelpers.AsOfDescription;
+        Assert.True(hours.Length <= ParameterBudget, $"AsOfDescription is {hours.Length} characters; the parameter budget is {ParameterBudget}");
+        Assert.Contains("END of the window", hours, StringComparison.Ordinal);
+        Assert.Contains("2026-08-18 = 00:00 UTC", hours, StringComparison.Ordinal);
+        Assert.Contains("default now", hours, StringComparison.Ordinal);
+        Assert.Contains("set as_of to its end; do not widen hours_back", hours, StringComparison.Ordinal);
+
+        var days = McpHelpers.AsOfDaysDescription;
+        Assert.True(days.Length <= ParameterBudget, $"AsOfDaysDescription is {days.Length} characters; the parameter budget is {ParameterBudget}");
+        Assert.Contains("LAST day of the range", days, StringComparison.Ordinal);
+        Assert.Contains("only the UTC date counts", days, StringComparison.Ordinal);
+        Assert.Contains("default today", days, StringComparison.Ordinal);
+        Assert.Contains("set as_of to its last day; do not widen days_back", days, StringComparison.Ordinal);
+
+        var lite = File.ReadAllText(RepoFilesIn("Lite/Mcp").Single(f => Path.GetFileName(f) == "McpInstructions.cs"));
+        foreach (var (sku, instructions) in new[] { ("Darling", DarlingMcpInstructions.Text), ("Lite", lite) })
+        {
+            Assert.True(
+                instructions.Contains("do NOT substitute a wider `hours_back`: for an aggregate read a wider window is a DIFFERENT answer, not the same answer with more rows", StringComparison.Ordinal),
+                $"{sku}'s server instructions no longer say why a wider hours_back is not an anchor; the shared as_of description relies on them for it (#3898)");
+            Assert.True(
+                instructions.Contains("`2026-08-19` (midnight UTC)", StringComparison.Ordinal),
+                $"{sku}'s server instructions no longer list the date-only as_of spelling");
+        }
+    }
+
     /* ── the two surfaces carry the same convention ── */
 
     /// <summary>

@@ -103,7 +103,7 @@ public sealed class OverviewNewestReadsHotFirstTests : IDisposable
         await initializer.CreateArchiveViewsAsync();
         var data = new LocalDataService(initializer);
 
-        var hot = await data.GetServerSummaryAsync(HotServer, "hot");
+        var hot = await data.GetServerSummaryAsync(HotServer, "hot", registeredAtUtc: null);
         Assert.NotNull(hot);
         Assert.Equal(42, hot!.CpuPercent);
         Assert.Equal(4200, hot.MemoryMb);
@@ -111,7 +111,7 @@ public sealed class OverviewNewestReadsHotFirstTests : IDisposable
         Assert.Equal(hotNewest, hot.LastCollectionTime);
 
         /* The fallback: nothing hot, so the archive view answers — with the archived NEWEST row. */
-        var archived = await data.GetServerSummaryAsync(ArchiveOnlyServer, "archived");
+        var archived = await data.GetServerSummaryAsync(ArchiveOnlyServer, "archived", registeredAtUtc: null);
         Assert.NotNull(archived);
         Assert.Equal(20, archived!.CpuPercent);
         Assert.Equal(2000, archived.MemoryMb);
@@ -134,7 +134,7 @@ public sealed class OverviewNewestReadsHotFirstTests : IDisposable
         }
 
         /* The hot server's card is untouched by that: none of its three newest-row reads opened the archive. */
-        var again = await data.GetServerSummaryAsync(HotServer, "hot");
+        var again = await data.GetServerSummaryAsync(HotServer, "hot", registeredAtUtc: null);
         Assert.NotNull(again);
         Assert.Equal(42, again!.CpuPercent);
         Assert.Equal(4200, again.MemoryMb);

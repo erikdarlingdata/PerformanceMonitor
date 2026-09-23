@@ -25,11 +25,17 @@ namespace PerformanceMonitorLite.Tests;
 /// had no read on either SKU: get_wait_trend charts ONE named wait type, and this is the whole LCK family
 /// at once as a per-second rate.
 ///
-/// <para>Three properties carry the weight, and none of them is "the SQL runs". The empty branch must NOT
+/// <para>Since #3897 the family is the SERIES — every LCK type's wait summed per collection, bucketed — and the
+/// types are a LEGEND of the ones that waited, with the idle ones counted. It was a row per (collection, type),
+/// which grew with every lock type a server had ever waited on and was 96% zeros on DARLING01.</para>
+///
+/// <para>The properties that carry the weight, and none of them is "the SQL runs". The empty branch must NOT
 /// be filtered the way the read is — a server collected for months that never took a lock wait is the
-/// all-clear this branch exists to give, and an LCK-filtered probe would call it uncollected. The rate must
-/// survive being fractional, because #2507 shipped an integer rate and a server at 0.4 a second reported
-/// zero. And the anchor must reach the query, proven by CONTENT rather than by signature.</para>
+/// all-clear this branch exists to give, and an LCK-filtered probe would call it uncollected. A window of
+/// collected, idle lock types is DATA — a measured zero — not an empty answer. The rate must survive being
+/// fractional, because #2507 shipped an integer rate and a server at 0.4 a second reported zero. The family
+/// has ONE interval per collection, so summing its types cannot divide it by their number. And the anchor
+/// must reach the query, proven by CONTENT rather than by signature.</para>
 /// </summary>
 public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -101,7 +107,7 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
     }
 
     [Fact]
-    public async Task TheRate_IsPerSecond_Fractional_AndDropsCounterResets()
+    public async Task TheFamilyRate_IsPerSecond_Fractional_AndDropsCounterResets()
     {
         var service = new LocalDataService(_duckDb);
         var first = Truncate(DateTime.UtcNow).AddMinutes(-30);
@@ -124,25 +130,80 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
         var root = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 4));
         Assert.Equal(ServerName, root.GetProperty("server").GetString());
 
-        var trend = root.GetProperty("trend").EnumerateArray().ToArray();
-        Assert.DoesNotContain(trend, r => r.GetProperty("wait_type").GetString() == "CXPACKET");
-        Assert.DoesNotContain(trend, r => r.GetProperty("wait_type").GetString() == "LCK_M_U");
+        /* The family: the FIRST collection of each type has no prior sample to difference against and (a pre-v60
+           row) no stored interval, so it is left out — it used to be charted as 0.00, a fabricated idle point
+           (#3540) — and the one rated collection is the second, where the family waited 6,000 + 3 ms over its ONE
+           60-second interval: 100.05 ms/sec. CXPACKET is filtered by the read, and the reset row is dropped rather
+           than charted as a negative wait. */
+        var point = Assert.Single(root.GetProperty("trend").EnumerateArray().ToArray());
+        Assert.Equal(100.05, point.GetProperty("wait_time_ms_per_second").GetDouble(), 3);
+        Assert.Equal(100.05, point.GetProperty("peak_wait_time_ms_per_second").GetDouble(), 3);
+        Assert.Equal("2 minutes", root.GetProperty("bucket").GetString());
 
-        /* Two rows: two wait types x the SECOND collection only. The FIRST collection of each type has no
-           prior sample to difference against and (a pre-v60 row) no stored interval, so its rate is NULL and
-           the row is dropped — it used to be charted as 0.00, a fabricated idle point (#3540). The LAG is per
-           wait type, which is what stops one type's cadence describing another. */
-        Assert.Equal(2, trend.Length);
-        Assert.DoesNotContain(trend, r => r.GetProperty("collection_time").GetString()!
-            .StartsWith(first.ToString("yyyy-MM-ddTHH:mm:ss"), StringComparison.Ordinal));
-
-        Assert.Equal(100d, RateOf(trend, "LCK_M_X", second), 3);
+        /* The legend names the types that waited, heaviest first, each with its own rate. The LAG is per wait
+           type, which is what stops one type's cadence describing another. */
+        var types = root.GetProperty("wait_types").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "LCK_M_X", "LCK_M_S" }, types.Select(t => t.GetProperty("wait_type").GetString()).ToArray());
+        Assert.Equal(100d, types[0].GetProperty("wait_time_ms_per_second").GetDouble(), 4);
+        Assert.DoesNotContain(types, t => t.GetProperty("wait_type").GetString() is "CXPACKET" or "LCK_M_U");
+        Assert.Equal(0, root.GetProperty("wait_types_idle").GetInt32());
 
         /* The fractional rate. Asserted as > 0 as well as by value, because "0.05" and "0" differ by a cast
            and the point of the assertion is that the cast is there. */
-        var tinyRate = RateOf(trend, "LCK_M_S", second);
+        var tinyRate = types[1].GetProperty("wait_time_ms_per_second").GetDouble();
         Assert.True(tinyRate > 0, $"a 3 ms delta over 60 s must not truncate to zero, got {tinyRate}");
-        Assert.Equal(0.05d, tinyRate, 3);
+        Assert.Equal(0.05d, tinyRate, 4);
+    }
+
+    /// <summary>
+    /// #3897: the family's denominator is each collection's ONE interval, and a window whose LCK types were
+    /// collected and never waited is a measured zero, not an empty answer. Fixed instants and stored intervals
+    /// (the v60 shape): two types in collection c1, one in c2, a third type idle throughout, all in one 60-minute
+    /// bucket — Darling's DarlingLockWaitTrendTests plants the same rows and asserts the same figures.
+    /// </summary>
+    [Fact]
+    public async Task TheFamily_SumsTypesOverOneIntervalPerCollection_AndAnIdleWindowIsAMeasuredZero()
+    {
+        var service = new LocalDataService(_duckDb);
+        var c1 = new DateTime(2026, 3, 4, 10, 10, 0, DateTimeKind.Unspecified);
+        var c2 = c1.AddMinutes(1);
+        var c3 = c1.AddMinutes(2);
+
+        /* c1: X 1,200 ms and S 600 ms over one 60 s sweep → 30 ms/s; c2: X 3,000 ms alone over a 120 s sweep →
+           25 ms/s; c3: nothing waits → 0. IX is collected and idle throughout. */
+        await SeedWaitAsync(c1, "LCK_M_X", 1_200, interval: 60);
+        await SeedWaitAsync(c1, "LCK_M_S", 600, interval: 60);
+        await SeedWaitAsync(c1, "LCK_M_IX", 0, interval: 60);
+        await SeedWaitAsync(c2, "LCK_M_X", 3_000, interval: 120);
+        await SeedWaitAsync(c2, "LCK_M_IX", 0, interval: 120);
+        await SeedWaitAsync(c3, "LCK_M_X", 0, interval: 60);
+        await SeedWaitAsync(c3, "LCK_M_IX", 0, interval: 60);
+
+        var root = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 2, "2026-03-04T11:00:00Z", bucket_minutes: 60));
+
+        /* One bucket: (1,200 + 600 + 3,000 + 0) ms over (60 + 120 + 60) s = 20 ms/s. Summing the types'
+           INTERVALS would have divided c1 by 120; averaging the per-collection rates would have read (30 + 25 + 0)
+           / 3. The peak is c1's family rate. */
+        var point = Assert.Single(root.GetProperty("trend").EnumerateArray().ToArray());
+        Assert.Equal(20d, point.GetProperty("wait_time_ms_per_second").GetDouble(), 6);
+        Assert.Equal(30d, point.GetProperty("peak_wait_time_ms_per_second").GetDouble(), 6);
+        Assert.StartsWith("2026-03-04T10:00:00", point.GetProperty("collection_time").GetString()!, StringComparison.Ordinal);
+        Assert.Equal(1, root.GetProperty("wait_types_idle").GetInt32());
+        Assert.Equal(new[] { "LCK_M_X", "LCK_M_S" }, root.GetProperty("wait_types").EnumerateArray().Select(t => t.GetProperty("wait_type").GetString()).ToArray());
+        Assert.EndsWith("The width is the bucket_minutes you passed.", root.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
+
+        /* An hour later, every type collected and idle: data, not "widen hours_back". */
+        var d1 = new DateTime(2026, 3, 4, 12, 10, 0, DateTimeKind.Unspecified);
+        await SeedWaitAsync(d1, "LCK_M_X", 0, interval: 60);
+        await SeedWaitAsync(d1.AddMinutes(1), "LCK_M_X", 0, interval: 60);
+        await SeedWaitAsync(d1, "LCK_M_S", 0, interval: 60);
+
+        var idle = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 1, "2026-03-04T13:00:00Z"));
+        Assert.False(idle.TryGetProperty("status", out _), "collected-but-idle lock types are an answer, not an empty status");
+        Assert.All(idle.GetProperty("trend").EnumerateArray(), p => Assert.Equal(0d, p.GetProperty("wait_time_ms_per_second").GetDouble()));
+        Assert.Empty(idle.GetProperty("wait_types").EnumerateArray());
+        Assert.Equal(2, idle.GetProperty("wait_types_idle").GetInt32());
+        Assert.Contains("measured zero", idle.GetProperty("wait_types_note").GetString()!, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -162,12 +223,11 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
 
         var anchor = DateTime.SpecifyKind(incident.AddSeconds(60), DateTimeKind.Utc).ToString("o");
         var anchored = Root(await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 1, anchor));
-        var rows = anchored.GetProperty("trend").EnumerateArray().ToArray();
 
-        /* One row: the first anchored collection has no prior and is not a point (#3540). */
-        var row = Assert.Single(rows);
-        Assert.Equal("LCK_M_IX", row.GetProperty("wait_type").GetString());
-        Assert.Equal(30d, RateOf(rows, "LCK_M_IX", incident.AddSeconds(60)), 3);
+        /* One point: the first anchored collection has no prior and is not rated (#3540). */
+        var point = Assert.Single(anchored.GetProperty("trend").EnumerateArray().ToArray());
+        Assert.Equal(30d, point.GetProperty("wait_time_ms_per_second").GetDouble(), 3);
+        Assert.Equal("LCK_M_IX", Assert.Single(anchored.GetProperty("wait_types").EnumerateArray().ToArray()).GetProperty("wait_type").GetString());
 
         /* The same LENGTH of window at the default anchor cannot reach it — so it is the anchor doing the
            work, not hours_back. */
@@ -177,21 +237,6 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
         /* An anchor we cannot use is refused, never silently treated as now. */
         var bad = await McpBlockingTools.GetLockWaitTrend(service, _serverManager, ServerName, 1, "last tuesday");
         Assert.Contains("Invalid as_of", bad, StringComparison.Ordinal);
-    }
-
-    /// <summary>The rate the read returned for one (wait type, collection) pair, asserted to exist.</summary>
-    private static double RateOf(JsonElement[] rows, string waitType, DateTime collectionTimeUtc)
-    {
-        var stamp = collectionTimeUtc.ToString("yyyy-MM-ddTHH:mm:ss");
-        var row = rows.FirstOrDefault(r =>
-            r.GetProperty("wait_type").GetString() == waitType &&
-            r.GetProperty("collection_time").GetString()!.StartsWith(stamp, StringComparison.Ordinal));
-
-        Assert.True(
-            row.ValueKind == JsonValueKind.Object,
-            $"no {waitType} row at {stamp} — the read returned [{string.Join(", ", rows.Select(r => r.GetProperty("wait_type").GetString() + "@" + r.GetProperty("collection_time").GetString()))}]");
-
-        return row.GetProperty("wait_time_ms_per_second").GetDouble();
     }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
@@ -209,7 +254,8 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
         return _seedConn;
     }
 
-    private async Task SeedWaitAsync(DateTime collectionTime, string waitType, long deltaMs)
+    /// <summary>A wait_stats row; <paramref name="interval"/> null is the pre-v60 shape the read LAG-rates.</summary>
+    private async Task SeedWaitAsync(DateTime collectionTime, string waitType, long deltaMs, int? interval = null)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var connection = await SeedConnectionAsync();
@@ -218,14 +264,15 @@ public sealed class LockWaitTrendToolTests : IClassFixture<SharedDuckDbFixture>,
 INSERT INTO wait_stats
     (collection_id, collection_time, server_id, server_name, wait_type,
      waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
-     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms)
-VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 1, $6, 0)";
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, 0, 0, 0, 1, $6, 0, $7)";
         cmd.Parameters.Add(new DuckDBParameter { Value = _nextId++ });
         cmd.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified) });
         cmd.Parameters.Add(new DuckDBParameter { Value = _serverId });
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerName });
         cmd.Parameters.Add(new DuckDBParameter { Value = waitType });
         cmd.Parameters.Add(new DuckDBParameter { Value = deltaMs });
+        cmd.Parameters.Add(new DuckDBParameter { Value = (object?)interval ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
 }

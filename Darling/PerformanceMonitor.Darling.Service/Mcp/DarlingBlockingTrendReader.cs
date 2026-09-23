@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -21,8 +24,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>GetBlockingTrendAsync</c> / <c>GetDeadlockTrendAsync</c> / <c>GetLockWaitTrendAsync</c> ported to
 /// Postgres. All are STORED reads (no live monitored-server hit). The first two share a
 /// <c>(bucket timestamp, COUNT(*))</c> shape, so one reader maps both; COUNT(*) is <c>bigint</c> in Postgres,
-/// read via GetInt64 and narrowed to the point's int. The lock-wait lane has its own mapper — it is a
-/// fractional RATE per (collection, wait type) rather than a count.
+/// read via GetInt64 and narrowed to the point's int. The lock-wait lane has its own two reads — the family's
+/// bucketed fractional RATE and the per-type legend (#3897) — rather than a count.
 /// Public-const SQL so Darling.Tests pin the dialect (the XE-preferred + DMV-fallback union, the deadlock
 /// bucket-on-deadlock_time, the lock-wait LAG interval) without a live Postgres.
 /// </summary>
@@ -79,29 +82,25 @@ internal static class DarlingBlockingTrendReader
         ORDER BY bucket
         """;
 
-    /// <summary>One LCK% wait type's per-second wait rate at one collection (mirror of the viewer's
-    /// <c>LockWaitTrendPoint</c>).</summary>
-    public sealed record LockWaitTrendReadPoint(DateTime CollectionTime, string WaitType, double WaitTimeMsPerSecond);
-
     /// <summary>
-    /// LCK% wait per-second rates — the viewer's <c>LockWaitTrendSql</c>, VERBATIM. Reads
-    /// <c>v_wait_stats</c> filtered to lock waits, derives each row's collection interval from the LAG of
-    /// the prior collection_time (partitioned by wait type), and divides the delta wait time by that
-    /// interval for a per-second rate. The delta is CAST to double precision before the division so a
-    /// sub-one-millisecond-per-second rate does not truncate to zero — the same defect #2507 found in the
-    /// execution-count trend, where a quiet server reported as an idle one. Negative deltas are dropped:
-    /// those are the counter reset across a SQL Server restart, not a negative wait. $1 server_id,
-    /// $2 window start, $3 window end (naive UTC).
+    /// The LCK% rows both lock-wait statements read (#3897), reduced to the ones whose rate is knowable — the rows
+    /// the pre-#3897 per-collection read kept. <c>raw</c> is the viewer's <c>LockWaitTrendSql</c> CTE verbatim:
+    /// <c>v_wait_stats</c> filtered to lock waits, each row's interval the STORED one (#3540; 0, no delta knowable,
+    /// becomes NULL through NULLIF) or, on a pre-V127 row, the LAG of the prior collection per wait type.
+    /// <c>rated</c> keeps a row only where that interval is positive and the delta is not negative — a negative
+    /// delta is the counter reset across a SQL Server restart, not a negative wait — and CASTs the delta to double
+    /// precision so a sub-one-millisecond-per-second rate does not truncate to zero (#2507).
+    /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string LockWaitTrendSql = """
-        WITH raw AS
+    private const string LockWaitRatedCtes = """
+        raw AS
         (
             SELECT
                 collection_time,
                 wait_type,
                 delta_wait_time_ms,
                 /* #3540: the STORED interval where the row has one; 0 (no delta knowable) becomes NULL through NULLIF
-                   and the reader drops the row rather than reading 0.00. NULL (a pre-V127 row) falls back to the LAG. */
+                   and the row is left out rather than read as 0.00. NULL (a pre-V127 row) falls back to the LAG. */
                 CASE WHEN sample_interval_seconds IS NULL
                      THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time))))
                      ELSE NULLIF(sample_interval_seconds, 0)
@@ -111,14 +110,69 @@ internal static class DarlingBlockingTrendReader
             AND   wait_type LIKE 'LCK%'
             AND   collection_time >= $2
             AND   collection_time <= $3
+        ),
+        rated AS
+        (
+            SELECT
+                collection_time,
+                wait_type,
+                CAST(delta_wait_time_ms AS double precision) AS wait_ms,
+                interval_seconds
+            FROM raw
+            WHERE interval_seconds > 0
+            AND   delta_wait_time_ms >= 0
+        )
+        """;
+
+    /// <summary>
+    /// Every LCK% type the window rated, with its window totals (#3897): the legend that says which types make up
+    /// the family series, and the one read that still names them one by one — the pre-#3897 payload carried a row
+    /// per type per collection, 96% of them zero, and grew with the number of lock types a server had ever seen.
+    /// A type that never waited comes back with a zero total, so the tool can count it without listing it.
+    /// The rate is the total over the seconds the rated rows covered; the peak is the worst single collection.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// </summary>
+    public const string LockWaitTypesSql = $"""
+        WITH {LockWaitRatedCtes}
+        SELECT
+            wait_type,
+            SUM(wait_ms) AS total_wait_ms,
+            SUM(interval_seconds) AS rated_seconds,
+            MAX(CASE WHEN interval_seconds > 0 THEN wait_ms / interval_seconds END) AS peak_wait_time_ms_per_second
+        FROM rated
+        GROUP BY wait_type
+        ORDER BY wait_type
+        """;
+
+    /// <summary>
+    /// The lock-wait FAMILY, bucketed (#3897) — what the tool's description has always called it: every LCK% type's
+    /// wait summed per collection and rated over that collection's interval (<c>per_collection</c>: one interval
+    /// per collection, not one per type, so summing the types cannot multiply the denominator), then
+    /// time-weighted across the bucket — the bucket's summed wait over its summed seconds, never an average of
+    /// per-collection rates. The peak is the worst single collection's family rate, so a one-minute pile-up
+    /// survives a sixty-minute bucket. A collection none of whose rows is rated contributes nothing, and a
+    /// bucket made only of those does not appear — the old read dropped such rows the same way.
+    /// Each point is stamped at its bucket's start, the first at the window's start. $1 server_id, $2 window
+    /// start, $3 window end (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public const string LockWaitTrendSql = $"""
+        WITH {LockWaitRatedCtes},
+        per_collection AS
+        (
+            SELECT
+                collection_time,
+                SUM(wait_ms) AS wait_ms,
+                MAX(interval_seconds) AS interval_seconds
+            FROM rated
+            GROUP BY collection_time
         )
         SELECT
-            collection_time,
-            wait_type,
-            CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second
-        FROM raw
-        WHERE delta_wait_time_ms >= 0
-        ORDER BY collection_time, wait_type
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            SUM(wait_ms) / SUM(interval_seconds) AS wait_time_ms_per_second,
+            MAX(CASE WHEN interval_seconds > 0 THEN wait_ms / interval_seconds END) AS peak_wait_time_ms_per_second
+        FROM per_collection
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>Blocking-incident-per-minute buckets for one server over the window.</summary>
@@ -132,30 +186,47 @@ internal static class DarlingBlockingTrendReader
         => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, cancellationToken);
 
     /// <summary>
-    /// LCK% wait per-second rates for one server over the window — one row per (collection, lock wait type).
-    /// Its own mapper rather than the count-trend one above: this returns three columns of two different
-    /// types, and the rate is a double the whole point of which is that it is fractional.
+    /// The lock-wait family for one server over the window, one point per bucket of <paramref name="bucketMinutes"/>
+    /// (#3897). Its own mapper rather than the count-trend one above: the rate is a double the whole point of
+    /// which is that it is fractional. The SQL rates only knowable rows, so every point it returns has a rate.
     /// </summary>
-    public static async Task<List<LockWaitTrendReadPoint>> GetLockWaitTrendAsync(
+    public static async Task<List<LockWaitPoint>> GetLockWaitTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        var items = new List<LockWaitPoint>();
+        await using var command = postgres.CreateCommand(LockWaitTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new LockWaitPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2), CultureInfo.InvariantCulture)));
+        }
+
+        return items;
+    }
+
+    /// <summary>Runs <see cref="LockWaitTypesSql"/>: every LCK% type the window rated, with its totals.</summary>
+    public static async Task<List<LockWaitType>> GetLockWaitTypesAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var items = new List<LockWaitTrendReadPoint>();
-        await using var command = postgres.CreateCommand(LockWaitTrendSql);
+        var items = new List<LockWaitType>();
+        await using var command = postgres.CreateCommand(LockWaitTypesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
-            if (reader.IsDBNull(2))
-            {
-                continue;
-            }
-
-            items.Add(new LockWaitTrendReadPoint(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                reader.GetDouble(2)));
+            items.Add(new LockWaitType(
+                reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2), CultureInfo.InvariantCulture),
+                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3), CultureInfo.InvariantCulture)));
         }
 
         return items;

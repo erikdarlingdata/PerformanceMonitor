@@ -614,6 +614,8 @@ public sealed class PgTargetKnobsTests
         /* The latest snapshot AT OR BEFORE the window end — so a historical window states the setting that applied then. */
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
+        /* #3928: the day first on both the anchor and the row scan, every retained snapshot only as the fallback. */
+        Assert.Equal(2, sql.Split("collection_time >= $3").Length - 1);
         /* PostgreSQL's own verdict, never a text comparison against boot_val. */
         Assert.Contains("(coalesce(c.source, 'default') = 'default') AS is_default", sql, StringComparison.Ordinal);
         foreach (var name in new[]

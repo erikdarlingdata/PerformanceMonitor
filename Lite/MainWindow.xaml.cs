@@ -222,7 +222,8 @@ public partial class MainWindow : Window
             _backgroundService = new CollectionBackgroundService(
                 _collectorService, _databaseInitializer, archiveService, retentionService, _serverManager,
                 analysisNotificationService,
-                new AppLoggerAdapter<CollectionBackgroundService>());
+                new AppLoggerAdapter<CollectionBackgroundService>(),
+                _scheduleManager);
 
             // Start background collection.
             // Off the UI thread on purpose: DuckDB.NET is synchronous and Lite has no
@@ -595,7 +596,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, _scheduleManager);
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
         catch (Exception ex)
@@ -787,7 +788,7 @@ public partial class MainWindow : Window
                 try
                 {
                     var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-                    var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent));
+                    var summary = await Task.Run(() => _dataService.GetServerSummaryAsync(serverId, server.DisplayNameWithIntent, server.RegisteredAtUtc));
                     if (summary != null)
                     {
                         summary.ServerName = server.ServerName;

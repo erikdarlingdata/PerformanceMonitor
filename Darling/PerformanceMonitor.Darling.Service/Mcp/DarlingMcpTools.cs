@@ -748,7 +748,9 @@ public sealed class DarlingMcpTools
 
             /* Coverage is discarded here on purpose (#3538 A2): this tool reads point-in-time
                configuration facts, which are the latest row regardless of window, and a one-hour window
-               the collector missed changes nothing about what the server is configured to. */
+               the collector missed changes nothing about what the server is configured to. (Physical memory
+               and database size are the newest sample within a day of now, #3896 — an hour missed is
+               still inside that.) */
             var (facts, _, _) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, 1);
 

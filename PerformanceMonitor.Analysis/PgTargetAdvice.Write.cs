@@ -136,6 +136,16 @@ public static partial class PgTargetAdvice
         if (resets > 0)
             sb.Append("Statistics were reset ").Append(KnobNum(resets)).Append(" time(s) inside the window, so these totals are a floor. ");
 
+        /* #3955: PostgreSQL counts a shutdown checkpoint as requested and keeps the count across the restart, and its own
+           write and sync phases land in the same counters, so the collector left the restart-spanning intervals out of
+           the checkpoint figures rather than read them as the workload's. */
+        var restarts = KnobMeta(pressure, "postmaster_restart_count") ?? 0;
+        if (restarts > 0)
+            sb.Append("PostgreSQL restarted ").Append(KnobNum(restarts)).Append(" time(s) inside the window; a shutdown checkpoint " +
+                      "counts as requested and its own write and sync phases land in the same counters, so the collection " +
+                      "interval(s) spanning a restart are left out of the requested count and the checkpoint write and sync " +
+                      "time rather than read as WAL pressure. ");
+
         sb.Append("Each requested checkpoint flushes every dirty buffer early and re-arms full-page images for the pages " +
                   "touched next, so a server in this state writes more WAL per transaction than the same server checkpointing " +
                   "on the clock.");

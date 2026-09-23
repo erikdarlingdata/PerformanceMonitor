@@ -373,7 +373,12 @@ public sealed class IntervalHonestHourlyRollupTests
         var legacySql = DurationTrendRouting.BuildHourlyTrendSql(legacy, withDatabaseFilter: false);
         var successorSql = DurationTrendRouting.BuildHourlyTrendSql(successor, withDatabaseFilter: false);
         Assert.Equal(legacySql.Replace(legacy, successor, StringComparison.Ordinal), successorSql);
-        Assert.Equal(DarlingTrendReader.QueryDurationTrendHourlySql, legacySql);
+
+        /* #3897: the MCP reader's hourly constant is the BUCKETED builder over the legacy view, and that builder
+           swaps the relation the same way — the successor's text differs in the name alone. */
+        var bucketedLegacy = DurationTrendRouting.BuildBucketedHourlyTrendSql(legacy);
+        Assert.Equal(DarlingTrendReader.QueryDurationTrendHourlySql, bucketedLegacy);
+        Assert.Equal(bucketedLegacy.Replace(legacy, successor, StringComparison.Ordinal), DurationTrendRouting.BuildBucketedHourlyTrendSql(successor));
 
         /* The keyed query history: the constant is the builder over the legacy, and the builder swaps FROM. */
         Assert.Equal(DarlingTrendReader.QueryHistoryHourlySqlFor(legacy), DarlingTrendReader.QueryHistoryHourlySql);

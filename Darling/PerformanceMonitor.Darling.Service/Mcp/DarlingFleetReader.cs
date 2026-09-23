@@ -208,8 +208,9 @@ AND   {SqlServerCollectedTargetSql}";
     ///
     /// <para><b>Falling out of this read is the correct answer, unlike
     /// <see cref="FleetLastCollectionSql"/>'s 48 hours.</b> That read's value is "when did we last see this
-    /// server", which a long-dark server must still report or its card drops out entirely. A CPU LEVEL is
-    /// the opposite: a four-hour-old reading is not this server's CPU now, and the card says so by carrying
+    /// server", so a long-dark server that falls out of it must still read Offline rather than never
+    /// collected (#3935, <see cref="ClassifyWindowedFreshness"/>). A CPU LEVEL is the opposite: a
+    /// four-hour-old reading is not this server's CPU now, and the card says so by carrying
     /// null and banding Unknown. The bound is <c>DarlingPgCpuUtilizationReader.Freshness</c> — three times
     /// the collector's own 5-minute cadence, so two missed cycles are tolerated — and it is that constant
     /// rather than a new number so the card and the High CPU alert agree on what "current" means.</para>
@@ -458,7 +459,8 @@ SELECT deadlock_warn_per_hour, deadlock_critical_per_hour
 FROM config_alert_settings
 WHERE id = 1";
 
-    /// <summary>Newest collection time per server — drives each card's freshness status. $1 window start.
+    /// <summary>Newest collection time per server — drives each card's freshness status. $1 window start
+    /// (<see cref="LastCollectionWindowStart"/>).
     /// Bounded (not a bare GROUP BY over the whole table) so TimescaleDB can chunk-exclude: this table only
     /// grows, and every collector run adds a row, so an unbounded MAX(collection_time) over ALL history was
     /// re-scanning the server's ENTIRE collection archive (millions of rows) on every fleet-overview call just
@@ -481,15 +483,29 @@ WHERE id = 1";
     /// table</b> (#3895). As a <c>GROUP BY</c> the window aggregated every collector run of every server in it
     /// — 490,940 rows and 103 MB on DARLING01's nine servers, for eleven timestamps — so it is now a
     /// per-server <c>LIMIT 1</c> driven from the enabled registry, an index-only descent per server (0.25 ms
-    /// there; 160 ms to 1 ms on a 43-server rig). The window is KEPT, for the paragraph above: a server dark
-    /// for longer still falls out and reads as having no recent history, exactly as it did, and the planner
-    /// still excludes every chunk older than two days before it starts.</para></summary>
+    /// there; 160 ms to 1 ms on a 43-server rig). The window is KEPT, for the paragraph above, and the planner
+    /// still excludes every chunk older than two days before it starts.</para>
+    ///
+    /// <para><b>Nothing in the window is not "never collected"</b> (#3935). A server dark for longer than the
+    /// window reached the card as a null and read "Awaiting first collection", banded Warning, while the WPF
+    /// viewer, whose per-server read has no window, called the same server Offline. Dropping the window would
+    /// have fixed the word at a price paid on every call: on DARLING01's 19 chunks the probe with no window
+    /// plans in 89–101 ms cold and 3.1–3.3 ms warm (8,937 and 273 planning buffers), against 9.8–13.1 ms and
+    /// 0.6–0.8 ms here (894 and 43), and it grows with the 60-day retention. So the window stays and the row
+    /// says what the window cannot: it is a LEFT JOIN, one row for EVERY enabled registry server, carrying
+    /// the registry's <c>created_date</c> — the server's first successful connect, written once by the
+    /// upsert — beside a newest collection that is null when the window holds none.
+    /// <see cref="ClassifyWindowedFreshness"/> turns that pair into Offline or never-collected. A null the
+    /// read positively reported is the only miss that can become Offline: a server absent from the result
+    /// altogether (disabled between <see cref="FleetServersSql"/> and this read) keeps the no-claim reading,
+    /// which is the lesson of the rotating false-Offlines this read's null fallback was written for.</para></summary>
     public const string FleetLastCollectionSql = @"
 SELECT
     s.server_id,
-    latest.collection_time AS last_collection_time
+    latest.collection_time AS last_collection_time,
+    s.created_date
 FROM servers AS s
-CROSS JOIN LATERAL
+LEFT JOIN LATERAL
 (
     SELECT collection_time
     FROM v_collection_log
@@ -497,9 +513,47 @@ CROSS JOIN LATERAL
     AND   collection_time >= $1
     ORDER BY collection_time DESC
     LIMIT 1
-) AS latest
+) AS latest ON TRUE
 WHERE s.is_enabled
 AND   s.server_id <> 0";
+
+    /// <summary>How far back <see cref="FleetLastCollectionSql"/> looks for a server's newest collection: two
+    /// days, deliberately far wider than <see cref="ServerHealthThresholds.OfflineThreshold"/> (the statement
+    /// says why).</summary>
+    internal static readonly TimeSpan LastCollectionWindow = TimeSpan.FromHours(48);
+
+    /// <summary>The instant <see cref="FleetLastCollectionSql"/>'s $1 is bound to for a roll-up at
+    /// <paramref name="now"/>, as naive UTC. ONE derivation for the bind and for
+    /// <see cref="ClassifyWindowedFreshness"/>, so the window the read searched and the window the card reasons
+    /// about cannot drift apart.</summary>
+    internal static DateTime LastCollectionWindowStart(DateTime now) =>
+        DateTime.SpecifyKind(now - LastCollectionWindow, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// A card's collection freshness from <see cref="FleetLastCollectionSql"/>'s row (#3935): the shared
+    /// registration rule (<see cref="ServerHealthClassifier"/>'s <c>ClassifyFreshness</c> overload, #3967) with
+    /// this read's window as what it could see. A newest collection inside the window bands on the ladder; with
+    /// none, a server first connected BEFORE the window reads Offline and one first connected inside it reads
+    /// awaiting its first collection, which is exact because the worker collects only after connecting (on
+    /// DARLING01 every one of the 17 registry rows has its first retained collection after its
+    /// <c>created_date</c>).
+    ///
+    /// <para><b>The window, not the retention, is what this read could see.</b> So a server that connected more
+    /// than two days ago and has never written a <c>collection_log</c> row reads Offline here, while the
+    /// viewer and <c>list_servers</c>, whose reads have no window, can still prove it never collected and say
+    /// so. That case is rare: every collector run writes a row whatever its outcome, so it takes a connect no
+    /// sweep followed. A server dark past the retention reads Offline on every surface.</para>
+    ///
+    /// <para><b>A null registration keeps the ladder's reading.</b> The service writes <c>created_date</c> on
+    /// every registry insert; a row without one was inserted by hand. The same holds for a server the read did
+    /// not report at all, which the caller passes as two nulls.</para>
+    /// </summary>
+    /// <param name="lastCollection">The newest collection inside the window, or null when the window holds
+    /// none.</param>
+    /// <param name="registeredAt">The registry's <c>created_date</c> from the same row, or null.</param>
+    /// <param name="now">The roll-up's reference instant, the one the window was cut from.</param>
+    internal static ServerFreshness ClassifyWindowedFreshness(DateTime? lastCollection, DateTime? registeredAt, DateTime now) =>
+        ServerHealthClassifier.ClassifyFreshness(lastCollection, registeredAt, LastCollectionWindowStart(now), now);
 
     /// <summary>Cross-server per-collector 7-day health aggregate — one row per (server, collector) pair carrying
     /// the columns the shared <c>CollectorHealth.HealthStatus</c> banding needs, so the caller counts each
@@ -608,12 +662,25 @@ GROUP BY server_id, collector_name";
     internal const string CollectionHealthRollupProbeSql =
         "SELECT to_regclass('collect." + TimescaleSupport.CollectionHealthHourlyView + "') IS NOT NULL";
 
+    /// <summary>The earliest watermark that can mean something was materialized (#3973): no Darling store holds
+    /// a collection from before 2000, so no real refresh can leave the watermark below it. Anything earlier is
+    /// the extension's "nothing materialized" sentinel, whichever one it uses.</summary>
+    internal static readonly DateTime MaterializedWatermarkFloor = new(2000, 1, 1);
+
     /// <summary>The aggregate's watermark — the instant below which it serves ONLY materialized buckets. NULL
-    /// before the first refresh (<c>-infinity</c>: nothing materialized, the whole window is served real-time
-    /// from raw). Run only after <see cref="CollectionHealthRollupProbeSql"/> said the aggregate exists (which
-    /// implies TimescaleDB, so the catalog is there).</summary>
+    /// while nothing is materialized, when the whole window is served real-time from raw. Run only after
+    /// <see cref="CollectionHealthRollupProbeSql"/> said the aggregate exists (which implies TimescaleDB, so the
+    /// catalog is there).
+    ///
+    /// <para><b>"Nothing materialized" is not <c>-infinity</c> (#3973).</b> The extension reports the minimum
+    /// FINITE timestamp, 4714-11-24 BC, before the first refresh (measured on TimescaleDB 2.28.1 and 2.30.1)
+    /// and still after a refresh over a window with no rows (measured on 2.28.1). <c>isfinite()</c> passes it,
+    /// and Npgsql cannot hold it as a <see cref="DateTime"/>, so the fleet overview failed with "Out of range of
+    /// DateTime" on every fresh store until rows had landed and a refresh had covered them. Anything before
+    /// <see cref="MaterializedWatermarkFloor"/> now reads as nothing materialized, whichever sentinel produced
+    /// it.</para></summary>
     internal const string CollectionHealthWatermarkSql = @"
-SELECT CASE WHEN isfinite(w) THEN w END
+SELECT CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
 FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
       FROM _timescaledb_catalog.continuous_agg
       WHERE user_view_schema = 'collect'
@@ -693,7 +760,8 @@ GROUP BY server_id, collector_name";
     /// pass, else the exact raw scan. (a) ABSENT: no aggregate (plain PostgreSQL, or not yet created) → raw.
     /// (b) CONTINUITY: any whole hour in [head end, watermark) missing as a bucket → raw
     /// (<see cref="CollectionHealthContinuitySql"/> says why). A guard read that fails is treated as a failed
-    /// guard, availability-first: the raw scan is always exact, only slower.
+    /// guard, availability-first: the raw scan is always exact, only slower. That includes a value the client
+    /// cannot convert (#3973): a guard read that produced one used to fail the whole overview instead.
     /// </summary>
     internal static async Task<bool> CollectionHealthRollupUsableAsync(
         NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken)
@@ -729,7 +797,7 @@ GROUP BY server_id, collector_name";
             var present = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
             return present >= expected;
         }
-        catch (PostgresException)
+        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
         {
             return false;
         }
@@ -829,22 +897,21 @@ GROUP BY server_id, collector_name";
                a PostgreSQL target is "no difference was taken" (unmeasured, not quiet), and for a SQL
                Server is a row BuildCard never looks at. */
             pgDeadlocks.TryGetValue(server.ServerId, out var pgDeadlock);
-            /* Not `lastCollection.TryGetValue(..., out var lastColl)` — that leaves lastColl as
-               default(DateTime) (0001-01-01) on a miss, and default(DateTime) is NOT null, so it
-               does not hit ClassifyFreshness's NeverCollected branch: it falls through to the
-               age-vs-OfflineThreshold check with an age of ~2000 years and always bands Offline.
-               A server whose row fell outside the bounded window above (or, before that fix, was
-               ever missing for any other reason) must read as "no recent history", not as a fake
-               ancient timestamp. */
-            DateTime? lastColl = lastCollection.TryGetValue(server.ServerId, out var lastCollValue)
-                ? lastCollValue
-                : null;
+            /* The row is a struct of NULLABLES, so a miss is two nulls rather than a value. This map used
+               to hold a bare DateTime, and `TryGetValue(..., out var lastColl)` then left default(DateTime)
+               (0001-01-01) on a miss — not null, so ClassifyFreshness skipped its NeverCollected branch,
+               computed an age of ~2000 years and banded Offline: the rotating false-Offlines on
+               actively-collecting servers the null fallback was written for. #3935 keeps that lesson: a
+               server the read reported with an empty window reads Offline or never-collected by its
+               registration (ClassifyWindowedFreshness); a server the read did not report at all keeps the
+               no-claim reading. */
+            lastCollection.TryGetValue(server.ServerId, out var collected);
             failingCollectors.TryGetValue(server.ServerId, out var collectors);
             tags.TryGetValue(server.ServerId, out var serverTags);
 
             cards.Add(BuildCard(
-                server, c, pg, m, mp, t, b, deadlock, pgDeadlock, lastColl, collectors, serverTags, now,
-                windowEndUtc - windowStartUtc, deadlockTiers));
+                server, c, pg, m, mp, t, b, deadlock, pgDeadlock, collected.LastCollection, collectors, serverTags, now,
+                windowEndUtc - windowStartUtc, deadlockTiers, collected.RegisteredAt));
         }
 
         return BuildRollup(cards, now, windowStartUtc, windowEndUtc, worstCount, tagForest, collectionHealthAgeSeconds);
@@ -867,6 +934,12 @@ GROUP BY server_id, collector_name";
     /// structurally empty for a SQL Server and ignored for one. Two parameters rather than one pre-merged
     /// row so this method — the step that decides what a card CLAIMS — is where the engine picks, and a
     /// test can hand a card BOTH rows and assert which one it believed.</param>
+    /// <param name="lastCollection">The newest collection inside <see cref="FleetLastCollectionSql"/>'s
+    /// window, or null when it holds none.</param>
+    /// <param name="registeredAt">The registry's <c>created_date</c> off the same row (#3935), which tells a
+    /// null <paramref name="lastCollection"/> apart: registered before the window is Offline, registered
+    /// inside it is awaiting its first collection. Trailing and defaulted to null, which keeps the shared
+    /// ladder's reading, so a caller that only exercises the metric rows need not invent a registration.</param>
     internal static FleetServerCard BuildCard(
         FleetServerRow server,
         CpuRow cpu,
@@ -882,7 +955,8 @@ GROUP BY server_id, collector_name";
         List<FleetTag>? tags,
         DateTime now,
         TimeSpan deadlockWindow,
-        DeadlockRateThresholds deadlockTiers)
+        DeadlockRateThresholds deadlockTiers,
+        DateTime? registeredAt = null)
     {
 
         /* Lite's XE-preferred / DMV-fallback, per server: XE when it has any row this window, else the DMV
@@ -980,8 +1054,10 @@ GROUP BY server_id, collector_name";
 
         /* Freshness -> the card's collection state, through the SAME mapping the WPF card and the sidebar
            row use (#2473). It was a hand-written copy of ApplyFreshness that happened to agree; the copy on
-           the sidebar row happened not to, which is the argument for none of them writing it out. */
-        var freshness = ServerHealthClassifier.ClassifyFreshness(lastCollection, now);
+           the sidebar row happened not to, which is the argument for none of them writing it out. #3935: the
+           band itself comes from the shared ladder too, with the one departure a windowed read needs — an
+           empty window on a server registered before it is Offline, not "never collected". */
+        var freshness = ClassifyWindowedFreshness(lastCollection, registeredAt, now);
         var flags = ServerCollectionStatusRules.FlagsFor(freshness);
         var isOnline = flags.IsOnline;
         var awaitingFirstCollection = flags.AwaitingFirstCollection;
@@ -1587,19 +1663,21 @@ GROUP BY server_id, collector_name";
         return map;
     }
 
-    private static async Task<Dictionary<int, DateTime>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
+    /// <summary>One <see cref="LastCollectionRow"/> per enabled registry server, INCLUDING the ones whose
+    /// window holds nothing (#3935): their row is the read's positive report that it looked and found none,
+    /// which is what <see cref="ClassifyWindowedFreshness"/> needs before it may call a server Offline.</summary>
+    private static async Task<Dictionary<int, LastCollectionRow>> ReadLastCollectionAsync(NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
-        var map = new Dictionary<int, DateTime>();
+        var map = new Dictionary<int, LastCollectionRow>();
         await using var command = postgres.CreateCommand(FleetLastCollectionSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddTimestamp(command, DateTime.SpecifyKind(now.AddHours(-48), DateTimeKind.Unspecified));
+        AddTimestamp(command, LastCollectionWindowStart(now));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            if (!reader.IsDBNull(1))
-            {
-                map[reader.GetInt32(0)] = reader.GetDateTime(1);
-            }
+            map[reader.GetInt32(0)] = new LastCollectionRow(
+                reader.IsDBNull(1) ? null : reader.GetDateTime(1),
+                reader.IsDBNull(2) ? null : reader.GetDateTime(2));
         }
 
         return map;
@@ -1724,6 +1802,16 @@ GROUP BY server_id, collector_name";
     internal readonly record struct ThreadsRow(int? TotalThreads, int? CurrentWorkers, int RunnableTasks, long WorkQueue);
     internal readonly record struct BlockingRow(int XeCount, long XeMaxWait, int DmvCount, long DmvMaxWait);
     internal readonly record struct DeadlockRow(int Count, DateTime? LastSeen);
+
+    /// <summary>One server's <see cref="FleetLastCollectionSql"/> row (#3935): its newest collection inside the
+    /// window and the registry's <c>created_date</c>, either of which can be null. Its <c>default</c> — two
+    /// nulls — is what a server the read did not report at all is handed, and it classifies exactly as a
+    /// null did before #3935: never collected, the amber no-claim reading, never a red Offline built out of
+    /// an absence.</summary>
+    /// <param name="LastCollection">The newest collection at or after <see cref="LastCollectionWindowStart"/>,
+    /// or null when the window holds none.</param>
+    /// <param name="RegisteredAt">The server's first successful connect, as the registry recorded it.</param>
+    internal readonly record struct LastCollectionRow(DateTime? LastCollection, DateTime? RegisteredAt);
     /// <summary>The PostgreSQL deadlock reading (#3539): the summed counter differences, the sample that
     /// showed the newest step, and <paramref name="Intervals"/> — how many differences the sum was taken
     /// over. Its <c>default</c> is zero intervals, which <see cref="BuildCard"/> reads as unmeasured: a
@@ -2046,6 +2134,13 @@ public sealed class FleetServerCard
     /// every collector's last run a success.</para>
     /// </summary>
     [JsonPropertyName("collection_stale")] public bool CollectionStale { get; init; }
+
+    /// <summary>The newest collection inside the fleet read's two-day window
+    /// (<see cref="DarlingFleetReader.LastCollectionWindow"/>); null when the window holds none. A null means
+    /// one of two things and <c>status</c> says which (#3935): "Awaiting first collection" for a server
+    /// registered inside the window that has not collected yet, "Offline" for one that went quiet before the
+    /// window began. The WPF viewer and <c>list_servers</c> read this instant with no window, so for the
+    /// second kind they show the older time this card leaves out; the band agrees.</summary>
     [JsonPropertyName("last_collection")] public DateTime? LastCollectionTime { get; init; }
 
     /// <summary>SQL Server's OWN share of host CPU, from the ring buffer. Null on Azure SQL DB and on every

@@ -945,6 +945,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// checkpoints' sync phases summed, so a total over ten seconds means at least one of them was long or
     /// all of them were slow, and either is the finding. The second arm, <c>checkpoints_requested &gt; 0</c>,
     /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>.
+    /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
+    /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955).
     /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
     /// </summary>
     internal const long CheckpointSyncBarMs = 10_000;
@@ -4672,6 +4674,74 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- the store's TimescaleDB extension (#3908) ---------------- */
+
+    /// <summary>
+    /// Fleet-level key for the store's TimescaleDB extension, beside <see cref="StoreUpgradeKey"/>: the same
+    /// metric, a different condition, so a start that upgrades the PostgreSQL major and then cannot move the
+    /// extension raises both.
+    /// </summary>
+    private const string StoreTimescaleKey = "storetimescale";
+
+    /// <summary>
+    /// What one service start found about the store's TimescaleDB extension (#3908): the update to the runtime's
+    /// version failed (<paramref name="Failed"/>), or the extension is behind that version after start and nothing
+    /// moved it. <paramref name="FromVersion"/> is what the store is on, null when it could not be read. A
+    /// platform-neutral copy of the Windows-only bootstrap's outcome, like <see cref="StoreUpgradeReport"/>.
+    /// </summary>
+    internal sealed record StoreTimescaleReport(bool Failed, string? FromVersion, string? ToVersion, string? FailureMessage);
+
+    /// <summary>
+    /// Reports a store whose TimescaleDB extension is not the runtime's version (#3908), ONCE per service start,
+    /// with the discipline of <see cref="EvaluateStoreUpgradeAsync"/>: a start's outcome is an event, fired when
+    /// the alert engine first exists and never re-evaluated. Under the same metric as the major upgrade, because
+    /// it is the same family and the same operator action. CRITICAL either way: the store runs and collects, but
+    /// on an older extension than the release was built and tested with, and a runtime moves TimescaleDB for a
+    /// reason, typically a published advisory against the old version.
+    /// </summary>
+    public async Task EvaluateStoreTimescaleAsync(StoreTimescaleReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            var from = report.FromVersion is null ? "its current TimescaleDB" : $"TimescaleDB {report.FromVersion}";
+            var to = report.ToVersion is null ? "the runtime's TimescaleDB" : $"TimescaleDB {report.ToVersion}";
+            var reason = string.IsNullOrWhiteSpace(report.FailureMessage)
+                ? string.Empty
+                : $" Reason: {report.FailureMessage.Trim().TrimEnd('.')}.";
+
+            var state = report.Failed
+                ? $"The store is running and collecting on {from}, whose library this runtime still carries, so nothing is down. The update is retried on the next service start."
+                : $"The store is running and collecting on {from}. Nothing moved it this start. It moves the next time this service starts the store itself, before anything can connect; a server started by something else, or one this service adopted, keeps this version until then.";
+
+            await FireAsync(
+                StoreKey(StoreTimescaleKey), _storeLabel, StoreUpgradeMetric,
+                from, to,
+                detail: $"The monitor's own store {(report.Failed ? "could not move" : "has not moved")} from {from} to {to}, the version its runtime ships.{reason} {state} " +
+                    "Until it moves, the store runs an older extension than the one this release was built and tested with.",
+                severity: AlertSeverityLevel.Critical,
+                shortMessage: report.Failed
+                    ? $"store {to} update FAILED, still running on {from}"
+                    : $"store is on {from}, runtime ships {to}",
+                /* Versions are identities, not quantities (#1881): they stay in the text. */
+                numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter; no store read happens here. */
+            _logger?.LogError("Store TimescaleDB self-alert failed: {Message}", ex.Message);
+        }
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     /// <summary>
@@ -5389,11 +5459,21 @@ internal sealed class DarlingSelfAlertEvaluator
     /// weighs against the store's disk, not a page.
     ///
     /// <para><b>Only an Observed interval is judged.</b> <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Absent"/>
-    /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract) and <c>Reset</c> (the counters went
-    /// backwards — <c>pg_stat_reset_shared</c> or a restart between sweeps) carry no measurement, and a
-    /// non-measurement neither fires nor resolves: the standing state is left as found, the agent-status
-    /// discipline. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer
-    /// and a controllable clock.</para>
+    /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract), <c>Reset</c> (the counters went
+    /// backwards — <c>pg_stat_reset_shared</c> or a restart between sweeps) and <c>Restarted</c> carry no
+    /// measurement, and a non-measurement neither fires nor resolves: the standing state is left as found, the
+    /// agent-status discipline. Gated on the master alerts switch. Internal so it pins directly with a recording
+    /// deliverer and a controllable clock.</para>
+    ///
+    /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
+    /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
+    /// stopped the store fired this alert as "WAL-forced" pressure the store did not have; and that checkpoint's
+    /// own write and sync phases land in the same counters, where nothing can separate them from the live
+    /// checkpoints' (a fast shutdown flushes every dirty buffer at once, with every client already gone, so a
+    /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
+    /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted"/> and states no delta, and the
+    /// gate below treats it like every other non-measurement. The cost is one skipped hourly interval after each
+    /// restart; the next interval is judged normally.</para>
     /// </summary>
     internal async Task ApplyCheckpointerPressureAsync(
         Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)

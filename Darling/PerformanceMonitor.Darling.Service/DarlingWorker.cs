@@ -420,6 +420,9 @@ public sealed class DarlingWorker : BackgroundService
        first hypertable conversion is real work. That pass is the one a start path would have spent minutes on
        too, and cutting it short costs only the steps it had not reached: they are idempotent, so the next
        hour resumes at the one that was interrupted rather than redoing the ladder. */
+    /// <summary>The convergence list, read-only, for tests that build a store the way the product does (#3908).</summary>
+    internal static IReadOnlyList<StoreObjectConvergenceStep> StoreObjectConvergence => s_storeObjectConvergence;
+
     private static readonly TimeSpan s_storeObjectConvergenceBudget = TimeSpan.FromMinutes(5);
 
     /* The store self-metrics sweep's cadence (fleet-level, #2068). Store growth is a slow signal — the
@@ -686,6 +689,10 @@ public sealed class DarlingWorker : BackgroundService
        config_service or schedule write, and ALTER ROLE is a catalog write we should not pay for a knob
        nobody touched. -1 means "not yet known", which cannot equal any clamped value. */
     private int _appliedComposeStatementTimeoutSeconds = -1;
+
+    /* #3914: this process provisioned the least-privilege roles on the compose distribution's own store, so the
+       reload keeps their statement_timeout current as it does on a managed store. Set only on success. */
+    private bool _composeStoreRolesProvisioned;
     private IReadOnlyList<ScheduleOverride> _scheduleOverrides = Array.Empty<ScheduleOverride>();
 
     /* The service-pause flag (Stage 2): read from config_service.paused on every reload and honored by
@@ -843,6 +850,12 @@ public sealed class DarlingWorker : BackgroundService
     private string? _storeLogRemaskCursor;
 
     private bool _storeLogRemaskDone;
+
+    /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
+       process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
+       none), and 42501, a login without the log read. get_store_log already reports the gap on the read
+       surface, so the hourly Warning only repeated what nobody was going to change. */
+    private bool _storeLogCaptureUnavailableWarned;
 
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built
        once in RunCollectionLoopAsync over the SAME deliverer/history the shared engine uses, so the
@@ -1316,6 +1329,9 @@ public sealed class DarlingWorker : BackgroundService
            every ordinary start. */
         DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport = null;
 
+        /* #3908: what this start did to the store's TimescaleDB extension, alerted beside the upgrade report. */
+        DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport = null;
+
         if (config.Postgres.Managed)
         {
             if (!OperatingSystem.IsWindows())
@@ -1356,6 +1372,7 @@ public sealed class DarlingWorker : BackgroundService
                 {
                     storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
                     storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
+                    storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
                     break;
                 }
                 catch (OperationCanceledException)
@@ -1388,7 +1405,7 @@ public sealed class DarlingWorker : BackgroundService
 
         try
         {
-            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, stoppingToken);
+            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, storeTimescaleReport, stoppingToken);
         }
         finally
         {
@@ -1574,6 +1591,23 @@ public sealed class DarlingWorker : BackgroundService
         };
 
     /// <summary>
+    /// Maps the bootstrap's TimescaleDB outcome to the alert payload (#3908). Null unless the extension could not
+    /// be moved or is behind the runtime after start: an update that landed is routine maintenance the log
+    /// already records, the same call <see cref="BuildStoreUpgradeReport"/> makes.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static DarlingSelfAlertEvaluator.StoreTimescaleReport? BuildStoreTimescaleReport(
+        DarlingStoreUpgrade.TimescaleUpdateOutcome outcome)
+        => outcome.Status switch
+        {
+            DarlingStoreUpgrade.TimescaleUpdateStatus.Failed => new DarlingSelfAlertEvaluator.StoreTimescaleReport(
+                true, outcome.From, outcome.To, outcome.Message),
+            DarlingStoreUpgrade.TimescaleUpdateStatus.Behind => new DarlingSelfAlertEvaluator.StoreTimescaleReport(
+                false, outcome.From, outcome.To, outcome.Message),
+            _ => null,
+        };
+
+    /// <summary>
     /// Maps the web host's published TLS-certificate snapshot to the report the evaluator consumes (#3514):
     /// a null snapshot — nothing served, or <c>Clear()</c>ed when the dashboard stopped — becomes
     /// <c>Configured=false</c> (the evaluator's resolve arm), and a live snapshot carries its validity window,
@@ -1602,6 +1636,7 @@ public sealed class DarlingWorker : BackgroundService
         DarlingConfig config,
         string storeConnectionString,
         DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport,
+        DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -1693,7 +1728,8 @@ public sealed class DarlingWorker : BackgroundService
            collect/config privileges — idempotent and self-healing, the conf-append discipline applied
            to roles. Windows-only (DPAPI credential files); a failure degrades (the Viewer cannot
            connect as admin/viewer until a later start succeeds) but never kills collection, which
-           connects as the owner. BYO stores provision roles out-of-band via tools/provision-roles.sql. */
+           connects as the owner. The compose store is the branch below; any other BYO store provisions roles
+           out-of-band via tools/provision-roles.sql. */
         if (config.Postgres.Managed && OperatingSystem.IsWindows())
         {
             try
@@ -1714,6 +1750,21 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogError(
                     "Least-privilege role provisioning failed — the Viewer's admin/viewer roles may be stale " +
                     "until the next successful start: {Message}", ex.Message);
+            }
+        }
+        else if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
+        {
+            /* #3914: the Linux compose distribution's store is the service's own, so it provisions the same roles
+               there and the web and MCP hosts connect as viewer and mcp. It decides from the store whether this
+               IS that store, publishes the verdict the hosts wait on, and never throws: a refusal or failure
+               leaves each host on its role's credential from an earlier start, or on the owner when there is none,
+               with the reason. Same reload baseline as managed, and only from a start that provisioned. */
+            var verdict = await DarlingStoreLogins.ProvisionComposeStoreAsync(
+                postgres, config.Postgres.ConnectionString, _logger, stoppingToken);
+            if (verdict.Provisioned)
+            {
+                _composeStoreRolesProvisioned = true;
+                _appliedComposeStatementTimeoutSeconds = verdict.AppliedComposeStatementTimeoutSeconds;
             }
         }
 
@@ -2124,6 +2175,12 @@ public sealed class DarlingWorker : BackgroundService
         if (storeUpgradeReport is not null)
         {
             await _selfAlerts.EvaluateStoreUpgradeAsync(storeUpgradeReport, stoppingToken);
+        }
+
+        /* #3908: the store's TimescaleDB extension, the same once-per-start event. */
+        if (storeTimescaleReport is not null)
+        {
+            await _selfAlerts.EvaluateStoreTimescaleAsync(storeTimescaleReport, stoppingToken);
         }
 
         /* Phase-5 analysis slice AN3: the analysis pipeline's shared pieces, constructed once.
@@ -3794,15 +3851,16 @@ public sealed class DarlingWorker : BackgroundService
            knob above it does not go live just by landing in the held config — a reload used to observe the
            new value and leave the roles on whatever the last service start wrote. Re-assert it here, but
            ONLY on a real change: a config_version bump fires on any config_service or schedule write, and
-           this is a catalog write. Gated exactly as startup provisioning is (managed + Windows), because
-           that is where these roles are known to exist — a BYO store provisions them out-of-band through
-           tools/provision-roles.sql and names them itself, so ALTER ROLE viewer here would be guessing.
+           this is a catalog write. Gated exactly as startup provisioning is (managed + Windows, or the compose
+           store this process provisioned, #3914), because that is where these roles are known to exist — any
+           other store provisions them out-of-band through tools/provision-roles.sql and names them itself, so
+           ALTER ROLE viewer here would be guessing.
            The baseline advances only on SUCCESS, so a failed attempt retries on the next reload rather
            than being recorded as applied. */
         if (_postgres is not null
             && DarlingManagedRoles.ShouldReassertComposeStatementTimeout(
                 view.ComposeStatementTimeoutSeconds, _appliedComposeStatementTimeoutSeconds,
-                config.Postgres.Managed, OperatingSystem.IsWindows()))
+                config.Postgres.Managed, OperatingSystem.IsWindows(), _composeStoreRolesProvisioned))
         {
             if (await DarlingManagedRoles.ReassertComposeStatementTimeoutAsync(
                     _postgres, view.ComposeStatementTimeoutSeconds, _logger, cancellationToken))
@@ -6778,7 +6836,29 @@ LIMIT 1";
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
-            await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
+
+            /* #3923: its OWN narrow catch, ahead of the store-log capture below and on the same reasoning
+               that catch already carries - a PostgresException the store permanently rejects here (catalog
+               drift on a bring-your-own TimescaleDB, a revoked privilege) must not cost the store-log
+               census or the collector-cost flush below it every hour forever. #3918 was exactly this for
+               one statement (a catch-all census failing 42703 on TimescaleDB 2.29+); the sizing pass shared
+               the OUTER catch then, so fixing that one statement left the next one the store rejects able to
+               take the whole tick down again. Narrower than the capture's catch below: a command TIMEOUT
+               still falls through to the outer catch (unchanged one-hour-gap handling), and so does a fault
+               that actually broke the connection - a server-REJECTED statement leaves the session idle and
+               usable, which is what the two passes after it need. */
+            try
+            {
+                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
+            }
+            catch (PostgresException ex) when (!PgBaselineProvider.IsCommandTimeout(ex)
+                                               && connection.State == ConnectionState.Open)
+            {
+                _logger.LogError(
+                    "Store self-metrics sweep failed ({SqlState}), so this hour's size rows are missing; the "
+                    + "store-log census and collector-cost flush on the same tick still run: {Message}",
+                    ex.SqlState, ex.Message);
+            }
 
             /* #3021: the store reading its OWN server log, on the same hourly tick and the same connection.
                It rides this cadence rather than carrying its own for two reasons. The log grows slowly (a
@@ -6803,11 +6883,40 @@ LIMIT 1";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogWarning(
-                    "Store log capture failed, so this hour's store-log census is missing (get_store_log "
-                    + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
-                    + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
-                    ex.Message);
+                var unavailable = ex is PostgresException
+                {
+                    SqlState: PostgresErrorCodes.UndefinedFile or PostgresErrorCodes.InsufficientPrivilege,
+                };
+                if (unavailable && _storeLogCaptureUnavailableWarned)
+                {
+                    _logger.LogDebug("Store log capture is still unavailable: {Message}", ex.Message);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Store log capture failed, so this hour's store-log census is missing (get_store_log "
+                        + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
+                        + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
+                        ex.Message);
+                    _storeLogCaptureUnavailableWarned |= unavailable;
+                }
+            }
+
+            /* #3971: Npgsql closes THIS connection outright on the capture's ERROR rather than leaving it
+               idle-but-usable - reproduced against a plain PostgreSQL 18.4 store on Npgsql 10.0.3, where a
+               pg_ls_dir fault (58P01) takes connection.State straight to Closed. The re-mask and the
+               collector-cost flush below run on this SAME connection, so a store that cannot grant the
+               capture's privilege, or has no log directory at all (the Linux compose store's shape), lost
+               both of them every hour before this - get_collector_cost never got a row however long that
+               store ran. Reopened rather than swapped for a fresh one: this connection came from the pool
+               through _postgres, so OpenAsync pulls a new physical connection under the same object the
+               `await using` above already owns and disposes. A capture that succeeded, or failed WITHOUT
+               closing the connection, finds it already Open here and this is a no-op. */
+            if (connection.State != ConnectionState.Open)
+            {
+                /* A Broken connection must be closed before it can open again; closing a Closed one is a no-op. */
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
             }
 
             /* #3915, #3944: rows stored before this build kept their entries whole (an ERROR's STATEMENT line with

@@ -58,6 +58,11 @@ public sealed class PgTargetWriteTests
     private static readonly int StockServerId = ServerIdHelper.GetDeterministicHashCode(StockServerName);
     private const string ZeroWalServerName = "darling-pg-target-write-zero-wal";
     private static readonly int ZeroWalServerId = ServerIdHelper.GetDeterministicHashCode(ZeroWalServerName);
+    /* #3955: a stock server that restarted mid-window, and its control with the same counters on one postmaster. */
+    private const string RestartServerName = "darling-pg-target-write-restart";
+    private static readonly int RestartServerId = ServerIdHelper.GetDeterministicHashCode(RestartServerName);
+    private const string SteadyServerName = "darling-pg-target-write-steady";
+    private static readonly int SteadyServerId = ServerIdHelper.GetDeterministicHashCode(SteadyServerName);
 
     private const double MiB = 1024.0 * 1024.0;
 
@@ -256,10 +261,11 @@ public sealed class PgTargetWriteTests
     public void WalIsTracked_IsOneDecision_NullnessAndBothSums(bool anyNonNull, double bytes, long records, bool expected)
         => Assert.Equal(expected, PgTargetFactCollector.WalIsTracked(anyNonNull, bytes, records));
 
-    /// <summary>The checkpoint read now returns the record sum the predicate needs, APPENDED after <c>sample_count</c> so
-    /// the ten ordinals lane 2 and lane 15 read did not move; the differencing is the WAL read's, verbatim.</summary>
+    /// <summary>The checkpoint read returns the record sum the predicate needs, APPENDED after <c>sample_count</c> so
+    /// the ten ordinals lane 2 and lane 15 read did not move; the differencing is the WAL read's, verbatim. #3955's
+    /// restart count is appended after it for the same reason, so it is now the last column.</summary>
     [Fact]
-    public void TheCheckpointRead_CarriesTheWalRecordSum_AsItsLastColumn_ForTheSharedPredicate()
+    public void TheCheckpointRead_CarriesTheWalRecordSumAfterSampleCount_AndTheRestartCountLast()
     {
         var sql = PgTargetFactCollector.PgTargetCheckpointSql;
         Assert.Contains("wal_records                - LAG(wal_records)                OVER series AS raw_wal_records", sql, StringComparison.Ordinal);
@@ -267,10 +273,51 @@ public sealed class PgTargetWriteTests
         var outerSelect = sql[sql.LastIndexOf("SELECT", StringComparison.Ordinal)..sql.LastIndexOf("FROM sampled", StringComparison.Ordinal)];
         var aliases = System.Text.RegularExpressions.Regex.Matches(outerSelect, @"\s+AS\s+(\w+)\s*(,|$)", System.Text.RegularExpressions.RegexOptions.Multiline)
             .Select(m => m.Groups[1].Value).ToList();
-        Assert.Equal(12, aliases.Count);
+        Assert.Equal(13, aliases.Count);
         Assert.Equal("sample_count", aliases[10]);
         Assert.Equal("wal_records", aliases[11]);
+        Assert.Equal("postmaster_restart_count", aliases[12]);
         Assert.Contains("CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint)  AS wal_records", outerSelect, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3955, the SQL half: a clean restart leaves every <c>stats_reset</c> stamp where it was, so the reset guards
+    /// cannot see it, and PostgreSQL adds the shutdown checkpoint to counters that kept running: one more requested
+    /// checkpoint, plus its own write and sync time and the buffers it flushed. The checkpoint read therefore marks
+    /// each interval by the shared restart rule (verbatim, the ONE spelling <see cref="PostmasterRestart.SpansSql"/>
+    /// owns) and leaves those intervals out of the requested, write, sync and checkpoint-buffer sums, and out of
+    /// nothing else: the timed count (a restart does not move it) and the WAL figures still sum every interval. The
+    /// WAL-volume read is untouched.
+    /// </summary>
+    [Fact]
+    public void TheCheckpointRead_LeavesRestartSpanningIntervalsOutOfTheCheckpointFigures_ButNotTheTimedCountOrTheWal()
+    {
+        var sql = PgTargetFactCollector.PgTargetCheckpointSql;
+
+        Assert.Contains(PostmasterRestart.SpansSql + " AS restart_here", sql, StringComparison.Ordinal);
+        Assert.Contains("WINDOW series AS (ORDER BY collection_time)", sql, StringComparison.Ordinal);
+        var filtered = new[] { "raw_requested", "raw_write_ms", "raw_sync_ms", "raw_ckpt_buffers" };
+        foreach (var column in filtered)
+        {
+            Assert.Contains($"SUM(GREATEST({column}, 0)) FILTER (WHERE NOT restart_here), 0)", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(filtered.Length, System.Text.RegularExpressions.Regex.Matches(sql, @"FILTER \(WHERE NOT restart_here\)").Count);
+        foreach (var unfiltered in new[] { "raw_timed", "raw_wal_bytes", "raw_wal_fpi", "raw_wal_records" })
+        {
+            Assert.Contains($"SUM(GREATEST({unfiltered}, 0)), 0)", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("CAST(count(*) FILTER (WHERE restart_here) AS integer)           AS postmaster_restart_count", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("postmaster_start_time", PgTargetFactCollector.PgTargetWalVolumeSql, StringComparison.Ordinal);
+
+        /* The rule's text: stamps compared on both sides when both carry one, else the older sample's time
+           against the newer's start, never NULL. */
+        Assert.Equal(
+            "coalesce(CASE WHEN postmaster_start_time IS NOT NULL AND LAG(postmaster_start_time) OVER series IS NOT NULL "
+            + "THEN postmaster_start_time <> LAG(postmaster_start_time) OVER series "
+            + "ELSE LAG(collection_time) OVER series < postmaster_start_time END, false)",
+            PostmasterRestart.SpansSql);
     }
 
     /* ───────────────────────── the SQL: one differencing, three readers ───────────────────────── */
@@ -704,6 +751,238 @@ public sealed class PgTargetWriteTests
         }
     }
 
+    /* ───────────────────────── #3955: a monitored server's restart is not WAL pressure ───────────────────────── */
+
+    /// <summary>
+    /// The advice says how many restart-spanning intervals the checkpoint figures leave out, and that the write and
+    /// sync time are among them (the shutdown checkpoint's own phases land in the same counters), so a reader who
+    /// opens the card on a server that restarted knows why those totals are a floor.
+    /// </summary>
+    [Fact]
+    public void CheckpointPressureAdvice_SaysTheRestartSpanningIntervalsAreLeftOut_OnlyWhenThereWereAny()
+    {
+        var restarted = Pressure(0.6, 10);
+        restarted.Metadata["postmaster_restart_count"] = 2;
+        var block = PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(restarted))!;
+        Assert.Contains("PostgreSQL restarted 2 time(s) inside the window; a shutdown checkpoint counts as requested and its own write and sync phases land in the same counters", block.Investigation, StringComparison.Ordinal);
+        Assert.Contains("left out of the requested count and the checkpoint write and sync time rather than read as WAL pressure", block.Investigation, StringComparison.Ordinal);
+
+        var steady = Pressure(0.6, 10);
+        steady.Metadata["postmaster_restart_count"] = 0;
+        Assert.DoesNotContain("restarted", PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(steady))!.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("restarted", PgTargetAdvice.Compose(PgTargetFactKeys.CheckpointPressure, Lookup(Pressure(0.6, 10)))!.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3955 through the REAL fact collector: a stock server whose only requested checkpoint in four hours is the
+    /// shutdown checkpoint of a restart two hours in (the postmaster start moves on the same row the counter moves
+    /// on). <c>PG_CHECKPOINT_PRESSURE</c> counts 0 requested beside the 48 timed, says one interval spanned a
+    /// restart, and leaves that one interval out of the write, sync and checkpoint-buffer sums too (239 of the 240
+    /// intervals). The control, the SAME counters on one postmaster, counts the 1 and all 240 intervals, exactly as
+    /// before.
+    /// </summary>
+    [Fact]
+    public async Task AMonitoredServersRestart_IsLeftOutOfTheCheckpointFigures_AndTheSameCountersWithoutOneStillCount_AgainstDevPostgres()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3955 write-family restart e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+            var seriesStart = windowStart.AddMinutes(-1);
+            var longAgo = windowStart.AddDays(-30);
+            var restartedAt = seriesStart.AddMinutes(120).AddSeconds(-30);
+
+            foreach (var (id, name, after) in new[] { (RestartServerId, RestartServerName, restartedAt), (SteadyServerId, SteadyServerName, longAgo) })
+            {
+                await PgTargetFactCollectorTests.RegisterServerAsync(connection, id, name, MonitoredEngineKind.Postgres, 18, ct);
+                for (var minute = 0; minute <= 4 * 60 + 1; minute++)
+                    await PgTargetFactCollectorTests.PlantDatabaseStatsAsync(connection, id, name, windowStart.AddMinutes(minute - 1), ct);
+                await PlantRestartSeriesAsync(connection, id, name, seriesStart, minutes: 4 * 60 + 1, restartAtMinute: 120,
+                    startBefore: longAgo, startAfter: after, ct);
+            }
+
+            async Task<Fact> PressureOf(int id, string name)
+            {
+                var facts = await new PgTargetFactCollector(postgres).CollectFactsAsync(new AnalysisContext
+                {
+                    ServerId = id, ServerName = name, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero,
+                    Coverage = new WindowCoverage { NominalMs = 4 * 3_600_000, ObservedMs = 4 * 3_600_000, SampleCount = 240 },
+                });
+                return Assert.Single(facts, f => f.Key == PgTargetFactKeys.CheckpointPressure);
+            }
+
+            var restarted = await PressureOf(RestartServerId, RestartServerName);
+            Assert.Equal(0, restarted.Metadata["checkpoints_requested"]);
+            Assert.Equal(1, restarted.Metadata["postmaster_restart_count"]);
+            Assert.Equal(48, restarted.Metadata["checkpoints_timed"]);
+            Assert.Equal(0, restarted.Value);
+            /* The restart interval's write, sync and buffers are the shutdown checkpoint's as much as anything live,
+               so that one interval is left out of them as well: 239 intervals of 10 ms, 5 ms and 100 buffers. The
+               timed count and the WAL still sum all 240. */
+            Assert.Equal(2_390, restarted.Metadata["checkpoint_write_ms"]);
+            Assert.Equal(1_195, restarted.Metadata["checkpoint_sync_ms"]);
+            Assert.Equal(23_900, restarted.Metadata["checkpoint_buffers_written"]);
+            Assert.Equal(1, restarted.Metadata["wal_tracked"]);
+            Assert.Equal(240.0 * 1_048_576, restarted.Metadata["wal_bytes"]);
+
+            var steady = await PressureOf(SteadyServerId, SteadyServerName);
+            Assert.Equal(1, steady.Metadata["checkpoints_requested"]);
+            Assert.Equal(0, steady.Metadata["postmaster_restart_count"]);
+            Assert.Equal(48, steady.Metadata["checkpoints_timed"]);
+            Assert.Equal(1.0 / 49.0, steady.Value, precision: 6);
+            Assert.Equal(2_400, steady.Metadata["checkpoint_write_ms"]);
+            Assert.Equal(1_200, steady.Metadata["checkpoint_sync_ms"]);
+            Assert.Equal(24_000, steady.Metadata["checkpoint_buffers_written"]);
+            Assert.Equal(240.0 * 1_048_576, steady.Metadata["wal_bytes"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #3955 through the REAL window reader and <c>get_pg_write_stats</c>: across a window that holds the restart,
+    /// <c>checkpoints_requested</c> and its share, the checkpoint write and sync time and the checkpoint buffers are
+    /// null with <c>postmaster_restarted</c> true and the note naming the restart, while the timed and completed
+    /// counts and the WAL stay; a window that starts after the restart states every figure again (0 requested, not
+    /// null). The upgrade shape (rows before the restart written before V139, with no start) is still a restart;
+    /// rows with no start on EITHER side are no evidence and read as before; and the control on one postmaster
+    /// counts the 1 and states the phases.
+    /// </summary>
+    [Fact]
+    public async Task TheWindowReadAndTheTool_WithholdTheCheckpointFiguresAcrossARestart_AndStateThemAfterIt_AgainstDevPostgres()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3955 write-stats restart e2e.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            var windowStart = windowEnd.AddHours(-4);
+            var seriesStart = windowStart.AddMinutes(-1);
+            var longAgo = windowStart.AddDays(-30);
+            var restartedAt = seriesStart.AddMinutes(120).AddSeconds(-30);
+
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, RestartServerId, RestartServerName, MonitoredEngineKind.Postgres, 18, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, SteadyServerId, SteadyServerName, MonitoredEngineKind.Postgres, 18, ct);
+            await PlantRestartSeriesAsync(connection, RestartServerId, RestartServerName, seriesStart, minutes: 4 * 60 + 1, restartAtMinute: 120,
+                startBefore: longAgo, startAfter: restartedAt, ct);
+            await PlantRestartSeriesAsync(connection, SteadyServerId, SteadyServerName, seriesStart, minutes: 4 * 60 + 1, restartAtMinute: 120,
+                startBefore: longAgo, startAfter: longAgo, ct);
+
+            var across = (await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(postgres, RestartServerId, windowStart, windowEnd, ct))!;
+            Assert.True(across.PostmasterRestartedDuringWindow);
+            Assert.Null(across.CheckpointsRequested);
+            /* The shutdown checkpoint's own write and sync phases and the buffers it flushed are in these counters too. */
+            Assert.Null(across.CheckpointWriteTimeMs);
+            Assert.Null(across.CheckpointSyncTimeMs);
+            Assert.Null(across.BuffersWrittenCheckpoint);
+            /* A restart does not move the timed or completed counts, nor the WAL. */
+            Assert.Equal(48, across.CheckpointsTimed);
+            Assert.Equal(48, across.CheckpointsDone);
+            Assert.Equal(240m * 1_048_576, across.WalBytes);
+            Assert.False(across.ResetDuringWindow);
+            Assert.Equal(DateTime.SpecifyKind(restartedAt, DateTimeKind.Utc), across.PostmasterStartTimeUtc);
+
+            /* From the first row after the restart (minute 130) to the last (241): 111 clean intervals. */
+            var afterIt = (await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(postgres, RestartServerId, restartedAt.AddMinutes(10), windowEnd, ct))!;
+            Assert.False(afterIt.PostmasterRestartedDuringWindow);
+            Assert.Equal(0, afterIt.CheckpointsRequested);
+            Assert.Equal(1_110.0, afterIt.CheckpointWriteTimeMs);
+            Assert.Equal(555.0, afterIt.CheckpointSyncTimeMs);
+            Assert.Equal(11_100, afterIt.BuffersWrittenCheckpoint);
+
+            var steady = (await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(postgres, SteadyServerId, windowStart, windowEnd, ct))!;
+            Assert.False(steady.PostmasterRestartedDuringWindow);
+            Assert.Equal(1, steady.CheckpointsRequested);
+            Assert.Equal(2_400.0, steady.CheckpointWriteTimeMs);
+            Assert.Equal(1_200.0, steady.CheckpointSyncTimeMs);
+            Assert.Equal(24_000, steady.BuffersWrittenCheckpoint);
+
+            var asOf = windowEnd.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            using (var doc = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgWriteStats(postgres, RestartServerName, 4, as_of: asOf)))
+            {
+                var root = doc.RootElement;
+                foreach (var withheld in new[] { "checkpoints_requested", "pct_checkpoints_requested", "checkpoint_write_time_ms", "checkpoint_sync_time_ms", "buffers_written_checkpoint" })
+                {
+                    Assert.Equal(JsonValueKind.Null, root.GetProperty(withheld).ValueKind);
+                }
+
+                Assert.Equal(48, root.GetProperty("checkpoints_timed").GetInt64());
+                Assert.Equal(240 * 1_048_576, root.GetProperty("wal_bytes").GetInt64());
+                Assert.True(root.GetProperty("postmaster_restarted").GetBoolean());
+                Assert.Equal(JsonValueKind.String, root.GetProperty("postmaster_start_time").ValueKind);
+                Assert.False(root.GetProperty("counter_reset").GetBoolean());
+                var note = root.GetProperty("note").GetString();
+                Assert.Contains("PostgreSQL RESTARTED inside this window", note, StringComparison.Ordinal);
+                Assert.Contains("checkpoint_write_time_ms, checkpoint_sync_time_ms and buffers_written_checkpoint are null", note, StringComparison.Ordinal);
+            }
+
+            using (var doc = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgWriteStats(postgres, SteadyServerName, 4, as_of: asOf)))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(1, root.GetProperty("checkpoints_requested").GetInt64());
+                Assert.Equal(Math.Round(100.0 / 49.0, 1), root.GetProperty("pct_checkpoints_requested").GetDouble());
+                Assert.Equal(2_400.0, root.GetProperty("checkpoint_write_time_ms").GetDouble());
+                Assert.Equal(1_200.0, root.GetProperty("checkpoint_sync_time_ms").GetDouble());
+                Assert.Equal(24_000, root.GetProperty("buffers_written_checkpoint").GetInt64());
+                Assert.False(root.GetProperty("postmaster_restarted").GetBoolean());
+                Assert.DoesNotContain("RESTARTED", root.GetProperty("note").GetString(), StringComparison.Ordinal);
+            }
+
+            /* The upgrade shape: rows before the restart carry no start (written before V139). The first stamped
+               row's start is later than the last unstamped row's collection time, so that interval is a restart. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE pg_write_stats SET postmaster_start_time = NULL WHERE server_id = $1 AND collection_time < $2",
+                RestartServerId, DarlingMcpTestData.Naive(seriesStart.AddMinutes(120)));
+            var upgrade = (await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(postgres, RestartServerId, windowStart, windowEnd, ct))!;
+            Assert.True(upgrade.PostmasterRestartedDuringWindow);
+            Assert.Null(upgrade.CheckpointsRequested);
+            Assert.Null(upgrade.CheckpointSyncTimeMs);
+
+            /* No start on either side of any interval: no evidence, so the window reads exactly as it did before. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE pg_write_stats SET postmaster_start_time = NULL WHERE server_id = $1", RestartServerId);
+            var legacy = (await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(postgres, RestartServerId, windowStart, windowEnd, ct))!;
+            Assert.False(legacy.PostmasterRestartedDuringWindow);
+            Assert.Equal(1, legacy.CheckpointsRequested);
+            Assert.Equal(1_200.0, legacy.CheckpointSyncTimeMs);
+            Assert.Null(legacy.PostmasterStartTimeUtc);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ───────────────────────── fixtures ───────────────────────── */
 
     private static Fact Registry(bool isAurora) => new()
@@ -912,15 +1191,52 @@ FROM s", connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>
+    /// #3955: one-minute <c>pg_write_stats</c> rows from <paramref name="start"/> for <paramref name="minutes"/> (both ends
+    /// inclusive) on a stock server: a timed checkpoint every five minutes, write and sync time climbing, WAL tracked,
+    /// and ONE requested checkpoint at <paramref name="restartAtMinute"/> — the shutdown checkpoint a fast stop leaves
+    /// on the counter. <paramref name="startBefore"/> stamps the rows before that minute (NULL plants the pre-V139
+    /// shape) and <paramref name="startAfter"/> the rows from it on (NULL plants rows with no evidence at all); the
+    /// same value for both is the control, one postmaster. Reset stamps NULL throughout: a clean restart moves none.
+    /// </summary>
+    private static async Task PlantRestartSeriesAsync(
+        NpgsqlConnection connection, int serverId, string serverName, DateTime start, int minutes, int restartAtMinute,
+        DateTime? startBefore, DateTime? startAfter, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_write_stats
+    (collection_id, collection_time, server_id, server_name,
+     num_timed, num_requested, num_done, checkpoint_write_time_ms, checkpoint_sync_time_ms, buffers_written_checkpoint, checkpointer_stats_reset,
+     buffers_clean, maxwritten_clean, buffers_alloc, buffers_backend, buffers_backend_fsync, bgwriter_stats_reset,
+     wal_records, wal_fpi, wal_bytes, wal_buffers_full, wal_write, wal_sync, wal_write_time_ms, wal_sync_time_ms, wal_stats_reset,
+     postmaster_start_time)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4,
+       500 + n / 5, 1000 + CASE WHEN n >= $6 THEN 1 ELSE 0 END, 1500 + n / 5, n * 10.0, n * 5.0, n * 100, NULL,
+       0, 0, 0, NULL, NULL, NULL,
+       n * 128, 0, 1000000000000 + n * 1048576, 0, NULL, NULL, NULL, NULL, NULL,
+       CASE WHEN n >= $6 THEN $8 ELSE $7 END
+FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 120 };
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next() + 3_000_000L);
+        command.Parameters.AddWithValue(start);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(minutes);
+        command.Parameters.AddWithValue(restartAtMinute);
+        command.Parameters.Add(new NpgsqlParameter { Value = startBefore.HasValue ? startBefore.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter { Value = startAfter.HasValue ? startAfter.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
+        var ids = $"{AuroraServerId}, {StockServerId}, {ZeroWalServerId}, {RestartServerId}, {SteadyServerId}";
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM pg_database_stats WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
-            $"DELETE FROM pg_write_stats WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
-            $"DELETE FROM pg_server_config WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
-            $"DELETE FROM analysis_findings WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
-            $"DELETE FROM analysis_muted WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId}); " +
-            $"DELETE FROM servers WHERE server_id IN ({AuroraServerId}, {StockServerId}, {ZeroWalServerId});", connection);
+            $"DELETE FROM pg_database_stats WHERE server_id IN ({ids}); " +
+            $"DELETE FROM pg_write_stats WHERE server_id IN ({ids}); " +
+            $"DELETE FROM pg_server_config WHERE server_id IN ({ids}); " +
+            $"DELETE FROM analysis_findings WHERE server_id IN ({ids}); " +
+            $"DELETE FROM analysis_muted WHERE server_id IN ({ids}); " +
+            $"DELETE FROM servers WHERE server_id IN ({ids});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }

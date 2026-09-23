@@ -457,17 +457,25 @@ function pickerControl(label, options, onPick) {
   return el("label", { class: "range-control" }, [el("span", { text: label }), sel]);
 }
 
-/** File I/O latency: pivot the flat per-(time, database) trend into one read-latency series per database. */
+/**
+ * File I/O latency: pivot the flat trend into one read-latency series per line. #3897: a line is a (database, file
+ * type) pair — or the one "(other)" line pooling everything past the top five — so the label names both; before
+ * #3897 the read projected only the database, and nine tempdb files wrote over each other in this pivot.
+ */
 export function fileIoPanel(server, ctx) {
-  const { panel, body } = panelShell("File I/O Latency", "avg read latency per database, " + ctx.label);
+  const { panel, body } = panelShell("File I/O Latency", "avg read latency per database and file type, " + ctx.label);
   (async () => {
     const res = await readTool("get_file_io_trend", { server, hours: ctx.hours });
     if (res.kind === "error") return mount(body, readErrorStrip(res.message));
     if (res.kind === "empty") return mount(body, emptyStrip(res.message));
 
-    const { points, series } = pivot(res.data.trend || [], {
+    const rows = (res.data.trend || []).map((r) => ({
+      ...r,
+      line: r.database_name === r.file_type ? r.database_name : r.database_name + " " + r.file_type + (r.file_name ? " " + r.file_name : ""),
+    }));
+    const { points, series } = pivot(rows, {
       xKey: "time",
-      seriesKey: "database_name",
+      seriesKey: "line",
       valueKey: "avg_read_latency_ms",
     });
     if (!series.length) return mount(body, emptyStrip("No file I/O samples in this window."));
@@ -930,9 +938,9 @@ export const SERVER_TABS = [
         },
       ]),
       /* #2484: the aggregate lock-wait lane, the third chart on the viewer's Blocking Trends tab. Charts ONE
-         numeric key and lets the read's own (collection, wait type) grouping stand, the same choice the two
-         Current Waits panels below make — the wait type is the grouping the read already applied, not a
-         second axis. get_wait_trend can chart one LCK type; this is the whole family. */
+         numeric key: since #3897 the read returns the whole LCK family as one bucketed series (its wait_types[]
+         legend names the types that waited), where it used to return a row per (collection, wait type) that
+         this chart drew as one jagged line. get_wait_trend can chart one LCK type; this is the whole family. */
       line("Lock Waits", "get_lock_wait_trend", { server, hours: ctx.hours }, "trend", "collection_time", LOCK_WAIT_SERIES, {
         subtitle: ctx.label,
         emptyText:
@@ -1855,7 +1863,7 @@ export const POSTGRES_TABS = [
         { server, hours: ctx.hours },
         "points",
         PG_DATABASE_TREND_COLUMNS,
-        ctx.label + ", the biggest temp-file spiller in this window; the hit ratio here is the interval's own, not the lifetime average",
+        ctx.label + ", the biggest temp-file spiller in this window; each row's hit ratio is its own intervals', not the lifetime average, and Worst Hit % is its worst single interval",
         "No differenced intervals for this database in the window. A trend needs at least two snapshots, so a short window is legitimately empty here."
       ),
       /* #2629: sampled lock activity. On Activity rather than a Blocking tab because PostgreSQL has no
@@ -3573,6 +3581,8 @@ const PG_QUERY_DURATION_TREND_COLUMNS = [
 const PG_IO_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "reads_per_second", label: "Reads/sec", format: "num2" },
+  /* #3897: a row is a bucket of intervals, so its busiest single interval rides beside the pooled rate. */
+  { key: "peak_reads_per_second", label: "Peak Reads/sec", format: "num2", small: true },
   { key: "writes_per_second", label: "Writes/sec", format: "num2" },
   { key: "cache_hit_pct", label: "Hit %", format: "num2" },
   { key: "avg_read_ms", label: "Avg Read (ms)", format: "num2" },
@@ -3588,6 +3598,8 @@ const PG_IO_TREND_COLUMNS = [
 const PG_DATABASE_TREND_COLUMNS = [
   { key: "collection_time", label: "When", format: "time" },
   { key: "cache_hit_pct", label: "Cache Hit %", format: "num2" },
+  /* #3897: a row is a bucket of intervals; the cliff this table exists to show is its worst one. */
+  { key: "worst_cache_hit_pct", label: "Worst Hit %", format: "num2", small: true },
   { key: "temp_files", label: "Temp Files", format: "int" },
   { key: "temp_bytes", label: "Temp Bytes", format: "int" },
   { key: "deadlocks", label: "Deadlocks", format: "int" },
@@ -3661,6 +3673,9 @@ const PG_WRITE_STATS = [
   { key: "wal_records", label: "WAL records", format: "int" },
   { key: "wal_fpi", label: "WAL full-page images", format: "int" },
   { key: "counter_reset", label: "Counters reset", format: "bool", small: true },
+  /* #3955: a restart inside the window is why Requested, % Requested, Checkpoint write and Buffers (checkpoint)
+     render blank: the shutdown checkpoint is counted as requested and its own write work lands in the same counters. */
+  { key: "postmaster_restarted", label: "Restarted in window", format: "bool", small: true },
 ];
 
 const PG_INDEX_BLOAT_COLUMNS = [

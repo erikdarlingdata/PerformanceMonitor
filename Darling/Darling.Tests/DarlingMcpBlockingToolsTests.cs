@@ -99,7 +99,7 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     [InlineData("get_blocked_process_xml", "server_name,hours_back,limit,as_of")]
     [InlineData("get_blocking_trend", "server_name,hours_back,as_of")]
     [InlineData("get_deadlock_trend", "server_name,hours_back,as_of")]
-    [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_lock_wait_trend", "server_name,hours_back,as_of,bucket_minutes")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
         var expected = expectedCsv.Split(',');
@@ -299,38 +299,58 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The lock-wait lane (#2484), pinned as the VIEWER'S query rather than as a query that happens to work.
+    /// The lock-wait lane (#2484), pinned on the viewer's per-row read it still starts from, and (#3897) on the
+    /// family bucketing and per-type legend built over it.
     ///
-    /// <para>Three properties, each of which is a real defect if it drifts. The LCK filter, or the read stops
-    /// being about locks. The LAG partitioned BY WAIT TYPE, without which one wait type's cadence is used to
-    /// divide another's delta. And the CAST to double precision before the division — integer division would
-    /// report a 3 ms delta over a 60-second interval as ZERO, which is #2507's defect (a quiet server reading
-    /// as an idle one) one read over.</para>
+    /// <para>The viewer's properties, each a real defect if it drifts: the LCK filter, or the read stops being
+    /// about locks; the LAG partitioned BY WAIT TYPE, without which one wait type's cadence divides another's
+    /// delta; the CAST to double precision before any division — integer division would report a 3 ms delta
+    /// over a 60-second interval as ZERO, #2507's defect one read over. #3897's: the family sums the types PER
+    /// COLLECTION over that collection's ONE interval (MAX, never a sum of the types' intervals, which would
+    /// divide by the number of types), then time-weights across the bucket as summed wait over summed seconds;
+    /// the peak is the worst collection's family rate; and the two statements share the rated rows, so the
+    /// legend and the series count the same waits.</para>
     /// </summary>
     [Fact]
     public void LockWaitTrendSql_FiltersLockWaits_LagsPerWaitType_AndDividesAsDouble()
     {
-        var sql = DarlingBlockingTrendReader.LockWaitTrendSql;
+        foreach (var sql in new[] { DarlingBlockingTrendReader.LockWaitTrendSql, DarlingBlockingTrendReader.LockWaitTypesSql })
+        {
+            Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
+            Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
+            Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
+            Assert.Contains("CAST(delta_wait_time_ms AS double precision) AS wait_ms", sql, StringComparison.Ordinal);
+            /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
+               pre-V127 rows; an unknowable interval leaves the row out rather than reading 0.00. */
+            Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
+            Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
+            Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
+            Assert.Contains("WHERE interval_seconds > 0", sql, StringComparison.Ordinal);
 
-        Assert.Contains("FROM v_wait_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("wait_type LIKE 'LCK%'", sql, StringComparison.Ordinal);
-        Assert.Contains("LAG(collection_time) OVER (PARTITION BY wait_type ORDER BY collection_time)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds", sql, StringComparison.Ordinal);
-        /* #3540: the STORED interval first (0, the unknowable marker, → NULL through NULLIF); the LAG only for
-           pre-V127 rows; no ELSE 0 on the rate, so an unknowable interval reads NULL and never 0.00. */
-        Assert.Contains("CASE WHEN sample_interval_seconds IS NULL", sql, StringComparison.Ordinal);
-        Assert.Contains("ELSE NULLIF(sample_interval_seconds, 0)", sql, StringComparison.Ordinal);
-        Assert.Contains("END AS interval_seconds", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0 END", sql, StringComparison.Ordinal);
+            /* A negative delta is the counter reset across a restart, not a negative wait. */
+            Assert.Contains("AND   delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);
 
-        /* A negative delta is the counter reset across a restart, not a negative wait. */
-        Assert.Contains("WHERE delta_wait_time_ms >= 0", sql, StringComparison.Ordinal);
+            var lower = sql.ToLowerInvariant();
+            Assert.DoesNotContain("getdate", lower);
+            Assert.DoesNotContain("top (", lower);
+            Assert.DoesNotContain("isnull(", lower);
+            Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+            Assert.DoesNotContain("AVG(", sql, StringComparison.OrdinalIgnoreCase);
+        }
 
-        var lower = sql.ToLowerInvariant();
-        Assert.DoesNotContain("getdate", lower);
-        Assert.DoesNotContain("top (", lower);
-        Assert.DoesNotContain("isnull(", lower);
-        Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+        var family = DarlingBlockingTrendReader.LockWaitTrendSql;
+        Assert.Contains("MAX(interval_seconds) AS interval_seconds", family, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time", family, StringComparison.Ordinal);
+        Assert.Contains("SUM(wait_ms) / SUM(interval_seconds) AS wait_time_ms_per_second", family, StringComparison.Ordinal);
+        Assert.Contains("MAX(CASE WHEN interval_seconds > 0 THEN wait_ms / interval_seconds END) AS peak_wait_time_ms_per_second", family, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", family, StringComparison.Ordinal);
+
+        var legend = DarlingBlockingTrendReader.LockWaitTypesSql;
+        Assert.Contains("GROUP BY wait_type", legend, StringComparison.Ordinal);
+        Assert.Contains("SUM(wait_ms) AS total_wait_ms", legend, StringComparison.Ordinal);
+        Assert.Contains("SUM(interval_seconds) AS rated_seconds", legend, StringComparison.Ordinal);
+        Assert.Contains("MAX(CASE WHEN interval_seconds > 0 THEN wait_ms / interval_seconds END) AS peak_wait_time_ms_per_second", legend, StringComparison.Ordinal);
     }
 
     /// <summary>

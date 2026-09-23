@@ -216,8 +216,9 @@ public class StoreStatementStatsTests
     }
 
     /// <summary>The four role keys, and identities that say who REALLY connects as each (#3904's review): the viewer
-    /// login also carries remote read-only seats and the custom-alert evaluator, and a compose or bring-your-own
-    /// store runs its web and MCP hosts as the owner.</summary>
+    /// login also carries remote read-only seats and the custom-alert evaluator, and a bring-your-own store runs a
+    /// web or MCP host without a login of its own as the owner (#3914 — no longer the compose store, whose hosts
+    /// connect as the roles the service provisions there).</summary>
     [Fact]
     public void TheRoleVocabulary_IsTheProductsThreeRolesAndTheOwner_WithHonestIdentities()
     {
@@ -230,7 +231,8 @@ public class StoreStatementStatsTests
 
         Assert.Contains("custom-alert", DarlingMcpStoreQueryStatsTools.RoleIdentities["viewer"], StringComparison.Ordinal);
         Assert.Contains("remote read-only", DarlingMcpStoreQueryStatsTools.RoleIdentities["viewer"], StringComparison.Ordinal);
-        Assert.Contains("compose or bring-your-own", DarlingMcpStoreQueryStatsTools.RoleIdentities["owner"], StringComparison.Ordinal);
+        Assert.Contains("bring-your-own", DarlingMcpStoreQueryStatsTools.RoleIdentities["owner"], StringComparison.Ordinal);
+        Assert.DoesNotContain("compose", DarlingMcpStoreQueryStatsTools.RoleIdentities["owner"], StringComparison.Ordinal);
     }
 
     [Theory]
@@ -342,7 +344,12 @@ public class StoreStatementStatsTests
         Assert.Contains("Utility statements are tracked", tracked, StringComparison.Ordinal);
 
         var owner = DarlingMcpStoreQueryStatsTools.BuildNote(State(connectedAsOwner: true), utilityTracked: false, hiddenText: 0, evictionPasses: 0);
-        Assert.Contains("compose or bring-your-own", owner, StringComparison.Ordinal);
+        Assert.Contains("bring-your-own", owner, StringComparison.Ordinal);
+        /* #3914: the note names the two settings that give the surfaces their own logins, and no longer claims the
+           compose store runs them as the owner. */
+        Assert.Contains("postgres.webConnectionString", owner, StringComparison.Ordinal);
+        Assert.Contains("postgres.mcpConnectionString", owner, StringComparison.Ordinal);
+        Assert.DoesNotContain("compose", owner, StringComparison.Ordinal);
 
         var hidden = DarlingMcpStoreQueryStatsTools.BuildNote(State(), utilityTracked: false, hiddenText: 7, evictionPasses: 0);
         Assert.Contains("7 statement(s) read as <insufficient privilege>", hidden, StringComparison.Ordinal);

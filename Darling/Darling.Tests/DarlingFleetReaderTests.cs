@@ -208,9 +208,11 @@ public sealed class DarlingFleetReaderSqlTests
         Assert.Contains("collection_time >= $1", sql, StringComparison.Ordinal);
         /* #3895: bounded is not enough — as a GROUP BY the 48 hours still aggregated every collector run of
            every server in them (490,940 rows on DARLING01) for one timestamp each. One probe per enabled
-           registry server, the window kept so a long-dark server still falls out exactly as it did. */
+           registry server, the window kept. #3935 made the join LEFT: a long-dark server is reported with an
+           empty window rather than dropped, so the card can tell it from one never collected
+           (FleetCardTellsDarkFromNeverCollectedTests). */
         Assert.Contains("FROM servers AS s", sql, StringComparison.Ordinal);
-        Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN LATERAL", sql, StringComparison.Ordinal);
         Assert.Matches(@"ORDER BY collection_time DESC\s+LIMIT 1", sql);
         Assert.Contains("WHERE s.is_enabled", sql, StringComparison.Ordinal);
         Assert.Contains("s.server_id <> 0", sql, StringComparison.Ordinal);

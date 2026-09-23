@@ -133,7 +133,16 @@ public sealed class CollectorRuntimeState
     /// collection-blocking exit, before the <c>return</c> — after the critical line, so a throw here could
     /// never cost the operator the log line).</summary>
     public void PublishStopped(StartupStep step, string detail)
-        => _current = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
+    {
+        _current = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
+
+        /* #3914: every one of these stand-downs comes before role provisioning, so a web or MCP host in a
+           container waiting to hear whether the compose store's roles were provisioned would otherwise wait for
+           a verdict that never comes. It connects with its role's credential from an earlier start instead, or as
+           the owner when the service holds none, and its warning says which and why. */
+        DarlingStoreLogins.SettleComposeStoreVerdict(
+            $"The collector stopped before it could provision the store's roles ({step}: {FirstLineOf(detail)}).");
+    }
 
     /// <summary>Publishes that the collection loop started (worker only; called once, where the loop logs
     /// that it began).</summary>

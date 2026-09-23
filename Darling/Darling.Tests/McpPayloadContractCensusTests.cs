@@ -13,6 +13,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
@@ -357,7 +358,8 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>The shared producers whose return a tool may pass through under <c>if (x != null) return x;</c>,
     /// in three classes. REFUSALS: the two resolvers and every <c>McpHelpers</c> validator (each of which builds
-    /// <c>Refusal</c>), and the fleet-sweep watch-state validator (which does too). GATES: the engine-capability
+    /// <c>Refusal</c>), the fleet-sweep watch-state validator, and the trend-width resolvers
+    /// (<c>TrendBuckets.Resolve</c> / <c>ValidateWidth</c> / <c>RequireWholeHours</c>, #3897), which do too. GATES: the engine-capability
     /// and runtime-precondition probes on both SKUs, whose answer is a MISS envelope (<c>not_collected</c> /
     /// <c>precondition</c>) computed above the read and passed through by the same idiom — not refusals, but
     /// shared builders, which is what the sweep is holding. CARRIED: the health-parser family's
@@ -367,6 +369,7 @@ public sealed class McpPayloadContractCensusTests
         @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync)\("
         + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
+        + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
         + @"|\b(?:Darling|Mcp)EngineCapability\.NotCollectedStatusAsync\("
         + @"|\b(?:Darling|Mcp)RuntimePrecondition\.(?:StatusAsync|GatedOffStatusAsync)\("
         + @"|\bCollectAsync(?:<[^>]+>)?\(",
@@ -395,10 +398,13 @@ public sealed class McpPayloadContractCensusTests
     /// assignment of <c>x</c> before it — <c>var x = …</c>, <c>x = …</c>, or the destructure <c>var (…, x) = …</c>
     /// — and the producer on its right-hand side must be one of <see cref="SharedPassThroughProducer"/>'s: a
     /// resolver, a <c>McpHelpers</c> validator, the watch-state validator, a gate probe, or the health-parser
-    /// helper that carries one of those. A <c>??</c> chain counts when its first operand does. A pass-through
+    /// helper that carries one of those. A <c>??</c> chain counts only when EVERY operand does (#3897: a shared first operand used to vouch for a hand-built second one). A pass-through
     /// of anything else is a refusal built by hand somewhere the census cannot see, and fails by name.</item>
     /// <item><b>Every <c>return</c> whose expression begins a string literal</b> (<c>"</c>, <c>$"</c>, <c>@"</c>)
-    /// is a bare sentence and must be in <see cref="BareSentenceReturns"/> — exactly, both ways.</item>
+    /// is a bare sentence and must be in <see cref="BareSentenceReturns"/> — exactly, both ways. The rule reaches
+    /// ONE call deep (#3962): a tool's <c>return Helper(…)</c> is read through that same-file method's return
+    /// expressions, arm by arm (<see cref="HelperReturnArms"/>) — get_query_heatmap's refusals were bare sentences
+    /// in private helpers until #3897, and this sweep could not see them.</item>
     /// <item><b>Every <c>return McpHelpers.Status("invalid", …)</c> and every hand-serialized
     /// <c>new { status = "invalid" … }</c></b> is a refusal built beside the builder rather than through it and
     /// fails: the word is right, the shape (no <c>hints.parameter</c>) is not, and one producer is the point.
@@ -409,7 +415,8 @@ public sealed class McpPayloadContractCensusTests
     /// <para>Bound: 244 tool methods; the guarded pass-through count has its own floor
     /// (<see cref="GuardedPassThroughFloor"/>) so the idiom regex cannot silently stop matching while the
     /// offender lists stay empty, and the resolver-sourced and validator-sourced counts are each floored at
-    /// 100 so neither producer class can vanish from the sweep unnoticed.</para>
+    /// 100 so neither producer class can vanish from the sweep unnoticed. The helpers followed are floored at
+    /// 50 (60 when #3962 landed) for the same reason.</para>
     /// </summary>
     [Fact]
     public void EveryRefusal_ReturnsThroughTheSharedShape_AndTheBareSentenceRosterIsExact()
@@ -420,8 +427,9 @@ public sealed class McpPayloadContractCensusTests
         var unshared = new List<string>();
         var bare = new List<(string File, string Tool, string Sentence)>();
         var handBuilt = new List<string>();
+        var helpersFollowed = 0;
 
-        foreach (var (file, tool, span, _) in ToolMethods())
+        foreach (var (file, tool, span, source) in ToolMethods())
         {
             var code = CSharpSourceWalker.StripCommentsAndStrings(span);
 
@@ -438,9 +446,13 @@ public sealed class McpPayloadContractCensusTests
                     continue;
                 }
 
-                if (!SharedPassThroughProducer.IsMatch(producer))
+                /* Every operand of a `??` chain, not just the first (#3897): the chain passes through whichever
+                   operand answers, so a hand-built refusal behind a shared first operand is still hand-built —
+                   get_query_heatmap's bucket_minutes answered a bare sentence that way on both SKUs until #3897. */
+                var unsharedOperand = CoalesceOperands(producer).FirstOrDefault(o => !SharedPassThroughProducer.IsMatch(o));
+                if (unsharedOperand is not null)
                 {
-                    unshared.Add($"{file} {tool}: {guard.Groups[1].Value} = {producer}");
+                    unshared.Add($"{file} {tool}: {guard.Groups[1].Value} = {producer} (not shared: {unsharedOperand.Trim()})");
                     continue;
                 }
 
@@ -454,9 +466,13 @@ public sealed class McpPayloadContractCensusTests
                 }
             }
 
-            foreach (var expression in ReturnExpressions(span, code))
+            /* The tool's own returns, then — one call deep, #3962 — what each `return Helper(…)` hands back. */
+            var helperArms = HelperReturnArms(span, source).ToList();
+            helpersFollowed += helperArms.Select(h => h.Helper).Distinct(StringComparer.Ordinal).Count();
+            foreach (var (expression, via) in ReturnExpressions(span, code).Select(e => (e, "return "))
+                .Concat(helperArms.Select(h => (h.Arm, $"return {h.Helper}(…) → "))))
             {
-                if (expression.StartsWith('"') || expression.StartsWith("$\"", StringComparison.Ordinal) || expression.StartsWith("@\"", StringComparison.Ordinal))
+                if (StartsWithStringLiteral(expression))
                 {
                     var opening = expression.IndexOf('"') + 1;
                     var closing = expression.IndexOf('"', opening);
@@ -466,7 +482,7 @@ public sealed class McpPayloadContractCensusTests
                 else if (expression.StartsWith("McpHelpers.Status(\"invalid\"", StringComparison.Ordinal)
                     || Regex.IsMatch(expression, @"^JsonSerializer\.Serialize\(\s*new\s*\{\s*status\s*=\s*""invalid"""))
                 {
-                    handBuilt.Add($"{file} {tool}: return {expression}");
+                    handBuilt.Add($"{file} {tool}: {via}{expression}");
                 }
             }
         }
@@ -474,6 +490,7 @@ public sealed class McpPayloadContractCensusTests
         Assert.True(passThroughs >= GuardedPassThroughFloor, $"only {passThroughs} guarded pass-throughs were found across both SKUs; the idiom marker has stopped matching");
         Assert.True(fromResolver >= 100, $"only {fromResolver} pass-throughs trace to a resolver; the resolver marker has stopped matching");
         Assert.True(fromValidator >= 100, $"only {fromValidator} pass-throughs trace to a McpHelpers validator; the validator marker has stopped matching");
+        Assert.True(helpersFollowed >= 50, $"only {helpersFollowed} `return Helper(…)` calls were followed into a same-file method; the helper walk has stopped resolving them");
 
         Assert.True(unshared.Count == 0,
             "these tools pass a value through `if (x != null) return x;` that no shared producer built — a refusal is McpHelpers.Refusal(parameter, sentence), built where the sentence is, so the wire carries `invalid` and hints.parameter: "
@@ -572,8 +589,14 @@ public sealed class McpPayloadContractCensusTests
         AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source", "Invalid source value 'perfmon'. Accepted values: dmv, xe. Omit it for all.");
         AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms", "Invalid min_duration_ms value '-1'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.");
 
-        /* And the two producers outside McpHelpers that the census accepts as shared. */
+        /* And the producers outside McpHelpers that the census accepts as shared: the watch-state validator, the
+           trend-width resolvers (#3897) — out of range, over the read's cap (naming the width that fits), and a
+           width the hourly rollup cannot serve — and the resolver. */
         AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state", "Unknown state 'garbage'. Legal values: pending, open, carried, closed; omit for open + carried.");
+        AssertRefusal(TrendBuckets.Resolve(24, 0, 1, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), out _), "bucket_minutes", "Invalid bucket_minutes value '0'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
+        AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes", "Invalid bucket_minutes value '1441'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
+        AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes", "bucket_minutes 1 over 24 hour(s) across 6 series is up to 8646 points, over this read's 1000-point cap. Use bucket_minutes 9 or wider, or narrow hours_back (as_of moves the window) for finer points.");
+        AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes", "bucket_minutes 30 cannot be served for this window: it reaches past the raw tier's 4-day retention, so the hourly rollup answers it, and that rollup's points are whole hours. Use a multiple of 60, or a window inside the last 4 days for finer points.");
         var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new DarlingServerResolver.RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
         AssertRefusal(miss, "server_name", "Could not resolve server. Available servers:\nbox-a");
     }
@@ -619,10 +642,13 @@ public sealed class McpPayloadContractCensusTests
 
                 var homemade = group_by == "x" ? null : "group_by must be x";
                 if (homemade != null) return homemade;
+
+                var mixed = McpHelpers.ValidateWindow(hours_back, as_of, out var anchor) ?? ValidateBucketMinutes(bucket_minutes);
+                if (mixed != null) return mixed;
             """;
         var code = CSharpSourceWalker.StripCommentsAndStrings(Body);
         var guards = GuardedPassThrough.Matches(code);
-        Assert.Equal(5, guards.Count);
+        Assert.Equal(6, guards.Count);
 
         Assert.Matches(SharedPassThroughProducer, LastAssignmentOf(code, "error", guards[0].Index)!);
         Assert.Contains("ValidateWindow", LastAssignmentOf(code, "validation", guards[1].Index)!, StringComparison.Ordinal);
@@ -631,6 +657,294 @@ public sealed class McpPayloadContractCensusTests
         var homemade = LastAssignmentOf(code, "homemade", guards[4].Index);
         Assert.NotNull(homemade);
         Assert.DoesNotMatch(SharedPassThroughProducer, homemade!);
+
+        /* The #3897 case: the whole chain matches the producer pattern on its shared first operand, and only the
+           operand walk sees that its second one is hand-built. */
+        var mixed = LastAssignmentOf(code, "mixed", guards[5].Index)!;
+        Assert.Matches(SharedPassThroughProducer, mixed);
+        var operands = CoalesceOperands(mixed);
+        Assert.Equal(2, operands.Count);
+        Assert.Matches(SharedPassThroughProducer, operands[0]);
+        Assert.DoesNotMatch(SharedPassThroughProducer, operands[1]);
+        Assert.All(CoalesceOperands(LastAssignmentOf(code, "chained", guards[3].Index)!), o => Assert.Matches(SharedPassThroughProducer, o));
+    }
+
+    /// <summary>A string literal opens the expression: <c>"</c>, <c>$"</c>, <c>@"</c>, <c>$@"</c> or <c>@$"</c>.</summary>
+    private static bool StartsWithStringLiteral(string expression) =>
+        Regex.IsMatch(expression, @"^(?:\$@|@\$|\$|@)?""");
+
+    /// <summary>
+    /// #3962: what a tool's <c>return Helper(…)</c> hands its caller, one call deep. For every such return in
+    /// <paramref name="span"/> whose callee is a method DECLARED in the same file (<paramref name="source"/>), each
+    /// of that method's return expressions — its expression body, or every <c>return</c> in its block body — split
+    /// at depth-zero <c>?</c> / <c>:</c> into its ternary arms, because <c>cond ? null : $"…"</c> is the shape a bare
+    /// sentence hid in (get_query_heatmap's bucket_minutes refusal, until #3897). Arms are read off the
+    /// comments-blanked, literals-kept text at the offsets the strings-blanked code gives, whitespace collapsed.
+    /// Same file only: a method in another file is a shared producer, which the pass-through sweep holds to its
+    /// own list; and one level only, which is where every helper on the tree sits.
+    /// </summary>
+    private static IEnumerable<(string Helper, string Arm)> HelperReturnArms(string span, string source)
+    {
+        var spanCode = CSharpSourceWalker.StripCommentsAndStrings(span);
+        var (sourceCode, sourceText) = Stripped(source);
+
+        foreach (var name in Regex.Matches(spanCode, @"\breturn\s+(?:await\s+)?(?<name>[A-Za-z_]\w*)\s*\(")
+                     .Select(m => m.Groups["name"].Value).Distinct(StringComparer.Ordinal))
+        {
+            var declaration = Regex.Match(
+                sourceCode,
+                @"\b(?:private|internal|public|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>?,\[\]\s]+?\s" + Regex.Escape(name) + @"\s*\(");
+            if (!declaration.Success)
+            {
+                continue;
+            }
+
+            var close = MatchingClose(sourceCode, declaration.Index + declaration.Length - 1);
+            var after = close + 1;
+            while (after < sourceCode.Length && char.IsWhiteSpace(sourceCode[after]))
+            {
+                after++;
+            }
+
+            var expressions = new List<(int Start, int End)>();
+            if (sourceCode.AsSpan(after).StartsWith("=>", StringComparison.Ordinal))
+            {
+                expressions.Add((after + 2, EndOfStatement(sourceCode, after + 2)));
+            }
+            else if (after < sourceCode.Length && sourceCode[after] == '{')
+            {
+                var bodyEnd = MatchingClose(sourceCode, after);
+                foreach (Match keyword in Regex.Matches(sourceCode[after..bodyEnd], @"\breturn\b"))
+                {
+                    var start = after + keyword.Index + keyword.Length;
+                    expressions.Add((start, EndOfStatement(sourceCode, start)));
+                }
+            }
+
+            foreach (var (start, end) in expressions)
+            {
+                foreach (var (armStart, armEnd) in ResultArms(sourceCode, start, end))
+                {
+                    yield return (name, Regex.Replace(sourceText[armStart..armEnd], @"\s+", " ").Trim());
+                }
+            }
+        }
+    }
+
+    /// <summary>A file's strings-blanked code and its comments-blanked, literals-kept text, walked once per file text
+    /// rather than once per tool the file declares: <see cref="ToolMethods"/> hands every tool of a file the same
+    /// source string, so the walk is keyed on that instance.</summary>
+    private static readonly ConditionalWeakTable<string, Tuple<string, string>> StrippedSources = new();
+
+    private static (string Code, string Text) Stripped(string source)
+    {
+        var entry = StrippedSources.GetValue(source, text =>
+        {
+            var code = CSharpSourceWalker.StripCommentsAndStrings(text);
+            return Tuple.Create(code, StripCommentsPreservingLength(text, code));
+        });
+        return (entry.Item1, entry.Item2);
+    }
+
+    /// <summary>The index of the bracket closing the one at <paramref name="open"/>, on strings-blanked code.</summary>
+    private static int MatchingClose(string code, int open)
+    {
+        var depth = 0;
+        for (var i = open; i < code.Length; i++)
+        {
+            if (code[i] is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (code[i] is ')' or ']' or '}' && --depth == 0)
+            {
+                return i;
+            }
+        }
+
+        return code.Length - 1;
+    }
+
+    /// <summary>The <c>;</c> ending the statement that starts at <paramref name="start"/>, at bracket depth zero.</summary>
+    private static int EndOfStatement(string code, int start)
+    {
+        var depth = 0;
+        for (var i = start; i < code.Length; i++)
+        {
+            if (code[i] is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (code[i] is ')' or ']' or '}')
+            {
+                depth--;
+            }
+            else if (code[i] == ';' && depth == 0)
+            {
+                return i;
+            }
+        }
+
+        return code.Length;
+    }
+
+    /// <summary>The RESULT arms of the expression between <paramref name="start"/> and <paramref name="end"/>: for
+    /// <c>c ? a : b</c> the arms of <c>a</c> and of <c>b</c> (so a chain <c>c1 ? a : c2 ? b : d</c> gives a, b and d,
+    /// and no condition is ever an arm); for anything else, the expression itself. Read at bracket depth zero on
+    /// strings-blanked code, so a <c>?</c> or <c>:</c> inside a literal or a call cannot split it, and <c>?.</c>,
+    /// <c>?[</c> and <c>??</c> are not the conditional operator.</summary>
+    private static IEnumerable<(int Start, int End)> ResultArms(string code, int start, int end)
+    {
+        var question = -1;
+        var depth = 0;
+        for (var i = start; i < end && question < 0; i++)
+        {
+            depth += code[i] switch { '(' or '[' or '{' => 1, ')' or ']' or '}' => -1, _ => 0 };
+            if (depth == 0 && IsConditionalQuestion(code, i, end))
+            {
+                question = i;
+            }
+        }
+
+        /* The ':' that closes this '?', past any conditional nested in its first arm. */
+        var colon = -1;
+        var nested = 0;
+        depth = 0;
+        for (var i = question + 1; question >= 0 && i < end && colon < 0; i++)
+        {
+            depth += code[i] switch { '(' or '[' or '{' => 1, ')' or ']' or '}' => -1, _ => 0 };
+            if (depth != 0)
+            {
+                continue;
+            }
+
+            if (IsConditionalQuestion(code, i, end))
+            {
+                nested++;
+            }
+            else if (code[i] == ':' && code[i - 1] != ':' && (i + 1 >= end || code[i + 1] != ':'))
+            {
+                if (nested == 0)
+                {
+                    colon = i;
+                }
+                else
+                {
+                    nested--;
+                }
+            }
+        }
+
+        if (colon < 0)
+        {
+            yield return (start, end);
+            yield break;
+        }
+
+        foreach (var arm in ResultArms(code, question + 1, colon))
+        {
+            yield return arm;
+        }
+
+        foreach (var arm in ResultArms(code, colon + 1, end))
+        {
+            yield return arm;
+        }
+    }
+
+    /// <summary>The conditional operator's <c>?</c> — not <c>?.</c>, <c>?[</c> or either half of <c>??</c>.</summary>
+    private static bool IsConditionalQuestion(string code, int i, int end) =>
+        code[i] == '?'
+        && (i + 1 >= end || code[i + 1] is not ('.' or '[' or '?'))
+        && code[i - 1] != '?';
+
+    /// <summary>The operands of a <c>??</c> chain at parenthesis depth zero — the whole expression when it has
+    /// none. Read off code whose strings and comments are blanked, so a <c>??</c> inside a literal cannot split it;
+    /// a conditional's single <c>?</c> and a null-conditional <c>?.</c> are not the operator.</summary>
+    private static List<string> CoalesceOperands(string expression)
+    {
+        var operands = new List<string>();
+        var depth = 0;
+        var start = 0;
+        for (var i = 0; i < expression.Length; i++)
+        {
+            var c = expression[i];
+            if (c is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or ']' or '}')
+            {
+                depth--;
+            }
+            else if (c == '?' && depth == 0 && i + 1 < expression.Length && expression[i + 1] == '?')
+            {
+                operands.Add(expression[start..i]);
+                start = i + 2;
+                i++;
+            }
+        }
+
+        operands.Add(expression[start..]);
+        return operands;
+    }
+
+    /// <summary>
+    /// #3962's walk, witnessed on the shape it exists for — the heatmap's pre-#3897 refusals, a bare sentence in a
+    /// ternary arm of an expression-bodied helper and in a block-bodied one — and not on its neighbours: a helper
+    /// that builds the refusal, a miss wrapped in the shared builder (its sentence is an ARGUMENT, not an arm), a
+    /// null arm, a method in another file, and a <c>?.</c> / <c>??</c> that is not a conditional.
+    /// </summary>
+    [Fact]
+    public void TheHelperWalk_ReadsASameFileHelpersReturnArms_AndNothingElse()
+    {
+        const string Source = """
+            public sealed class FixtureTools
+            {
+                public static string GetFixture(int bucket_minutes, string? metric)
+                {
+                    if (bucket_minutes < 1) return ValidateBucketMinutes(bucket_minutes);
+                    if (metric is null) return InvalidMetric(metric!);
+                    if (bucket_minutes > 5) return Refused(bucket_minutes);
+                    if (bucket_minutes > 4) return Quiet(bucket_minutes);
+                    if (bucket_minutes > 3) return Chained(metric);
+                    return OtherFile.Build();
+                }
+
+                private static string? ValidateBucketMinutes(int bucket_minutes) =>
+                    bucket_minutes >= 1 ? null : $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440.";
+
+                private static string InvalidMetric(string metric)
+                {
+                    // a comment with "quotes" and a ? mark : and a colon
+                    return $"Invalid metric '{metric}'.";
+                }
+
+                private static string Refused(int value) => McpHelpers.Refusal("bucket_minutes", $"Invalid bucket_minutes value '{value}'.");
+
+                private static string Quiet(int value) =>
+                    value > 0 ? McpHelpers.Status("empty", $"Nothing in the last {value} hour(s).") : McpHelpers.Status("unavailable", "never");
+
+                private static string Chained(string? metric) => metric?.Length > 3 ? metric ?? "x" : McpHelpers.Refusal("metric", "bad");
+            }
+            """;
+        var source = Source.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var span = source[source.IndexOf("public static string GetFixture", StringComparison.Ordinal)..(source.IndexOf("return OtherFile.Build();", StringComparison.Ordinal) + 40)];
+
+        var arms = HelperReturnArms(span, source).ToList();
+        var bareArms = arms.Where(a => StartsWithStringLiteral(a.Arm)).ToList();
+
+        Assert.Equal(new[] { "InvalidMetric", "ValidateBucketMinutes" }, bareArms.Select(a => a.Helper).Order(StringComparer.Ordinal).ToArray());
+        Assert.Contains(bareArms, a => a.Arm.StartsWith("$\"Invalid bucket_minutes value", StringComparison.Ordinal));
+        Assert.Contains(bareArms, a => a.Arm.StartsWith("$\"Invalid metric", StringComparison.Ordinal));
+
+        /* The neighbours are read — the walk resolved them — and none of their arms is a bare sentence. */
+        Assert.Contains(arms, a => a.Helper == "Refused" && a.Arm.StartsWith("McpHelpers.Refusal(", StringComparison.Ordinal));
+        Assert.Equal(2, arms.Count(a => a.Helper == "Quiet"));
+        Assert.All(arms.Where(a => a.Helper == "Quiet"), a => Assert.StartsWith("McpHelpers.Status(", a.Arm, StringComparison.Ordinal));
+        Assert.Equal(new[] { "metric ?? \"x\"", "McpHelpers.Refusal(\"metric\", \"bad\")" }, arms.Where(a => a.Helper == "Chained").Select(a => a.Arm).ToArray());
+        Assert.DoesNotContain(arms, a => a.Helper == "Build");
+        Assert.Equal(new[] { "null", "$\"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440.\"" }, arms.Where(a => a.Helper == "ValidateBucketMinutes").Select(a => a.Arm).ToArray());
     }
 
     /// <summary>The right-hand side of the LAST assignment to <paramref name="name"/> that precedes

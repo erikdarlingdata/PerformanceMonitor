@@ -54,14 +54,20 @@ public sealed class DarlingMcpQueryHeatmapTools
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
-            ?? McpHelpers.ValidateTop(limit)
-            ?? ValidateBucketMinutes(bucket_minutes);
+            ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
+
+        /* The bin-width bound. Refused out of range rather than clamped, for the same reason the row cap is: a
+           silently rewritten bin width draws a different grid than the one that was asked for. Built here, where
+           the sentence is (#3897): it was a bare sentence behind a `??` chain, with no `invalid` status and no
+           hints.parameter. */
+        if (bucket_minutes < 1 || bucket_minutes > DarlingQueryHeatmapReader.MaxBucketMinutes)
+            return McpHelpers.Refusal("bucket_minutes", $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.");
 
         /* A metric we do not know is REFUSED, not quietly turned into duration: a caller who asked for CPU
            and silently got elapsed time would read the wrong grid with nothing to tell them so. */
         if (!DarlingQueryHeatmapReader.TryParseMetric(metric, out var parsedMetric))
-            return InvalidMetric(metric!);
+            return McpHelpers.Refusal("metric", $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.");
 
         try
         {
@@ -194,14 +200,4 @@ public sealed class DarlingMcpQueryHeatmapTools
             "empty",
             $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.");
     }
-
-    /// <summary>The bin-width bound. Refuses out of range rather than clamping, for the same reason the row
-    /// cap does: a silently rewritten bin width draws a different grid than the one that was asked for.</summary>
-    private static string? ValidateBucketMinutes(int bucket_minutes) =>
-        bucket_minutes >= 1 && bucket_minutes <= DarlingQueryHeatmapReader.MaxBucketMinutes
-            ? null
-            : $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.";
-
-    private static string InvalidMetric(string metric) =>
-        $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.";
 }

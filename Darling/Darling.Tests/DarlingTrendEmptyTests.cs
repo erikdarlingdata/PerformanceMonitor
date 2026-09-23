@@ -127,7 +127,9 @@ public sealed class DarlingTrendEmptyTests
     public void EachProbe_WalksTheSameRelationAsItsTrend()
     {
         AssertSameRelation(DarlingTrendReader.HasAnyMemoryStatSql, DarlingTrendReader.MemoryTrendSql);
-        AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoLatencyTrendSql);
+        /* #3897: both file I/O statements — the ranking and the bucketed series — walk the probe's relation. */
+        AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoSeriesSql);
+        AssertSameRelation(DarlingTrendReader.HasAnyFileIoStatSql, DarlingTrendReader.FileIoTrendSql);
         AssertSameRelation(DarlingTrendReader.HasAnyQueryStatSql, DarlingTrendReader.QueryDurationTrendSql);
 
         /* And each stops at the first row: it runs on a path that already found nothing, and its only job

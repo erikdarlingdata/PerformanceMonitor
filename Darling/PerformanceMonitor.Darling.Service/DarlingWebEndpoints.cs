@@ -1853,6 +1853,14 @@ public static class DarlingWebEndpoints
     private static CatalogParam PText(string name) => new(name, TypeText, false, null);
     private static CatalogParam PReqText(string name) => new(name, TypeText, true, null);
     private static CatalogParam PInt(string name, int def) => new(name, TypeInt, false, def);
+
+    /// <summary>
+    /// An optional integer with NO default — <see cref="PDouble(string)"/>'s shape for an int. Absent is a third
+    /// state, not a number: <c>bucket_minutes</c> absent means the read sizes its points to the window (#3897),
+    /// and advertising a default would tell a catalog consumer that sending nothing and sending that width are
+    /// the same request.
+    /// </summary>
+    private static CatalogParam PInt(string name) => new(name, TypeInt, false, null);
     private static CatalogParam PBool(string name, bool def) => new(name, TypeBool, false, def);
     private static CatalogParam PDouble(string name, double def) => new(name, TypeDouble, false, def);
 
@@ -1908,7 +1916,7 @@ public static class DarlingWebEndpoints
             ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PAsOf()),
             ["get_deadlock_trend"] = R(CatBlocking, "Deadlock counts over time.", PServer(), PHours(24), PAsOf()),
             ["get_deadlocks"] = R(CatBlocking, "Recent deadlocks with victim/resource summary.", PServer(), PHours(24), PLimit(20), PAsOf()),
-            ["get_lock_wait_trend"] = R(CatBlocking, "Every LCK% wait type's wait ms/sec over time - the aggregate lock-wait lane.", PServer(), PHours(24), PAsOf()),
+            ["get_lock_wait_trend"] = R(CatBlocking, "The LCK% family's summed wait ms/sec over time - the aggregate lock-wait lane - with a legend of the types that waited.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
 
             /* ── automatic plan correction (DarlingMcpPlanCorrectionTools, #2028) ── */
             ["get_plan_corrections"] = R(CatAnalysis, "Automatic plan correction activity + per-database FORCE_LAST_GOOD_PLAN state.", PServer(), PHours(24), PLimit(50), PAsOf()),
@@ -1969,8 +1977,8 @@ public static class DarlingWebEndpoints
             ["get_pg_log_events"] = R(CatData, "PostgreSQL server-log events in the window, classified by family (error, connection, lock_wait, temp_file, autovacuum, checkpoint), newest first, SQL in them normalized. The 'check the error log' read. Filter by family and min_severity; the page says what bounded it.", PServer(), PHours(24), PText("family"), PText("min_severity"), PLimit(50), PAsOf()),
             ["get_pg_wait_trend"] = R(CatTrends, "One PostgreSQL wait event over time, per second. Omit wait_event to follow whichever dominates. Estimates from a sampling profiler, so the shape is the finding.", PServer(), PText("wait_event"), PHours(24), PAsOf()),
             ["get_pg_query_duration_trend"] = R(CatTrends, "One PostgreSQL statement over time by queryid: what a single execution cost in each interval. Omit queryid for the busiest statement. The regression read.", PServer(), PText("queryid"), PHours(24), PAsOf()),
-            ["get_pg_io_trend"] = R(CatTrends, "One PostgreSQL (backend_type, context) pair over time: I/O rates per second, the hit ratio per interval, and latency where the server measures it. Omit both to follow whichever pair moved the most I/O.", PServer(), PText("backend_type"), PText("context"), PHours(24), PAsOf()),
-            ["get_pg_database_trend"] = R(CatTrends, "One PostgreSQL database over time: temp-file spills, the interval's own cache hit ratio, deadlocks and the rollback share. Omit database for the biggest spiller. The cumulative ratio is a lifetime average that hides a cliff.", PServer(), PText("database"), PHours(24), PAsOf()),
+            ["get_pg_io_trend"] = R(CatTrends, "One PostgreSQL (backend_type, context) pair over time: I/O rates per second, the hit ratio per point, and latency where the server measures it. Omit both to follow whichever pair moved the most I/O.", PServer(), PText("backend_type"), PText("context"), PHours(24), PAsOf(), PInt("bucket_minutes")),
+            ["get_pg_database_trend"] = R(CatTrends, "One PostgreSQL database over time: temp-file spills, the cache hit ratio per point with its worst interval, deadlocks and the rollback share. Omit database for the biggest spiller. The cumulative ratio is a lifetime average that hides a cliff.", PServer(), PText("database"), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_replication_stats"] = R(CatData, "Health of CONNECTED replicas from pg_stat_replication, with the worst lag in the window beside the latest. Counterpart of get_pg_replication_slots.", PServer(), PHours(24), PLimit(25), PAsOf()),
             ["get_pg_blocking"] = R(CatData, "PostgreSQL blocking chains that were sampled, with the root blocker attributed. A sample, not an event log.", PServer(), PHours(24), PLimit(50), PAsOf()),
             ["get_pg_database_stats"] = R(CatData, "PostgreSQL per-database temp-file spills, cache hit ratio, deadlocks and commit/rollback split, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
@@ -1983,13 +1991,13 @@ public static class DarlingWebEndpoints
             ["list_servers"] = R(CatData, "The monitored servers known to the store."),
 
             /* ── trends (DarlingMcpTrendTools) ── */
-            ["get_file_io_trend"] = R(CatTrends, "File-IO throughput over time.", PServer(), PHours(24), PAsOf()),
+            ["get_file_io_trend"] = R(CatTrends, "File I/O read and write latency over time per database and file type, heaviest stall first; database_name charts one database per file.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes"), PText("database_name")),
             ["get_memory_trend"] = R(CatTrends, "Memory usage over time.", PServer(), PHours(24), PAsOf()),
             ["get_perfmon_trend"] = R(CatTrends, "One perfmon counter over time (requires counter_name).", PReqText("counter_name"), PServer(), PHours(24), PAsOf()),
             /* #3653 item 17: the four reads below disclose the WINDOW floor as window_truncated (beside
                effective_start / effective_hours_back) — not the page dialect's truncated, which they never had. */
-            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf()),
-            ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf()),
+            ["get_procedure_duration_trend"] = R(CatTrends, "Stored-procedure elapsed ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
+            ["get_query_duration_trend"] = R(CatTrends, "Query elapsed ms/sec + executions/sec over time (per-interval rates, not percentiles); window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
             ["get_query_store_duration_trend"] = R(CatTrends, "Query Store duration ms/sec + executions/sec over time; window_truncated says the tier did not hold the whole window.", PServer(), PHours(24), PAsOf()),
             ["get_query_trend"] = R(CatTrends, "One query's metrics over time (requires query_hash + database_name); window_truncated says the tier did not hold the whole window.", PReqText("query_hash"), PReqText("database_name"), PServer(), PHours(24), PAsOf()),
 
@@ -2000,7 +2008,7 @@ public static class DarlingWebEndpoints
             ["get_fleet_overview"] = R(CatOverview, "The banded cross-server fleet roll-up.", PHours(DefaultFleetHours)),
             ["get_sweep_reports"] = R(CatOverview, "The scheduled Fleet Sweep Reports: the sweep timeline for the window, the newest sweep in full, and the watch-item worklist - or one sweep by sweep_id (a string; the ids do not survive a JSON number round trip).", PHours(1), PAsOf(), PText("sweep_id"), PText("watch_state")),
             ["get_ag_health"] = R(CatOverview, "Availability Group topology: replicas and per-database secondary state.", PServer()),
-            ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth series (self-metrics).", PInt("days_back", 30)),
+            ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth (self-metrics): a summary by default, object_kind to list one kind, an exact object_name for one object's daily series.", PInt("days_back", 30), PText("object_kind"), PText("object_name"), PLimit(DarlingMcpStoreMetricsTools.DefaultLimit)),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf()),
             ["get_store_query_stats"] = R(CatOverview, "The monitoring store's OWN SQL statements ranked by server-side cost (pg_stat_statements), split by the role that ran them (on a managed store: the web viewer, MCP tools, the Darling Viewer, or the service itself).", PText("role"), PText("order_by"), PTop(DarlingMcpStoreQueryStatsTools.DefaultTop), PBool("full_text", false)),
             ["get_collector_cost"] = R(CatOverview, "The monitoring tool's OWN per-collector cost on the monitored servers (self-monitoring) - which of our collectors is the most expensive to run. Pass collector_name for that one collector's daily trend instead of the ranked list.", PInt("days_back", 7), PText("collector_name")),
@@ -2609,7 +2617,9 @@ public static class DarlingWebEndpoints
             ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
-            ["get_lock_wait_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
 
             /* ── automatic plan correction (#2028) ── */
             ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
@@ -2675,8 +2685,12 @@ public static class DarlingWebEndpoints
             ["get_pg_log_events"] = (c, pg, an) => DarlingMcpPgLogEventTools.GetPgLogEvents(pg, Server(c), Hours(c, 24), Str(c, "family"), Str(c, "min_severity"), Rows(c, "limit", 50), as_of: AsOf(c)),
             ["get_pg_wait_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgWaitTrend(pg, Server(c), Str(c, "wait_event"), Hours(c, 24), as_of: AsOf(c)),
             ["get_pg_query_duration_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgQueryDurationTrend(pg, Server(c), Str(c, "queryid"), Hours(c, 24), as_of: AsOf(c)),
-            ["get_pg_io_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), as_of: AsOf(c)),
-            ["get_pg_database_trend"] = (c, pg, an) => DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), as_of: AsOf(c)),
+            ["get_pg_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpPgTrendTools.GetPgIoTrend(pg, Server(c), Str(c, "backend_type"), Str(c, "context"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
+            ["get_pg_database_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_pg_replication_stats"] = (c, pg, an) => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
             ["get_pg_database_stats"] = (c, pg, an) => DarlingMcpPgDatabaseTools.GetPgDatabaseStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
@@ -2691,13 +2705,22 @@ public static class DarlingWebEndpoints
             ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg),
 
             /* ── trends ── */
-            ["get_file_io_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            /* #3897: the trends a page charts pass the CHART budget — a browser draws far more points than a model
+               should read — and bind bucket_minutes, refusing a value that is not a number rather than quietly
+               sizing the points itself (the OptionalDouble rule). */
+            ["get_file_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_memory_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
                 ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), as_of: AsOf(c))
                 : MissingParam("counter_name"),
-            ["get_procedure_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
-            ["get_query_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
+            ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
@@ -2711,7 +2734,7 @@ public static class DarlingWebEndpoints
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c)),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours)),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c)),
-            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30)),
+            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit)),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c)),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false)),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name")),
@@ -2908,6 +2931,29 @@ public static class DarlingWebEndpoints
         }
 
         var parsed = double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number);
+        value = parsed ? number : null;
+        return parsed;
+    }
+
+    /// <summary>
+    /// An OPTIONAL integer parameter — <see cref="OptionalDouble"/>'s rule for an int: true with null when the key
+    /// is absent, true with the value when it parses, FALSE when it is present and not an integer. For a knob
+    /// whose absence means "let the read choose" (<c>bucket_minutes</c>, #3897), an unreadable value falling back
+    /// to that choice would answer a different request than the one sent.
+    /// </summary>
+    private static bool OptionalInt(HttpContext context, string key, out int? value) =>
+        TryParseOptionalInt(First(context, key), out value);
+
+    /// <summary>PURE optional-integer binding — <see cref="TryParseOptionalDouble"/>'s twin.</summary>
+    internal static bool TryParseOptionalInt(string? raw, out int? value)
+    {
+        if (raw is null)
+        {
+            value = null;
+            return true;
+        }
+
+        var parsed = int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number);
         value = parsed ? number : null;
         return parsed;
     }

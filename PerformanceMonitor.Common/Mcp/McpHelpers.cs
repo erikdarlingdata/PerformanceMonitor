@@ -238,12 +238,19 @@ internal static class McpHelpers
     /// <para>It is a constant rather than 100 hand-typed attribute strings for the reason the rest of the
     /// two-SKU parity rules exist: the same parameter described two different ways on two servers is a
     /// divergence no test would catch and every agent would notice.</para>
+    ///
+    /// <para><b>The rule, not the reasoning (#3898).</b> This text rides on 91 tools on Darling and 56 on
+    /// Lite, so every character here is paid that many times in every client that loads the catalog; at 379
+    /// characters it was a tenth of Darling's <c>tools/list</c>. It keeps what a caller must act on: the
+    /// anchor is the window's END, a bare date is 00:00 UTC (the start of that day, so a whole-day question
+    /// anchors on the next date), omitting it means now, and a past incident is <c>as_of</c> at its end, never
+    /// a wider <c>hours_back</c>. The WHY of that last rule (a wider window is a different aggregate, not the
+    /// same one with more rows) and the other accepted spellings live once, in both SKUs' server instructions
+    /// under "Asking about a PAST window", and <c>AsOfWindowAnchorTests</c> holds both halves.</para>
     /// </summary>
     public const string AsOfDescription =
-        "Optional UTC anchor for the END of the window, ISO-8601 (2026-08-18T14:30:00Z, or 2026-08-18 for " +
-        "midnight UTC). Omit to anchor at now. The window is the hours_back hours ENDING here, so a past " +
-        "incident is 'as_of the end of it, hours_back its length' — widening hours_back is NOT the same " +
-        "question, because a wider window is a different aggregate, not the same one with more rows.";
+        "Optional ISO-8601 UTC END of the window (2026-08-18T14:30:00Z; 2026-08-18 = 00:00 UTC); " +
+        "default now. For a past incident set as_of to its end; do not widen hours_back.";
 
     /// <summary>
     /// <see cref="AsOfDescription"/> for the reads whose span is measured in DAYS rather than hours.
@@ -252,13 +259,14 @@ internal static class McpHelpers
     /// own text. A parameter description that names a parameter the tool does not have is worse than a
     /// slightly generic one: the caller reads it, sends <c>hours_back</c>, and the key is ignored rather than
     /// rejected. Same contract, same anchor, same resolver — only the unit of the span differs.</para>
+    ///
+    /// <para>Cut to the rule by #3898 for the reason its sibling was. Unlike that one, the anchor day is
+    /// INCLUDED (the reader keeps only the UTC date and ends the range on it), which is why the text says
+    /// LAST day and needs no 00:00 caveat.</para>
     /// </summary>
     public const string AsOfDaysDescription =
-        "Optional UTC anchor for the LAST day of the range, ISO-8601 (2026-08-18T14:30:00Z, or 2026-08-18 for " +
-        "midnight UTC; only the UTC date is used). Omit to anchor at today. The range is the days_back days " +
-        "ENDING on that day, so a past month is 'as_of its last day, days_back its length' — widening " +
-        "days_back is NOT the same question, because it asks about a different span of days rather than the " +
-        "same one in more detail.";
+        "Optional ISO-8601 UTC LAST day of the range (2026-08-18; only the UTC date counts); default today. " +
+        "For a past month set as_of to its last day; do not widen days_back.";
 
     /// <summary>
     /// The one clause every tool that publishes the WINDOW FLOOR carries in its description, on both SKUs
@@ -279,13 +287,15 @@ internal static class McpHelpers
     /// sentence on every tool that publishes the key, and a rename is a WIRE CHANGE the description has to
     /// own — a client still reading <c>truncated</c> off these tools reads a key that is no longer there and
     /// gets <c>undefined</c>, not <c>false</c>. Leading space: it is appended to each tool's own sentence.</para>
+    ///
+    /// <para>#3898 cut it to the fact and the remedy it rules out. The WIRE CHANGE sentence stays on the wire
+    /// until the rename has shipped for one release (#3898's ruling on wire-change notices); it has not shipped
+    /// in one yet, and no on-demand guide exists to carry it instead.</para>
     /// </summary>
     public const string WindowTruncatedDescription =
-        " window_truncated is true when the store did not hold the whole requested window: the served series " +
-        "begins later than hours_back asked for because the tier that answered no longer reaches that far back, " +
-        "and effective_start / effective_hours_back say where it does begin. That is the window floor, not a " +
-        "page cut — no limit changes it. WIRE CHANGE: this key was spelled truncated before #3653; the old " +
-        "spelling is not published here any more.";
+        " window_truncated is true when the store did not hold the start of the window; effective_start / " +
+        "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
+        "changes it. WIRE CHANGE: spelled truncated before #3653.";
 
     /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.

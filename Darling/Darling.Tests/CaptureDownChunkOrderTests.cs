@@ -139,10 +139,27 @@ public sealed class CaptureDownChunkOrderTests
             {
                 /* Every chunk scan the plan carries, split into executed and never-executed. ChunkAppend orders
                    the chunks newest-first for ORDER BY collection_time DESC, so each arm's LIMIT 1 is satisfied
-                   by the newest chunk and the rest never start. */
-                var chunkScans = plan.Split('\n').Where(l => Regex.IsMatch(l, @"Scan .* on _hyper_\d+_\d+_chunk")).ToList();
-                Assert.True(chunkScans.Count >= 2 * 8,
-                    "expected the plan to carry at least eight chunk scans per arm (eight seeded days):\n" + plan);
+                   by the newest chunk and the rest never start. From TimescaleDB 2.30 the same read plans as
+                   DeferredChunkAppend (on by default), which lists only the chunks it visited and counts them,
+                   so there the proof is one visited chunk per arm (#3908, measured on 2.30.1). */
+                var lines = plan.Split('\n');
+                var chunkScans = lines.Where(PlanChunkScans.IsChunkScan).ToList();
+                var visited = lines
+                    .Select(l => Regex.Match(l, @"Chunks Visited: (\d+)"))
+                    .Where(m => m.Success)
+                    .Select(m => int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture))
+                    .ToList();
+                if (visited.Count > 0)
+                {
+                    Assert.True(visited.Count == 2 && visited.All(v => v == 1),
+                        "expected each arm's deferred chunk append to visit exactly the newest chunk:\n" + plan);
+                }
+                else
+                {
+                    Assert.True(chunkScans.Count >= 2 * 8,
+                        "expected the plan to carry at least eight chunk scans per arm (eight seeded days):\n" + plan);
+                }
+
                 var executed = chunkScans.Where(l => !l.Contains("never executed", StringComparison.Ordinal)).ToList();
                 Assert.True(executed.Count <= 2,
                     "more than one chunk executed per arm — the read is walking history again:\n" + plan);

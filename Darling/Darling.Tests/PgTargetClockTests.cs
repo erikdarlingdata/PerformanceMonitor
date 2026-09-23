@@ -92,7 +92,7 @@ public sealed class PgTargetClockTests
     /// The override's read is the config facts' rule, copied: the snapshot that applied AT OR BEFORE the window end
     /// (a historical window keys on the clock it had then), the reader's three-value session-scope exclusion spelled
     /// inline, the one setting by name, an unqualified collector table (no <c>v_</c> view), bound bounds (no bare
-    /// <c>now()</c>), and one row at most.
+    /// <c>now()</c>), the config reads' lower bound on both the anchor and the row scan (#3928), and one row at most.
     /// </summary>
     [Fact]
     public void TheOverridesRead_IsTheConfigFactsRule_LatestSnapshotAtOrBeforeTheWindowEnd_SessionScopesExcluded()
@@ -108,13 +108,14 @@ public sealed class PgTargetClockTests
         Assert.DoesNotContain("now(", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("CURRENT_TIMESTAMP", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotMatch(new Regex(@"\bFROM\s+v_"), sql);
-        Assert.DoesNotContain("$3", sql, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Matches(sql, @"collection_time >= \$3").Count);
+        Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
 
         /* The anchor and the exclusion are the collector's, token for token. */
         var config = PgTargetFactCollector.PgTargetConfigSnapshotSql;
         foreach (var shared in new[]
                  {
-                     "AND   c.collection_time = (\r\n          SELECT MAX(collection_time)\r\n          FROM pg_server_config\r\n          WHERE server_id = $1\r\n          AND   collection_time <= $2)",
+                     "AND   c.collection_time >= $3\r\nAND   c.collection_time = (\r\n          SELECT MAX(collection_time)\r\n          FROM pg_server_config\r\n          WHERE server_id = $1\r\n          AND   collection_time >= $3\r\n          AND   collection_time <= $2)",
                      "AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')",
                  })
         {

@@ -28,10 +28,17 @@ public partial class DrillDownCollector
     private readonly IPlanFetcher? _planFetcher;
     private const int TextLimit = 500;
 
-    public DrillDownCollector(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null)
+    /// <summary>
+    /// The cadence each collector runs at on a server, for the latest-value lookbacks (#3896) — the fact
+    /// collector's, so a list and the count it details are bounded alike. Null is every shipped default.
+    /// </summary>
+    private readonly Func<int, string, int?>? _collectorFrequencyMinutes;
+
+    public DrillDownCollector(DuckDbInitializer duckDb, IPlanFetcher? planFetcher = null, Func<int, string, int?>? collectorFrequencyMinutes = null)
     {
         _duckDb = duckDb;
         _planFetcher = planFetcher;
+        _collectorFrequencyMinutes = collectorFrequencyMinutes;
     }
 
     /// <summary>

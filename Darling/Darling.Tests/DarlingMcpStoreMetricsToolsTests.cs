@@ -54,7 +54,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     }
 
     [Fact]
-    public void ParamContract_DaysBackOnly_Default30_CeilingIsTheSweepsRetention()
+    public void ParamContract_DaysBackKindNameLimit_NoServerName_CeilingIsTheSweepsRetention()
     {
         var method = ToolMethods().Single();
         var mcpParams = method.GetParameters()
@@ -62,9 +62,15 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             .Select(p => (p.Name, p.HasDefaultValue, p.DefaultValue))
             .ToArray();
 
-        /* Deliberately NO server_name: the store is the subject, not a monitored server. */
-        Assert.Equal(new[] { "days_back" }, mcpParams.Select(p => p.Name).ToArray());
-        Assert.Equal(30, mcpParams.Single().DefaultValue);
+        /* Deliberately NO server_name: the store is the subject, not a monitored server. #3903 added the two
+           filters and the list bound; each is optional, so a caller sending only days_back — every caller before
+           #3903 — gets the summary, whose lists say what bounded them. */
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.All(mcpParams, p => Assert.True(p.HasDefaultValue, $"{p.Name} must stay optional"));
+        Assert.Equal(30, mcpParams[0].DefaultValue);
+        Assert.Null(mcpParams[1].DefaultValue);
+        Assert.Null(mcpParams[2].DefaultValue);
+        Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, mcpParams[3].DefaultValue);
 
         /* The window ceiling is the series' own retention — past it there is nothing to read, and the two
            numbers drifting apart would let a caller ask for days the sweep deliberately deleted. */
@@ -1070,7 +1076,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         /* Stale rows and the live census failing are each named. */
         var staleRows = rows.Append(Row(StoreSelfMetrics.HypertableObjectKind, "old", gib, at: SweepAt.AddHours(-1))).ToArray();
         var stale = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(staleRows)!, staleRows, states, null);
-        Assert.Contains("1 object row(s) in objects[] are from an OLDER sweep", stale, StringComparison.Ordinal);
+        Assert.Contains("1 object row(s) in the inventory are from an OLDER sweep", stale, StringComparison.Ordinal);
         Assert.Contains("live census naming them did not complete", stale, StringComparison.Ordinal);
 
         /* No TimescaleDB rows at all: the low share is explained, not flagged. */

@@ -27,9 +27,9 @@ namespace Darling.Tests;
 /// which share seven of their call sites with that path and cannot share its number.
 ///
 /// <para><b>Three constants, because the failure modes differ rather than the magnitudes.</b>
-/// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the twenty-six un-retried bootstrap
-/// sites; <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/> the two inside the
-/// bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
+/// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the un-retried bootstrap sites
+/// (<see cref="ExpectedBootstrapSites"/> of them); <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/>
+/// the two inside the bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
 /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the ten on the collection loop's serial
 /// thread, where ten sequential commands have to fit inside one watchdog window.</para>
 ///
@@ -59,9 +59,9 @@ namespace Darling.Tests;
 /// deadline is therefore the statement AFTER it. That window can be satisfied by a NEIGHBOUR: when a
 /// command is built in a <c>using (...) { ...; }</c> block, the two statements are consumed by the block
 /// body plus the statement following the block, so a timed construction there marks an untimed site
-/// clean. That is not hypothetical here — it is the exact shape of
-/// <c>DarlingStoreUpgrade.BridgeTimescaleAsync</c>, where the bridge's <c>ALTER EXTENSION UPDATE</c> sits
-/// in such a block immediately ahead of the extension-verify read. <see cref="ConstructionSpan"/> instead
+/// clean. That was not hypothetical here — it was the exact shape of
+/// <c>DarlingStoreUpgrade.BridgeTimescaleAsync</c> until #3908, where the bridge's <c>ALTER EXTENSION UPDATE</c>
+/// sat in such a block immediately ahead of the extension-verify read. <see cref="ConstructionSpan"/> instead
 /// walks the argument list and its optional trailing object initializer and stops, so what it reads is
 /// exactly one command's own deadline and a neighbour cannot be borrowed in either direction. Every one
 /// of this group's twenty-eight edits uses the object-initializer form, which is what makes that
@@ -76,9 +76,10 @@ public sealed class StartupCommandTimeoutTests
     /// command sites each holds and which deadline each site is expected to carry.
     ///
     /// <para><c>Other</c> counts sites carrying a deadline this group deliberately did NOT change:
-    /// the two <c>ALTER EXTENSION UPDATE</c> statements already bounded by
-    /// <c>DarlingStoreUpgrade.s_bridgeTimeout</c> (1 h), which is right for a data-rewriting extension
-    /// update and wrong for the catalog reads beside it. Counting them rather than ignoring them is what
+    /// the <c>ALTER EXTENSION UPDATE</c> bounded by <c>DarlingStoreUpgrade.s_bridgeTimeout</c> (1 h), which
+    /// is right for a data-rewriting extension update and wrong for the catalog reads beside it. There were
+    /// two, in the bridge and after start, until #3908 moved both into
+    /// <c>UpdateTimescaleAsFirstStatementAsync</c>. Counting them rather than ignoring them is what
     /// keeps this pin honest about the two files it only partly owns.</para>
     ///
     /// <para><b>What is deliberately absent, and why each is a different budget — the token test, member
@@ -116,10 +117,20 @@ public sealed class StartupCommandTimeoutTests
         ("DarlingManagedPostgres.cs", "VerifyPgHbaAsync", 3, 0, 0, 0),
         ("DarlingManagedPostgres.cs", "GuardAdoptedListenAsync", 1, 0, 0, 0),
         ("DarlingStoreUpgrade.cs", "ReadClusterIdentityAsync", 1, 0, 0, 0),
-        ("DarlingStoreUpgrade.cs", "BridgeTimescaleAsync", 3, 0, 0, 1),
-        ("DarlingStoreUpgrade.cs", "CompleteAfterStartAsync", 3, 0, 0, 1),
+        ("DarlingStoreUpgrade.cs", "BridgeTimescaleAsync", 1, 0, 0, 0),
+        ("DarlingStoreUpgrade.cs", "CompleteAfterStartAsync", 2, 0, 0, 0),
+        /* #3908: the store's TimescaleDB update moved out of the two members above into its own. Its two reads
+           take the bootstrap deadline; the ALTER keeps the 1 h bridge bound it always had. */
+        ("DarlingStoreUpgrade.cs", "UpdateTimescaleAsFirstStatementAsync", 0, 0, 0, 1),
+        ("DarlingStoreUpgrade.cs", "ReadExtversionAsync", 1, 0, 0, 0),
+        ("DarlingStoreUpgrade.cs", "ListConnectableDatabasesAsync", 1, 0, 0, 0),
         ("DarlingStoreUpgrade.cs", "VerifySentinelReadAsync", 2, 0, 0, 0),
-        ("DarlingManagedRoles.cs", "EnsureProvisionedAsync", 1, 0, 0, 0),
+        /* #3914: the provisioning batch moved out of EnsureProvisionedAsync into the core it now shares with
+           the compose store's provisioning; same single command, same deadline. */
+        ("DarlingManagedRoles.cs", "ProvisionRolesAsync", 1, 0, 0, 0),
+        /* #3914: the compose store's one pre-read (the login's bootstrap-superuser status and the three role
+           names' markers), run once at startup before anything is written. */
+        ("DarlingManagedRoles.cs", "ReadComposeStoreFactsAsync", 1, 0, 0, 0),
         /* #3910: the stored-verifier read that decides which role passwords are re-asserted. */
         ("DarlingManagedRoles.cs", "ReadStoredRoleSecretsAsync", 1, 0, 0, 0),
         ("DarlingManagedRoles.cs", "ReadComposeStatementTimeoutAsync", 1, 0, 0, 0),
@@ -644,13 +655,13 @@ public sealed class StartupCommandTimeoutTests
     /// <c>.Storage</c> and <c>.Viewer</c> are Npgsql-store-only projects; <c>.Service</c> is not, and it
     /// builds commands against monitored PostgreSQL targets in the same files.
     ///
-    /// <para>All thirty sites in the members above are STORE commands, classified individually: twenty-six
-    /// against the <c>darling</c> store (six on a data-source connection, twenty on a non-pooled
-    /// <c>NpgsqlConnection</c> built from a connection-string builder), two against the MAINTENANCE
-    /// database <c>postgres</c> on the same cluster (the connect probe), and two against each
-    /// TimescaleDB-carrying database on the store cluster (the extension bridge). None is a monitored
-    /// target: no <c>SqlConnection</c>, no <c>TargetProviders.For</c>, and no use of a
-    /// <c>runtime.Target</c> connection anywhere in the thirty.</para>
+    /// <para>Every site in the members above is a STORE command, classified individually: against the
+    /// <c>darling</c> store (on a data-source connection, or on a non-pooled <c>NpgsqlConnection</c> built from
+    /// a connection-string builder), against the MAINTENANCE database <c>postgres</c> on the same cluster (the
+    /// connect probe), or against each TimescaleDB-carrying database on the store cluster (the extension
+    /// bridge). None is a monitored target: no <c>SqlConnection</c>, no <c>TargetProviders.For</c>, and no use
+    /// of a <c>runtime.Target</c> connection anywhere among them. No count here: the census above owns the
+    /// numbers, and a numeral in this sentence went stale the first time a site was added.</para>
     ///
     /// <para>The classification is encoded as a NEGATIVE against the two real target shapes, so a future
     /// target command placed in one of these members fails asking for a decision rather than inheriting a
