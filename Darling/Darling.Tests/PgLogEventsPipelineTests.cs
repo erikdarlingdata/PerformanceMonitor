@@ -1043,6 +1043,119 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
+    /// #3996's round-2 review, #4006, the target's half: es, id and ja keep the ERROR label in English, and so does
+    /// every catalogue that translates PL/pgSQL alone (zh_TW here), so a translated syntax error opens an event and
+    /// its token reached <c>message</c> verbatim: only the English <c> at or near "</c> was read. Every catalogue's
+    /// form is read now, a token-first one included, and an unterminated head in any language withholds its token;
+    /// so do a jsonpath token, a head holding a quote (<c>improper use of "*"</c>), and a token-first message cut
+    /// between its lines before its closing.
+    /// </summary>
+    [Fact]
+    public void ATranslatedSyntaxError_ReadsItsTokenAsSql_OrWithholdsIt()
+    {
+        var events = Classify(
+            P + "[4700] ERROR:  \"'4111-1111-1111-1111'\"またはその近辺で構文エラー(40文字目)\n"
+            + P + "[4701] ERROR:  error de sintaxis en o cerca de «'Leak4006a'» en carácter 28\n"
+            + P + "[4702] ERROR:  una cadena de caracteres entre comillas está inconclusa en o cerca de «'hunter2, 'sk_live_Leak4006b')» en carácter 45\n"
+            + P + "[4703] ERROR:  'kesalahan sintaks' pada atau didekat « 'Leak4006c' » pada karakter 12\n"
+            + P + "[4704] ERROR:  \"'Leak4006d'\" もしくはその近辺で 構文エラー(20文字目)\n"
+            + P + "[4705] ERROR:  \"'Leak4006e'\" 附近發生 語法錯誤 at character 9\n"
+            + P + "[4706] ERROR:  improper use of \"*\" at or near \"'Leak4006f'\" at character 17\n"
+            + P + "[4707] ERROR:  syntax error at or near \"\"4111-1111\"\" of jsonpath input\n"
+            + P + "[4708] ERROR:  42601: \"'Leak4006g'\"またはその近辺で構文エラー(8文字目)\n"
+            + P + "[4709] ERROR:  \"$$ BEGIN\n"
+            + "\tRAISE NOTICE 'Leak4006h';\n"
+            + "\tEND\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)\n"
+            + P + "[4710] ERROR:  \"$$ BEGIN\n"
+            + "\tRAISE NOTICE 'Leak4006i';\n"
+            + P + "[4711] ERROR:  syntax error at or near \"FROM\" at character 8\n");
+        Assert.Equal(12, events.Count);
+        Assert.All(events, e => Assert.DoesNotContain("Leak4006", e.Message, StringComparison.Ordinal));
+        Assert.All(events, e => Assert.DoesNotContain("4111", e.Message, StringComparison.Ordinal));
+
+        string MessageOf(int pid) => events.Single(e => e.Pid == pid).Message;
+        const string W = PgLogTextRedactor.WithheldStatement;
+        Assert.Equal("\"'?'\"またはその近辺で構文エラー(40文字目)", MessageOf(4700));
+        Assert.Equal("error de sintaxis en o cerca de «'?'» en carácter 28", MessageOf(4701));
+        Assert.Equal("una cadena de caracteres entre comillas está inconclusa en o cerca de «" + W + "» en carácter 45", MessageOf(4702));
+        Assert.Equal("'kesalahan sintaks' pada atau didekat « '?' » pada karakter 12", MessageOf(4703));
+        Assert.Equal("\"'?'\" もしくはその近辺で 構文エラー(20文字目)", MessageOf(4704));
+        Assert.Equal("\"'?'\" 附近發生 語法錯誤 at character 9", MessageOf(4705));
+        Assert.Equal("improper use of \"*\" at or near \"" + W + "\"", MessageOf(4706));
+        Assert.Equal("syntax error at or near \"" + W + "\" of jsonpath input", MessageOf(4707));
+        Assert.Equal("42601: \"'?'\"またはその近辺で構文エラー(8文字目)", MessageOf(4708));
+        Assert.Equal("\"" + W + "\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)", MessageOf(4709));
+        Assert.Equal("\"" + W + "\"", MessageOf(4710));
+        Assert.Equal("syntax error at or near \"FROM\" at character 8", MessageOf(4711));
+    }
+
+    /// <summary>
+    /// #3996's round-2 review (1), the target's half. Turkish and Korean write four labels and one with no space
+    /// after the colon, and the run read one as a label only before a letter: PL/pgSQL's QUERY companion is the
+    /// function's body, which opens with a space after <c>AS $$ BEGIN</c> (or a digit), so the run crossed
+    /// <c>SORGU: </c> and <c>쿼리: </c> and opened an event at the first English label inside the body, with the
+    /// body's password on its lines. A named unpadded label ends the run whatever follows its colon, except the
+    /// managed prefix's pid in brackets after a database whose name ends in one.
+    /// </summary>
+    [Fact]
+    public void AnUnpaddedLabel_EndsTheRunWhateverFollowsItsColon()
+    {
+        var events = Classify(
+            P + "[4720] HATA:  \"x\"  yerinde sözdizimi hatası\n"
+            + P + "[4720] SORGU: BEGIN -- WARNING: legacy key below\n"
+            + "\tPERFORM dblink_connect('host=db user=app password=Leak4006j');\n"
+            + "\tEND x\n"
+            + P + "[4721] 오류:  구문 오류\n"
+            + P + "[4721] 쿼리: 1; SELECT 'x' AS a, 'ERROR: ' AS b, 'Leak4006k' AS c\n"
+            + P + "[4722] HATA:  \"x\"  yerinde sözdizimi hatası\n"
+            + P + "[4722] SORGU: BEGIN PERFORM dblink_connect('password=Leak4006l'); RAISE EXCEPTION 'ERROR:  bad %', x;\n"
+            + "\tEND x\n"
+            + P + "[4723] ERROR:  x\n"
+            + P + "[4723] ORTAM: PL/pgSQL function f() line 3 at RAISE 'ERROR:  Leak4006m'\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@검색쿼리:[4724]:ERROR:  y\n");
+        Assert.Equal([4723, 4724], events.Select(e => e.Pid));
+        Assert.Equal(["x", "y"], events.Select(e => e.Message));
+        Assert.All(events, e => Assert.DoesNotContain("Leak4006", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #3996's round-2 review (3): each deadlock query's buffer was sized to the whole DETAIL, so a 63 KB report of
+    /// 880 waiters allocated 107 MB a call, and a CONTEXT's frames were each sized to the 64 KB field cap, 125 MB a
+    /// call for 1,000 one-line frames. Each is sized to its own text now.
+    /// </summary>
+    [Fact]
+    public void EachQueryAndFrame_IsSizedToItself()
+    {
+        var report = new StringBuilder();
+        for (var k = 0; k < 880; k++)
+        {
+            report.Append("Process ").Append(1000 + k).Append(" waits for Lock on x; blocked by process 1.\n");
+        }
+
+        for (var k = 0; k < 880; k++)
+        {
+            report.Append("Process ").Append(1000 + k).Append(": x\n");
+        }
+
+        var context = new StringBuilder();
+        for (var k = 0; k < 1000; k++)
+        {
+            context.Append("SQL statement \"SELECT ").Append(k).Append("\"\n");
+        }
+
+        var (detail, frames) = (report.ToString().TrimEnd('\n'), context.ToString().TrimEnd('\n'));
+        /* Under the 64 KB past which a field's SQL is not read at all, so the report's every query is read. */
+        Assert.InRange(detail.Length, 60_000, 64 * 1024);
+        foreach (var redact in new Func<string>[] { () => PgLogTextRedactor.RedactDetail(detail, complete: true)!, () => PgLogTextRedactor.RedactContext(frames)! })
+        {
+            redact();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            Assert.DoesNotContain(PgLogTextRedactor.WithheldStatement, redact(), StringComparison.Ordinal);
+            Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 8L * 1024 * 1024);
+        }
+    }
+
+    /// <summary>
     /// #3996's review (5, 6). PL/pgSQL writes a variable's name UNQUOTED in its <c>parameters:</c> list, so a name
     /// that needed quoting (<c>o'k</c>, <c>a"b</c>) put the lexer out of step and a value came back as a word; the
     /// lexed list must now read as <c>name = '?'</c> or <c>NULL</c> pairs, or it is withheld. A portal's name is

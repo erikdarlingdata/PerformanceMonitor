@@ -106,10 +106,11 @@ public readonly record struct PgLogEvent(
             /* #3944: the message, and the prose of the detail and context, as PostgreSQL wrote them. #3920: a
                DETAIL can carry other sessions' SQL (a deadlock's `Process N: query` lines, a crash's `Failed
                process was running: query`), and a CONTEXT the statement a function was running (`SQL statement
-               "UPDATE ... WHERE id = 42"`); that SQL is normalized like a stored statement, and so is the text a
-               syntax error quotes after `at or near` (#3996's review). A deadlock report's later queries are read
-               past one cut inside a literal only when the entry proves its DETAIL whole. The HINT companion is
-               deliberately NOT stored: it is advice text, never evidence, and nothing here claims otherwise. */
+               "UPDATE ... WHERE id = 42"`); that SQL is normalized like a stored statement, and so is the token a
+               syntax error quotes, in any catalogue's words (#3996's reviews, #4006). A deadlock report's later
+               queries are read past one cut inside a literal only when the entry proves its DETAIL whole. The HINT
+               companion is deliberately NOT stored: it is advice text, never evidence, and nothing here claims
+               otherwise. */
             Message: PgLogTextRedactor.RedactMessage(entry.Message) ?? string.Empty,
             Detail: PgLogTextRedactor.RedactDetail(entry.Detail, entry.DetailComplete),
             Context: PgLogTextRedactor.RedactContext(entry.Context),

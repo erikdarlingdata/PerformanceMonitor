@@ -693,6 +693,115 @@ public class StoreLogClassifierTests
     }
 
     /// <summary>
+    /// #3996's round-2 review, #4006, the store's half: es, id and ja keep the ERROR label in English, so a translated
+    /// syntax error is a retained entry, and its token was kept verbatim in the sample and the message shown: only
+    /// the English <c> at or near "</c> was read. Every catalogue's form is read now, in the sample, the message shown
+    /// and the grouping key alike. A Japanese token comes FIRST and can run over lines, and the key read the entry's
+    /// first line alone, which names no form, so it kept the token's first line: the key is read off the kept entry
+    /// now. A Japanese entry cut before its closing is withheld from its opening quote, and so is a one-line sample
+    /// an earlier release stored that the cap cut.
+    /// </summary>
+    [Fact]
+    public void ATranslatedSyntaxError_KeepsNoTokenInItsSampleMessageOrKey()
+    {
+        const string W = StoreLogClassifier.WithheldStatement;
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "ERROR:  \"'4111-1111-1111-1111'\"またはその近辺で構文エラー(40文字目)",
+            DefaultPrefix + "文:  INSERT INTO cards VALUES (1 '4111-1111-1111-1111')",
+            DefaultPrefix + "ERROR:  una cadena de caracteres entre comillas está inconclusa en o cerca de «'hunter2, 'sk_live_Leak4006n')» en carácter 45",
+            DefaultPrefix + "SENTENCIA:  INSERT INTO u VALUES ('bob''s', 'hunter2, 'sk_live_Leak4006n')",
+            DefaultPrefix + "ERROR:  'kesalahan sintaks' pada atau didekat « 'Leak4006o' » pada karakter 12",
+            DefaultPrefix + "ERROR:  \"$$ -- deploy key Leak4006p",
+            "\tBEGIN RAISE NOTICE 'x';",
+            "\tEND\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)",
+            DefaultPrefix + "ERROR:  \"$$ -- deploy key Leak4006q",
+            "\tBEGIN RAISE NOTICE 'x';",
+            "",
+        ]));
+        Assert.Equal(5, census.EntriesRead);
+        Assert.All(census.Groups, g => Assert.DoesNotContain("Leak4006", g.MessageText + g.SampleLine, StringComparison.Ordinal));
+        Assert.All(census.Groups, g => Assert.DoesNotContain("4111", g.MessageText + g.SampleLine, StringComparison.Ordinal));
+
+        (string Key, string Sample, string Shown)[] expected =
+        [
+            (
+                "\"?\"またはその近辺で構文エラー(?文字目)",
+                DefaultPrefix + "ERROR:  \"'?'\"またはその近辺で構文エラー(40文字目)\n" + StoreLogClassifier.WithheldLines,
+                "\"'?'\"またはその近辺で構文エラー(40文字目)"),
+            (
+                "una cadena de caracteres entre comillas está inconclusa en o cerca de «" + W + "» en carácter ?",
+                DefaultPrefix + "ERROR:  una cadena de caracteres entre comillas está inconclusa en o cerca de «" + W + "» en carácter 45\n"
+                    + StoreLogClassifier.WithheldLines,
+                "una cadena de caracteres entre comillas está inconclusa en o cerca de «" + W + "» en carácter 45"),
+            (
+                "'?' pada atau didekat « '?' » pada karakter ?",
+                DefaultPrefix + "ERROR:  'kesalahan sintaks' pada atau didekat « '?' » pada karakter 12",
+                "'kesalahan sintaks' pada atau didekat « '?' » pada karakter 12"),
+            (
+                "\"?\"またはその近辺で文字列のドル引用符が閉じていません(?文字目)",
+                DefaultPrefix + "ERROR:  \"" + W + "\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)",
+                "\"" + W + "\"またはその近辺で文字列のドル引用符が閉じていません(20文字目)"),
+            ("\"?\"", DefaultPrefix + "ERROR:  \"" + W + "\"", "\"" + W + "\""),
+        ];
+        Assert.Equal(expected.Length, census.Groups.Count);
+        foreach (var (key, sample, shown) in expected)
+        {
+            var group = Assert.Single(census.Groups, g => g.MessageText == key);
+            Assert.Equal(sample, group.SampleLine);
+            Assert.Equal(shown, StoreLogClassifier.DisplayMessageOf(group.EventClass, group.MessageText, group.SampleLine));
+            Assert.Equal((key, sample), StoreLogClassifier.MaskStoredEvent(group.EventClass, group.MessageText, group.SampleLine));
+        }
+
+        /* A row an earlier release stored as written, whose one line the cap cut inside a Japanese token. */
+        var capped = (DefaultPrefix + "ERROR:  \"'Leak4006r " + new string('x', StoreLogClassifier.MaxSampleLength))[..StoreLogClassifier.MaxSampleLength];
+        Assert.Equal(
+            ("\"?\"", DefaultPrefix + "ERROR:  \"" + W + "\""),
+            StoreLogClassifier.MaskStoredEvent(StoreLogClassifier.UnclassifiedClass, "\"'Leak4006r", capped));
+    }
+
+    /// <summary>
+    /// #3996's round-2 review (1), the store's half. A Turkish or Korean label written with no space after its colon
+    /// was a label only before a letter, and PL/pgSQL's QUERY companion is the function's body, which opens with a
+    /// space (or a digit): <c>SORGU: BEGIN ... 'ERROR:  ...'</c> was no label, the ERROR inside the body opened an
+    /// entry, and that entry's kept prefix carried the body's password. A named unpadded label is one whatever
+    /// follows its colon, so such a line opens no field and is withheld; a row an earlier release stored from one
+    /// keeps no text.
+    /// </summary>
+    [Fact]
+    public void AnUnpaddedLabel_IsALabelWhateverFollowsItsColon()
+    {
+        var census = StoreLogClassifier.Classify(string.Join("\n",
+        [
+            DefaultPrefix + "HATA:  \"x\"  yerinde sözdizimi hatası",
+            DefaultPrefix + "SORGU: BEGIN -- WARNING: legacy key below",
+            "\tPERFORM dblink_connect('host=db user=app password=Leak4006s');",
+            "\tEND x",
+            DefaultPrefix + "오류:  구문 오류",
+            DefaultPrefix + "쿼리: 1; SELECT 'x' AS a, 'ERROR: ' AS b, 'Leak4006s' AS c",
+            DefaultPrefix + "HATA:  \"x\"  yerinde sözdizimi hatası",
+            DefaultPrefix + "SORGU: BEGIN PERFORM dblink_connect('password=Leak4006s'); RAISE EXCEPTION 'ERROR:  bad %', x;",
+            "\tEND x",
+            DefaultPrefix + "ERROR:  x",
+            DefaultPrefix + "ORTAM: PL/pgSQL function f() line 3 at RAISE 'ERROR:  Leak4006s'",
+            "",
+        ]));
+        Assert.Equal(1, census.EntriesRead);
+        Assert.Equal(DefaultPrefix + "ERROR:  x\n" + StoreLogClassifier.WithheldLines, Assert.Single(census.Groups).SampleLine);
+
+        /* The managed prefix's pid in brackets after a database whose name ends in one is not a label. */
+        const string managed = "2026-09-05 14:03:02 UTC:192.0.2.10(52345):app_user@검색쿼리:[5288]:ERROR:  y";
+        Assert.Equal(managed, Assert.Single(StoreLogClassifier.Classify(managed + "\n").Groups).SampleLine);
+
+        Assert.Equal(
+            (null, null),
+            StoreLogClassifier.MaskStoredEvent(
+                StoreLogClassifier.UnclassifiedClass,
+                "bad %', x;",
+                DefaultPrefix + "SORGU: BEGIN PERFORM dblink_connect('password=Leak4006s'); RAISE EXCEPTION 'ERROR:  bad %', x;\n\tEND x"));
+    }
+
+    /// <summary>
     /// One slow query is ONE row however often it ran (#3904's review): the first version grouped by the
     /// duration line, so a panel polled every minute filled the 20-row budget with one statement and pushed the
     /// real signal out as "40 further distinct messages". Two different statements stay two rows.

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -59,6 +60,14 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class PgLogEntryAssembler
 {
+    /// <summary>The field labels a catalogue of PostgreSQL 18's writes without the two spaces after the colon that
+    /// elog.c's English labels end with, as each is written up to its colon (#3996's round-2 review): Turkish
+    /// <c>AYRINTI:</c>, <c>İPUCU:</c>, <c>SORGU:</c> and <c>ORTAM:</c> (DETAIL, HINT, QUERY, CONTEXT), Korean
+    /// <c>쿼리:</c> (QUERY) and French <c>PILE D'APPEL :</c> (BACKTRACE). Each ends a label whatever follows its
+    /// colon. PgLogCatalogueShapeTests fails when the bundled runtime's catalogues write another.</summary>
+    public static readonly IReadOnlyList<string> UnpaddedLabels =
+        ["AYRINTI:", "İPUCU:", "SORGU:", "ORTAM:", "쿼리:", "PILE D'APPEL :"];
+
     /* The prefix line: stamp, zone-and-pid in either family, whatever else the prefix carried, then the
        label. `rest` is lazy so the label is the FIRST `LABEL:  ` after the pid, which is what %Q's glued
        query id requires. The companion labels are in the same alternation as the severities because a
@@ -67,19 +76,28 @@ public static class PgLogEntryAssembler
        `rest` never runs past a label of ANY language (#3996's review). Under a translated lc_messages the
        line's own label is one this does not know (`SENTENCIA:  `, `ANWEISUNG:  `), and a lazy run past it found
        `ERROR:  ` inside the statement's literal and started a new event from the middle of it. So `rest` stops at
-       what a label ends with in every catalogue PostgreSQL 18 ships: a colon and two spaces, or, for the four
-       Turkish and one Korean label written with none (`SORGU:SELECT`, `쿼리:SELECT`), a colon straight after a
+       what a label ends with in every catalogue PostgreSQL 18 ships: a colon and two spaces, one of the labels a
+       catalogue writes without them (UnpaddedLabels) whatever follows its colon, or a colon straight after a
        non-ASCII letter or three capitals and before text. A prefix's own colons pass: a time's, `]:` before the
        label, `: ` separators, an IPv6 client, pgAdmin's `DB:postgres`. A label glued to capitals (`PG_CATALOG:`)
        is not one. A line whose label is not this reader's opens nothing: fail closed. The managed family's `mid`
        is held to the same run, because it is lazy too: refused at the real pid, it slid on to a `[1]` inside the
-       statement's literal and read that as the pid. */
-    private const string PrefixRun = @"(?:(?!:  )(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])[^\n])*?";
+       statement's literal and read that as the pid.
+
+       The unpadded labels are named because their text need not start with a letter (#3996's round-2 review):
+       PL/pgSQL's QUERY companion is the function's body, which opens with a space after `AS $$ BEGIN`, so
+       `SORGU: BEGIN ... 'ERROR:  ...'` passed the shape rule, the run crossed it, and the ERROR inside the body
+       opened an event carrying the body's password. The one thing after a named label's colon that does not make
+       it a label is a pid in brackets: the managed family writes `%u@%d:[%p]:`, and a database or role whose name
+       ends in one (`검색쿼리`) would otherwise lose every line. */
+    private static readonly string s_prefixRun =
+        @"(?:(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
+        + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])[^\n])*?";
 
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
-        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + PrefixRun + @")\[(?<pid>\d+)\])"
-        + @"(?<rest>" + PrefixRun + ")"
+        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\])"
+        + @"(?<rest>" + s_prefixRun + ")"
         + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 

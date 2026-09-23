@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -40,8 +41,8 @@ namespace PerformanceMonitor.Collectors;
 /// written.</description></item>
 /// <item><description><see cref="RedactMessage"/> — a message as written, except auto_explain's plan report, whose
 /// plan carries the statement's text in a form the lexer cannot read (<see cref="WithholdPlan"/>, withheld below
-/// its duration line), and the SQL a syntax error quotes after <c>at or near</c>, put through the
-/// lexer.</description></item>
+/// its duration line), and the SQL a syntax error quotes after <c>at or near</c>, in any catalogue's words
+/// (<see cref="ScannerErrorFormats"/>, #4006), put through the lexer.</description></item>
 /// </list>
 /// </summary>
 public static class PgLogTextRedactor
@@ -234,8 +235,11 @@ public static class PgLogTextRedactor
                 continue;
             }
 
+            /* Sized to this query (#3996's round-2 review): sized to the whole DETAIL, a 63 KB report of 880
+               waiters allocated 107 MB a call. */
             var end = h + 1 < heads.Count ? heads[h + 1].Line : lines.Length;
-            var query = new StringBuilder(lines[line], head.Length, lines[line].Length - head.Length, detail.Length);
+            var query = new StringBuilder(
+                lines[line], head.Length, lines[line].Length - head.Length, LengthOf(lines, line, end) - head.Length);
             for (var k = line + 1; k < end; k++)
             {
                 query.Append('\n').Append(lines[k]);
@@ -253,6 +257,19 @@ public static class PgLogTextRedactor
     /// to read at all.</summary>
     private static string MaskQuery(string query) =>
         query.Length > MaxSqlFieldLength ? WithheldStatement : RedactStoredStatement(query) ?? WithheldStatement;
+
+    /// <summary>The length of <paramref name="lines"/> from <paramref name="from"/> up to <paramref name="to"/>,
+    /// joined by newlines.</summary>
+    private static int LengthOf(string[] lines, int from, int to)
+    {
+        var length = to - from - 1;
+        for (var k = from; k < to; k++)
+        {
+            length += lines[k].Length;
+        }
+
+        return length;
+    }
 
     /// <summary>
     /// A CONTEXT field (#3920, #3944): a frame that quotes the statement it was running (<c>SQL statement "..."</c>,
@@ -354,7 +371,10 @@ public static class PgLogTextRedactor
                 return (null, -1);
             }
 
-            var body = new StringBuilder(lines[start], headLength, lines[start].Length - headLength, MaxSqlFieldLength);
+            /* Sized to this body, as a deadlock query is (#3996's round-2 review): sized to the field's cap, a
+               27 KB CONTEXT of 1,000 one-line frames allocated 125 MB a call. */
+            var body = new StringBuilder(
+                lines[start], headLength, lines[start].Length - headLength, LengthOf(lines, start, end + 1) - headLength);
             for (var k = start + 1; k <= end; k++)
             {
                 body.Append('\n').Append(lines[k]);
@@ -400,38 +420,477 @@ public static class PgLogTextRedactor
         return message[..(newline + 1)] + indent + WithheldPlan;
     }
 
-    /* A scanner's error (scanner_yyerror, plpgsql_yyerror): "<what> at or near "<text>"", and the log's " at
-       character N" after it (jsonpath's own grammar says " of jsonpath input" first). The quoted text is not
-       escaped, so it runs to the message's LAST quote. */
-    private static readonly Regex s_nearLexeme = new(
-        @"^(?<head>[^""\n]*?) at or near ""(?<lexeme>.*)""(?<tail>(?: of jsonpath input)?(?: at character [0-9]+)?)$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.Singleline);
+    /* A scanner's error, in every language PostgreSQL 18 ships it in (#4006). The scanner writes "<what> at or near
+       "<text>"" (scanner_yyerror, plpgsql_yyerror), jsonpath's grammar "... of jsonpath input", and past the last
+       token "<what> at end of input"; the server log then appends " at character N" (elog.c). Every one of these
+       is translated under lc_messages, and the ERROR label is not: es, id and ja keep it in English, and so does
+       every catalogue that translates PL/pgSQL alone (cs, el, ro, vi, zh_TW), so a translated form reaches the
+       stored message exactly as the English one did before #3996's review. English was the only form read, and a
+       Japanese error kept its token verbatim. These are the msgstrs of every catalogue in the postgres and plpgsql
+       domains, verbatim; PgLogCatalogueShapeTests reads the bundled runtime's .mo files and fails on one missing
+       here, so a PostgreSQL bump cannot reopen #4006 quietly. %1$s is the head (the error's name, from a fixed set
+       of messages), %2$s the token, and a catalogue may put the token first. */
+
+    /// <summary>Every catalogue's <c>%s at or near "%s"</c> (#4006): what the token of a syntax error is written
+    /// inside, in the postgres and plpgsql domains.</summary>
+    public static readonly IReadOnlyList<string> ScannerErrorFormats =
+    [
+        "%s at or near \"%s\"",
+        "%s bei »%s«", // de
+        "%s en o cerca de «%s»", // es
+        "%s sur ou près de « %s »", // fr
+        "'%s' pada atau didekat « %s »", // id
+        "%s a o presso \"%s\"", // it
+        "\"%2$s\"またはその近辺で%1$s", // ja
+        "\"%2$s\" もしくはその近辺で %1$s", // ja, plpgsql
+        "%s \"%s\"-სთან ან ახლოს", // ka
+        "%s, \"%s\" 부근", // ko
+        "%s w lub blisko \"%s\"", // pl
+        "%s w lub pobliżu \"%s\"", // pl, plpgsql
+        "%s em ou próximo a \"%s\"", // pt_BR
+        "%s (примерное положение: \"%s\")", // ru
+        "%s vid eller nära \"%s\"", // sv
+        "\"%2$s\"  yerinde %1$s", // tr
+        "%s в або поблизу \"%s\"", // uk
+        "%s 在 \"%s\" 或附近的", // zh_CN
+        "%s na nebo blízko \"%s\"", // cs, plpgsql only
+        "%s σε ή κοντά σε «%s»", // el, plpgsql only
+        "%s la sau aproape de \"%s\"", // ro, plpgsql only
+        "%s tại hoặc gần\"%s\"", // vi, plpgsql only
+        "\"%2$s\" 附近發生 %1$s", // zh_TW, plpgsql only
+    ];
+
+    /// <summary>Every catalogue's <c>%s at or near "%s" of jsonpath input</c> (#4006). Its token is jsonpath, not
+    /// SQL: the lexer would read a jsonpath string (<c>"4111-1111"</c>) as a quoted identifier and keep it, so the
+    /// token is withheld rather than read.</summary>
+    public static readonly IReadOnlyList<string> JsonpathErrorFormats =
+    [
+        "%s at or near \"%s\" of jsonpath input",
+        "%s bei »%s« in jsonpath-Eingabe", // de
+        "%s en o cerca de «%s» de la entrada jsonpath", // es
+        "%s sur ou près de « %s » de l'entrée jsonpath", // fr
+        "%s in corrispondenza o vicino a \"%s\" dell'input jsonpath", // it
+        "jsonpath 入力の\"%2$s\"または近くに %1$s があります", // ja
+        "%s ზუსტად ან ახლოს jsonpath შეყვანის \"%s\"-სთან", // ka
+        "%s, jsonpath 입력 \"%s\" 부근", // ko
+        "%s em ou perto de \"%s\" da entrada jsonpath", // pt_BR
+        "%s в строке jsonpath (примерное положение: \"%s\")", // ru
+        "%s vid eller nära \"%s\" i jsonpath-indata", // sv
+        "jsonpath girdisinin \"%2$s\" kısmında veya yakınında %1$s", // tr
+        "%s в або біля \"%s\" введення jsonpath", // uk
+        "%s位于或靠近jsonpath输入的 \"%s\"", // zh_CN
+    ];
+
+    /// <summary>Every catalogue's <c>%s at end of input</c> and <c>%s at end of jsonpath input</c> (#4006): a syntax
+    /// error past the last token, which quotes nothing and is kept as written.</summary>
+    public static readonly IReadOnlyList<string> EndOfInputFormats =
+    [
+        "%s at end of input",
+        "%s at end of jsonpath input",
+        "%s am Ende der Eingabe", // de
+        "%s am Ende der jsonpath-Eingabe", // de
+        "%s al final de la entrada", // es
+        "%s al final de la entrada jsonpath", // es
+        "%s à la fin de l'entrée", // fr
+        "%s à la fin de l'entrée jsonpath", // fr
+        "'%s' diakhir masukan", // id
+        "%s alla fine dell'input", // it
+        "%s alla fine dell'input di jsonpath", // it
+        "入力の最後で %s", // ja
+        "jsonpath の最後に %s があります", // ja
+        "%s შეყვანის ბოლოს", // ka
+        "%s jsonpath-ის შეყვანის ბოლოში", // ka
+        "%s, 입력 끝부분", // ko
+        "%s, jsonpath 입력 끝부분", // ko
+        "%s na końcu danych wejściowych", // pl
+        "%s no fim da entrada", // pt_BR
+        "%s no final da entrada jsonpath", // pt_BR
+        "%s в конце", // ru
+        "%s в конце аргумента jsonpath", // ru
+        "%s vid slutet av indatan", // sv
+        "%s vid slutet av jsonpath-indata", // sv
+        "giriş sonuna %s", // tr
+        "jsonpath girdisi sonunda %s", // tr
+        "%s в кінці введення", // uk
+        "%s в кінці введення jsonpath", // uk
+        "%s 在输入的末尾", // zh_CN
+        "%s位于jsonpath输入的末尾", // zh_CN
+        "\"%s\" na konci vstupu", // cs, plpgsql only
+        "«%s» στο τέλος εισόδου", // el, plpgsql only
+        "%s la sfârşit de intrare", // ro, plpgsql only
+        "%s tại nơi kết thúc đầu vào", // vi, plpgsql only
+        "輸入結尾發生 %s", // zh_TW, plpgsql only
+    ];
+
+    /// <summary>Every catalogue's <c> at character %d</c> (#4006), which the server log appends to a message that
+    /// carries a cursor position. Any catalogue's is accepted after any form: a catalogue that translates PL/pgSQL
+    /// alone writes PL/pgSQL's message translated and this position in English.</summary>
+    public static readonly IReadOnlyList<string> PositionFormats =
+    [
+        " at character %d",
+        " bei Zeichen %d", // de
+        " en carácter %d", // es
+        " au caractère %d", // fr
+        " pada karakter %d", // id
+        " al carattere %d", // it
+        "(%d文字目)", // ja
+        " სიმბოლოსთან %d", // ka
+        " %d 번째 문자 부근", // ko
+        " przy znaku %d", // pl
+        " no caractere %d", // pt_BR
+        " (символ %d)", // ru
+        " vid tecken %d", // sv
+        " %d karakterinde ", // tr
+        " символ %d", // uk
+        " 第 %d 个字符处", // zh_CN
+    ];
+
+    /// <summary>The scanner's six <c>unterminated ...</c> heads in every catalogue (#4006). An error under one quotes
+    /// the input from the literal's, identifier's or comment's opening to the end of the input, so by its name it
+    /// cannot be read to its end, and its token is withheld without being read.</summary>
+    public static readonly IReadOnlyList<string> UnterminatedMessages =
+    [
+        "unterminated /* comment",
+        "unterminated bit string literal",
+        "unterminated dollar-quoted string",
+        "unterminated hexadecimal string literal",
+        "unterminated quoted identifier",
+        "unterminated quoted string",
+        "/*-Kommentar nicht abgeschlossen", // de
+        "Bitkettenkonstante nicht abgeschlossen",
+        "Dollar-Quotes nicht abgeschlossen",
+        "hexadezimale Zeichenkette nicht abgeschlossen",
+        "Bezeichner in Anführungszeichen nicht abgeschlossen",
+        "Zeichenkette in Anführungszeichen nicht abgeschlossen",
+        "un comentario /* está inconcluso", // es
+        "una cadena de bits está inconclusa",
+        "una cadena separada por $ está inconclusa",
+        "una cadena hexadecimal está inconclusa",
+        "un identificador entre comillas está inconcluso",
+        "una cadena de caracteres entre comillas está inconclusa",
+        "commentaire /* non terminé", // fr
+        "chaîne bit litérale non terminée",
+        "chaîne entre guillemets dollars non terminée",
+        "chaîne hexadécimale litérale non terminée",
+        "identifiant entre guillemets non terminé",
+        "chaîne entre guillemets non terminée",
+        "komentar /* tidak berakhiran", // id
+        "'bit string literal' tidak berakhiran",
+        "string dengan batas dollar ($) yang tidak berakhir",
+        "'hexadecimal string literal' tidak berakhiran",
+        "penunjuk (identifier) tidak memiliki akhir batas",
+        "membatalkan proses terminasi string kutipan",
+        "commento /* non terminato", // it
+        "letterale di stringa di bit non terminato",
+        "stringa delimitata da dollari non terminata",
+        "letterale di stringa esadecimale non terminato",
+        "identificativo tra virgolette non terminato",
+        "stringa tra virgolette non terminata",
+        "/*コメントが閉じていません", // ja
+        "ビット列リテラルの終端がありません",
+        "文字列のドル引用符が閉じていません",
+        "16進数文字列リテラルの終端がありません",
+        "識別子の引用符が閉じていません",
+        "文字列の引用符が閉じていません",
+        "დაუსრულებელი /* კომენტარი", // ka
+        "გაწყვეტილი ბიტური სტრიქონი",
+        "$-ით დაწყებული სტრიქონ დაუმთავრებელია",
+        "გაწყვეტილი თექვსმეტობითი სტრიქონი",
+        "დაუსრულებელი იდენტიფიკატორი ბრჭყალებში",
+        "ბრჭყალებში ჩასმული ციტატის დაუსრულებელი სტრიქონი",
+        "마무리 안된 /* 주석", // ko
+        "마무리 안된 비트 문자열 문자",
+        "마무리 안된 달러-따옴표 안의 문자열",
+        "마무리 안된 16진수 문자열 문자",
+        "마무리 안된 따옴표 안의 식별자",
+        "마무리 안된 따옴표 안의 문자열",
+        "nie zakończony komentarz /*", // pl
+        "niezakończona stała łańcucha bitów",
+        "niezakończona stała łańcuchowa cytowana znakiem dolara",
+        "niezakończona stała łańcucha szesnastkowego",
+        "niezakończony identyfikator cytowany",
+        "niezakończona stała łańcuchowa",
+        "comentário /* não foi terminado", // pt_BR
+        "cadeia de bits não foi terminada",
+        "cadeia de caracteres entre dólares não foi terminada",
+        "cadeia de caracteres hexadecimal não foi terminada",
+        "identificador entre aspas não foi terminado",
+        "cadeia de caracteres entre aspas não foi terminada",
+        "незавершённый комментарий /*", // ru
+        "оборванная битовая строка",
+        "незавершённая строка с $",
+        "оборванная шестнадцатеричная строка",
+        "незавершённый идентификатор в кавычках",
+        "незавершённая строка в кавычках",
+        "ej avslutad /*-kommentar", // sv
+        "ej avslutad bitsträngslitteral",
+        "icke terminerad dollarciterad sträng",
+        "ej avslutad hexadecimal stränglitteral",
+        "icke terminerad citerad identifierare",
+        "icketerminerad citerad sträng",
+        "/* açıklama sonlandırılmamış", // tr
+        "sonuçlandırılmamış bit string literal",
+        "sonlandırılmamış dolar işaretiyle sınırlandırılmış satır",
+        "sonuçlandırılmamış hexadecimal string literal",
+        "sonlandırılmamış tırnakla sınırlandırılmış tanımlayıcı",
+        "sonuçlandırılmamış tırnakla sınırlandırılmış satır",
+        "незавершений коментар /*", // uk
+        "незавершений бітовий рядок",
+        "незавершений рядок з $",
+        "незавершений шістнадцятковий рядок",
+        "незавершений ідентифікатор в лапках",
+        "незавершений рядок в лапках",
+        "/* 注释没有结束", // zh_CN
+        "未结束的bit字符串常量",
+        "未结束的用$符号引用的字符串",
+        "未结束的16进制字符串常量",
+        "未结束的引用标识符",
+        "未结束的引用字符串",
+    ];
+
+    /* A placeholder in a catalogue format: %s in order, or %1$s / %2$s where a catalogue reorders them. */
+    private static readonly Regex s_formatArgument = new(
+        @"%(?:(?<position>[12])\$)?s",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* The head is one of the scanner's fixed messages, so it holds no newline and no quote a token is written
+       inside. Holding one is what makes a head "not clean" (#3996's round-2 review): `improper use of "*"` puts a
+       quote before the marker, and a message of one catalogue could otherwise pass for another's with its token
+       inside the other's head. Such a message matches no form whole and is withheld from its marker on. */
+    private const string HeadPattern = @"(?<head>[^\n""«»]*?)";
+
+    /* log_error_verbosity = verbose writes the SQLSTATE and a colon ahead of the message. */
+    private const string StatePattern = @"^(?:[0-9A-Z]{5}: )?";
+
+    private static readonly HashSet<string> s_unterminated = new(UnterminatedMessages, StringComparer.Ordinal);
+
+    private static readonly string s_positionPattern =
+        "(?<tail>(?:"
+        + string.Join('|', PositionFormats.Select(f => Regex.Escape(f).Replace("%d", "[0-9]+", StringComparison.Ordinal)))
+        + ")?)$";
+
+    private static readonly MessageShape[] s_tokenShapes =
+    [
+        .. JsonpathErrorFormats.Select(f => MessageShape.Compile(f, jsonpath: true)),
+        .. ScannerErrorFormats.Select(f => MessageShape.Compile(f, jsonpath: false)),
+    ];
+
+    private static readonly MessageShape[] s_endShapes =
+        [.. EndOfInputFormats.Select(f => MessageShape.Compile(f, jsonpath: false))];
+
+    /// <summary>One catalogue form, compiled (#4006): the pattern of a whole message in it, and the literal text on
+    /// either side of its token, which is all a message cut short, or ending in a way no form knows, is recognized
+    /// by.</summary>
+    private sealed class MessageShape
+    {
+        public required Regex Whole { get; init; }
+
+        /// <summary>The form's longest literal: a message without it cannot be in this form.</summary>
+        public required string Anchor { get; init; }
+
+        public required string Opening { get; init; }
+
+        public required string Closing { get; init; }
+
+        public required bool TokenFirst { get; init; }
+
+        public required bool Jsonpath { get; init; }
+
+        /// <summary>The text before the token has words in it (<c> at or near "</c>, <c> en o cerca de «</c>),
+        /// not just a quote, so it marks where a token starts wherever it appears.</summary>
+        public required bool OpeningNamed { get; init; }
+
+        /// <summary>The same for the text after the token (<c>"またはその近辺で</c>, <c>" 부근</c>).</summary>
+        public required bool ClosingNamed { get; init; }
+
+        /// <summary>What closes a withheld token: the closing text up to its first word.</summary>
+        public required string CloseQuote { get; init; }
+
+        public static MessageShape Compile(string format, bool jsonpath)
+        {
+            var pattern = new StringBuilder(StatePattern);
+            var literals = new List<string>();
+            var tokenAfter = -1;
+            var argument = 0;
+            var from = 0;
+            foreach (Match placeholder in s_formatArgument.Matches(format))
+            {
+                var literal = format[from..placeholder.Index];
+                literals.Add(literal);
+                pattern.Append(Regex.Escape(literal));
+                var position = placeholder.Groups["position"];
+                argument = position.Success ? position.Value[0] - '0' : argument + 1;
+                if (argument == 2)
+                {
+                    tokenAfter = literals.Count - 1;
+                    pattern.Append("(?<lexeme>.*)");
+                }
+                else
+                {
+                    pattern.Append(HeadPattern);
+                }
+
+                from = placeholder.Index + placeholder.Length;
+            }
+
+            literals.Add(format[from..]);
+            pattern.Append(Regex.Escape(format[from..])).Append(s_positionPattern);
+            var opening = tokenAfter < 0 ? string.Empty : literals[tokenAfter];
+            var closing = tokenAfter < 0 ? string.Empty : literals[tokenAfter + 1];
+            return new MessageShape
+            {
+                Whole = new Regex(pattern.ToString(), RegexOptions.CultureInvariant | RegexOptions.Singleline),
+                Anchor = literals.MaxBy(l => l.Length)!,
+                Opening = opening,
+                Closing = closing,
+                TokenFirst = tokenAfter == 0,
+                Jsonpath = jsonpath,
+                OpeningNamed = opening.Any(char.IsLetter),
+                ClosingNamed = closing.Any(char.IsLetter),
+                CloseQuote = new string([.. closing.TakeWhile(c => !char.IsLetter(c))]).TrimEnd(),
+            };
+        }
+    }
 
     /// <summary>
-    /// A message as it is kept (#3944, #3996's review): as PostgreSQL wrote it (<see cref="WithholdPlan"/>), except
-    /// the text a syntax error quotes after <c>at or near</c>, which is SQL: the scanner writes the statement from
-    /// the error token on, one token for most errors (a string literal among them, value and all), and everything
-    /// to the end of the input for an unterminated one (<c>unterminated dollar-quoted string</c> carries a whole
-    /// function body). It is read by <see cref="RedactStoredStatement"/>, and an <c>unterminated ...</c> form is
-    /// withheld outright, since by its name it cannot be read to its end; so is quoted text whose closing quote the
-    /// message does not carry (its first line alone, or a cut). Null in, null out; idempotent.
+    /// A message as it is kept (#3944, #3996's reviews, #4006): as PostgreSQL wrote it (<see cref="WithholdPlan"/>),
+    /// except the token a syntax error quotes, in any catalogue's words (<see cref="ScannerErrorFormats"/>), which is
+    /// SQL: the scanner writes the statement from the error token on, one token for most errors (a string literal
+    /// among them, value and all), and everything to the end of the input for an unterminated one
+    /// (<c>unterminated dollar-quoted string</c> carries a whole function body). It is read by
+    /// <see cref="RedactStoredStatement"/>, or withheld: under an <see cref="UnterminatedMessages"/> head, which by its
+    /// name cannot be read to its end; in a jsonpath error (<see cref="JsonpathErrorFormats"/>), whose token is not
+    /// SQL; and when it does not read to its end.
+    ///
+    /// <para><b>A message that names a form but does not match it whole</b> is withheld from where its token may
+    /// start: a head that is not clean (<c>improper use of "*" at or near "..."</c>), a message cut before its
+    /// closing quote, or one ending in a way no catalogue writes. Where a form's opening has words in it
+    /// (<c> at or near "</c>), everything after the first one is withheld; where only its closing does (Japanese,
+    /// Turkish and Traditional Chinese write the token FIRST, <c>"'4111...'"またはその近辺で構文エラー</c>), the text
+    /// between its opening quote and its last closing is; and a token-first message that opens with its quote and is
+    /// not whole (<paramref name="cut"/>, or spanning lines, which is how an entry cut between its lines reads) is
+    /// withheld from that quote on, since its closing may be what the cut took. Every form that applies is applied,
+    /// from the earliest start. Null in, null out; idempotent.</para>
     /// </summary>
-    public static string? RedactMessage(string? message)
+    /// <param name="message">The message, and its continuation lines.</param>
+    /// <param name="cut">True when the caller knows the message's end may be missing (a stored sample the length cap
+    /// cut on its first line).</param>
+    public static string? RedactMessage(string? message, bool cut = false)
     {
         var kept = WithholdPlan(message);
-        var at = kept?.IndexOf(" at or near \"", StringComparison.Ordinal) ?? -1;
-        if (at < 0 || kept![..at].IndexOfAny(['"', '\n']) >= 0)
+        if (string.IsNullOrEmpty(kept))
         {
             return kept;
         }
 
-        var near = s_nearLexeme.Match(kept);
-        var head = kept[..at];
-        var lexeme = near.Success ? near.Groups["lexeme"].Value : null;
-        var masked = lexeme is null || head.StartsWith("unterminated ", StringComparison.Ordinal) || lexeme.Length > MaxSqlFieldLength
-            ? WithheldStatement
-            : RedactStoredStatement(lexeme) ?? WithheldStatement;
-        return head + " at or near \"" + masked + "\"" + (near.Success ? near.Groups["tail"].Value : string.Empty);
+        /* A form matched whole: the token lexed, or withheld. The earliest token wins, so no token is left standing
+           inside the head of a form that matched further along. */
+        Match? whole = null;
+        MessageShape? wholeShape = null;
+        foreach (var shape in s_tokenShapes)
+        {
+            if (kept.Contains(shape.Anchor, StringComparison.Ordinal)
+                && shape.Whole.Match(kept) is { Success: true } match
+                && (whole is null || match.Groups["lexeme"].Index < whole.Groups["lexeme"].Index))
+            {
+                (whole, wholeShape) = (match, shape);
+            }
+        }
+
+        if (whole is not null)
+        {
+            var lexeme = whole.Groups["lexeme"];
+            var head = whole.Groups["head"].Value;
+            var masked = wholeShape!.Jsonpath
+                || head.StartsWith("unterminated ", StringComparison.Ordinal)
+                || s_unterminated.Contains(head)
+                || lexeme.Length > MaxSqlFieldLength
+                    ? WithheldStatement
+                    : RedactStoredStatement(lexeme.Value) ?? WithheldStatement;
+            return kept[..lexeme.Index] + masked + kept[(lexeme.Index + lexeme.Length)..];
+        }
+
+        /* An error past the last token names no token, and is kept. */
+        foreach (var shape in s_endShapes)
+        {
+            if (kept.Contains(shape.Anchor, StringComparison.Ordinal) && shape.Whole.IsMatch(kept))
+            {
+                return kept;
+            }
+        }
+
+        var start = -1;
+        var end = -1;
+        var closeQuote = string.Empty;
+        foreach (var shape in s_tokenShapes)
+        {
+            var (from, to) = UnreadSpan(kept, shape, cut);
+            if (from < 0)
+            {
+                continue;
+            }
+
+            start = start < 0 ? from : Math.Min(start, from);
+            if (to > end)
+            {
+                (end, closeQuote) = (to, shape.CloseQuote);
+            }
+        }
+
+        return start < 0 ? kept : kept[..start] + WithheldStatement + (end == kept.Length ? closeQuote : kept[end..]);
+    }
+
+    /// <summary>Where the token of a message that names <paramref name="shape"/> without matching it whole may lie
+    /// (<see cref="RedactMessage"/>): from, and to (the message's end when unknown); (-1, -1) when it names no
+    /// token of this form.</summary>
+    private static (int From, int To) UnreadSpan(string kept, MessageShape shape, bool cut)
+    {
+        if (shape.OpeningNamed)
+        {
+            var at = kept.IndexOf(shape.Opening, StringComparison.Ordinal);
+            return at < 0 ? (-1, -1) : (at + shape.Opening.Length, kept.Length);
+        }
+
+        /* A token-first form opens the message with its quote (after a verbose SQLSTATE). */
+        var state = StatePrefixLength(kept);
+        var opened = shape.TokenFirst && kept.AsSpan(state).StartsWith(shape.Opening, StringComparison.Ordinal)
+            ? state + shape.Opening.Length
+            : -1;
+        var close = shape.ClosingNamed ? kept.LastIndexOf(shape.Closing, StringComparison.Ordinal) : -1;
+        if (close >= 0)
+        {
+            /* Between the token's opening and its last closing; from the message's start when the opening is not
+               found before that closing. */
+            var from = opened;
+            if (!shape.TokenFirst)
+            {
+                var opening = kept.IndexOf(shape.Opening, 0, close, StringComparison.Ordinal);
+                from = opening < 0 ? -1 : opening + shape.Opening.Length;
+            }
+
+            return (from >= 0 && from <= close ? from : 0, close);
+        }
+
+        return opened >= 0 && (cut || kept.Contains('\n')) ? (opened, kept.Length) : (-1, -1);
+    }
+
+    /// <summary>The length of a verbose log's <c>SQLSTATE: </c> ahead of the message, or 0.</summary>
+    private static int StatePrefixLength(string message)
+    {
+        if (message.Length < 7 || message[5] != ':' || message[6] != ' ')
+        {
+            return 0;
+        }
+
+        for (var i = 0; i < 5; i++)
+        {
+            if (!char.IsAsciiDigit(message[i]) && !char.IsAsciiLetterUpper(message[i]))
+            {
+                return 0;
+            }
+        }
+
+        return 7;
     }
 
     /// <summary>The form a monitored target's <c>STATEMENT:</c> companion is fingerprinted in, and never stored in:

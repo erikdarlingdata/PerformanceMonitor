@@ -808,17 +808,37 @@ public static class StoreLogClassifier
 
     /// <summary>
     /// Whether the colon at <paramref name="at"/> ends a label as some catalogue of PostgreSQL 18's writes one
-    /// (#3996's review): followed by two spaces, as every English label and most translated ones are, or, as the
-    /// Turkish <c>AYRINTI:</c>, <c>İPUCU:</c>, <c>SORGU:</c> and <c>ORTAM:</c> and the Korean <c>쿼리:</c> are,
-    /// straight after a non-ASCII letter or three capitals and straight before the text. A colon before a digit, a
-    /// bracket, another colon or a space is a prefix's (a time, <c>%r</c>, <c>]:</c>, a <c>: </c> separator), and
-    /// so is one after two capitals at most (pgAdmin's application_name <c>DB:postgres</c>).
+    /// (#3996's review): followed by two spaces, as every English label and most translated ones are; ending one of
+    /// the labels a catalogue writes without them (<see cref="PgLogEntryAssembler.UnpaddedLabels"/>: the Turkish
+    /// <c>AYRINTI:</c>, <c>İPUCU:</c>, <c>SORGU:</c> and <c>ORTAM:</c>, the Korean <c>쿼리:</c>, the French
+    /// <c>PILE D'APPEL :</c>), whatever follows but a pid in brackets (the managed family's <c>%d:[%p]</c>); or
+    /// straight after a non-ASCII letter or three capitals and straight before text. A colon before a digit, a
+    /// bracket, another colon or a space is otherwise a prefix's (a time, <c>%r</c>, <c>]:</c>, a <c>: </c>
+    /// separator), and so is one after two capitals at most (pgAdmin's application_name <c>DB:postgres</c>).
+    ///
+    /// <para>The unpadded labels are named (#3996's round-2 review) because the text after one need not start with a
+    /// letter: PL/pgSQL's QUERY companion is the function's body, which opens with a space after <c>AS $$ BEGIN</c>.
+    /// Read by the shape rule alone, <c>SORGU: BEGIN ... 'ERROR:  ...'</c> was no label, and the ERROR inside the
+    /// body opened an entry whose kept prefix carried the body's password.</para>
     /// </summary>
     private static bool IsLabelColon(ReadOnlySpan<char> line, int at)
     {
         if (line[(at + 1)..].StartsWith("  ", StringComparison.Ordinal))
         {
             return true;
+        }
+
+        /* Except before a pid in brackets: the managed family's `%u@%d:[%p]:`, whose database or role can end in
+           one of these names (`검색쿼리`). */
+        var pid = line[(at + 1)..];
+        var bracket = pid.StartsWith('[') ? pid.IndexOf(']') : -1;
+        var beforePid = bracket > 1 && !pid[1..bracket].ContainsAnyExceptInRange('0', '9');
+        foreach (var label in PgLogEntryAssembler.UnpaddedLabels)
+        {
+            if (!beforePid && at + 1 >= label.Length && line[(at + 1 - label.Length)..(at + 1)].SequenceEqual(label))
+            {
+                return true;
+            }
         }
 
         if (at + 1 >= line.Length || char.IsAsciiDigit(line[at + 1]) || line[at + 1] is '[' or ':' || char.IsWhiteSpace(line[at + 1]))
@@ -933,7 +953,7 @@ public static class StoreLogClassifier
     /// <see cref="RoutineClass"/>, counted and keeping no text.
     /// </summary>
     internal static (string EventClass, bool Retained, string Message, string RawText) MaskRetained(
-        string eventClass, string message, string rawText)
+        string eventClass, string message, string rawText, bool cut = false)
     {
         if (eventClass == SlowStatementClass)
         {
@@ -944,8 +964,12 @@ public static class StoreLogClassifier
 
         /* Keyed from the message as it is kept, so a syntax error's quoted SQL is normalized before the key reads
            it (#3996's review): the key keeps what lies between quoted runs, and an unterminated literal's quote
-           pairs with nothing. */
-        return (eventClass, true, GroupingKeyOf(PgLogTextRedactor.RedactMessage(message) ?? message), MaskEntry(rawText));
+           pairs with nothing. Read off the kept entry's first line, not off the raw first line alone (#4006): a
+           catalogue that writes the token first (`"$$ BEGIN` ... `"またはその近辺で...`) names its form only after
+           the token, which can run past that line, and the first line alone named no form to withhold it by. */
+        var masked = MaskEntry(rawText, cut);
+        var kept = PrimaryMessageOf(masked) ?? PgLogTextRedactor.RedactMessage(message, cut) ?? message;
+        return (eventClass, true, GroupingKeyOf(kept), masked);
     }
 
     /* The values PostgreSQL's prose carries, as the grouping key sees them (#3944): a single- or double-quoted run
@@ -1009,9 +1033,10 @@ public static class StoreLogClassifier
     /// HINT and LOCATION included, is kept as PostgreSQL wrote it, except an auto_explain plan report's plan
     /// (<see cref="PgLogTextRedactor.WithholdPlan"/>). Each field's tab-continuation lines go with it, so a statement
     /// that spans lines is read whole. Idempotent, which is what lets rows stored before this build be brought up by
-    /// the same function.
+    /// the same function. <paramref name="cut"/> says the entry's end may be missing, and is passed to
+    /// <see cref="PgLogTextRedactor.RedactMessage"/>.
     /// </summary>
-    internal static string MaskEntry(string rawText)
+    internal static string MaskEntry(string rawText, bool cut = false)
     {
         var lines = rawText.Split('\n');
         var result = new StringBuilder(rawText.Length);
@@ -1048,29 +1073,18 @@ public static class StoreLogClassifier
 
             if (field.Kind == FieldKind.Primary)
             {
-                var message = new StringBuilder(line, field.MessageStart, line.Length - field.MessageStart, rawText.Length);
-                for (var k = i + 1; k < next; k++)
-                {
-                    message.Append('\n').Append(lines[k]);
-                }
-
-                result.Append(line, 0, field.MessageStart).Append(PgLogTextRedactor.RedactMessage(message.ToString()));
+                var message = FieldText(lines, i, next, field.MessageStart);
+                result.Append(line, 0, field.MessageStart).Append(PgLogTextRedactor.RedactMessage(message, cut));
             }
             else if (field.Name is "STATEMENT" or "QUERY" or "DETAIL" or "CONTEXT")
             {
-                var block = new StringBuilder(line, field.MessageStart, line.Length - field.MessageStart, rawText.Length);
-                for (var k = i + 1; k < next; k++)
-                {
-                    block.Append('\n').Append(lines[k]);
-                }
-
                 /* A deadlock report's later queries are read past one cut inside a literal only when the DETAIL is
                    proven whole (#3996's review): a companion field follows it in the entry. DeadLockReport always
                    writes its HINT, so a report without one was cut between its lines. */
                 var detailComplete = next < lines.Length
                     && FindField(lines[next]) is { Kind: FieldKind.Continuation } after
                     && after.Name != "DETAIL";
-                var text = block.ToString();
+                var text = FieldText(lines, i, next, field.MessageStart);
                 var masked = field.Name switch
                 {
                     "STATEMENT" or "QUERY" => PgLogTextRedactor.RedactStoredStatement(text) ?? WithheldStatement,
@@ -1095,14 +1109,21 @@ public static class StoreLogClassifier
         return result.ToString();
     }
 
+    /// <summary>A field's text (<see cref="MaskEntry"/>): its first line from <paramref name="from"/>, and the
+    /// tab-led lines under it up to <paramref name="next"/>. Sized to the field, not to the entry (#3996's round-2
+    /// review).</summary>
+    private static string FieldText(string[] lines, int start, int next, int from) =>
+        next == start + 1 ? lines[start][from..] : string.Join('\n', lines, start, next - start)[from..];
+
     /// <summary>
     /// A row stored by <see cref="StoreLogSweep"/> brought to this build's rules (#3915, #3944). Rows written before
     /// it carry the entry as the server wrote it, a failed statement's literals included, for the sweep's 400-day
     /// retention, and a message that is the text rather than its grouping key; this normalizes the sample's SQL and
     /// re-keys the message. Computed from the stored SAMPLE, whose first line carries the message the row was
     /// grouped on, so the key and the sample come out consistent. Idempotent, so a row already brought up comes back
-    /// unchanged, with one exception: a sample the <see cref="MaxSampleLength"/> cap cut inside a normalized token
-    /// re-reads with that statement withheld, which the sweep's pass writes back once. Four shapes keep no text: a
+    /// unchanged, with one exception: a sample the <see cref="MaxSampleLength"/> cap cut inside a normalized token,
+    /// or on its one line inside a syntax error's token (#4006), re-reads with that statement withheld, which the
+    /// sweep's pass writes back once. Four shapes keep no text: a
     /// slow-statement row whose first line names no statement, a row whose sample opens on a tab-led line, a row
     /// whose sample's first line opens no severity this reader knows, and a row of any other class whose sample is
     /// a line of statement logging.
@@ -1143,8 +1164,11 @@ public static class StoreLogClassifier
             return (null, null);
         }
 
+        /* A sample of one line that the cap cut (#4006): its message's end is missing, and a catalogue that writes a
+           syntax error's token first names its form only after the token, so what the cap left names none. */
+        var cut = sample.Length >= MaxSampleLength && !sample.Contains('\n');
         var lineMessage = PrimaryMessageOf(sample) ?? message ?? firstLine;
-        var (_, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample);
+        var (_, retained, key, maskedSample) = MaskRetained(eventClass, lineMessage, sample, cut);
         if (!retained)
         {
             return (null, null);
