@@ -381,7 +381,17 @@ function Get-DarlingServiceLogonName([string]$name) {
 # link below the root (the walk does not descend it and a real install never holds one), or a root that is
 # itself a junction (the lock would change the link, not the folder it points to). Kept byte-identical in
 # install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallLocationTests compares.
-function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
+#
+# NARROWED (#4052): the service only ever writes under pg-runtime\ and pg-runtime-prev\ (it extracts the
+# bundled runtime there and rescues the previous one on an update - see DarlingManagedPostgres and
+# DarlingStoreUpgrade, whose stamp/blocked files (pg-runtime.sha256/.stamp/.blocked) all live INSIDE
+# pg-runtime\, never beside it). So the service account gets Read & Execute on $root - it still needs to
+# run its own exe and load its own DLLs - and Modify is granted ONLY on pg-runtime\, pg-runtime-prev\, and
+# whatever $extraServiceDirectories names (the bring-your-own-Postgres log-hash-key folder,
+# DarlingLogHashKeyFile.BringYourOwnDirectoryName, when that mode is configured - #4052's resolution of
+# #4050's open write-site row). Every one of those directories is created ahead of time if missing, so the
+# grant has something to land on and the first extraction never has to create its own root-owned folder.
+function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string[]]$extraServiceDirectories = @()) {
     # icacls reports a file it could not change on stderr (under /C it carries on), and Windows PowerShell 5.1
     # turns redirected native stderr into a TERMINATING error when the preference is Stop, as both scripts set
     # it. So this function judges icacls by its exit code and output, and reports an unreadable object rather
