@@ -214,11 +214,25 @@ FROM
     AND   collection_time >= $2
 ) AS sampled";
 
-    /// <summary>Newest collection time across all collectors for one server. $1 server_id.</summary>
+    /// <summary>
+    /// Newest collection time across all collectors for one server. $1 server_id.
+    ///
+    /// <para><b>#3976: <c>ORDER BY collection_time DESC LIMIT 1</c>, not <c>MAX(collection_time)</c>.</b> Same
+    /// answer — <c>ExecuteScalarAsync</c> reads null identically whether MAX found no matching row or LIMIT 1
+    /// returned none — but a bound cannot make the MAX form cheap here: <c>collection_log</c> keeps 60 days
+    /// (<c>DarlingRetentionHorizons.CollectionLogRetentionDays</c>), so any bound wide enough to keep the
+    /// answer identical is the retention horizon itself, and every retained chunk falls inside it. This is
+    /// the same per-server LATERAL shape <see cref="ServerFreshnessSql"/> already carries for the SAME table
+    /// (#3895, measured there at 2.5-6.4 ms against 93.8-129.5 ms unbounded) and <c>DarlingDataReader.ServerListSql</c>
+    /// now carries too (#3976): an ordered per-chunk descent that stops at the newest chunk with a row, which
+    /// a plan built to prove a MAX over the whole retained history cannot do regardless of any WHERE clause.</para>
+    /// </summary>
     public const string ServerSummaryLastCollectionSql = @"
-SELECT MAX(collection_time)
+SELECT collection_time
 FROM v_collection_log
-WHERE server_id = $1";
+WHERE server_id = $1
+ORDER BY collection_time DESC
+LIMIT 1";
 
     /// <summary>
     /// One server's Overview-card summary — Lite's <c>GetServerSummaryAsync</c> ported to Postgres and

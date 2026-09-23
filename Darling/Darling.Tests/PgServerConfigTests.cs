@@ -118,18 +118,29 @@ public sealed class PgServerConfigTests
     }
 
     /// <summary>
-    /// The current-config read is anchored on the newest snapshot, never on an hours window. A
-    /// configuration has no window — it is the state now — and an hours filter would return NOTHING for a
-    /// server whose hourly collector last ran just outside it, which reads as "this server has no
-    /// configuration" rather than "ask again".
+    /// The current-config read is anchored on the newest snapshot, never on an hours window that could come up
+    /// empty. A configuration has no window — it is the state now — and an hours filter with no fallback would
+    /// return NOTHING for a server whose hourly collector last ran just outside it, which reads as "this
+    /// server has no configuration" rather than "ask again".
+    ///
+    /// <para><b>#3974: this is no longer "no bound at all" — it is "a day's bound, with a guaranteed retry at
+    /// none".</b> <see cref="DarlingPgServerConfigReader.ConfigSnapshotLowerBounds"/> lets TimescaleDB plan
+    /// the day's one or two chunks instead of the whole retained year, and
+    /// <see cref="DarlingPgServerConfigReader.GetCurrentConfigPageAsync"/> always falls back to
+    /// <see cref="DateTime.MinValue"/> when the day found nothing — so the property this test is named for
+    /// (a server whose collector went dark past the bound still answers with its newest snapshot, never
+    /// "no configuration") still holds; only the SQL text carries a bound now, alongside the fallback that
+    /// makes it a window in name only. <see cref="PgServerConfigToolBoundTests"/> pins the bound and the
+    /// fallback loop.</para>
     /// </summary>
     [Fact]
-    public void TheCurrentReadAnchorsOnTheNewestSnapshot_NotAWindow()
+    public void TheCurrentReadAnchorsOnTheNewestSnapshot_NeverComingUpEmptyForADarkServer()
     {
         var sql = DarlingPgServerConfigReader.CurrentConfigSql;
 
         Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time >=", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
+        Assert.Equal(DateTime.MinValue, DarlingPgServerConfigReader.ConfigSnapshotLowerBounds(DateTime.UtcNow)[^1]);
     }
 
     /// <summary>

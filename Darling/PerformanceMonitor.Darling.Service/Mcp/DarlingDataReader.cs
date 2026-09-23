@@ -1314,11 +1314,25 @@ internal static class DarlingDataReader
     /* ─────────────────────────── discovery / health ─────────────────────────── */
 
     /// <summary>
-    /// Every enabled server plus its newest collection instant — the list_servers read. The
-    /// correlated <c>MAX(collection_time)</c> per server drives the freshness-derived status the tool
-    /// assigns (the headless viewer has no live ping either — see <c>ServerSummaryItem.ClassifyFreshness</c>).
-    /// <c>created_date</c> rides on the same registry row for the retention rule <see cref="ServerListRow"/>
-    /// describes (#3967). $-free (no parameters, no bare now()) so a test can pin the dialect ungated.
+    /// Every enabled server plus its newest collection instant — the list_servers read. Drives the
+    /// freshness-derived status the tool assigns (the headless viewer has no live ping either — see
+    /// <c>ServerSummaryItem.ClassifyFreshness</c>). <c>created_date</c> rides on the same registry row for the
+    /// retention rule <see cref="ServerListRow"/> describes (#3967). $-free (no parameters, no bare now()) so a
+    /// test can pin the dialect ungated.
+    ///
+    /// <para><b>#3976: a per-server LATERAL probe, not a correlated <c>MAX(collection_time)</c>.</b> The two
+    /// read the SAME value — the newest collection per server — but a bound cannot make the old shape cheap:
+    /// <c>collection_log</c> keeps <c>DarlingRetentionHorizons.CollectionLogRetentionDays</c> days, so any
+    /// bound wide enough to keep the answer identical is the retention horizon itself, and every retained
+    /// chunk falls inside it (measured: 172.8 ms of cold planning and 9,694 buffers over 19 daily chunks on
+    /// DARLING01, several times that at the 60-day production retention). <c>ViewerDataService.ServerFreshnessSql</c>
+    /// already carries this exact <c>ORDER BY collection_time DESC LIMIT 1</c> shape for the SAME table
+    /// (#3895) and measures 2.5-6.4 ms there — an ordered per-chunk descent that stops at the newest chunk
+    /// with a row, which a plan built to prove a MAX over the whole retained history cannot do regardless of
+    /// any WHERE clause. No <c>collection_time</c> bound is added; a dark-past-retention server still reads
+    /// Offline through <see cref="ServerHealthClassifier.ClassifyFreshness(DateTime?, DateTime?, DateTime, DateTime)"/>
+    /// exactly as it did before this fix (<c>DarkPastRetentionReadsOfflineTests</c> pins that rule unchanged)
+    /// — this is a plan-shape fix, not a semantic one, and the rows are identical.</para>
     /// </summary>
     public const string ServerListSql = """
         SELECT
@@ -1326,11 +1340,19 @@ internal static class DarlingDataReader
             s.server_name,
             s.display_name,
             s.sql_major_version,
-            (SELECT MAX(cl.collection_time) FROM v_collection_log cl WHERE cl.server_id = s.server_id) AS last_collection,
+            latest.collection_time AS last_collection,
             s.engine_kind,
             s.postgres_major_version,
             s.created_date
         FROM servers s
+        LEFT JOIN LATERAL
+        (
+            SELECT cl.collection_time
+            FROM v_collection_log cl
+            WHERE cl.server_id = s.server_id
+            ORDER BY cl.collection_time DESC
+            LIMIT 1
+        ) AS latest ON TRUE
         WHERE s.is_enabled
         ORDER BY s.server_name
         """;

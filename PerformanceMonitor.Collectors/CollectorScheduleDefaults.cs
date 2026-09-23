@@ -414,4 +414,26 @@ public static class CollectorScheduleDefaults
             && !(CollectorDeltaCalculator.IsDeltaFamily(collectorName) && v > CollectorDeltaCalculator.MaxDeltaFrequencyMinutes)
         ? v
         : null;
+
+    /// <summary>
+    /// #3929/#3930 (Erik, ruled 2026-09-23): an on-load collector (<see cref="ResolveFrequencyMinutes"/> = 0 -
+    /// server_config, database_config, database_scoped_config, trace_flags, server_properties) captures on
+    /// every connect, but nothing re-ran it on a long, healthy connection. A server connected 30+ days lost its
+    /// config snapshot to retention entirely (#3930), and a state that clears — a trace flag turned off — had
+    /// no later row to overwrite the stale ON one until the next reconnect (#3929). Both SKUs now ALSO re-run
+    /// every on-load collector on this cadence, in addition to on connect.
+    /// </summary>
+    public const int OnLoadRecaptureMinutes = 1440;
+
+    /// <summary>
+    /// The one place "on-load" (frequency 0) becomes a concrete periodic interval (#3929/#3930):
+    /// <paramref name="frequencyMinutes"/> itself, or <see cref="OnLoadRecaptureMinutes"/> when it resolved to
+    /// 0. Both Darling's worker (the connect seed, the reload recompute, and the due-collector sweep) and
+    /// Lite's <c>ScheduleManager</c> call this instead of special-casing the five on-load collectors by name,
+    /// so an operator's own override (any frequency &gt; 0) still wins — this only substitutes for the
+    /// unscheduled "0" default, never an explicit choice. The analysis pass uses it too, to bound the
+    /// TRACE_FLAGS read the same way (see <c>PgLatestValueBounds</c> / Lite's <c>LatestValueBounds</c>).
+    /// </summary>
+    public static int EffectiveRecurringIntervalMinutes(int frequencyMinutes) =>
+        frequencyMinutes == 0 ? OnLoadRecaptureMinutes : frequencyMinutes;
 }

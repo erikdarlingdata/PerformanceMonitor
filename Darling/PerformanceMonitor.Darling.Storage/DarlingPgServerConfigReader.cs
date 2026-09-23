@@ -103,10 +103,32 @@ public static class DarlingPgServerConfigReader
     }
 
     /// <summary>
+    /// #3974: the lower bounds every <c>pg_server_config</c> TOOL read runs with, in order — the day before
+    /// now, then no bound at all. Mirrors <c>PgTargetFactCollector.ConfigSnapshotLowerBounds</c> (#3928),
+    /// which bounds the same table's ANALYSIS reads; these reads have no window — they answer "the
+    /// configuration NOW" — so the day is counted back from the instant of the call rather than from a
+    /// window's end. Bound on both the anchor's <c>MAX(collection_time)</c> and the outer row scan,
+    /// TimescaleDB plans the day's one or two chunks instead of the whole retained year (365 one-day chunks
+    /// cost 4.0-8.3 s of cold planning unbounded, 0.6-21 ms bounded — the issue's measurement). The fallback
+    /// is what keeps a target whose config collector has been dark for more than a day answering with its
+    /// newest snapshot however old, the rule these reads had before #3974.
+    /// </summary>
+    internal static DateTime[] ConfigSnapshotLowerBounds(DateTime nowUtc) =>
+        [DateTime.SpecifyKind(nowUtc - TimeSpan.FromHours(24), DateTimeKind.Unspecified), DateTime.MinValue];
+
+    /// <summary>
     /// The newest snapshot, session-scoped rows removed. Anchored on <c>MAX(collection_time)</c> for the
     /// server rather than on "within the last N hours": a configuration read has no window — it is the
     /// state now — and an hours filter would return NOTHING on a server whose hourly collector last ran
     /// just outside it, which reads as "this server has no configuration".
+    ///
+    /// <para><b>#3974: bounded from below by <see cref="ConfigSnapshotLowerBounds"/>, day first.</b> Both the
+    /// anchor's <c>MAX(collection_time)</c> and the outer row scan carry <c>collection_time >= $4</c>; bounding
+    /// only the anchor is not enough because the outer <c>collection_time = (…)</c> can exclude chunks only at
+    /// run time. <see cref="GetCurrentConfigPageAsync"/> runs the day first and falls back to every retained
+    /// snapshot only when that returned no rows, so a server whose config collector has gone dark for more than
+    /// a day still gets its newest snapshot however old — the same "state now, however stale" contract the
+    /// paragraph above already promises, just planned against a day's chunks instead of the whole table.</para>
     ///
     /// <para><b>The default-view filter is IN the statement</b> (#3653, from #3541 A3/A13). <c>$2</c> is the
     /// tool's <c>include_defaults</c>; when false the population is the settings somebody chose plus any row
@@ -157,10 +179,12 @@ public static class DarlingPgServerConfigReader
             COUNT(*) FILTER (WHERE coalesce(c.source, 'default') <> 'default') OVER ()::int AS snapshot_non_default_count
         FROM pg_server_config AS c
         WHERE c.server_id = $1
+        AND   c.collection_time >= $4
         AND   c.collection_time = (
                   SELECT MAX(collection_time)
                   FROM pg_server_config
-                  WHERE server_id = $1)
+                  WHERE server_id = $1
+                  AND   collection_time >= $4)
         AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
         /* V138 (#3691): the SERVER-WIDE population. pg_server_config also holds the per-database and
            per-role overrides now, and this read is the one an operator reads as "the server's
@@ -378,31 +402,41 @@ public static class DarlingPgServerConfigReader
     {
         var rows = new List<PgConfigRow>();
         var snapshotNonDefaultCount = 0;
-        await using var command = postgres.CreateCommand(CurrentConfigSql);
-        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(includeDefaults);
-        command.Parameters.AddWithValue(limit);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+
+        /* #3974: the day first, and every retained snapshot only when that found nothing. */
+        foreach (var lowerBound in ConfigSnapshotLowerBounds(DateTime.UtcNow))
         {
-            /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
-            snapshotNonDefaultCount = reader.GetInt32(14);
-            rows.Add(new PgConfigRow(
-                reader.GetString(0),
-                reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8),
-                reader.GetInt32(9),
-                reader.GetBoolean(10),
-                reader.IsDBNull(11) ? null : reader.GetString(11),
-                !reader.IsDBNull(12) && reader.GetBoolean(12),
-                reader.GetDateTime(13)));
+            rows.Clear();
+            snapshotNonDefaultCount = 0;
+            await using var command = postgres.CreateCommand(CurrentConfigSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(includeDefaults);
+            command.Parameters.AddWithValue(limit);
+            command.Parameters.AddWithValue(lowerBound);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                /* Identical on every row (OVER () with no partition); the last write wins with the same number. */
+                snapshotNonDefaultCount = reader.GetInt32(14);
+                rows.Add(new PgConfigRow(
+                    reader.GetString(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.GetInt32(9),
+                    reader.GetBoolean(10),
+                    reader.IsDBNull(11) ? null : reader.GetString(11),
+                    !reader.IsDBNull(12) && reader.GetBoolean(12),
+                    reader.GetDateTime(13)));
+            }
+
+            if (rows.Count > 0) break;
         }
 
         return new PgConfigPage(rows, snapshotNonDefaultCount);
@@ -458,23 +492,36 @@ public static class DarlingPgServerConfigReader
     /// <c>split_part</c> cannot return NULL, but the column is nullable in the schema like every payload
     /// column, and a NULL name here would be an unusable row.</para>
     ///
-    /// <para>$1 server_id.</para>
+    /// <para><b>#3974: the anchor is bound like <see cref="CurrentConfigSql"/>'s, but rides its OWN column
+    /// rather than the row count.</b> Most servers have zero per-database or per-role overrides, so a naive
+    /// day-then-fallback loop keyed on "the read returned rows" would run the unbounded fallback on nearly
+    /// every call — exactly the cost this fix removes. The anchor is instead a one-row CTE
+    /// (<c>MAX(collection_time)</c> bound to <c>$2</c>), LEFT JOINed to the override rows at that instant, so
+    /// the statement always returns the anchor's <c>collection_time</c> even when the snapshot has no
+    /// overrides — a phantom row with every override column NULL. <see cref="GetOverridesAsync"/> reads that
+    /// column to tell "no snapshot in the day" (retry wider) from "a snapshot, with zero overrides" (done),
+    /// and drops the phantom row rather than returning it. $1 server_id, $2 the lower bound.</para>
     /// </summary>
     public const string OverrideSql = """
+        WITH anchor AS (
+            SELECT MAX(collection_time) AS collection_time
+            FROM pg_server_config
+            WHERE server_id = $1
+            AND   collection_time >= $2
+        )
         SELECT
+            a.collection_time AS anchor_time,
             c.database_name,
             c.role_name,
             c.name,
-            c.setting,
-            c.collection_time
-        FROM pg_server_config AS c
-        WHERE c.server_id = $1
-        AND   c.collection_time = (
-                  SELECT MAX(collection_time)
-                  FROM pg_server_config
-                  WHERE server_id = $1)
-        AND   (c.database_name IS NOT NULL OR c.role_name IS NOT NULL)
-        AND   c.name IS NOT NULL
+            c.setting
+        FROM anchor AS a
+        LEFT JOIN pg_server_config AS c
+               ON c.server_id = $1
+              AND c.collection_time = a.collection_time
+              AND c.collection_time >= $2
+              AND (c.database_name IS NOT NULL OR c.role_name IS NOT NULL)
+              AND c.name IS NOT NULL
         ORDER BY c.database_name NULLS LAST, c.role_name NULLS LAST, c.name
         """;
 
@@ -490,18 +537,40 @@ public static class DarlingPgServerConfigReader
         ArgumentNullException.ThrowIfNull(postgres);
 
         var rows = new List<PgConfigOverrideRow>();
-        await using var command = postgres.CreateCommand(OverrideSql);
-        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-        command.Parameters.AddWithValue(serverId);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+
+        /* #3974: the day first, and every retained snapshot only when THAT bound found no snapshot at all —
+           never merely when it found zero overrides, which is the common case (see OverrideSql's remark). */
+        foreach (var lowerBound in ConfigSnapshotLowerBounds(DateTime.UtcNow))
         {
-            rows.Add(new PgConfigOverrideRow(
-                reader.IsDBNull(0) ? null : reader.GetString(0),
-                reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.GetDateTime(4)));
+            rows.Clear();
+            var anchorFound = false;
+            await using var command = postgres.CreateCommand(OverrideSql);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(lowerBound);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.IsDBNull(0))
+                {
+                    continue; // no snapshot in this bound at all
+                }
+
+                anchorFound = true;
+                if (reader.IsDBNull(3))
+                {
+                    continue; // a snapshot exists, but this phantom row (the LEFT JOIN's unmatched side) has no override
+                }
+
+                rows.Add(new PgConfigOverrideRow(
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.GetDateTime(0)));
+            }
+
+            if (anchorFound) break;
         }
 
         return rows;
