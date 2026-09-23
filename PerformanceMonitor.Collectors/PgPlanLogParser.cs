@@ -84,7 +84,7 @@ public static class PgPlanLogParser
        transport asked for. */
     private static readonly Regex s_planBlock = new(
         @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
-        + @"(?:[^ \n]+ \[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
         + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
