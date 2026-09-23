@@ -111,18 +111,20 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         var quiet = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 1);
         AssertQuietWindow(quiet);
 
-        await SeedQueryAsync(DateTime.UtcNow.AddMinutes(-10));
+        var seededAt = DateTime.UtcNow.AddMinutes(-10);
+        await SeedQueryAsync(seededAt);
         var payload = await McpQueryTools.GetQueryDurationTrend(service, _serverManager, ServerName, 4);
         AssertPayload(payload);
 
         /* #3541 A2: get_query_duration_trend's three answers all carry the same disclosure block as its
-           Darling twin — raw, per-collection, the requested start standing (not truncated) on the two empty
-           branches and the first point on the data one. */
-        foreach (var envelope in new[] { never, quiet, payload })
+           Darling twin — raw, the requested start standing (not truncated) on the two empty branches and the
+           first collection on the data one. #3897: the width each would serve — two minutes over four hours,
+           one over an hour. */
+        foreach (var (envelope, width) in new[] { (never, "2 minutes"), (quiet, "1 minute"), (payload, "2 minutes") })
         {
             var root = JsonDocument.Parse(envelope).RootElement;
             Assert.Equal("raw", root.GetProperty("source").GetString());
-            Assert.Equal("per-collection", root.GetProperty("bucket").GetString());
+            Assert.Equal(width, root.GetProperty("bucket").GetString());
             Assert.True(root.TryGetProperty("effective_start", out _));
             Assert.True(root.TryGetProperty("window_truncated", out _));
         }
@@ -130,8 +132,9 @@ public sealed class TrendEmptyParityToolTests : IClassFixture<SharedDuckDbFixtur
         Assert.False(JsonDocument.Parse(never).RootElement.GetProperty("window_truncated").GetBoolean());
         Assert.False(JsonDocument.Parse(quiet).RootElement.GetProperty("window_truncated").GetBoolean());
 
+        /* effective_start is the collection the store held, not the two-minute boundary its point is stamped at. */
         var data = JsonDocument.Parse(payload).RootElement;
-        Assert.Equal(data.GetProperty("trend")[0].GetProperty("time").GetString(), data.GetProperty("effective_start").GetString());
+        Assert.StartsWith(seededAt.ToString("yyyy-MM-ddTHH:mm:ss"), data.GetProperty("effective_start").GetString()!, StringComparison.Ordinal);
         /* #3541 A12: one collection inside the 4-hour window (the other seed is 48 hours back) — a lone
            collection has nothing to difference against, so the point is present but UNRATED: `value` and its
            named twin are both null (this assertion used to compare two fabricated zeros), the envelope says
@@ -255,8 +258,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    /* delta_reads above zero on purpose: the trend's top_files CTE requires read or write activity, so a
-       row with zero deltas would leave the window empty for a reason that has nothing to do with #2485. */
+    /* delta_reads above zero on purpose: the trend ranks only series that read or wrote (#3897), so a row with
+       zero deltas would leave the window empty for a reason that has nothing to do with #2485. */
     private async Task SeedFileIoAsync(DateTime collectionTimeUtc)
     {
         using var readLock = _duckDb.AcquireReadLock();

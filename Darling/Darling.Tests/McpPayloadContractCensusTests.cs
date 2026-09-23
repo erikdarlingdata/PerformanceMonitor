@@ -357,7 +357,8 @@ public sealed class McpPayloadContractCensusTests
 
     /// <summary>The shared producers whose return a tool may pass through under <c>if (x != null) return x;</c>,
     /// in three classes. REFUSALS: the two resolvers and every <c>McpHelpers</c> validator (each of which builds
-    /// <c>Refusal</c>), and the fleet-sweep watch-state validator (which does too). GATES: the engine-capability
+    /// <c>Refusal</c>), the fleet-sweep watch-state validator, and the trend-width resolvers
+    /// (<c>TrendBuckets.Resolve</c> / <c>ValidateWidth</c> / <c>RequireWholeHours</c>, #3897), which do too. GATES: the engine-capability
     /// and runtime-precondition probes on both SKUs, whose answer is a MISS envelope (<c>not_collected</c> /
     /// <c>precondition</c>) computed above the read and passed through by the same idiom — not refusals, but
     /// shared builders, which is what the sweep is holding. CARRIED: the health-parser family's
@@ -367,6 +368,7 @@ public sealed class McpPayloadContractCensusTests
         @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync)\("
         + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
+        + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
         + @"|\b(?:Darling|Mcp)EngineCapability\.NotCollectedStatusAsync\("
         + @"|\b(?:Darling|Mcp)RuntimePrecondition\.(?:StatusAsync|GatedOffStatusAsync)\("
         + @"|\bCollectAsync(?:<[^>]+>)?\(",
@@ -572,8 +574,14 @@ public sealed class McpPayloadContractCensusTests
         AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source", "Invalid source value 'perfmon'. Accepted values: dmv, xe. Omit it for all.");
         AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms", "Invalid min_duration_ms value '-1'. A duration floor cannot be negative — use 0 to admit every row, or omit it entirely.");
 
-        /* And the two producers outside McpHelpers that the census accepts as shared. */
+        /* And the producers outside McpHelpers that the census accepts as shared: the watch-state validator, the
+           trend-width resolvers (#3897) — out of range, over the read's cap (naming the width that fits), and a
+           width the hourly rollup cannot serve — and the resolver. */
         AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state", "Unknown state 'garbage'. Legal values: pending, open, carried, closed; omit for open + carried.");
+        AssertRefusal(TrendBuckets.Resolve(24, 0, 1, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), out _), "bucket_minutes", "Invalid bucket_minutes value '0'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
+        AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes", "Invalid bucket_minutes value '1441'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
+        AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes", "bucket_minutes 1 over 24 hour(s) across 6 series is up to 8646 points, over this read's 1000-point cap. Use bucket_minutes 9 or wider, or narrow hours_back (as_of moves the window) for finer points.");
+        AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes", "bucket_minutes 30 cannot be served for this window: it reaches past the raw tier's 4-day retention, so the hourly rollup answers it, and that rollup's points are whole hours. Use a multiple of 60, or a window inside the last 4 days for finer points.");
         var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new DarlingServerResolver.RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
         AssertRefusal(miss, "server_name", "Could not resolve server. Available servers:\nbox-a");
     }

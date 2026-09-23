@@ -196,12 +196,15 @@ public sealed class DarlingMcpQueryHeatmapTools
     }
 
     /// <summary>The bin-width bound. Refuses out of range rather than clamping, for the same reason the row
-    /// cap does: a silently rewritten bin width draws a different grid than the one that was asked for.</summary>
+    /// cap does: a silently rewritten bin width draws a different grid than the one that was asked for. Through
+    /// <see cref="McpHelpers.Refusal"/>, like every other <c>bucket_minutes</c> refusal (#3897): it answered a bare
+    /// sentence, with no <c>invalid</c> status and no <c>hints.parameter</c>, behind a <c>??</c> chain whose first
+    /// operand the refusal census accepts.</summary>
     private static string? ValidateBucketMinutes(int bucket_minutes) =>
         bucket_minutes >= 1 && bucket_minutes <= DarlingQueryHeatmapReader.MaxBucketMinutes
             ? null
-            : $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.";
+            : McpHelpers.Refusal("bucket_minutes", $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.");
 
     private static string InvalidMetric(string metric) =>
-        $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.";
+        McpHelpers.Refusal("metric", $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.");
 }

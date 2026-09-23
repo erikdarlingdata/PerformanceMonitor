@@ -95,15 +95,21 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
 
         /* #3541 A2: both empty envelopes carry the disclosure block Darling's twins carry, so a caller reads
            `source` without first checking whether it got data. Lite has one tier, so it is always raw, and an
-           empty answer narrows nothing: the requested start stands and nothing is called truncated. */
+           empty answer narrows nothing: the requested start stands and nothing is called truncated. #3897: the
+           empty answer names the width the data would have been served at — ten minutes over a day, one over
+           an hour. */
         foreach (var envelope in new[] { neverRoot, quietRoot })
         {
             AssertDisclosureBlock(envelope);
             Assert.Equal("raw", envelope.GetProperty("source").GetString());
-            Assert.Equal("per-collection", envelope.GetProperty("bucket").GetString());
             Assert.False(envelope.GetProperty("window_truncated").GetBoolean());
-            Assert.Equal(JsonValueKind.Null, envelope.GetProperty("aggregate_note").ValueKind);
+            Assert.StartsWith("Each point summarizes the collections in one ", envelope.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
         }
+
+        Assert.Equal("10 minutes", neverRoot.GetProperty("bucket").GetString());
+        Assert.Equal(10, neverRoot.GetProperty("bucket_minutes").GetInt32());
+        Assert.Equal("1 minute", quietRoot.GetProperty("bucket").GetString());
+        Assert.Equal(1, quietRoot.GetProperty("bucket_minutes").GetInt32());
 
         Assert.Equal(1.0, quietRoot.GetProperty("effective_hours_back").GetDouble());
         Assert.Equal(24.0, neverRoot.GetProperty("effective_hours_back").GetDouble());
@@ -162,6 +168,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(JsonValueKind.Null, first.GetProperty("execution_count").ValueKind);
         Assert.Equal(JsonValueKind.Null, first.GetProperty("executions_per_second").ValueKind);
         Assert.Equal(1, root.GetProperty("unrated_points").GetInt32());
+        Assert.Equal(1, root.GetProperty("unrated_collections").GetInt32());
         var unratedNote = root.GetProperty("unrated_note").GetString()!;
         Assert.Contains("rated against the PREVIOUS one and has none inside the window", unratedNote, StringComparison.Ordinal);
         Assert.Contains("STORED sample interval is 0", unratedNote, StringComparison.Ordinal);
@@ -180,18 +187,19 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(second.GetProperty("value").GetDouble(), second.GetProperty("elapsed_ms_per_second").GetDouble());
 
         /*
-            #3541 A2: the disclosure block, with Lite's truth. One tier (raw, per-collection, no aggregate
-            note), and the series the store held begins at the 20-minutes-ago seed — the unrated first
-            collection, kept since #3541 A12 exactly so effective_start can say so — and because that head
-            sits three-plus hours past the requested 4-hour start, `window_truncated` is true. The label describes
-            the data, not the request; that is the whole contract.
+            #3541 A2: the disclosure block, with Lite's truth. One tier (raw), and the series the store held
+            begins at the 20-minutes-ago seed — the unrated first collection, kept since #3541 A12 exactly so
+            effective_start can say so — and because that head sits three-plus hours past the requested 4-hour
+            start, `window_truncated` is true. The label describes the data, not the request; that is the whole
+            contract. #3897: four hours are two-minute buckets, the note says a point is a bucket, and
+            effective_start is the COLLECTION, not the bucket boundary the point is stamped at.
         */
         AssertDisclosureBlock(root);
         Assert.Equal("raw", root.GetProperty("source").GetString());
-        Assert.Equal("per-collection", root.GetProperty("bucket").GetString());
-        Assert.Equal(JsonValueKind.Null, root.GetProperty("aggregate_note").ValueKind);
+        Assert.Equal("2 minutes", root.GetProperty("bucket").GetString());
+        Assert.Contains("one 2-minute bucket", root.GetProperty("aggregate_note").GetString()!, StringComparison.Ordinal);
         Assert.False(root.TryGetProperty("routing", out _));
-        Assert.Equal(trend[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
+        Assert.Equal(baseNow.AddMinutes(-20).ToString("o"), root.GetProperty("effective_start").GetString());
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.2, 0.5);
     }
@@ -220,7 +228,7 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         Assert.Equal(2, root.GetProperty("trend").GetArrayLength());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("trend")[0].GetProperty("value").ValueKind);
         Assert.False(root.GetProperty("window_truncated").GetBoolean());
-        Assert.Equal(root.GetProperty("trend")[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
+        Assert.Equal(baseNow.AddMinutes(-55).ToString("o"), root.GetProperty("effective_start").GetString());
         Assert.InRange(root.GetProperty("effective_hours_back").GetDouble(), 0.8, 1.0);
     }
 
@@ -261,16 +269,20 @@ public sealed class PerformanceTrendsToolTests : IClassFixture<SharedDuckDbFixtu
         var root = JsonDocument.Parse(hit).RootElement;
         AssertDisclosureBlock(root);
         Assert.Equal("per-interval", root.GetProperty("bucket").GetString());
+        /* #3897: not time-bucketed, so no width, and each point is its own interval — no peak finer than it. */
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("bucket_minutes").ValueKind);
+        Assert.Equal(JsonValueKind.Null, trend[1].GetProperty("peak_elapsed_ms_per_second").ValueKind);
         Assert.Equal(trend[0].GetProperty("time").GetString(), root.GetProperty("effective_start").GetString());
         Assert.True(root.GetProperty("window_truncated").GetBoolean());
     }
 
-    /// <summary>The six keys every Performance-Trends envelope carries since #3541 A2, in the order they are
-    /// written — the same order on the data path, the empty path, and on Darling.</summary>
+    /// <summary>The keys every Performance-Trends envelope carries — six since #3541 A2, seven since #3897 added
+    /// <c>bucket_minutes</c> beside its word — in the order they are written: the same order on the data path, the
+    /// empty path, and on Darling.</summary>
     private static void AssertDisclosureBlock(JsonElement envelope)
     {
         var keys = envelope.EnumerateObject().Select(p => p.Name).ToArray();
-        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "aggregate_note" };
+        var block = new[] { "source", "effective_start", "effective_hours_back", "window_truncated", "bucket", "bucket_minutes", "aggregate_note" };
         var at = Array.IndexOf(keys, "source");
         Assert.True(at >= 0, "the envelope has no `source`");
         Assert.Equal(block, keys.Skip(at).Take(block.Length).ToArray());
