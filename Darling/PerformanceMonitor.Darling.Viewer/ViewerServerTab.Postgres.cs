@@ -367,9 +367,9 @@ public partial class ViewerServerTab
             + (page.Rows.Count == 0
                 ? string.Empty
                 : $"  Showing {page.Rows.Count} of {page.WindowTotal} distinct entries in the window, newest "
-                  + "first; message and detail are redacted at the collector and the statement text is never "
-                  + "stored, only fingerprinted. Sightings counts how often the collector saw the SAME line "
-                  + "while it stayed inside the log tail it re-reads.");
+                  + "first; messages are as PostgreSQL wrote them with the SQL in them normalized, and the "
+                  + "statement text is never stored, only fingerprinted. Sightings counts how often the "
+                  + "collector saw the SAME line while it stayed inside the log tail it re-reads.");
     }
 
     /// <summary>

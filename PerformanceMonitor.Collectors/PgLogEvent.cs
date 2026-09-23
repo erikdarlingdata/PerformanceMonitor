@@ -12,8 +12,10 @@ namespace PerformanceMonitor.Collectors;
 
 /// <summary>
 /// One CLASSIFIED log event, in the shape <c>collect.pg_log_events</c> stores (#3601). Built only by a
-/// family parser from a <see cref="PgLogEntry"/>, and only through <see cref="From"/>, which is where every
-/// text column meets <see cref="PgLogTextRedactor"/> — a parser cannot construct an unredacted row.
+/// family parser from a <see cref="PgLogEntry"/>, and only through <see cref="From"/>, which is where the SQL
+/// PostgreSQL writes into the entry meets <see cref="PgLogTextRedactor"/> — a parser cannot construct a row that
+/// keeps a statement's text, an auto_explain plan, or a literal of the SQL frames PostgreSQL writes into a DETAIL
+/// or CONTEXT. The prose is stored as PostgreSQL wrote it (#3944).
 ///
 /// <para><b>Generic first, structured where a family has structure.</b> The leading columns are the ones
 /// EVERY family has — when, who, how bad, what it said — plus a statement fingerprint and an identity
@@ -35,9 +37,12 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="UserName">From the prefix or the message, or null.</param>
 /// <param name="ApplicationName">From the message where it names one (connection authorized), or null.</param>
 /// <param name="Pid">The backend that wrote the line.</param>
-/// <param name="Message">REDACTED prose.</param>
-/// <param name="Detail">REDACTED prose, or null.</param>
-/// <param name="Context">REDACTED prose, or null — the <c>CONTEXT:</c> companion: for a lock wait the tuple
+/// <param name="Message">PostgreSQL's prose, as written (#3944); an auto_explain plan report keeps only its duration
+/// line, and a syntax error's quoted SQL is normalized (#3996's review).</param>
+/// <param name="Detail">As written, with the SQL PostgreSQL writes into a DETAIL (a deadlock's queries, a crash's
+/// query) normalized; or null.</param>
+/// <param name="Context">As written, with the statement an SQL frame quotes normalized; or null — the
+/// <c>CONTEXT:</c> companion: for a lock wait the tuple
 /// and relation the waiter was on (<c>while updating tuple (0,7) in relation "orders"</c>), for an error
 /// inside a function the frame (<c>PL/pgSQL function f() line 3 at RAISE</c>). Review caught the first
 /// draft parsing it and dropping it while a doc comment claimed it was stored.</param>
@@ -65,20 +70,20 @@ public readonly record struct PgLogEvent(
     public int SeverityRank => PgLogEntry.RankOf(Severity);
 
     /// <summary>
-    /// The ONE constructor path. Takes the raw entry and the family's structured additions, redacts every
-    /// text column, fingerprints the statement, hashes the raw entry. A parser supplies the family name and
-    /// whatever it extracted that the prefix did not carry; it never supplies stored text of its own.
+    /// The ONE constructor path. Takes the raw entry and the family's structured additions, normalizes the SQL
+    /// in its DETAIL and CONTEXT, fingerprints the statement, hashes the raw entry. A parser supplies the family
+    /// name and whatever it extracted that the prefix did not carry; it never supplies stored text of its own.
     /// </summary>
     /// <param name="entry">The assembled, unredacted entry.</param>
     /// <param name="family">The family this parser claims it for.</param>
     /// <param name="databaseName">Overrides the prefix's, where the message named one (connection lines).</param>
     /// <param name="userName">Overrides the prefix's, where the message named one.</param>
     /// <param name="applicationName">From the message, where it named one.</param>
-    /// <param name="metrics">The family's lifted numbers, where it has any (#3602, #3603). Numbers need no
-    /// redaction; <see cref="PgLogEventMetrics.RelationName"/> is an identifier PostgreSQL wrote after the
-    /// noun <c>table</c>, the shape the redactor's own allowlist keeps whole in <c>message</c> — the same
-    /// standing <paramref name="databaseName"/> and <paramref name="userName"/> have. Nothing a user typed
-    /// can reach a metrics member: every source clause is engine prose with engine numbers.</param>
+    /// <param name="metrics">The family's lifted numbers, where it has any (#3602, #3603).
+    /// <see cref="PgLogEventMetrics.RelationName"/> is an identifier PostgreSQL wrote after the noun
+    /// <c>table</c>, lifted out of the <c>message</c> that is stored as written anyway — the same standing
+    /// <paramref name="databaseName"/> and <paramref name="userName"/> have. Every source clause is engine prose
+    /// with engine numbers.</param>
     public static PgLogEvent From(
         in PgLogEntry entry,
         string family,
@@ -98,13 +103,16 @@ public readonly record struct PgLogEvent(
             UserName: userName ?? entry.UserName,
             ApplicationName: applicationName,
             Pid: entry.Pid,
+            /* #3944: the message, and the prose of the detail and context, as PostgreSQL wrote them. #3920: a
+               DETAIL can carry other sessions' SQL (a deadlock's `Process N: query` lines, a crash's `Failed
+               process was running: query`), and a CONTEXT the statement a function was running (`SQL statement
+               "UPDATE ... WHERE id = 42"`); that SQL is normalized like a stored statement, and so is the token a
+               syntax error quotes, in any catalogue's words (#3996's reviews, #4006). A deadlock report's later
+               queries are read past one cut inside a literal only when the entry proves its DETAIL whole. The HINT
+               companion is deliberately NOT stored: it is advice text, never evidence, and nothing here claims
+               otherwise. */
             Message: PgLogTextRedactor.RedactMessage(entry.Message) ?? string.Empty,
-            /* #3920: a DETAIL can carry other sessions' SQL (a deadlock's `Process N: query` lines, a crash's
-               `Failed process was running: query`), and a CONTEXT the statement a function was running (`SQL
-               statement "UPDATE ... WHERE id = 42"`). Both are masked as SQL, so a bare number or a
-               dollar-quoted string in them goes too, which prose masking kept. The HINT companion is
-               deliberately NOT stored: it is advice text, never evidence, and nothing here claims otherwise. */
-            Detail: PgLogTextRedactor.RedactDetail(entry.Detail),
+            Detail: PgLogTextRedactor.RedactDetail(entry.Detail, entry.DetailComplete),
             Context: PgLogTextRedactor.RedactContext(entry.Context),
             StatementFingerprint: PgLogTextRedactor.Fingerprint(redactedStatement),
             RawLineHash: PgLogTextRedactor.RawLineHash(entry.RawText),

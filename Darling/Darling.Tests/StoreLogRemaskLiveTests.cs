@@ -17,11 +17,12 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The re-mask of store-log rows captured before #3915, against a real migrated store. An earlier build kept
-/// retained entries as the server wrote them (an ERROR's STATEMENT line with a password literal, a quoted
-/// value, the first #3899 build's raw slow statements) for the sweep's 400-day retention, where the viewer and
-/// mcp roles read them. The pass rewrites exactly the rows its masking changes, walks the table in bounded
-/// slices by cursor, and a second pass changes nothing.
+/// The re-mask of store-log rows captured before #3915 and #3944, against a real migrated store. An earlier build
+/// kept retained entries whole (an ERROR's STATEMENT line with a password literal, the first #3899 build's raw slow
+/// statements) for the sweep's 400-day retention, where the viewer and mcp roles read them, and stored a message's
+/// text where this build stores its grouping key. The pass normalizes the SQL, re-keys the message and keeps the
+/// prose as PostgreSQL wrote it; it rewrites exactly the rows that changes, walks the table in bounded slices by
+/// cursor, and a second pass changes nothing.
 ///
 /// <para><b>#1776 own-store</b>: it mints and migrates a scratch database through <c>ScratchPostgres</c>, so
 /// it is not in the <c>live-postgres</c> collection.</para>
@@ -53,6 +54,9 @@ public sealed class StoreLogRemaskLiveTests
                 Prefix + "LOG:  duration: 6001.000 ms  statement: SELECT * FROM t WHERE code = 'Remask3915c'"),
             ("deadlock", "ERROR", "deadlock detected",
                 Prefix + "ERROR:  deadlock detected\n" + Prefix + "DETAIL:  Process 1 waits for ShareLock on transaction 2; blocked by process 3."),
+            /* A 3.8.0 capture's fragment: a statement's tab-led continuation opened an entry of its own. */
+            ("lock_timeout", "ERROR", "noted",
+                "\t-- ERROR:  noted\n\tFROM creds WHERE pw = 'Remask3944f'"),
             ("routine", "LOG", null, null),
         };
 
@@ -69,8 +73,8 @@ VALUES ((now() AT TIME ZONE 'UTC'), $1, $2, 1, $3, $4)", c);
         }
 
         var (examined, rewritten) = await RunToTheEndAsync(c, ct);
-        Assert.Equal(4, examined);
-        Assert.Equal(3, rewritten);
+        Assert.Equal(5, examined);
+        Assert.Equal(4, rewritten);
 
         var stored = new Dictionary<string, (string? Message, string? Sample)>();
         await using (var read = new NpgsqlCommand("SELECT event_class, message_text, sample_line FROM collect.store_log_events", c))
@@ -84,14 +88,22 @@ VALUES ((now() AT TIME ZONE 'UTC'), $1, $2, 1, $3, $4)", c);
             }
         }
 
+        /* The SQL literals are gone from every row; the prose value is kept in the sample, and its message is the
+           grouping key. */
         foreach (var (_, (message, sample)) in stored)
         {
-            Assert.DoesNotContain("Remask3915", message ?? "", StringComparison.Ordinal);
-            Assert.DoesNotContain("Remask3915", sample ?? "", StringComparison.Ordinal);
+            Assert.DoesNotContain("Remask3915a", (message ?? "") + sample, StringComparison.Ordinal);
+            Assert.DoesNotContain("Remask3915c", (message ?? "") + sample, StringComparison.Ordinal);
+            Assert.DoesNotContain("Remask3944f", (message ?? "") + sample, StringComparison.Ordinal);
         }
+
+        /* The fragment keeps no text: its occurrence stays in the class count. */
+        Assert.Equal(((string?)null, (string?)null), stored["lock_timeout"]);
 
         Assert.Equal("statement: SELECT * FROM t WHERE code = '?'", stored[StoreLogClassifier.SlowStatementClass].Message);
         Assert.Contains("STATEMENT:  ALTER ROLE admin PASSWORD '?'", stored["statement_timeout"].Sample, StringComparison.Ordinal);
+        Assert.Equal("invalid input syntax for type integer: \"?\"", stored["unclassified"].Message);
+        Assert.Equal(Prefix + "ERROR:  invalid input syntax for type integer: \"Remask3915b\"", stored["unclassified"].Sample);
         Assert.Equal("deadlock detected", stored["deadlock"].Message);
 
         /* Idempotent: a second pass over the same table rewrites nothing. */

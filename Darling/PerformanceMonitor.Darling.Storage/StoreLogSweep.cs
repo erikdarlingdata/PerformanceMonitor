@@ -178,8 +178,8 @@ WHERE capture_time < $1";
         bool OffsetReset,
         StoreLogClassifier.Census Census);
 
-    /// <summary>How many stored rows one re-mask pass examines (#3915): a bounded slice per hourly tick, so a
-    /// store with a long retained history finishes over a few ticks instead of overrunning one tick's
+    /// <summary>How many stored rows one re-mask pass examines (#3915, #3944): a bounded slice per hourly tick, so
+    /// a store with a long retained history finishes over a few ticks instead of overrunning one tick's
     /// budget.</summary>
     public const int MaxRemaskRowsPerPass = 5000;
 
@@ -201,7 +201,7 @@ AND   (e.message_text IS NOT NULL OR e.sample_line IS NOT NULL)
 ORDER BY e.ctid
 LIMIT $2";
 
-    /// <summary>Writes one row's re-masked text back, by the physical row it was read from.</summary>
+    /// <summary>Writes one row's re-masked key and sample back, by the physical row it was read from.</summary>
     public const string RemaskUpdateSql = @"
 UPDATE collect.store_log_events
 SET message_text = $1,
@@ -209,14 +209,16 @@ SET message_text = $1,
 WHERE ctid = $3::tid";
 
     /// <summary>
-    /// Re-masks rows stored before this build (#3915), one bounded slice per call: rows written by an earlier
-    /// build kept the entry as the server wrote it, so an ERROR's STATEMENT line with a password literal, a
-    /// DETAIL's key values, and the first #3899 build's raw slow statements sit in
-    /// <c>collect.store_log_events</c> for the sweep's 400-day retention, readable by the viewer and mcp roles.
-    /// Each row goes through <see cref="StoreLogClassifier.MaskStoredEvent"/>, the same masking a new capture
-    /// gets, and is rewritten only if that changed it; the masking is idempotent, so rows this build wrote come
-    /// back unchanged and a pass that is cut short loses nothing. Returns the cursor to resume from, null once
-    /// the table's end is reached, with how many rows were examined and rewritten.
+    /// Brings rows stored before this build to its rules (#3915, #3944), one bounded slice per call. The
+    /// releases that captured the store's log (3.7.0 through 3.8.0) kept each entry whole, so an ERROR's
+    /// STATEMENT line with a password literal, and the first #3899 build's raw slow statements, sit in
+    /// <c>collect.store_log_events</c> for the sweep's 400-day retention, readable by the viewer and mcp roles;
+    /// and their message is the text rather than its grouping key. Each row goes through
+    /// <see cref="StoreLogClassifier.MaskStoredEvent"/>, which normalizes its SQL and re-keys its message the way
+    /// a new capture does, and is rewritten only if that changed it; the function is idempotent, so rows this
+    /// build wrote come back unchanged (bar a sample the cap cut inside a token, rewritten once) and a pass that is
+    /// cut short loses nothing. Returns the cursor to resume from, null once the table's end is reached, with how
+    /// many rows were examined and rewritten.
     /// </summary>
     public static async Task<(string? NextCursor, int Examined, int Rewritten)> RemaskStoredEventsAsync(
         NpgsqlConnection connection, string? afterCursor, CancellationToken cancellationToken = default)
@@ -399,6 +401,17 @@ WHERE ctid = $3::tid";
     public static bool ShouldWriteHeartbeat(int consumedFiles, int candidateFiles) =>
         consumedFiles == 0 && candidateFiles > 0;
 
+    /// <summary>
+    /// Whether a file in the log directory is the stderr-format log <see cref="StoreLogClassifier"/> reads (#3944's
+    /// review). A store that also logs to csvlog or jsonlog writes <c>.csv</c> / <c>.json</c> files beside it (the
+    /// name with its <c>.log</c> suffix swapped, or the suffix appended). Their records have no tab continuation
+    /// and no <c>SEVERITY:  </c> field, so a record whose text happened to hold one would open an entry that took
+    /// in the records after it, their statement columns included, and a retained entry keeps its prose as written.
+    /// </summary>
+    public static bool IsStderrLogFile(string logFile) =>
+        !logFile.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+        && !logFile.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>One row of <see cref="LogDirectoryListSql"/>.</summary>
     private readonly record struct Candidate(string LogFile, long SizeBytes, long? StoredOffset, long? StoredLastSize);
 
@@ -411,6 +424,11 @@ WHERE ctid = $3::tid";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            if (!IsStderrLogFile(reader.GetString(0)))
+            {
+                continue;
+            }
+
             rows.Add(new Candidate(
                 LogFile: reader.GetString(0),
                 SizeBytes: reader.IsDBNull(1) ? 0 : reader.GetInt64(1),

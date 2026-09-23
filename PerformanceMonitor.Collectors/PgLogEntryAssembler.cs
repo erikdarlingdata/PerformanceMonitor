@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -59,15 +60,45 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public static class PgLogEntryAssembler
 {
+    /// <summary>The field labels a catalogue of PostgreSQL 18's writes without the two spaces after the colon that
+    /// elog.c's English labels end with, as each is written up to its colon (#3996's round-2 review): Turkish
+    /// <c>AYRINTI:</c>, <c>İPUCU:</c>, <c>SORGU:</c> and <c>ORTAM:</c> (DETAIL, HINT, QUERY, CONTEXT), Korean
+    /// <c>쿼리:</c> (QUERY) and French <c>PILE D'APPEL :</c> (BACKTRACE). Each ends a label whatever follows its
+    /// colon. PgLogCatalogueShapeTests fails when the bundled runtime's catalogues write another.</summary>
+    public static readonly IReadOnlyList<string> UnpaddedLabels =
+        ["AYRINTI:", "İPUCU:", "SORGU:", "ORTAM:", "쿼리:", "PILE D'APPEL :"];
+
     /* The prefix line: stamp, zone-and-pid in either family, whatever else the prefix carried, then the
        label. `rest` is lazy so the label is the FIRST `LABEL:  ` after the pid, which is what %Q's glued
        query id requires. The companion labels are in the same alternation as the severities because a
-       companion line carries the same prefix and is told apart only by its label. */
+       companion line carries the same prefix and is told apart only by its label.
+
+       `rest` never runs past a label of ANY language (#3996's review). Under a translated lc_messages the
+       line's own label is one this does not know (`SENTENCIA:  `, `ANWEISUNG:  `), and a lazy run past it found
+       `ERROR:  ` inside the statement's literal and started a new event from the middle of it. So `rest` stops at
+       what a label ends with in every catalogue PostgreSQL 18 ships: a colon and two spaces, one of the labels a
+       catalogue writes without them (UnpaddedLabels) whatever follows its colon, or a colon straight after a
+       non-ASCII letter or three capitals and before text. A prefix's own colons pass: a time's, `]:` before the
+       label, `: ` separators, an IPv6 client, pgAdmin's `DB:postgres`. A label glued to capitals (`PG_CATALOG:`)
+       is not one. A line whose label is not this reader's opens nothing: fail closed. The managed family's `mid`
+       is held to the same run, because it is lazy too: refused at the real pid, it slid on to a `[1]` inside the
+       statement's literal and read that as the pid.
+
+       The unpadded labels are named because their text need not start with a letter (#3996's round-2 review):
+       PL/pgSQL's QUERY companion is the function's body, which opens with a space after `AS $$ BEGIN`, so
+       `SORGU: BEGIN ... 'ERROR:  ...'` passed the shape rule, the run crossed it, and the ERROR inside the body
+       opened an event carrying the body's password. The one thing after a named label's colon that does not make
+       it a label is a pid in brackets: the managed family writes `%u@%d:[%p]:`, and a database or role whose name
+       ends in one (`검색쿼리`) would otherwise lose every line. */
+    private static readonly string s_prefixRun =
+        @"(?:(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
+        + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])[^\n])*?";
+
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
-        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>[^\n]*?)\[(?<pid>\d+)\])"
-        + @"(?<rest>[^\n]*?)"
-        + @"(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
+        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\])"
+        + @"(?<rest>" + s_prefixRun + ")"
+        + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* %u@%d anywhere in the prefix's non-pid text. Both halves required: a background process renders
@@ -134,8 +165,18 @@ public static class PgLogEntryAssembler
 
             if (!match.Success)
             {
-                /* Not a prefix line and not a continuation: the cut head, or a line the server wrote to
-                   stderr outside its own format (a loader's chatter, a crash dump). Nothing to do with it. */
+                /* Not a prefix line and not a continuation: the cut head, a line the server wrote to stderr
+                   outside its own format (a loader's chatter, a crash dump), or a line whose label this reader
+                   does not know, as under a translated lc_messages (#3996's review). Nothing to do with it, nor
+                   with the tab lines under it, and it ends the open entry: a message's lines are written
+                   together, so what follows belongs to this line's message, not the entry above (a German
+                   `FEHLER:` line's untranslated `DETAIL:` would otherwise join the entry before it). */
+                if (current is not null)
+                {
+                    entries.Add(current.Build());
+                    current = null;
+                }
+
                 continue;
             }
 
@@ -158,6 +199,13 @@ public static class PgLogEntryAssembler
             if (current is not null && current.Pid == match.Groups["pid"].Value)
             {
                 current.Companion(label, match.Groups["text"].Value, line);
+            }
+            else
+            {
+                /* ...and neither do the tab lines under that backend's line (#3944's review): they are the rest of
+                   ITS field, another session's multi-line statement say, and the field open here would otherwise
+                   take them in, now that the columns keep their prose as written. */
+                current?.CloseField();
             }
         }
 
@@ -184,6 +232,11 @@ public static class PgLogEntryAssembler
         private StringBuilder? _statement;
         private StringBuilder? _context;
         private StringBuilder? _open;
+
+        /* Whether the DETAIL is proven whole (#3996's review): another companion followed it, and nothing cut
+           into its lines on the way. */
+        private bool _detailFollowed;
+        private bool _detailInterrupted;
 
         public string Pid { get; }
 
@@ -227,9 +280,18 @@ public static class PgLogEntryAssembler
             _raw.Append('\t').Append(text).Append('\n');
         }
 
+        /// <summary>Stops tab-continuation lines from joining the field last opened: the line they continue was
+        /// not this entry's. A DETAIL closed this way may have lost the rest of its lines.</summary>
+        public void CloseField()
+        {
+            _detailInterrupted |= _open is not null && ReferenceEquals(_open, _detail);
+            _open = null;
+        }
+
         public void Companion(string label, string text, string line)
         {
             _raw.Append(line).Append('\n');
+            _detailFollowed |= _detail is not null && label != "DETAIL";
 
             switch (label)
             {
@@ -291,7 +353,8 @@ public static class PgLogEntryAssembler
                 UserName: userMatch.Success ? userMatch.Groups["user"].Value : null,
                 DatabaseName: userMatch.Success ? userMatch.Groups["db"].Value : null,
                 SqlState: stateMatch.Success ? stateMatch.Groups["state"].Value : null,
-                RawText: _raw.ToString());
+                RawText: _raw.ToString(),
+                DetailComplete: _detailFollowed && !_detailInterrupted);
         }
     }
 }

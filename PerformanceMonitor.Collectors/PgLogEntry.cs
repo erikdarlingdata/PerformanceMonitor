@@ -28,12 +28,12 @@ namespace PerformanceMonitor.Collectors;
 /// same rule, the same exception, for the same reason (#2993). A parser does not have to think about
 /// <c>log_timezone</c>.</para>
 ///
-/// <para><b>Nothing here is redacted.</b> This is the RAW entry, and it is what a parser needs to extract
-/// structure from — a lock wait's pid and mode, a spill's byte count. Redaction happens where a string is
-/// about to be STORED, in <see cref="PgLogTextRedactor"/>, and every stored text column of
-/// <see cref="PgLogEvent"/> goes through it. An entry must not leave the collector process unredacted, and
-/// the type boundary is what says so: <see cref="PgLogEntry"/> is in-process only, <see cref="PgLogEvent"/>
-/// is what gets written.</para>
+/// <para><b>Nothing here is normalized.</b> This is the RAW entry, and it is what a parser needs to extract
+/// structure from — a lock wait's pid and mode, a spill's byte count. The SQL in it is normalized where it is
+/// about to be STORED, in <see cref="PgLogTextRedactor"/> inside <see cref="PgLogEvent.From"/>, and the
+/// statement is only fingerprinted. An entry's SQL must not leave the collector process as written, and the
+/// type boundary is what says so: <see cref="PgLogEntry"/> is in-process only, <see cref="PgLogEvent"/> is
+/// what gets written.</para>
 /// </summary>
 /// <param name="TimestampText">The prefix's <c>%m</c> or <c>%t</c> stamp as written.</param>
 /// <param name="ZoneText">The prefix's zone token as written — <c>log_timezone</c> rendered for THIS line.</param>
@@ -57,6 +57,9 @@ namespace PerformanceMonitor.Collectors;
 /// prefix does not, so this is null on most self-hosted targets.</param>
 /// <param name="RawText">The whole entry as it appeared in the log — every line, verbatim. Hashed for
 /// identity across overlapping tail reads; never stored.</param>
+/// <param name="DetailComplete">Whether the DETAIL is proven whole (#3996's review): another companion followed it
+/// in this entry and nothing cut into its lines. <see cref="PgLogTextRedactor.RedactDetail"/> trusts a deadlock
+/// report's later query heads after one that does not read to its end only then.</param>
 public readonly record struct PgLogEntry(
     string TimestampText,
     string ZoneText,
@@ -72,7 +75,8 @@ public readonly record struct PgLogEntry(
     string? UserName,
     string? DatabaseName,
     string? SqlState,
-    string RawText)
+    string RawText,
+    bool DetailComplete = false)
 {
     /// <summary>
     /// PostgreSQL's severity labels ranked by SERIOUSNESS, which is the order a reader filtering on
