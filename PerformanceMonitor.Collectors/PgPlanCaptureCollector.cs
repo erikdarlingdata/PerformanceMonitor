@@ -107,10 +107,27 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        the JSON tab-indented under its LOG line, so the block is recognisable as a unit. The tabs are
        stripped to make it valid JSON.
 
+       ANCHORED to '^' with the 'n' (newline-sensitive) flag, and the timestamp is REQUIRED (#4008). The
+       pre-fix pattern matched '[digits] digits LOG:  duration: ... plan:' ANYWHERE in the tail, with no
+       timestamp check at all, so a statement's own author could write that text into their own SQL and
+       have PostgreSQL echo it back verbatim in the STATEMENT: companion after a syntax error — tab-indented
+       continuation lines and all — forging a plan, with any query id and duration, onto any real query's
+       history. A '^\d{4}-\d\d-\d\d ...' timestamp required at a genuine line start closes that: forged
+       text is never the first character of a raw physical line, because a real line always opens with
+       log_line_prefix and a continuation always opens with a tab, and 'n' makes '^' match only right after
+       a newline or at the very start of the tail. Self-hosted's own log_line_prefix is whatever the
+       operator configured, but the space-separated family is PostgreSQL's own default and the only one this
+       route has ever recognised — PgPlanLogParser.s_planBlock carries the colon-separated (managed-prefix)
+       alternative too, because that family is the norm on the RDS log-API route this SQL never runs on.
+
        The marker row the gate emits instead of log rows when logging_collector is off (#3410) is spelled
        in this query's own three columns; ReadAsync turns it into PgLoggingCollectorOffException, and the
        runner records the named non-fatal skip — not-collected with the reason, never a silent zero that
-       reads as a target with nothing slow on it. */
+       reads as a target with nothing slow on it. A second marker arm (#3997) covers the narrower gap where
+       logging_collector is on but log_destination carries no stderr format — csvlog/jsonlog only — so the
+       shared tail's newest CTE excludes every file it sees; ReadAsync turns that one into
+       PgNoStderrLogFileException, and the two arms are mutually exclusive by construction (one needs the
+       setting off, the other needs it on). */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
     (m[1])::bigint                                   AS query_id,
@@ -119,11 +136,14 @@ SELECT
 FROM tail,
      regexp_matches(
          tail.body,
-         '\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
-         'g') AS m
+         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         'gn') AS m
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 2000";
 
     public override string Name => "pg_plan_capture";
@@ -179,6 +199,16 @@ LIMIT 2000";
                 && string.Equals(reader.GetString(2), PgLoggingCollectorOffException.Marker, StringComparison.Ordinal))
             {
                 throw new PgLoggingCollectorOffException();
+            }
+
+            /* The second marker row (#3997): logging_collector is on but every file in the directory was a
+               csvlog/jsonlog sibling, so the shared tail found no stderr-format file this cycle. Same shape
+               as the check above — a NULL query id plus this marker text cannot be a real capture. */
+            if (reader.IsDBNull(0)
+                && !reader.IsDBNull(2)
+                && string.Equals(reader.GetString(2), PgNoStderrLogFileException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgNoStderrLogFileException();
             }
 
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API

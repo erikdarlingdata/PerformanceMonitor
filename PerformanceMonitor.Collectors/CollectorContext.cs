@@ -243,6 +243,15 @@ public sealed class CollectorContext
     public bool CapturePlanXml { get; init; }
 
     /// <summary>
+    /// The store's log-hash key (#4004): the secret the <c>pg_log_events</c> collector keys its two stored identities
+    /// with, <c>raw_line_hash</c> and <c>statement_fingerprint</c>. The host loads it once at start from outside the
+    /// store and hands the same instance to every run. Null means the host has none (Lite never collects PostgreSQL
+    /// logs; a Darling service whose key file could not be used refuses): the collector then refuses to run before it
+    /// touches the target, rather than hashing without a key.
+    /// </summary>
+    public PgLogHashKey? LogHashKey { get; init; }
+
+    /// <summary>
     /// When true, the query_store payload leaves <c>query_sql_text</c> NULL and the host is responsible
     /// for resolving statement text through <see cref="QueryStoreCollector.BuildTextFetchByIdsQuery"/> instead
     /// (#2150). Default false, which keeps the text inline exactly as it ships today.

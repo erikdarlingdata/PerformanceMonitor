@@ -59,14 +59,24 @@ public sealed class PgLogEventClassifier
         new PgRecognisedFamilyParser(),
     };
 
-    /// <summary>The classifier every transport uses. One instance, no state: the parsers are pure.</summary>
-    public static PgLogEventClassifier Default { get; } = new(DefaultParsers);
-
     private readonly IReadOnlyList<IPgLogFamilyParser> _parsers;
+    private readonly PgLogHashKey _key;
 
-    public PgLogEventClassifier(IReadOnlyList<IPgLogFamilyParser> parsers)
+    /// <summary>
+    /// The classifier every transport uses: <see cref="DefaultParsers"/>, stamping each event's identities under
+    /// <paramref name="key"/>, the store's log-hash key (#4004). There is deliberately no keyless instance: a
+    /// classifier that could hash without the store's key is the unkeyed oracle #4004 removed.
+    /// </summary>
+    public PgLogEventClassifier(PgLogHashKey key)
+        : this(DefaultParsers, key)
+    {
+    }
+
+    /// <summary>A classifier over <paramref name="parsers"/>, in order, stamping under <paramref name="key"/>.</summary>
+    public PgLogEventClassifier(IReadOnlyList<IPgLogFamilyParser> parsers, PgLogHashKey key)
     {
         _parsers = parsers ?? throw new ArgumentNullException(nameof(parsers));
+        _key = key ?? throw new ArgumentNullException(nameof(key));
     }
 
     /// <summary>The parsers this classifier consults, in order.</summary>
@@ -97,7 +107,9 @@ public sealed class PgLogEventClassifier
             {
                 if (parser.TryParse(entry, out var logEvent))
                 {
-                    events.Add(logEvent);
+                    /* #4004: the identities are keyed here, the one step every claimed entry passes through, so no
+                       parser needs the key and no event leaves without them. */
+                    events.Add(_key.Stamp(logEvent, entry));
                     break;
                 }
             }

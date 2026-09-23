@@ -49,6 +49,8 @@ public sealed class PgServerLogPathPinTests
             ServerName = "test-server",
             CollectionTime = new DateTime(2026, 9, 14, 12, 0, 0, DateTimeKind.Utc),
             Deltas = s_deltas,
+            /* #4004: pg_log_events refuses to build its query without the store's log-hash key; any key does here. */
+            LogHashKey = new PgLogHashKey(new byte[PgLogHashKey.KeyLength]),
             Target = new CollectorTargetInfo
             {
                 Engine = CollectorTargetEngine.PostgreSql,

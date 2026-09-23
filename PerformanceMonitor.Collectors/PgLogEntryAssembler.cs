@@ -48,7 +48,7 @@ namespace PerformanceMonitor.Collectors;
 /// deadlock and plan routes throw, classified by the runner the same way, so an operator sees ONE sentence
 /// about <c>log_timezone</c> whichever log reader met it first. Not skipped per line, because a line under
 /// a non-UTC prefix parses PERFECTLY and lands in the wrong hour with nothing disagreeing; the deadlock
-/// parser's <c>FromBlock</c> remarks argue the whole-read refusal over the partial history.</para>
+/// parser's <c>FromReport</c> remarks argue the whole-read refusal over the partial history.</para>
 ///
 /// <para><b>Window edges.</b> The self-hosted tail starts at an arbitrary byte and the RDS chunk ends at
 /// one. Lines before the first recognisable prefix are the cut head and are dropped; a final line with no
@@ -249,7 +249,7 @@ public static class PgLogEntryAssembler
             _prefixRest = (match.Groups["mid"].Value + match.Groups["rest"].Value).Trim();
 
             /* THROWN rather than skipped, and it is the one intolerant thing in the assembler — see the
-               type header and PgDeadlockLogParser.FromBlock for why a per-line skip is the silent-wrong
+               type header and PgDeadlockLogParser.FromReport for why a per-line skip is the silent-wrong
                outcome here. */
             if (!PgDeadlockLogParser.IsZeroOffsetLogZone(_zone))
             {

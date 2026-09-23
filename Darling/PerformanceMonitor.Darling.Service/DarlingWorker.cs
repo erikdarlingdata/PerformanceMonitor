@@ -851,6 +851,31 @@ public sealed class DarlingWorker : BackgroundService
 
     private bool _storeLogRemaskDone;
 
+    /* #4012: the re-mask of PostgreSQL deadlock alerts, then stored analysis findings' deadlock exemplars, then
+       deadlock reports, stored before #4005 with their SQL raw. The alerts go first because they are found through the reports' raw hashes, which the report pass
+       replaces. Each has a cursor and is done once a slice reaches its table's end; a scan that left rows raw
+       (a row that changed under its write, a report whose rewrite failed) reads its table through again, at
+       most PgDeadlockRemask.MaxRescansPerProcess times, and the next process's pass is a no-op re-read. */
+    private string? _pgDeadlockAlertRemaskCursor;
+
+    private bool _pgDeadlockAlertRemaskLeftRows;
+
+    private bool _pgDeadlockAlertRemaskDone;
+
+    private string? _pgDeadlockFindingRemaskCursor;
+
+    private bool _pgDeadlockFindingRemaskLeftRows;
+
+    private bool _pgDeadlockFindingRemaskDone;
+
+    private PgDeadlockRemask.ReportCursor? _pgDeadlockRemaskCursor;
+
+    private bool _pgDeadlockRemaskLeftRows;
+
+    private bool _pgDeadlockRemaskDone;
+
+    private int _pgDeadlockRemaskRescans;
+
     /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
        process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
        none), and 42501, a login without the log read. get_store_log already reports the gap on the read
@@ -2014,6 +2039,11 @@ public sealed class DarlingWorker : BackgroundService
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
            CollectSchemaChangeEvents is a file-only knob (darling.json), read the same way for symmetry —
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
+        /* #4004: the store's log-hash key, loaded ONCE here and shared by every run that hashes log text (pg_log_events
+           on the pg_read_file and RDS routes), so raw_line_hash and statement_fingerprint are keyed with a secret the
+           store never holds. Generated only when none exists and never replaced: null means the file could not be used,
+           the reason is already logged, and those runs refuse rather than hash without it. */
+        var logHashKey = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
@@ -2027,7 +2057,8 @@ public sealed class DarlingWorker : BackgroundService
             /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides
                the cadence gate reads — one source, so the scope a run collects under and the schedule it
                was dispatched under can never come from two different reloads. */
-            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides));
+            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides),
+            logHashKey: logHashKey);
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -6971,6 +7002,100 @@ LIMIT 1";
                 }
             }
 
+            /* #4012: PostgreSQL deadlock reports stored before #4005 keep their SQL raw, with a hash over the raw
+               graph, for pg_deadlocks' 90 days, and a deadlock alert fired before it keeps the same in its history
+               row, and an analysis finding its exemplars. Every read normalizes them; a direct SELECT does not. One
+               bounded slice per tick, the alerts' until they are done, then the findings', then the reports', with the store-log slice's own-catch, own-cap posture:
+               neither a failure nor a slow slice may cost the collector-cost flush below. */
+            if (!_pgDeadlockRemaskDone)
+            {
+                if (connection.State != ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
+                }
+
+                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
+                try
+                {
+                    if (!_pgDeadlockAlertRemaskDone)
+                    {
+                        var (next, examined, rewritten, raced) = await PgDeadlockRemask.RemaskStoredAlertsAsync(
+                            connection, _pgDeadlockAlertRemaskCursor, remaskBudget.Token);
+                        _pgDeadlockAlertRemaskCursor = next;
+                        _pgDeadlockAlertRemaskLeftRows |= raced > 0;
+                        if (next is null)
+                        {
+                            _pgDeadlockAlertRemaskDone = !_pgDeadlockAlertRemaskLeftRows
+                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
+                            _pgDeadlockAlertRemaskLeftRows = false;
+                        }
+
+                        if (rewritten > 0)
+                        {
+                            _logger.LogInformation(
+                                "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} deadlock alert(s) fired before this build, so their SQL literals and raw report hashes no longer sit in the alert history{Remaining}.",
+                                rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
+                        }
+                    }
+                    else if (!_pgDeadlockFindingRemaskDone)
+                    {
+                        var (next, examined, rewritten, raced) = await PgDeadlockRemask.RemaskStoredFindingsAsync(
+                            connection, _pgDeadlockFindingRemaskCursor, remaskBudget.Token);
+                        _pgDeadlockFindingRemaskCursor = next;
+                        _pgDeadlockFindingRemaskLeftRows |= raced > 0;
+                        if (next is null)
+                        {
+                            _pgDeadlockFindingRemaskDone = !_pgDeadlockFindingRemaskLeftRows
+                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
+                            _pgDeadlockFindingRemaskLeftRows = false;
+                        }
+
+                        if (rewritten > 0)
+                        {
+                            _logger.LogInformation(
+                                "PostgreSQL deadlocks: re-masked {Rewritten} of {Examined} stored analysis finding(s) written before this build, so their deadlock exemplars' SQL literals no longer sit in the findings store{Remaining}.",
+                                rewritten, examined, next is null ? "" : "; the rest follow on the next hourly passes");
+                        }
+                    }
+                    else
+                    {
+                        var (next, examined, rewritten, failed) = await PgDeadlockRemask.RemaskStoredReportsAsync(
+                            connection, _pgDeadlockRemaskCursor, remaskBudget.Token);
+                        _pgDeadlockRemaskCursor = next;
+                        _pgDeadlockRemaskLeftRows |= failed > 0;
+                        if (next is null)
+                        {
+                            _pgDeadlockRemaskDone = !_pgDeadlockRemaskLeftRows
+                                || ++_pgDeadlockRemaskRescans > PgDeadlockRemask.MaxRescansPerProcess;
+                            _pgDeadlockRemaskLeftRows = false;
+                        }
+
+                        if (rewritten > 0 || failed > 0)
+                        {
+                            _logger.LogInformation(
+                                "PostgreSQL deadlocks: re-masked {Rewritten} stored report row(s) of {Examined} examined, captured before this build, so their SQL literals and raw report hashes no longer sit in pg_deadlocks; {Failed} report(s) could not be rewritten and are retried{Remaining}.",
+                                rewritten, examined, failed, next is null ? "" : "; the rest follow on the next hourly passes");
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                {
+                    _logger.LogWarning(
+                        "PostgreSQL deadlocks: re-masking alerts and reports stored before this build failed, and is retried next hour: {Message}",
+                        ex.Message);
+                }
+            }
+
+            /* The flush runs on this same connection, which a canceled slice above can leave closed. */
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
+            }
+
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
             await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
@@ -9648,6 +9773,24 @@ LIMIT 1";
                marker row — the RDS transport runs no SQL and its platform keeps the logging collector on —
                so the elapsed time is a target query and belongs in sqlMs. */
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: logging_collector is off, so the target writes no server log files",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgNoStderrLogFileException ex)
+        {
+            /* #3997's narrower sibling to the arm above: logging_collector is ON, but log_destination
+               carries no stderr format, so the shared tail's newest CTE excluded every file it saw as a
+               csvlog/jsonlog sibling and there is nothing left for the pg_read_file route to read. Same
+               disposition as PgLoggingCollectorOffException and for the same reasons — a setting on the
+               monitored server, satisfiable and re-derived every cycle, not broken on the monitoring side,
+               and a SUCCESS row with zero rows would read as a target with nothing to report rather than
+               one this route cannot read at all. Same slot rule too: only the pg_read_file route produces
+               this marker, so the elapsed time is a target query and belongs in sqlMs. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
                 server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(

@@ -58,11 +58,35 @@ public static class PgPlanLogParser
        default on a managed parameter group spells '%t:%r:%u@%d:[%p]:' and puts its own ':' there, so
        adding the %Q this parser requires gives '%t:%r:%u@%d:[%p]:%Q ' and the line reads `]:<id> LOG:`.
 
+       ANCHORED to the start of a genuine log line, and the timestamp is REQUIRED, not decorative (#4008).
+       The pre-fix pattern looked for '[digits] digits LOG:  duration: ... plan:' ANYWHERE in the tail, so
+       a statement's own author could plant that text inside their SQL - the STATEMENT: companion PostgreSQL
+       echoes back after a syntax error reads it back verbatim, tab-indented continuation lines and all, and
+       the forger picks the query id and duration that lands on somebody else's history. Requiring a real
+       '\d{4}-\d\d-\d\d ...' timestamp at '^' (RegexOptions.Multiline) closes that: forged text is never the
+       first character of a raw physical line, because every real line starts with a log_line_prefix and
+       every continuation starts with a tab, and .NET's Multiline '^' only matches right after '\n' or at
+       the very start of the buffer.
+
+       The managed family's gap before the pid bracket is '[^\[\n]*', NOT the lazy '[^\n]*?' the assembler
+       uses for the analogous gap elsewhere. That distinction is load-bearing: with a lazy dot-star, a line
+       carrying a REAL bracket followed later by a FORGED one (the STATEMENT echo again, now under a
+       colon-prefixed target) fails to match at the real bracket - '[ :]digit LOG:' does not follow it - and
+       backtracking then EXPANDS the lazy gap past the real bracket to reach the forged one, which does
+       satisfy the rest of the pattern. Excluding '[' from the gap's character class makes the first
+       bracket the only one reachable: the class cannot consume '[' at all, so there is nothing to
+       backtrack into that would ever reach a later one. Proven by re-adding the lazy form and watching
+       PgPlanLogParserTests.AForgedHeaderBehindARealColonPrefixedBracket_StillYieldsNoPlan fail.
+
        PgPlanCaptureCollector holds this pattern's counterpart for the pg_read_file route, as SQL and
-       narrower: that one requires the space, which PostgreSQL's own default renders. */
+       narrower: self-hosted's own SQL regex only ever needed the space family (PostgreSQL's own default),
+       so it gained the same timestamp anchor without the colon alternative rather than a capability neither
+       transport asked for. */
     private static readonly Regex s_planBlock = new(
-        @"\[\d+\][ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
-        RegexOptions.Compiled);
+        @"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? "
+        + @"(?:[^ \[\n]+ [^\[\n]*\[\d+\]|[^ :\n]+:[^\[\n]*\[\d+\])"
+        + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
+        RegexOptions.Compiled | RegexOptions.Multiline);
 
     /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
        inferred: wrong in the safe direction leaves a number in a filter, wrong the other way rewrites an

@@ -46,8 +46,10 @@ namespace PerformanceMonitor.Collectors;
 /// and relation the waiter was on (<c>while updating tuple (0,7) in relation "orders"</c>), for an error
 /// inside a function the frame (<c>PL/pgSQL function f() line 3 at RAISE</c>). Review caught the first
 /// draft parsing it and dropping it while a doc comment claimed it was stored.</param>
-/// <param name="StatementFingerprint">Hash of the REDACTED statement, or null where the entry had none.</param>
-/// <param name="RawLineHash">Identity across sightings. See <see cref="PgLogTextRedactor.RawLineHash"/>.</param>
+/// <param name="StatementFingerprint">Keyed hash of the REDACTED statement, or null where the entry had none. See
+/// <see cref="PgLogHashKey.Fingerprint"/>. Never returned by any read surface (#4004).</param>
+/// <param name="RawLineHash">Identity across sightings, keyed. See <see cref="PgLogHashKey.RawLineHash"/>. Never
+/// returned by any read surface (#3996, #4004).</param>
 /// <param name="Metrics">The family's lifted numbers (#3602 spill bytes, #3603 autovacuum run figures), or
 /// <see cref="PgLogEventMetrics.None"/> for a family with none. Every member nullable; the store columns are.</param>
 public readonly record struct PgLogEvent(
@@ -70,9 +72,14 @@ public readonly record struct PgLogEvent(
     public int SeverityRank => PgLogEntry.RankOf(Severity);
 
     /// <summary>
-    /// The ONE constructor path. Takes the raw entry and the family's structured additions, normalizes the SQL
-    /// in its DETAIL and CONTEXT, fingerprints the statement, hashes the raw entry. A parser supplies the family
-    /// name and whatever it extracted that the prefix did not carry; it never supplies stored text of its own.
+    /// The ONE constructor path. Takes the raw entry and the family's structured additions and normalizes the SQL
+    /// in its DETAIL and CONTEXT. A parser supplies the family name and whatever it extracted that the prefix did
+    /// not carry; it never supplies stored text of its own.
+    ///
+    /// <para><b>The two identities are not computed here</b> (#4004): they are keyed with the store's own secret, and a
+    /// family parser has no key. The event comes back with no fingerprint and an empty <see cref="RawLineHash"/>, and
+    /// the classifier stamps both with its key (<see cref="PgLogHashKey.Stamp"/>) before the event leaves the
+    /// pipeline; the collector's writer refuses an event that was never stamped.</para>
     /// </summary>
     /// <param name="entry">The assembled, unredacted entry.</param>
     /// <param name="family">The family this parser claims it for.</param>
@@ -92,8 +99,6 @@ public readonly record struct PgLogEvent(
         string? applicationName = null,
         PgLogEventMetrics metrics = default)
     {
-        var redactedStatement = PgLogTextRedactor.RedactStatement(entry.Statement);
-
         return new PgLogEvent(
             OccurredAtUtc: entry.OccurredAtUtc,
             Family: family,
@@ -114,8 +119,9 @@ public readonly record struct PgLogEvent(
             Message: PgLogTextRedactor.RedactMessage(entry.Message) ?? string.Empty,
             Detail: PgLogTextRedactor.RedactDetail(entry.Detail, entry.DetailComplete),
             Context: PgLogTextRedactor.RedactContext(entry.Context),
-            StatementFingerprint: PgLogTextRedactor.Fingerprint(redactedStatement),
-            RawLineHash: PgLogTextRedactor.RawLineHash(entry.RawText),
+            /* Stamped by the classifier under the store's key (#4004); see the summary. */
+            StatementFingerprint: null,
+            RawLineHash: string.Empty,
             Metrics: metrics);
     }
 }

@@ -186,6 +186,19 @@ public static class PgTableTuning
            0.02 + 10000 sizes the trigger to roughly one purge's worth of deletions rather than to the
            table's total size, so cleanup follows the work that created it. */
         "ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)",
+        /* #3934: the store-metrics latest read (DarlingStoreMetricsReader.StoreMetricsLatestSql) took each
+           object's newest row with DISTINCT ON (object_kind, object_name) ... ORDER BY object_kind,
+           object_name, metric_time DESC over the WHOLE table — the only index was idx_store_metrics_time
+           (metric_time) alone, so every call sorted every retained row. The table keeps 400 days of hourly
+           sweeps at ~250 objects/sweep, so the sort grows linearly for over a year after a store is created:
+           7,772 ms and an external merge sort spilling ~180 MB at full retention on a CI-sized rig (2.4 M
+           rows), 225 ms on DARLING01 today (83,355 rows). A RESULTS-INVARIANT covering-shape index, same
+           reasoning as every other statement in this list — Erik's ruling on the issue was that this needed
+           no migration rung, since the composer's Tuning stage already creates exactly this kind of index
+           idempotently at every start and hourly (#3817, #3913). Paired with the skip-scan rewrite of
+           StoreMetricsLatestSql below, the latest read went from 7,772 ms to 15 ms on the same seed with
+           identical rows (251). */
+        "CREATE INDEX IF NOT EXISTS idx_store_metrics_kind_name_time ON collect.store_metrics (object_kind, object_name, metric_time DESC)",
     };
 
     /// <summary>

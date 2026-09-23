@@ -185,21 +185,27 @@ public sealed class FleetIdentifierScrubTests
     {
         var extensions = new[] { ".cs", ".ps1", ".md", ".json", ".xaml", ".js", ".yml", ".yaml", ".sql" };
 
+        /* Every exclusion below is judged on the path BELOW the repo root (#4004's lane): a checkout that itself
+           lives under .claude/worktrees matched the .claude exclusion on every file, scanned nothing, and failed as
+           "the sweep lost the tree". */
+        var root = RepoRoot();
+        string InRepo(string f) => Path.DirectorySeparatorChar + Path.GetRelativePath(root, f);
+
         return Directory
-            .EnumerateFiles(RepoRoot(), "*", SearchOption.AllDirectories)
+            .EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Where(f => extensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}pg-runtime{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}pg-runtime{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             /*
                 .claude/worktrees holds separate checkouts of other branches. They are not part of
                 the tree this repo publishes, and scanning them makes the guard permanently red on
                 a developer box while staying green in CI, where they do not exist -- which is the
                 worst of both, because a local red that never goes away trains people to ignore it.
             */
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
+            .Where(f => !InRepo(f).Contains($"{Path.DirectorySeparatorChar}.claude{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

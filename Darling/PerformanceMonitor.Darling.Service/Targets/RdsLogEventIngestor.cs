@@ -30,20 +30,25 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// the two existing ingestors are untouched and this one arrives beside them.</para>
 ///
 /// <para><b>What it deliberately does NOT duplicate.</b> Assembly, classification, redaction and hashing
-/// are <see cref="PgLogEventClassifier.Default"/>, the same instance the <c>pg_read_file</c> route's
-/// <see cref="PgLogEventsCollector"/> calls; this type hands it the chunk's text and gets rows. The WRITE
+/// are <see cref="PgLogEventClassifier"/>'s, the same parsers the <c>pg_read_file</c> route's
+/// <see cref="PgLogEventsCollector"/> runs, keyed with the same store key (#4004); this type hands it the chunk's
+/// text and gets rows. The WRITE
 /// goes through <c>PgCollectorRowWriter</c> and the collector's own definition, so column order and the
 /// COPY command are the collector's. The marker moves after the write and nowhere else (#3008).</para>
 /// </summary>
 public sealed class RdsLogEventIngestor
 {
     private readonly NpgsqlDataSource _postgres;
+    private readonly PgLogEventClassifier _classifier;
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
 
-    public RdsLogEventIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null)
+    /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
+    /// runs carry, so the two transports store identical identities for identical text.</param>
+    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
         _logs = logs ?? new RdsLogSource();
         _logger = logger;
     }
@@ -108,7 +113,7 @@ public sealed class RdsLogEventIngestor
 
         /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
            about the target's configuration and has to reach the runner uncommitted (#3008). */
-        var events = PgLogEventClassifier.Default.Classify(text);
+        var events = _classifier.Classify(text);
 
         if (events.Count == 0)
         {
