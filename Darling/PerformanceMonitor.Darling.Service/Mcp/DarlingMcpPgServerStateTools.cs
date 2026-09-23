@@ -474,7 +474,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. A restart inside the window leaves checkpoints_requested and pct_checkpoints_requested null, with postmaster_restarted true: PostgreSQL counts a shutdown checkpoint as requested and keeps the count across the restart, so across one the requested figure cannot be told from WAL pressure (postmaster_start_time says when the server last started, so a window after it can be chosen). Returns one row describing the whole window, not a series.")]
+    [McpServerTool(Name = "get_pg_write_stats"), Description("Gets PostgreSQL checkpoint and WAL write activity across the window: how many checkpoints were timed versus REQUESTED, how long they spent writing and syncing, how many buffers were written by checkpoints, by the background writer and by backends themselves, and the WAL record, full-page-image and byte totals. Requested checkpoints are the signal to look for - a timed checkpoint is the scheduled one, while a requested checkpoint means WAL filled max_wal_size before the interval elapsed, so a high requested share means checkpoints are being forced by write volume. buffers_backend counts writes a query had to do itself because no clean buffer was available, which is backpressure landing on user queries - PostgreSQL 17 removed that column from pg_stat_bgwriter, so it is null on 17 and later and the note says so. wal_fpi counts full-page images, which is why write volume spikes immediately after each checkpoint. A restart inside the window leaves checkpoints_requested, pct_checkpoints_requested, checkpoint_write_time_ms, checkpoint_sync_time_ms and buffers_written_checkpoint null, with postmaster_restarted true: PostgreSQL counts a shutdown checkpoint as requested and keeps the count across the restart, and that checkpoint's own write and sync work lands in the same counters, so across one those figures cannot be told from the workload's (postmaster_start_time says when the server last started, so a window after it can be chosen). Returns one row describing the whole window, not a series.")]
     public static async Task<string> GetPgWriteStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -575,7 +575,8 @@ public sealed class DarlingMcpPgServerStateTools
                     : null,
                 counter_reset = row.ResetDuringWindow,
                 /* #3955: a restart inside the window, found from consecutive rows' postmaster start times; it is
-                   why checkpoints_requested is null. postmaster_start_time is the window's last sample's. */
+                   why checkpoints_requested, the checkpoint write and sync time and the checkpoint buffer counts are
+                   null. postmaster_start_time is the window's last sample's. */
                 postmaster_restarted = row.PostmasterRestartedDuringWindow,
                 postmaster_start_time = row.PostmasterStartTimeUtc,
                 note = "Requested checkpoints mean max_wal_size filled before the scheduled interval, so a "
@@ -606,11 +607,14 @@ public sealed class DarlingMcpPgServerStateTools
                                ? " (its postmaster started at "
                                  + started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " UTC)"
                                : string.Empty)
-                           + ". A shutdown checkpoint is counted as REQUESTED and the count survives the restart, so "
-                           + "checkpoints_requested and pct_checkpoints_requested are null rather than a figure that "
-                           + "would read the restart as WAL pressure. For a requested count, set hours_back (or as_of) "
-                           + "so the window starts after that restart. The timed count is unaffected; the checkpoint "
-                           + "write and sync time include the shutdown checkpoint's own work."
+                           + ". A shutdown checkpoint is counted as REQUESTED and the count survives the restart, and "
+                           + "its own write and sync phases and the buffers it flushed land in the same counters, where "
+                           + "nothing can separate them from the workload's checkpoints. So checkpoints_requested, "
+                           + "pct_checkpoints_requested, checkpoint_write_time_ms, checkpoint_sync_time_ms and "
+                           + "buffers_written_checkpoint are null rather than figures that would read "
+                           + "the restart as write pressure. Set hours_back (or as_of) so the window starts after that "
+                           + "restart to see them. The timed count (which a restart does not move) and the WAL figures "
+                           + "are still stated."
                          : string.Empty),
             }, McpHelpers.JsonOptions);
         }

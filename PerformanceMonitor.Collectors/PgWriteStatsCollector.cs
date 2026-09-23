@@ -72,9 +72,10 @@ namespace PerformanceMonitor.Collectors;
 /// naive UTC. A counter reset is visible in the three <c>stats_reset</c> stamps; a CLEAN restart is not, because
 /// the statistics survive it, and it adds a requested checkpoint that WAL did not force: PostgreSQL counts the
 /// shutdown checkpoint in <c>num_requested</c> (<c>checkpoints_req</c> through 16), measured +1 per fast stop on
-/// 18.6. The reads difference these rows, so without the start time a monitored server's restart read as WAL
-/// pressure. With it, they apply one rule (<c>PostmasterRestart</c> in the Darling store) and treat a
-/// restart-spanning interval's requested figure as unknown. The function is readable by any login, Aurora
+/// 18.6, and that checkpoint's own write and sync time and flushed buffers land in the same counters. The reads
+/// difference these rows, so without the start time a monitored server's restart read as WAL pressure. With it,
+/// they apply one rule (<c>PostmasterRestart</c> in the Darling store) and treat a restart-spanning interval's
+/// requested count and checkpoint phase figures as unknown. The function is readable by any login, Aurora
 /// included, and it is the same instant on every row one postmaster writes, so it costs one scalar per
 /// snapshot. Appended LAST, so every earlier ordinal and an upgraded store's column order are unchanged.</para>
 /// </summary>

@@ -69,7 +69,8 @@
                      monitored server. -->
                 <DataGridTextColumn Header="Added" Binding="{Binding CreatedDate, StringFormat=yyyy-MM-dd HH:mm}" Width="140"/>
                 <!-- "Last Collected" (not "Last Connected"): the Darling SERVICE connects + collects, not the
-                     viewer. Reuses the sidebar dots' MAX(collection_time) freshness read; "Never" until first collect. -->
+                     viewer. Reuses the sidebar dots' MAX(collection_time) freshness read; "Never" until first collect,
+                     "None retained" once retention has dropped a dark server's whole history (#3967). -->
                 <DataGridTextColumn Header="Last Collected" Binding="{Binding LastCollectedDisplay}" Width="140"/>
             </DataGrid.Columns>
         </DataGrid>

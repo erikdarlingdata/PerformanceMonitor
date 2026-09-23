@@ -816,6 +816,15 @@ public sealed class ServerSummaryItem
     public DateTime? LastCollectionTime { get; set; }
 
     /// <summary>
+    /// The server's registration, <c>servers.created_date</c> (its first successful connect), stamped by the
+    /// Overview loader from the registry row it already holds, the way <see cref="IsPostgres"/> is (#3967).
+    /// Null when the loader did not stamp one, which keeps the ladder's reading. It is what
+    /// <see cref="ApplyFreshness"/> reads to tell a server whose whole history retention has dropped (Offline)
+    /// from one that has never collected.
+    /// </summary>
+    public DateTime? RegisteredAt { get; set; }
+
+    /// <summary>
     /// Headline CPU display: total non-idle CPU prominently with the SQL-only number alongside, e.g.
     /// "64% (SQL 60%)". Falls back to a single number when only one value is available.
     ///
@@ -985,10 +994,14 @@ public sealed class ServerSummaryItem
     /// <summary>
     /// The stored collection_time is naive UTC; the viewer shows it in the viewer machine's local time
     /// (the viewer convention — Lite used its per-server offset helper instead).
+    ///
+    /// <para>With no collection to show, "Never" only when the card is awaiting its first one. A card that
+    /// reads Offline with nothing to show is a server whose history retention has dropped (#3967): something
+    /// was collected, and none of it is retained, which is what the row says.</para>
     /// </summary>
     public string LastCollectionDisplay => LastCollectionTime.HasValue
         ? ViewerTimeHelper.ForDisplay(LastCollectionTime.Value).ToString("HH:mm:ss")
-        : "Never";
+        : IsOnline == false ? "None retained" : "Never";
 
     /* Collection status. The (IsOnline, CollectionStale, AwaitingFirstCollection) triple is resolved by
        ServerCollectionStatusRules.Classify and nowhere else in the viewer — the sidebar row's dot carried its
@@ -1247,6 +1260,18 @@ public sealed class ServerSummaryItem
         ServerHealthClassifier.ClassifyFreshness(lastCollectionUtc, nowUtc);
 
     /// <summary>
+    /// The same derivation with the registration rule (#3967), and the one the sidebar dot and the Overview
+    /// card both call. Their newest-collection reads have no window, but the collection log's retention bounds
+    /// what they can see (<see cref="DarlingRetentionHorizons.CollectionLogHorizon"/>), so a server whose whole
+    /// history retention has dropped comes back null. Registered before that horizon, it reads Offline;
+    /// registered after it, or with no registration, it keeps the ladder's never-collected reading. One
+    /// horizon for both surfaces, so the dot and the card cannot disagree about the same server.
+    /// </summary>
+    public static ServerFreshness ClassifyFreshness(DateTime? lastCollectionUtc, DateTime? registeredAtUtc, DateTime nowUtc) =>
+        ServerHealthClassifier.ClassifyFreshness(
+            lastCollectionUtc, registeredAtUtc, DarlingRetentionHorizons.CollectionLogHorizon(nowUtc), nowUtc);
+
+    /// <summary>
     /// Maps the freshness band onto the card's three status flags, taking the live-ping's place: Fresh →
     /// Online, Stale → the amber Warning state, Offline → the red Offline overlay, NeverCollected → the amber
     /// "Awaiting first collection" state (IsOnline stays null: the truth is "unknown, not reached yet", not
@@ -1259,7 +1284,7 @@ public sealed class ServerSummaryItem
     /// </summary>
     public void ApplyFreshness(DateTime nowUtc)
     {
-        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, nowUtc));
+        var flags = ServerCollectionStatusRules.FlagsFor(ClassifyFreshness(LastCollectionTime, RegisteredAt, nowUtc));
         IsOnline = flags.IsOnline;
         CollectionStale = flags.CollectionStale;
         AwaitingFirstCollection = flags.AwaitingFirstCollection;

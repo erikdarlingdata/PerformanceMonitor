@@ -54,7 +54,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <see cref="StoreSelfMetrics.CheckpointerInsertSql"/>). Both are pure over rows already in hand and both
 /// are what the self-alert evaluator judges, so the tool and the alert cannot disagree about a number. Since
 /// #3955 the checkpointer pair also carries each row's postmaster start time, and an interval that spans a
-/// restart states no requested count (<see cref="PostmasterRestart"/> says why and how that is decided).</para>
+/// restart states no delta at all (<see cref="PostmasterRestart"/> says why and how that is decided).</para>
 ///
 /// <para>And, since #3903, the pure half of the summary-first payload: <see cref="SelectObjects"/> resolves the
 /// tool's two filters to a view, <see cref="OrderForList"/> and <see cref="OrderByGrowth"/> rank its lists, and
@@ -1304,7 +1304,7 @@ LIMIT $1";
     /// literal <c>LIMIT</c> on a reader is the shape the page census inventories, and this is not a page.
     /// <c>postmaster_start_time</c> (V139, #3955) rides along so <see cref="CheckpointerReading.From"/> can tell an
     /// interval that spans a restart; it is NULL on a row written before the rung, which the rule reads as no
-    /// evidence rather than as a restart.
+    /// evidence on the newer row and as "compare its time" on the older one.
     /// </summary>
     public const string CheckpointerPairSql = $@"
 SELECT
@@ -1329,11 +1329,12 @@ LIMIT $1";
     public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null);
 
     /// <summary>
-    /// Whether the pair yielded an interval (#3783). Four states rather than a nullable delta, for the reason
+    /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
     /// every other status on this surface has more than two: "the sweep has never written the row", "it has
-    /// written one and there is nothing yet to subtract", "the counters went backwards between the two" and
-    /// "here is the interval" are four different facts about the same absent-or-present number, and the
-    /// self-alert must fire on exactly one of them.
+    /// written one and there is nothing yet to subtract", "the counters went backwards between the two", "a
+    /// restart between the two put the shutdown checkpoint's own work into the counters" (#3955) and "here is
+    /// the interval" are five different facts about the same absent-or-present number, and the self-alert must
+    /// fire on exactly one of them.
     /// </summary>
     public enum CheckpointerDeltaStatus
     {
@@ -1352,9 +1353,16 @@ LIMIT $1";
         /// zero. The row after the next sweep will difference cleanly against the post-reset row.</summary>
         Reset,
 
-        /// <summary>A measured interval. The one state the self-alert judges. One that spans a postmaster restart
-        /// (<see cref="CheckpointerReading.PostmasterRestarted"/>, #3955) is still Observed, because its write and
-        /// sync deltas are real, but it states no requested count.</summary>
+        /// <summary>The store's postmaster restarted between the two sweeps (<see cref="PostmasterRestart.Spans"/>,
+        /// #3955) and the counters did not go backwards: a clean stop writes the statistics out, and the shutdown
+        /// checkpoint lands in all three of them — one more REQUESTED checkpoint, plus its own write and sync
+        /// phases, which nothing can separate from the live checkpoints' work. So no delta is stated, the Reset
+        /// shape, and the self-alert judges neither arm: a standing alert neither fires nor recovers. The cost is
+        /// one skipped hourly interval after each restart; the next sweep differences cleanly against the
+        /// post-restart row and is judged normally.</summary>
+        Restarted,
+
+        /// <summary>A measured interval on one postmaster. The one state the self-alert judges.</summary>
         Observed,
     }
 
@@ -1372,15 +1380,14 @@ LIMIT $1";
     /// <param name="WriteMs">Milliseconds the checkpointer spent in the write phase inside the interval.</param>
     /// <param name="SyncMs">Milliseconds it spent in the sync (fsync) phase inside the interval — the phase the
     /// production read kills sat inside.</param>
-    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.
-    /// Null on an Observed interval that spans a postmaster restart (<paramref name="PostmasterRestarted"/>): the
-    /// shutdown checkpoint is counted as requested and survives the restart, so the count cannot be told from WAL
-    /// pressure there (#3955).</param>
+    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.</param>
     /// <param name="CumulativeWriteMs">The newest row's raw counter, for a reader who wants the lifetime figure. Null when Absent.</param>
     /// <param name="CumulativeSyncMs">Likewise.</param>
     /// <param name="CumulativeRequested">Likewise.</param>
     /// <param name="PostmasterRestarted">The interval spans a postmaster restart by <see cref="PostmasterRestart.Spans"/>
-    /// (V139, #3955). False when there is no interval to span (Absent, NoPrevious).</param>
+    /// (V139, #3955): true on every <see cref="CheckpointerDeltaStatus.Restarted"/> reading, and on a
+    /// <see cref="CheckpointerDeltaStatus.Reset"/> one whose counters fell because the restart was unclean. False
+    /// when there is no interval to span (Absent, NoPrevious) and on every Observed one.</param>
     /// <param name="PostmasterStartTime">When the postmaster that produced the newest row started, UTC; null when the
     /// newest row predates V139 or there is no row.</param>
     public sealed record CheckpointerReading(
@@ -1406,9 +1413,10 @@ LIMIT $1";
         /// <paramref name="previous"/> null is <see cref="CheckpointerDeltaStatus.NoPrevious"/>; any counter
         /// lower on the newest row is <see cref="CheckpointerDeltaStatus.Reset"/>; a pair whose stamps do not
         /// advance (two rows at one instant cannot happen from one sweep, but the arithmetic must not divide
-        /// by it) is treated as no interval. Otherwise the three subtractions and the measured span, except that
-        /// an interval spanning a postmaster restart (<see cref="PostmasterRestart.Spans"/>, #3955) leaves the
-        /// requested count null: the write and sync deltas are still real, and still Observed.
+        /// by it) is treated as no interval. A pair that spans a postmaster restart
+        /// (<see cref="PostmasterRestart.Spans"/>, #3955) is <see cref="CheckpointerDeltaStatus.Restarted"/>, with no
+        /// delta: the shutdown checkpoint is in all three counters. Otherwise the three subtractions and the
+        /// measured span.
         /// </summary>
         public static CheckpointerReading From(CheckpointerSample? newest, CheckpointerSample? previous)
         {
@@ -1442,23 +1450,31 @@ LIMIT $1";
                     restarted, startedAt);
             }
 
+            /* #3955: the shutdown checkpoint is one more requested checkpoint and its own write and sync phases,
+               in counters that kept running across the restart, and nothing separates it from the live
+               checkpoints' work. No delta, never a zero: the next interval is judged normally. */
+            if (restarted)
+            {
+                return new CheckpointerReading(
+                    CheckpointerDeltaStatus.Restarted, observedAt, previousAt, null, null, null, null,
+                    newest.WriteMs, newest.SyncMs, newest.Requested,
+                    PostmasterRestarted: true, PostmasterStartTime: startedAt);
+            }
+
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
                 newest.WriteMs - previous.WriteMs,
                 newest.SyncMs - previous.SyncMs,
-                /* #3955: a shutdown checkpoint is counted as requested and the count survives the restart, so
-                   across one the difference cannot be told from WAL pressure. Unknown, never zero. */
-                restarted ? null : newest.Requested - previous.Requested,
+                newest.Requested - previous.Requested,
                 newest.WriteMs, newest.SyncMs, newest.Requested,
-                restarted, startedAt);
+                PostmasterRestarted: false, PostmasterStartTime: startedAt);
         }
 
         /// <summary>
         /// The self-alert's condition (#3783), judged on an Observed interval only: the sync phase held more
         /// than <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> inside the interval, OR at least one
-        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding. An
-        /// interval that spans a postmaster restart has no requested count (#3955), so only its sync arm can make
-        /// it pressure.
+        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding,
+        /// and that includes one that spans a postmaster restart (#3955).
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed

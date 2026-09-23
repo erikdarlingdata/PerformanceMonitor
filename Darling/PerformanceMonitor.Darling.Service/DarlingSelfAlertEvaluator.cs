@@ -944,9 +944,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// the hourly cadence with the default five-minute <c>checkpoint_timeout</c> that is at most twelve timed
     /// checkpoints' sync phases summed, so a total over ten seconds means at least one of them was long or
     /// all of them were slow, and either is the finding. The second arm, <c>checkpoints_requested &gt; 0</c>,
-    /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>,
-    /// on an interval with no postmaster restart inside it. PostgreSQL counts the shutdown checkpoint as requested
-    /// and keeps the count across the restart, so across one that arm is not judged at all (#3955).
+    /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>.
+    /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
+    /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955).
     /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
     /// </summary>
     internal const long CheckpointSyncBarMs = 10_000;
@@ -5459,19 +5459,21 @@ internal sealed class DarlingSelfAlertEvaluator
     /// weighs against the store's disk, not a page.
     ///
     /// <para><b>Only an Observed interval is judged.</b> <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Absent"/>
-    /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract) and <c>Reset</c> (the counters went
-    /// backwards — <c>pg_stat_reset_shared</c> or a restart between sweeps) carry no measurement, and a
-    /// non-measurement neither fires nor resolves: the standing state is left as found, the agent-status
-    /// discipline. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer
-    /// and a controllable clock.</para>
+    /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract), <c>Reset</c> (the counters went
+    /// backwards — <c>pg_stat_reset_shared</c> or a restart between sweeps) and <c>Restarted</c> carry no
+    /// measurement, and a non-measurement neither fires nor resolves: the standing state is left as found, the
+    /// agent-status discipline. Gated on the master alerts switch. Internal so it pins directly with a recording
+    /// deliverer and a controllable clock.</para>
     ///
-    /// <para><b>An interval that spans a postmaster restart judges the sync arm only (#3955).</b> PostgreSQL counts
-    /// the shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
-    /// stopped the store fired this alert as "WAL-forced" pressure the store did not have. The reader states no
-    /// requested count for such an interval (<see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.PostmasterRestarted"/>).
-    /// A sync phase over the bar still fires, in words that name the restart; a sync phase under it neither fires
-    /// nor resolves, because a clean interval needs both arms measured clean and one of them was not measured.
-    /// The next interval states both again.</para>
+    /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
+    /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
+    /// stopped the store fired this alert as "WAL-forced" pressure the store did not have; and that checkpoint's
+    /// own write and sync phases land in the same counters, where nothing can separate them from the live
+    /// checkpoints' (a fast shutdown flushes every dirty buffer at once, with every client already gone, so a
+    /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
+    /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted"/> and states no delta, and the
+    /// gate below treats it like every other non-measurement. The cost is one skipped hourly interval after each
+    /// restart; the next interval is judged normally.</para>
     /// </summary>
     internal async Task ApplyCheckpointerPressureAsync(
         Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)
@@ -5489,10 +5491,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var now = _utcNow();
         var syncMs = reading.SyncMs ?? 0;
         var writeMs = reading.WriteMs ?? 0;
-        /* Zero on a restart-spanning interval, where the reader states none (#3955): the requested arm below then
-           cannot fire, and the words say why instead of printing the zero. */
         var requested = reading.Requested ?? 0;
-        var restarted = reading.PostmasterRestarted;
         var intervalSeconds = reading.IntervalSeconds ?? 0;
         var intervalMinutes = (intervalSeconds / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
 
@@ -5510,21 +5509,14 @@ internal sealed class DarlingSelfAlertEvaluator
                     (true, false) => $"sync {syncSeconds}s",
                     _ => $"{requested} WAL-forced checkpoint(s)",
                 };
-                /* #3955: only the sync arm can reach here across a restart; the one-line forms say it spanned one. */
-                var across = restarted ? " (across a store restart)" : string.Empty;
                 await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
-                    $"{arms} in {intervalMinutes} min{across}",
+                    $"{arms} in {intervalMinutes} min",
                     $"sync > {(CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture)}s or any requested checkpoint",
                     detail: $"The store's own checkpointer spent {syncSeconds}s in its sync (fsync) phase and {writeSeconds}s in its write " +
-                        $"phase over the {intervalMinutes} minutes between the last two self-metrics sweeps, and " +
-                        (restarted
-                            ? "the store RESTARTED inside that interval" + RestartedAtClause(reading) + ", so its requested-checkpoint " +
-                              "count is not stated: PostgreSQL counts the shutdown checkpoint as requested and keeps the count across " +
-                              "the restart, so it cannot be told from WAL pressure (#3955). The two phases above include that shutdown " +
-                              "checkpoint's own write and sync. "
-                            : $"{requested} of its checkpoints in that interval were REQUESTED — forced by WAL volume reaching max_wal_size rather than " +
-                              "by checkpoint_timeout. ") +
+                        $"phase over the {intervalMinutes} minutes between the last two self-metrics sweeps, and {requested} of its " +
+                        "checkpoints in that interval were REQUESTED — forced by WAL volume reaching max_wal_size rather than " +
+                        "by checkpoint_timeout. " +
                         (syncMs > CheckpointSyncBarMs
                             ? "A sync phase that long is an I/O stall every reader on the store shares: on one production store, " +
                               "three read kills in a day that nothing else explained all sat inside 25.2 s and 14.0 s sync " +
@@ -5540,16 +5532,13 @@ internal sealed class DarlingSelfAlertEvaluator
                         "cooldown while each new interval breaches and recovers when one reads clean.",
                     /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
                     severity: null,
-                    shortMessage: $"store checkpointer: {arms} in the last {intervalMinutes} min{across} — WAL sizing (#3802) and refresh slicing (#3745) are the levers",
+                    shortMessage: $"store checkpointer: {arms} in the last {intervalMinutes} min — WAL sizing (#3802) and refresh slicing (#3745) are the levers",
                     numericCurrentValue: syncMs,
                     numericThresholdValue: CheckpointSyncBarMs,
                     cancellationToken);
             }
         }
-        /* #3955: across a restart the sync arm measured under the bar and the requested arm was not measured at all.
-           "Under the line again" needs both, so a standing alert is left as found: the non-measurement discipline
-           above, applied to the one arm that has no measurement. */
-        else if (!restarted && _activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
+        else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
         {
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
@@ -5559,15 +5548,6 @@ internal sealed class DarlingSelfAlertEvaluator
                 $"{requested} requested checkpoint(s) in the last {intervalMinutes} min — under the line again"), cancellationToken);
         }
     }
-
-    /// <summary>
-    /// " (it started at 2026-09-22 21:17:04 UTC)" for a restart-spanning interval whose newest row carries its
-    /// postmaster's start time, empty otherwise (#3955). The start is the SERVER's clock, stated in UTC.
-    /// </summary>
-    private static string RestartedAtClause(Mcp.DarlingStoreMetricsReader.CheckpointerReading reading) =>
-        reading.PostmasterStartTime is DateTime started
-            ? " (it started at " + started.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " UTC)"
-            : string.Empty;
 
     /// <summary>
     /// Edge-applies the fleet-level policy-job self-heal machine (#1581, widened to every family by #3816)

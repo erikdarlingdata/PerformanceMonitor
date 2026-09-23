@@ -1085,29 +1085,36 @@ internal static class PgDisplay
     {
         ArgumentNullException.ThrowIfNull(row);
 
+        /* #3955: the five checkpoint figures a shutdown checkpoint lands in are blank across a restart, for a reason
+           neither the version notes nor the reset note cover, so each of those rows says it in its own note. */
+        string Checkpoint(string note) => row.PostmasterRestartedDuringWindow
+            ? "Blank: PostgreSQL restarted inside this window. The shutdown checkpoint is counted as requested and "
+              + "its own write, sync and buffer work lands in the same counters, so across a restart this figure "
+              + "cannot be told from the workload's. Choose a window that starts after the restart to see it."
+            : note;
+
         return new List<WriteStatRow>
         {
             Metric("Checkpoints", "Timed", row.CheckpointsTimed,
                 "Checkpoints that began because checkpoint_timeout elapsed. This is the healthy kind."),
             Metric("Checkpoints", "Requested", row.CheckpointsRequested,
-                row.PostmasterRestartedDuringWindow
-                    /* #3955: blank for a reason the reset note does not cover, so this row says it. */
-                    ? "Blank: PostgreSQL restarted inside this window, and a shutdown checkpoint is counted as "
-                      + "requested and survives the restart, so across one this count cannot be told from WAL "
-                      + "pressure. Choose a window that starts after the restart to see it."
-                    : "Began because WAL volume demanded one. Climbing against Timed is the classic "
-                      + "max_wal_size-too-small signal."),
+                Checkpoint("Began because WAL volume demanded one. Climbing against Timed is the classic "
+                    + "max_wal_size-too-small signal.")),
             Metric("Checkpoints", "Completed", row.CheckpointsDone,
                 "PostgreSQL 18+. Blank on earlier majors, which do not expose it."),
             MetricMs("Checkpoints", "Write Time (ms)", row.CheckpointWriteTimeMs,
-                "Time spent writing buffers during checkpoints."),
+                Checkpoint("Time spent writing buffers during checkpoints.")),
             MetricMs("Checkpoints", "Sync Time (ms)", row.CheckpointSyncTimeMs,
-                "Time spent in fsync during checkpoints. High here with low write time points at the "
-                + "storage rather than at the volume."),
+                Checkpoint("Time spent in fsync during checkpoints. High here with low write time points at the "
+                    + "storage rather than at the volume.")),
             Metric("Checkpoints", "Buffers Written", row.BuffersWrittenCheckpoint,
-                "Buffers written by the checkpointer."),
+                Checkpoint("Buffers written by the checkpointer.")),
+            /* Two reasons can blank this one, so the restart note names both rather than replacing the version note. */
             Metric("Checkpoints", "SLRU Written", row.SlruWritten,
-                "PostgreSQL 18+. Blank on earlier majors."),
+                row.PostmasterRestartedDuringWindow
+                    ? "PostgreSQL 18+, so blank on earlier majors; and blank on any major across a restart inside this "
+                      + "window, for the reason the Requested row gives."
+                    : "PostgreSQL 18+. Blank on earlier majors."),
             Metric("Restartpoints", "Timed", row.RestartpointsTimed,
                 "A standby's equivalent of a checkpoint. PostgreSQL 17+, and zero on a primary."),
             Metric("Restartpoints", "Requested", row.RestartpointsRequested,

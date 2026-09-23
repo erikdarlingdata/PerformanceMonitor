@@ -37,15 +37,18 @@ namespace PerformanceMonitor.Darling.Storage;
 /// version does not expose it" instead of "it was zero". On a fleet holding both 16 and 18 targets those are
 /// completely different statements — 16 has no <c>num_done</c>, 18 has no <c>wal_write_time</c>.</para>
 ///
-/// <para><b>A restart is the second discontinuity, and it moves one column (#3955).</b> A CLEAN restart leaves all
-/// three <c>stats_reset</c> stamps where they were, so the reset guard cannot see it, and it ADDS to
-/// <c>num_requested</c>: PostgreSQL counts the shutdown checkpoint as requested and keeps the count across the
-/// restart. Across a window holding one, last-minus-first on that column is WAL-forced checkpoints plus shutdowns
-/// in unknown proportion, so <c>checkpoints_requested</c> is NULL there, the same answer the reset guard gives a
-/// family, and <see cref="PgWriteStatsRow.PostmasterRestartedDuringWindow"/> says why. The restarts are found by
-/// <see cref="PostmasterRestart.SpansSql"/> over consecutive rows' <c>postmaster_start_time</c> (V139). Every
-/// other figure is still stated: the timed count does not move on a restart, and the write and sync time do
-/// include the shutdown checkpoint's own phases, which is real work it did and which the tool's note says.</para>
+/// <para><b>A restart is the second discontinuity, and it moves the checkpoint figures (#3955).</b> A CLEAN restart
+/// leaves all three <c>stats_reset</c> stamps where they were, so the reset guard cannot see it, and it ADDS the
+/// shutdown checkpoint to counters that kept running: one more <c>num_requested</c> (PostgreSQL counts the shutdown
+/// checkpoint as requested and keeps the count across the restart), plus that checkpoint's own write and sync time
+/// and the buffers it flushed. Across a window holding one, last-minus-first on those columns mixes the workload's
+/// checkpoints with the shutdown's in unknown proportion, so <c>checkpoints_requested</c>,
+/// <c>checkpoint_write_time_ms</c>, <c>checkpoint_sync_time_ms</c>, <c>buffers_written_checkpoint</c> and
+/// <c>slru_written</c> are NULL there, the same answer the reset guard gives a family, and
+/// <see cref="PgWriteStatsRow.PostmasterRestartedDuringWindow"/> says why. The restarts are found by
+/// <see cref="PostmasterRestart.SpansSql"/> over consecutive rows' <c>postmaster_start_time</c> (V139). The cost is
+/// the window: a window that starts after the restart states every figure again. The timed and completed counts
+/// do not move on a restart and are still stated.</para>
 ///
 /// <para>Shared by the WPF tab and the MCP surface so there is one copy of this SQL, per #2530.</para>
 /// </summary>
@@ -55,7 +58,8 @@ public static class DarlingPgWriteStatsReader
     /// <param name="CheckpointsRequested">Checkpoints begun because WAL volume demanded one. Climbing
     /// against <paramref name="CheckpointsTimed"/> is the <c>max_wal_size</c>-too-small signal. NULL when the
     /// window holds a postmaster restart (<paramref name="PostmasterRestartedDuringWindow"/>), because the shutdown
-    /// checkpoint is counted here too.</param>
+    /// checkpoint is counted here too; the checkpoint write and sync time and the buffer counts are NULL there for
+    /// the same reason.</param>
     /// <param name="BuffersBackend">Buffers a backend wrote itself. NULL on PostgreSQL 17+, where the fact
     /// moved to <c>pg_stat_io</c> rather than to the checkpointer — NOT zero, which would read as "backends
     /// never had to write", the opposite of unknown.</param>
@@ -64,7 +68,9 @@ public static class DarlingPgWriteStatsReader
     /// inside the window, so the affected families report NULL rather than a difference across the reset.</param>
     /// <param name="PostmasterRestartedDuringWindow">True when two consecutive samples inside the window came from
     /// different postmasters by <see cref="PostmasterRestart.SpansSql"/> (#3955), so
-    /// <paramref name="CheckpointsRequested"/> is NULL.</param>
+    /// <paramref name="CheckpointsRequested"/>, <paramref name="CheckpointWriteTimeMs"/>,
+    /// <paramref name="CheckpointSyncTimeMs"/>, <paramref name="BuffersWrittenCheckpoint"/> and
+    /// <paramref name="SlruWritten"/> are NULL.</param>
     /// <param name="PostmasterStartTimeUtc">When the postmaster that produced the window's LAST sample started, UTC;
     /// NULL when that sample predates V139.</param>
     public sealed record PgWriteStatsRow(
@@ -110,10 +116,9 @@ public static class DarlingPgWriteStatsReader
        and blanking a perfectly good difference.
 
        #3955: restarted_here is the shared restart rule over consecutive rows (it needs the series window, so
-       bounded carries one), and edges folds it into one flag. A restart anywhere inside the window blanks the
-       requested count alone: num_timed does not move on a restart, and the other columns the shutdown checkpoint
-       touches (its write and sync time, the buffers it wrote) measure work it really did, which the tool's note
-       says, whereas counting it as REQUESTED is what would read it as WAL pressure. */
+       bounded carries one), and edges folds it into one flag. A restart anywhere inside the window blanks every
+       column the shutdown checkpoint lands in: the requested count, the write and sync time, and the buffers
+       (and SLRU buffers) it flushed. num_timed and num_done do not move on a restart and are kept. */
     public const string PgWriteStatsSql = $$"""
         WITH bounded AS (
             SELECT
@@ -151,18 +156,20 @@ public static class DarlingPgWriteStatsReader
         SELECT
             e.window_start,
             e.window_end,
-            /* Checkpointer family: differenced only when its own reset stamp held still. Requested also needs
-               the window to hold no postmaster restart (#3955). */
+            /* Checkpointer family: differenced only when its own reset stamp held still. Requested, and the four
+               columns below that the shutdown checkpoint's own work lands in, also need the window to hold no
+               postmaster restart (#3955). */
             CASE WHEN ck_reset THEN l.num_timed          - f.num_timed          END AS checkpoints_timed,
             CASE WHEN ck_reset AND NOT e.restarted THEN l.num_requested - f.num_requested END AS checkpoints_requested,
             CASE WHEN ck_reset THEN l.num_done           - f.num_done           END AS checkpoints_done,
             CASE WHEN ck_reset THEN l.restartpoints_timed - f.restartpoints_timed END AS restartpoints_timed,
             CASE WHEN ck_reset THEN l.restartpoints_req  - f.restartpoints_req  END AS restartpoints_requested,
             CASE WHEN ck_reset THEN l.restartpoints_done - f.restartpoints_done END AS restartpoints_done,
-            CASE WHEN ck_reset THEN l.checkpoint_write_time_ms - f.checkpoint_write_time_ms END AS checkpoint_write_time_ms,
-            CASE WHEN ck_reset THEN l.checkpoint_sync_time_ms  - f.checkpoint_sync_time_ms  END AS checkpoint_sync_time_ms,
-            CASE WHEN ck_reset THEN l.buffers_written_checkpoint - f.buffers_written_checkpoint END AS buffers_written_checkpoint,
-            CASE WHEN ck_reset THEN l.slru_written       - f.slru_written       END AS slru_written,
+            /* #3955: the shutdown checkpoint's own work is in these four too, and nothing separates it. */
+            CASE WHEN ck_reset AND NOT e.restarted THEN l.checkpoint_write_time_ms - f.checkpoint_write_time_ms END AS checkpoint_write_time_ms,
+            CASE WHEN ck_reset AND NOT e.restarted THEN l.checkpoint_sync_time_ms  - f.checkpoint_sync_time_ms  END AS checkpoint_sync_time_ms,
+            CASE WHEN ck_reset AND NOT e.restarted THEN l.buffers_written_checkpoint - f.buffers_written_checkpoint END AS buffers_written_checkpoint,
+            CASE WHEN ck_reset AND NOT e.restarted THEN l.slru_written - f.slru_written END AS slru_written,
             /* Background-writer family. */
             CASE WHEN bg_reset THEN l.buffers_clean      - f.buffers_clean      END AS buffers_clean,
             CASE WHEN bg_reset THEN l.maxwritten_clean   - f.maxwritten_clean   END AS maxwritten_clean,
