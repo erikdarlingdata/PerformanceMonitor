@@ -284,3 +284,96 @@ public sealed class McpToolGuideHeadsPgBBlockingWaitIndexTests
         Assert.Contains("it is observed by fetching one row past this cap, never inferred from a full page", usage.Tail!, StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for the rest of the "pgB" family: <c>get_pg_kernel_stats</c>
+/// (<c>DarlingMcpPgKernelStatsTools</c>), <c>get_pg_xmin_horizon</c> (<c>DarlingMcpPgXminTools</c>) and
+/// <c>get_pg_table_bloat</c> (<c>DarlingMcpPgTableBloatTools</c>). Darling only - none of the three has a Lite
+/// twin. A separate class from the others in this file so parallel lanes converting different files in the
+/// same family never conflict on one class body.
+/// </summary>
+public sealed class McpToolGuideHeadsPgBKernelXminBloatTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_kernel_stats",
+        "get_pg_xmin_horizon",
+        "get_pg_table_bloat",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_kernel_stats", "zero means cache-served, not unread"),
+        ("get_pg_kernel_stats", "PAGE BOUNDED BY limit: queries_returned/truncated"),
+        ("get_pg_kernel_stats", "SHARES ARE OF THE WINDOW: pct_of_total_cpu divides by total_cpu_ms, not the page sum"),
+        ("get_pg_kernel_stats", "per-interval deltas needing a second to difference"),
+        ("get_pg_xmin_horizon", "EVERY capture in the window, not just captures with a holder"),
+        ("get_pg_xmin_horizon", "no_holder: captured, found nothing - all-clear"),
+        ("get_pg_xmin_horizon", "unavailable: never captured"),
+        ("get_pg_xmin_horizon", "feeds get_pg_wraparound_risk"),
+        ("get_pg_table_bloat", "ESTIMATE, NOT MEASUREMENT"),
+        ("get_pg_table_bloat", "SUPPRESSED (nulled), not shown"),
+        ("get_pg_table_bloat", "pg_monitor alone does not grant it"),
+        ("get_pg_table_bloat", "empty: every table under the 1 MB floor, real all-clear"),
+        ("get_pg_table_bloat", "unavailable: no snapshots ever or in window"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: every original sentence the terse head left out still rides in the tail -
+    /// get_pg_kernel_stats' get_pg_top_queries pairing and window-share arithmetic, get_pg_xmin_horizon's full
+    /// five-cause list and vacuum-horizon-alert denominator note, and get_pg_table_bloat's measured pgstattuple
+    /// comparison and collection cadence.</summary>
+    [Fact]
+    public void D3HeadCompression_LandsEveryDroppedSentenceInTheTail()
+    {
+        var kernel = McpToolGuideTests.Served("get_pg_kernel_stats");
+        Assert.Contains("which is the first split any tuning question needs", kernel.Tail!, StringComparison.Ordinal);
+        Assert.Contains("do not read them as logical I/O", kernel.Tail!, StringComparison.Ordinal);
+        Assert.Contains("returned_pct_of_total is that ratio stated once", kernel.Tail!, StringComparison.Ordinal);
+
+        var xmin = McpToolGuideTests.Served("get_pg_xmin_horizon");
+        Assert.Contains("a long-running or idle-in-transaction session", xmin.Tail!, StringComparison.Ordinal);
+        Assert.Contains("unheld captures included, the same denominator the vacuum-horizon alert uses", xmin.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Works on any PostgreSQL target.", xmin.Tail!, StringComparison.Ordinal);
+
+        var bloat = McpToolGuideTests.Served("get_pg_table_bloat");
+        Assert.Contains("Against pgstattuple on real tables with current statistics it was within about 2 percentage points", bloat.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Collected hourly per database on writers only, for tables of at least 1 MB.", bloat.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D2 parameter overflow: <c>get_pg_kernel_stats</c>' and <c>get_pg_table_bloat</c>'s <c>limit</c>
+    /// descriptions were 204 and 270 chars; each was trimmed to a verbatim prefix at or under 200, and the
+    /// complete original parameter sentence (not just the cut suffix) lands verbatim in its tool's tail rather
+    /// than being reworded away (#3898 lesson: never reword a cut parameter clause).</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_Verbatim()
+    {
+        var kernel = McpToolGuideTests.Served("get_pg_kernel_stats");
+        var kernelLimit = Assert.Single(kernel.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(kernelLimit.Length <= 200, $"get_pg_kernel_stats.limit: {kernelLimit.Length} > 200");
+        Assert.Contains("the shares stay of the whole window whatever this is set to.", kernel.Tail!, StringComparison.Ordinal);
+
+        var bloat = McpToolGuideTests.Served("get_pg_table_bloat");
+        var bloatLimit = Assert.Single(bloat.ParameterDescriptionLengths, x => x.Parameter == "limit");
+        Assert.True(bloatLimit.Length <= 200, $"get_pg_table_bloat.limit: {bloatLimit.Length} > 200");
+        Assert.Contains("it is observed by fetching one row past this cap, never inferred from a full page.", bloat.Tail!, StringComparison.Ordinal);
+    }
+}
