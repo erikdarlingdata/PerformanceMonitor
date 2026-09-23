@@ -79,10 +79,12 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [Theory]
     [InlineData("get_memory_trend", "server_name,hours_back,as_of")]
     [InlineData("get_perfmon_trend", "counter_name,server_name,hours_back,as_of")]
-    [InlineData("get_file_io_trend", "server_name,hours_back,as_of")]
+    /* #3897: bucket_minutes (and on the file I/O trend database_name) appended BEHIND as_of, so a positional
+       caller of the pre-#3897 contract still binds; Lite's twins carry the same lists. */
+    [InlineData("get_file_io_trend", "server_name,hours_back,as_of,bucket_minutes,database_name")]
     [InlineData("get_query_trend", "query_hash,database_name,server_name,hours_back,as_of")]
-    [InlineData("get_query_duration_trend", "server_name,hours_back,as_of")]
-    [InlineData("get_procedure_duration_trend", "server_name,hours_back,as_of")]
+    [InlineData("get_query_duration_trend", "server_name,hours_back,as_of,bucket_minutes")]
+    [InlineData("get_procedure_duration_trend", "server_name,hours_back,as_of,bucket_minutes")]
     [InlineData("get_query_store_duration_trend", "server_name,hours_back,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
@@ -204,17 +206,74 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_perfmon_stats", distinct, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #3897: get_file_io_trend's two statements rank with ONE shared CTE (the series the first counts are the
+    /// series the second charts), rank on the window's I/O STALL rather than its operations, fold everything past
+    /// the charted series into one "(other)" line PER COLLECTION before bucketing, and recompute latency as a
+    /// ratio of the bucket's sums — never an average of per-collection latencies, and never the old read's
+    /// <c>ELSE 0</c> for a bucket that did no I/O. Asserted on the shipped text, so a later edit that "simplifies"
+    /// any of those into the plausible wrong shape has to argue with this.
+    /// </summary>
     [Fact]
-    public void FileIoLatencyTrendSql_TopFiles_StallPerOp_WindowedBothSides()
+    public void FileIoTrendSql_RanksByStall_FoldsPerCollection_RecomputesLatencyFromSums()
     {
-        var sql = DarlingTrendReader.FileIoLatencyTrendSql;
-        Assert.Contains("FROM v_file_io_stats", sql, StringComparison.Ordinal);
-        Assert.Contains("top_files", sql, StringComparison.Ordinal);                              /* 10 busiest files */
-        Assert.Contains("delta_stall_read_ms", sql, StringComparison.Ordinal);
-        Assert.Contains("delta_stall_write_ms", sql, StringComparison.Ordinal);
-        Assert.Contains("avg_read_latency_ms", sql, StringComparison.Ordinal);
-        Assert.Contains("f.collection_time >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("f.collection_time <= $3", sql, StringComparison.Ordinal);
+        var series = Lf(DarlingTrendReader.FileIoSeriesSql);
+        var trend = Lf(DarlingTrendReader.FileIoTrendSql);
+
+        /* One ranking, byte for byte, in both statements. */
+        var ranked = Cte(series, "ranked AS (");
+        Assert.Equal(ranked, Cte(trend, "ranked AS ("));
+        Assert.Contains("FROM v_file_io_stats", ranked, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY SUM(delta_stall_read_ms + delta_stall_write_ms) DESC,", ranked, StringComparison.Ordinal);
+        Assert.Contains("SUM(delta_reads + delta_writes) DESC,", ranked, StringComparison.Ordinal);
+        Assert.Contains("AND   (delta_reads > 0 OR delta_writes > 0)", ranked, StringComparison.Ordinal);
+        /* A restart row ranks nothing: the trend drops it (#3540), so it must not chart a series ahead of the
+           ones whose deltas were knowable. */
+        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ranked, StringComparison.Ordinal);
+        Assert.Contains("AND   ($4::text IS NULL OR database_name = $4)", ranked, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $2", ranked, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", ranked, StringComparison.Ordinal);
+        /* The grain: (database, file type) unless a database is named, then its files. */
+        Assert.Contains("CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name", ranked, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT", ranked, StringComparison.Ordinal);
+
+        /* The fold: past $5 every ranked series takes the composer's residual label, pooled per collection. */
+        Assert.Contains("CASE WHEN r.series_rank <= $5 THEN r.database_name ELSE '" + TrendPayloads.OtherLabel + "' END AS database_name", trend, StringComparison.Ordinal);
+        Assert.Contains("JOIN ranked AS r", trend, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY collection_time, database_name, file_type, file_name", trend, StringComparison.Ordinal);
+        Assert.Contains("FROM per_collection", trend, StringComparison.Ordinal);
+
+        /* Latency: a ratio of the bucket's sums, NULL over no operations, and the peak the worst collection's. */
+        Assert.Contains("SUM(stall_read_ms) / NULLIF(CAST(SUM(reads) AS double precision), 0) AS avg_read_latency_ms", trend, StringComparison.Ordinal);
+        Assert.Contains("SUM(stall_write_ms) / NULLIF(CAST(SUM(writes) AS double precision), 0) AS avg_write_latency_ms", trend, StringComparison.Ordinal);
+        Assert.Contains("MAX(stall_read_ms / NULLIF(CAST(reads AS double precision), 0)) AS peak_read_latency_ms", trend, StringComparison.Ordinal);
+        Assert.Contains("MAX(stall_write_ms / NULLIF(CAST(writes AS double precision), 0)) AS peak_write_latency_ms", trend, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(", trend, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ELSE 0", trend, StringComparison.Ordinal);
+
+        /* The restart rule survives (#3540), and the bucket is the shared width on the shared origin, the first
+           point clamped to the window's start. */
+        Assert.Contains("AND   f.sample_interval_seconds IS DISTINCT FROM 0", trend, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", trend, StringComparison.Ordinal);
+        Assert.Equal(TrendBuckets.OriginSql, TrendBucketSql.OriginSql);
+    }
+
+    /// <summary>The body of the CTE that opens at <paramref name="opener"/>, up to its matching parenthesis.</summary>
+    private static string Cte(string sql, string opener)
+    {
+        var at = sql.IndexOf(opener, StringComparison.Ordinal);
+        Assert.True(at >= 0, $"no \"{opener}\" in the statement");
+        var depth = 0;
+        for (var i = at + opener.Length - 1; i < sql.Length; i++)
+        {
+            depth += sql[i] switch { '(' => 1, ')' => -1, _ => 0 };
+            if (depth == 0)
+            {
+                return sql[at..(i + 1)];
+            }
+        }
+
+        throw new InvalidOperationException($"unbalanced CTE at \"{opener}\"");
     }
 
     [Fact]
@@ -249,8 +308,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// <summary>
     /// #3540 (V128): the procedure trend reads the collection's STORED interval — MAX over the collection's
     /// rows, 0 → NULL through NULLIF so a restart's marker collection has no rate rather than plotting 0.00 —
-    /// and falls back to the LAG derivation only for a pre-V128 collection. No ELSE 0. Byte-identical to the
-    /// viewer's copy apart from the database filter, as the pair always were. The C# half: since #3541 A12
+    /// and falls back to the LAG derivation only for a pre-V128 collection. No ELSE 0. Its per-collection CTE
+    /// is byte-identical to the viewer's apart from the database filter, as the pair always were; since #3897
+    /// the MCP statement buckets what that CTE returns and the viewer's chart reads it collection by
+    /// collection. The C# half: since #3541 A12
     /// the MCP reader KEEPS the NULL-rate row as an unrated point (<c>QueryDurationTrendPoint.HasRate</c>
     /// false) rather than dropping it — a lone collection must not become an empty series the empty ladder
     /// mislabels as quiet, and <c>effective_start</c> must be the first collection the store held. The viewer's
@@ -265,23 +326,27 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
         Assert.Contains("CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
 
-        /* The viewer's copy minus its database-filter line is this string, whitespace aside. */
-        var viewer = string.Join('\n', ViewerDataService.ProcedureDurationTrendSql
-            .Replace("\r\n", "\n", StringComparison.Ordinal)
+        /* The viewer's per-collection CTE minus its database-filter line is the MCP statement's, whitespace aside. */
+        var viewer = string.Join('\n', Cte(Lf(ViewerDataService.ProcedureDurationTrendSql), "raw AS\n(")
             .Split('\n')
             .Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal))
             .Select(l => l.Trim()));
-        var mcp = string.Join('\n', sql.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n').Select(l => l.Trim()));
+        var mcp = string.Join('\n', Cte(Lf(sql), "raw AS\n(").Split('\n').Select(l => l.Trim()));
         Assert.Equal(viewer, mcp);
 
-        /* And the shared reader KEEPS a NULL-rate row as an unrated point rather than reading it as 0 or
-           dropping it — the C# half of the idiom (#3541 A12). */
+        /* And the shared readers KEEP a NULL-rate row as an unrated point rather than reading it as 0 or
+           dropping it — the C# half of the idiom (#3541 A12): the bucketed one the duration pair has read
+           through since #3897 (a bucket whose every collection was unrated), and the per-collection one the
+           Query Store trend still reads through. */
         var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs");
-        var reader = source[source.IndexOf("private static async Task<List<QueryDurationTrendPoint>> ReadDurationPointsAsync(", StringComparison.Ordinal)..];
-        reader = reader[..reader.IndexOf("return items;", StringComparison.Ordinal)];
-        Assert.Contains("reader.IsDBNull(1) ? null", reader, StringComparison.Ordinal);
-        Assert.DoesNotContain("continue;", reader, StringComparison.Ordinal);
-        Assert.DoesNotContain("reader.IsDBNull(1) ? 0", reader, StringComparison.Ordinal);
+        foreach (var mapper in new[] { "ReadBucketedDurationPointsAsync(", "ReadDurationPointsAsync(" })
+        {
+            var reader = source[source.IndexOf("private static async Task<List<QueryDurationTrendPoint>> " + mapper, StringComparison.Ordinal)..];
+            reader = reader[..reader.IndexOf("return items;", StringComparison.Ordinal)];
+            Assert.Contains("reader.IsDBNull(1) ? null", reader, StringComparison.Ordinal);
+            Assert.DoesNotContain("continue;", reader, StringComparison.Ordinal);
+            Assert.DoesNotContain("reader.IsDBNull(1) ? 0", reader, StringComparison.Ordinal);
+        }
         Assert.Equal(typeof(double?), typeof(DarlingTrendReader.QueryDurationTrendPoint).GetProperty("Value")!.PropertyType);
     }
 
@@ -335,12 +400,15 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         Assert.Contains("bucket >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("bucket <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY bucket", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY bucket", sql, StringComparison.Ordinal);
 
-        /* Same three columns, same aliases, as the raw read — one mapper serves both tiers. */
-        Assert.Contains("bucket AS collection_time", sql, StringComparison.Ordinal);
+        /* Since #3897 the rollup's hours are gathered into $4-minute buckets on the shared origin; the columns and
+           aliases are the bucketed raw read's, so one mapper serves both tiers. */
+        Assert.Contains("GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', bucket, " + TrendBucketSql.OriginSql + "), $2) AS bucket_start", sql, StringComparison.Ordinal);
         Assert.Contains("AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
         Assert.Contains("AS executions_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("AS peak_elapsed_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(bucket) AS first_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", sql, StringComparison.Ordinal);
 
         /* The rollup's own summed columns, which the CAGG definition must still carry under these names. */
         Assert.Contains("SUM(elapsed_time_sum)", sql, StringComparison.Ordinal);
@@ -370,8 +438,10 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         {
             Assert.DoesNotContain("LAG(", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("interval_seconds", sql, StringComparison.Ordinal);
-            Assert.Contains("/ " + DarlingTrendReader.HourlyBucketSecondsSql + " AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
-            Assert.Contains("/ " + DarlingTrendReader.HourlyBucketSecondsSql + " AS executions_per_second", sql, StringComparison.Ordinal);
+            /* #3897: over the seconds of the hours the bucket holds — at one hour a bucket, the width itself. */
+            Assert.Contains("/ (COUNT(*) * " + DarlingTrendReader.HourlyBucketSecondsSql + ") AS elapsed_ms_per_second", sql, StringComparison.Ordinal);
+            Assert.Contains("/ (COUNT(*) * " + DarlingTrendReader.HourlyBucketSecondsSql + ") AS executions_per_second", sql, StringComparison.Ordinal);
+            Assert.Contains("MAX(elapsed_ms / " + DarlingTrendReader.HourlyBucketSecondsSql + ") AS peak_elapsed_ms_per_second", sql, StringComparison.Ordinal);
         }
 
         /* The raw reads keep a LAG — since #3653 A11 only as the fallback for a pre-V128 collection whose stored
@@ -434,14 +504,21 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true)).Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray(),
             Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
 
-        /* The alias's ARGUMENT, by value: the MCP reader's two raw texts are the builder's output WITHOUT the
-           viewer's filter, byte for byte (line endings aside) — not line-trimmed, because an alias has no
-           indentation of its own to forgive — and the viewer's procedure text is the builder's output WITH it. */
-        Assert.Equal(Lf(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)), Lf(DarlingTrendReader.QueryDurationTrendSql));
-        Assert.Equal(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false)), Lf(DarlingTrendReader.ProcedureDurationTrendSql));
+        /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's
+           output, byte for byte (line endings aside) — not line-trimmed, because an alias has no indentation of
+           its own to forgive — and the viewer's procedure text is the per-collection builder's output WITH its
+           filter. The two builders share one per-collection CTE (DurationTrendRouting.RawCollectionsCte): the
+           MCP statement's CTE IS the viewer's minus the filter line, so the tool's buckets and the chart's points
+           are built from the same collections with the same three-state interval. */
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats")), Lf(DarlingTrendReader.QueryDurationTrendSql));
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats")), Lf(DarlingTrendReader.ProcedureDurationTrendSql));
         Assert.Equal(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true)), Lf(ViewerDataService.ProcedureDurationTrendSql));
-        Assert.DoesNotContain("$4", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("$4", DarlingTrendReader.ProcedureDurationTrendSql, StringComparison.Ordinal);
+        Assert.Equal(Cte(Lf(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)), "raw AS\n("), Cte(Lf(DarlingTrendReader.QueryDurationTrendSql), "raw AS\n("));
+        Assert.Equal(Cte(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false)), "raw AS\n("), Cte(Lf(DarlingTrendReader.ProcedureDurationTrendSql), "raw AS\n("));
+        /* The MCP text has no database filter; its one $4 is the bucket width. */
+        Assert.DoesNotContain("$4::text[]", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4::text[]", DarlingTrendReader.ProcedureDurationTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CAST($4 AS integer) * INTERVAL '1 minute'", DarlingTrendReader.QueryDurationTrendSql, StringComparison.Ordinal);
         Assert.Contains("$4::text[]", ViewerDataService.ProcedureDurationTrendSql, StringComparison.Ordinal);
 
         /* Identity, read off the declarations (the #3684 idiom: ViewerTrendRoutingPortTests pins the hourly and
@@ -449,8 +526,8 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            LF-normalised first — the positive half would fail loudly on CRLF, which is why it is asserted on
            the normalised text rather than left to a DoesNotContain that could never fire. */
         var reader = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs"));
-        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false);", reader, StringComparison.Ordinal);
-        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false);", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"query_stats\");", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\");", reader, StringComparison.Ordinal);
         var viewer = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs"));
         Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
         Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
@@ -475,9 +552,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            Since #3653 (Q12) only the RAW alias is passed: the hourly text is built inside the routed read from
            the route's resolved relation (the interval-honest successor where it reaches as far as the legacy),
            so the hourly constants stay as the pinned legacy text and are no longer the routed read's argument. */
-        Assert.Contains("QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
-        Assert.Contains("ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken", reader, StringComparison.Ordinal);
-        Assert.Contains("DurationTrendRouting.BuildHourlyTrendSql(route.HourlyView, withDatabaseFilter: false)", reader, StringComparison.Ordinal);
+        Assert.Contains("QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken", reader, StringComparison.Ordinal);
+        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyView)", reader, StringComparison.Ordinal);
     }
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);
@@ -551,7 +628,8 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingTrendReader.MemoryTrendSql))]
     [InlineData(nameof(DarlingTrendReader.PerfmonTrendSql))]
     [InlineData(nameof(DarlingTrendReader.DistinctPerfmonCountersSql))]
-    [InlineData(nameof(DarlingTrendReader.FileIoLatencyTrendSql))]
+    [InlineData(nameof(DarlingTrendReader.FileIoSeriesSql))]
+    [InlineData(nameof(DarlingTrendReader.FileIoTrendSql))]
     [InlineData(nameof(DarlingTrendReader.QueryDurationTrendSql))]
     [InlineData(nameof(DarlingTrendReader.QueryDurationTrendHourlySql))]
     [InlineData(nameof(DarlingTrendReader.ProcedureDurationTrendSql))]
@@ -579,7 +657,8 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         nameof(DarlingTrendReader.MemoryTrendSql) => DarlingTrendReader.MemoryTrendSql,
         nameof(DarlingTrendReader.PerfmonTrendSql) => DarlingTrendReader.PerfmonTrendSql,
         nameof(DarlingTrendReader.DistinctPerfmonCountersSql) => DarlingTrendReader.DistinctPerfmonCountersSql,
-        nameof(DarlingTrendReader.FileIoLatencyTrendSql) => DarlingTrendReader.FileIoLatencyTrendSql,
+        nameof(DarlingTrendReader.FileIoSeriesSql) => DarlingTrendReader.FileIoSeriesSql,
+        nameof(DarlingTrendReader.FileIoTrendSql) => DarlingTrendReader.FileIoTrendSql,
         nameof(DarlingTrendReader.QueryDurationTrendSql) => DarlingTrendReader.QueryDurationTrendSql,
         nameof(DarlingTrendReader.QueryDurationTrendHourlySql) => DarlingTrendReader.QueryDurationTrendHourlySql,
         nameof(DarlingTrendReader.ProcedureDurationTrendSql) => DarlingTrendReader.ProcedureDurationTrendSql,
@@ -796,9 +875,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             var now = t4.AddMinutes(1);
             var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(t1.AddMinutes(-1), RollupAvailability.All, RollupCoverage.Unknown, nowUtc: now);
             Assert.Equal(RetentionTier.Raw, route.Tier);
-            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, ServerId, t1.AddMinutes(-1), now, route, ct);
+            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, ServerId, t1.AddMinutes(-1), now, route, 1, ct);
 
-            Assert.Equal(new[] { t1, t2, t3, t4 }, result.Points.Select(p => p.CollectionTime).ToArray());
+            /* #3897: one-minute buckets, five minutes apart, so each bucket holds exactly one collection and every
+               figure below is that collection's own; the point is stamped at its minute, the collection itself is
+               the point's FirstCollectionTime. */
+            Assert.Equal(new DateTime?[] { t1, t2, t3, t4 }, result.Points.Select(p => p.FirstCollectionTime).ToArray());
+            Assert.Equal(new[] { t1, t2, t3, t4 }.Select(t => t.AddTicks(-(t.Ticks % TimeSpan.TicksPerMinute))).ToArray(), result.Points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(new long[] { 1, 0, 1, 0 }, result.Points.Select(p => p.UnratedCollections).ToArray());
             Assert.Equal(t1, result.EffectiveStartUtc);                       /* the unrated row is KEPT and anchors the window */
             Assert.False(result.Points[0].HasRate);                          /* no prior collection: unknowable */
             Assert.Equal(2.0, result.Points[1].Value!.Value, precision: 6);  /* 600 ms / LAG 300 s */
@@ -809,13 +893,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
             Assert.Equal(10.0, result.Points[3].Value!.Value, precision: 6); /* 1,200 ms / STORED 120 s, not the LAG's 4.0 */
             Assert.Equal(0.2, result.Points[3].ExecutionsPerSecond!.Value, precision: 6);
 
-            /* The tool over the same rows (its 24-hour default window resolves raw on this store): the two
-               unrated points are on the wire as null, counted, and never 0. */
-            var payload = await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName);
+            /* The tool over the same rows at one-minute points (its 24-hour window resolves raw on this store):
+               the two unrated points are on the wire as null, counted, and never 0. */
+            var payload = await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, bucket_minutes: 1);
             DarlingMcpTestData.AssertEnvelope(payload, ServerName, "trend");
             using var doc = JsonDocument.Parse(payload);
             Assert.Equal("raw", doc.RootElement.GetProperty("source").GetString());
             Assert.Equal(2, doc.RootElement.GetProperty("unrated_points").GetInt32());
+            Assert.Equal(2, doc.RootElement.GetProperty("unrated_collections").GetInt32());
             var trend = doc.RootElement.GetProperty("trend").EnumerateArray().ToArray();
             Assert.Equal(4, trend.Length);
             Assert.Equal(JsonValueKind.Null, trend[0].GetProperty("elapsed_ms_per_second").ValueKind);

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -75,12 +76,6 @@ internal static class DarlingTrendReader
     /// fabricated zero on a level that has no delta.</para></summary>
     public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType = null);
 
-    /// <summary>One file I/O-latency-trend point: average read/write latency (stall-ms / op) per collection
-    /// for one (database, file) — the tool surfaces database_name + latencies, mirroring Lite's
-    /// get_file_io_trend field set (file_name rides the top-10 grouping but is not projected).</summary>
-    public sealed record FileIoLatencyTrendPoint(
-        DateTime CollectionTime, string DatabaseName, double AvgReadLatencyMs, double AvgWriteLatencyMs);
-
     /// <summary>
     /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
     /// the per-second rate (elapsed ms/sec) plus executions/sec (Lite's <c>QueryTrendPoint</c> shape).
@@ -98,9 +93,24 @@ internal static class DarlingTrendReader
         /// collection — no previous collection to difference against — for a collection landing in the
         /// same second as its predecessor, and (on the plan-cache trends, which read the STORED interval:
         /// #3540 V128, #3653) for a restart collection whose interval the calculator could not measure; none
-        /// has a denominator, and none is 0.
+        /// has a denominator, and none is 0. On a bucketed point (#3897), false only when EVERY collection in
+        /// the bucket was one of those.
         /// </summary>
         public bool HasRate => Value.HasValue;
+
+        /// <summary>The bucket's worst single collection's elapsed ms per second (#3897) — its busiest hour on the
+        /// hourly tier, where the rollup holds no finer grain. Null on a Query Store point, which is not a bucket,
+        /// and on an unrated one.</summary>
+        public double? PeakElapsedMsPerSecond { get; init; }
+
+        /// <summary>The first collection inside the point (#3897): what <c>effective_start</c> reports, because a
+        /// bucketed point is stamped at its bucket's start and that is not a collection the store held. Null on
+        /// an unbucketed point, whose own time is its collection.</summary>
+        public DateTime? FirstCollectionTime { get; init; }
+
+        /// <summary>How many collections in the point had no knowable rate and were left out of its rates
+        /// (#3897): at most one on an unbucketed point (the point itself), any number in a bucket.</summary>
+        public long UnratedCollections { get; init; }
     }
 
     /// <summary>One point of a single query's per-collection history (Lite's <c>QueryStatsHistoryRow</c>,
@@ -350,66 +360,197 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── file I/O latency trend ─────────────────────────── */
 
     /// <summary>
-    /// The file I/O latency trend — the viewer's <c>FileIoLatencyTrendSql</c> (Lite's
-    /// <c>GetFileIoLatencyTrendAsync</c>), focused to the columns get_file_io_trend surfaces: a
-    /// <c>top_files</c> CTE picks the 10 busiest (database, file) pairs by total delta ops over the window,
-    /// then per-collection average read/write latency (stall-ms / op, delta-stall sums CAST to double
-    /// precision before division) is computed per (collection, database, file). The tool projects
-    /// database_name + the two latencies (file_name rides the grouping but is not surfaced, mirroring Lite's
-    /// get_file_io_trend field set). Rows whose stored <c>sample_interval_seconds</c> is 0 — no delta
-    /// knowable, a restart — are dropped rather than reported as 0.00 ms (#3540). $1 server_id, $2/$3
-    /// window (naive UTC).
+    /// The ranking both file I/O statements share, so the series the first one counts are exactly the series the
+    /// second one charts (#3897). A series is a (database, file type) pair — the per-database, data-versus-log
+    /// view the tool promises — or, when <c>$4</c> names a database, each of that database's files. Ranked by the
+    /// window's summed stall (read + write ms), because the read exists to find where storage is SLOW: ranking on
+    /// operations, the viewer's order, put nine tempdb data files ahead of a user database whose writes averaged
+    /// 190 ms on DARLING01's SQL2022. Operations break a stall tie, then the names, so the order is total.
+    ///
+    /// <para>Only rows that did work rank (<c>delta_reads &gt; 0 OR delta_writes &gt; 0</c>, the old
+    /// <c>top_files</c> filter): an idle series has no latency to trend and must not become a line of nothing.
+    /// Pre-#3897 the read took the ten busiest FILES, projected only the database name, and so returned nine
+    /// indistinguishable "tempdb" rows per collection; the grain is now named in every row.</para>
+    ///
+    /// <para>$1 server_id, $2/$3 window (naive UTC), $4 the database to scope to (NULL = every database).</para>
     /// </summary>
-    public const string FileIoLatencyTrendSql = """
-        WITH top_files AS (
-            SELECT database_name, file_name
+    private const string FileIoRankedCte = """
+        ranked AS (
+            SELECT
+                database_name,
+                file_type,
+                CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END AS file_name,
+                COUNT(DISTINCT file_name) AS files,
+                CAST(SUM(delta_stall_read_ms + delta_stall_write_ms) AS bigint) AS stall_ms,
+                CAST(SUM(delta_reads + delta_writes) AS bigint) AS ops,
+                ROW_NUMBER() OVER (
+                    ORDER BY SUM(delta_stall_read_ms + delta_stall_write_ms) DESC,
+                             SUM(delta_reads + delta_writes) DESC,
+                             database_name,
+                             file_type,
+                             CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END
+                ) AS series_rank
             FROM v_file_io_stats
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
+            AND   ($4::text IS NULL OR database_name = $4)
             AND   (delta_reads > 0 OR delta_writes > 0)
-            GROUP BY database_name, file_name
-            ORDER BY SUM(delta_reads + delta_writes) DESC
-            LIMIT 10
+            /* #3540: a restart row's delta is not knowable, and the trend below drops it — so it must not rank a
+               series either, or a restart's garbage delta could chart a series ahead of the ones that worked. */
+            AND   sample_interval_seconds IS DISTINCT FROM 0
+            GROUP BY database_name, file_type, CASE WHEN $4::text IS NULL THEN NULL ELSE file_name END
         )
-        SELECT
-            f.collection_time,
-            f.database_name,
-            CASE WHEN SUM(f.delta_reads) > 0
-                 THEN SUM(CAST(f.delta_stall_read_ms AS double precision)) / SUM(f.delta_reads)
-                 ELSE 0 END AS avg_read_latency_ms,
-            CASE WHEN SUM(f.delta_writes) > 0
-                 THEN SUM(CAST(f.delta_stall_write_ms AS double precision)) / SUM(f.delta_writes)
-                 ELSE 0 END AS avg_write_latency_ms
-        FROM v_file_io_stats f
-        JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
-        WHERE f.server_id = $1
-        AND   f.collection_time >= $2
-        AND   f.collection_time <= $3
-        /* #3540: a stored interval of 0 is the calculator's "no delta knowable" marker (first sighting,
-           counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
-           confident "0.00 ms" a restart used to render. IS DISTINCT FROM 0 keeps pre-V127 rows (NULL: interval
-           never recorded), which carry on reading exactly as they always did. */
-        AND   f.sample_interval_seconds IS DISTINCT FROM 0
-        GROUP BY f.collection_time, f.database_name, f.file_name
-        ORDER BY f.collection_time, f.database_name, f.file_name
         """;
 
-    public static async Task<List<FileIoLatencyTrendPoint>> GetFileIoLatencyTrendAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// The first of get_file_io_trend's two reads (#3897): every series the window saw activity on, in rank
+    /// order, with what it was ranked by. The tool reads its length before choosing a bucket width — five charted
+    /// series and one "(other)" line need a coarser width than two series do — and its rows name what the
+    /// "(other)" line pools. $1 server_id, $2/$3 window (naive UTC), $4 database (NULL = all).
+    /// </summary>
+    public const string FileIoSeriesSql = $"""
+        WITH {FileIoRankedCte}
+        SELECT database_name, file_type, file_name, files, stall_ms, ops, series_rank
+        FROM ranked
+        ORDER BY series_rank
+        """;
+
+    /// <summary>
+    /// The second read (#3897): every ranked series bucketed. The top <c>$5</c> keep their own line and every
+    /// ranked series past them is folded into ONE "(other)" line (the custom-view composer's residual label),
+    /// so a three-hundred-database server answers with six lines, not six hundred.
+    ///
+    /// <para><b>The fold happens per COLLECTION, before bucketing</b>: <c>per_collection</c> sums the folded
+    /// files' operations and stall at each collection, so "(other)" is one pooled file at every collection
+    /// and its peak is the pooled latency at its worst collection — not the worst single file inside it, and not
+    /// a sum of intervals across files.</para>
+    ///
+    /// <para><b>Latency is a ratio of sums, never an average of ratios</b>: the bucket's summed stall over its
+    /// summed operations, so a collection with a thousand reads weighs a thousand times one with a single read.
+    /// NULL when the bucket did no reads (or no writes) — the old read's <c>ELSE 0</c> published a latency of
+    /// 0.00 ms for a collection that did no I/O, a measurement nobody made. The peak is the worst single
+    /// collection's ratio, so a one-minute stall survives a sixty-minute bucket.</para>
+    ///
+    /// <para>Rows whose stored <c>sample_interval_seconds</c> is 0 — no delta knowable, a restart — are
+    /// dropped, exactly as before (#3540); <c>IS DISTINCT FROM 0</c> keeps pre-V127 rows (NULL). Each point is
+    /// stamped at its bucket's start, the first at the window's start (<c>GREATEST</c>), so no point claims time
+    /// the window did not ask for. $1 server_id, $2/$3 window (naive UTC), $4 database (NULL = all), $5 how many
+    /// ranked series keep their own line, $6 the bucket width in minutes.</para>
+    /// </summary>
+    public const string FileIoTrendSql = $"""
+        WITH {FileIoRankedCte},
+        labelled AS (
+            SELECT
+                f.collection_time,
+                CASE WHEN r.series_rank <= $5 THEN r.database_name ELSE '(other)' END AS database_name,
+                CASE WHEN r.series_rank <= $5 THEN r.file_type ELSE '(other)' END AS file_type,
+                CASE
+                    WHEN r.series_rank <= $5 THEN r.file_name
+                    WHEN $4::text IS NULL THEN NULL
+                    ELSE '(other)'
+                END AS file_name,
+                f.delta_reads,
+                f.delta_writes,
+                f.delta_stall_read_ms,
+                f.delta_stall_write_ms
+            FROM v_file_io_stats AS f
+            JOIN ranked AS r
+              ON  r.database_name = f.database_name
+              AND r.file_type = f.file_type
+              AND (r.file_name IS NULL OR r.file_name = f.file_name)
+            WHERE f.server_id = $1
+            AND   f.collection_time >= $2
+            AND   f.collection_time <= $3
+            AND   ($4::text IS NULL OR f.database_name = $4)
+            AND   f.sample_interval_seconds IS DISTINCT FROM 0
+        ),
+        per_collection AS (
+            SELECT
+                collection_time,
+                database_name,
+                file_type,
+                file_name,
+                SUM(delta_reads) AS reads,
+                SUM(delta_writes) AS writes,
+                SUM(CAST(delta_stall_read_ms AS double precision)) AS stall_read_ms,
+                SUM(CAST(delta_stall_write_ms AS double precision)) AS stall_write_ms
+            FROM labelled
+            GROUP BY collection_time, database_name, file_type, file_name
+        )
+        SELECT
+            GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            database_name,
+            file_type,
+            file_name,
+            CAST(SUM(reads) AS bigint) AS reads,
+            CAST(SUM(writes) AS bigint) AS writes,
+            SUM(stall_read_ms) AS stall_read_ms,
+            SUM(stall_write_ms) AS stall_write_ms,
+            SUM(stall_read_ms) / NULLIF(CAST(SUM(reads) AS double precision), 0) AS avg_read_latency_ms,
+            SUM(stall_write_ms) / NULLIF(CAST(SUM(writes) AS double precision), 0) AS avg_write_latency_ms,
+            MAX(stall_read_ms / NULLIF(CAST(reads AS double precision), 0)) AS peak_read_latency_ms,
+            MAX(stall_write_ms / NULLIF(CAST(writes AS double precision), 0)) AS peak_write_latency_ms
+        FROM per_collection
+        GROUP BY 1, 2, 3, 4
+        ORDER BY 1, 2, 3, 4
+        """;
+
+    /// <summary>Runs <see cref="FileIoSeriesSql"/>: the window's active series, in rank order.</summary>
+    public static async Task<List<FileIoSeries>> GetFileIoSeriesAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, string? databaseName,
+        CancellationToken cancellationToken = default)
     {
-        var items = new List<FileIoLatencyTrendPoint>();
-        await using var command = postgres.CreateCommand(FileIoLatencyTrendSql);
+        var items = new List<FileIoSeries>();
+        await using var command = postgres.CreateCommand(FileIoSeriesSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddNullableText(command, databaseName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new FileIoLatencyTrendPoint(
+            items.Add(new FileIoSeries(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetInt64(3),
+                reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                reader.GetInt64(6)));
+        }
+
+        return items;
+    }
+
+    /// <summary>Runs <see cref="FileIoTrendSql"/>: the top <paramref name="chartedSeries"/> series and the
+    /// "(other)" fold, bucketed at <paramref name="bucketMinutes"/>.</summary>
+    public static async Task<List<FileIoPoint>> GetFileIoTrendAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, string? databaseName,
+        int chartedSeries, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        var items = new List<FileIoPoint>();
+        await using var command = postgres.CreateCommand(FileIoTrendSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddNullableText(command, databaseName);
+        DarlingMcpReadParameters.AddInt(command, chartedSeries);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            items.Add(new FileIoPoint(
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
-                reader.IsDBNull(3) ? 0 : reader.GetDouble(3)));
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
+                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                reader.IsDBNull(9) ? null : reader.GetDouble(9),
+                reader.IsDBNull(10) ? null : reader.GetDouble(10),
+                reader.IsDBNull(11) ? null : reader.GetDouble(11)));
         }
 
         return items;
@@ -418,16 +559,17 @@ internal static class DarlingTrendReader
     /* ─────────────────────────── query duration trend ─────────────────────────── */
 
     /// <summary>
-    /// The query-stats duration trend — <see cref="DurationTrendRouting.QueryDurationTrendRawSql"/> WITHOUT
-    /// the viewer's <c>$4</c> database filter, by alias (#3653, measurement A11): per collection, the summed
-    /// <c>delta_elapsed_time</c> (→ ms) and <c>delta_execution_count</c> divided by the collection's STORED
-    /// <c>sample_interval_seconds</c> for an elapsed-ms/sec + executions/sec rate. The viewer's
-    /// <c>QueryDurationTrendSql</c> is the same builder's output with the filter (Lite's
-    /// <c>GetQueryDurationTrendAsync</c> is the same shape over <c>v_query_stats</c>), so the tool and the
-    /// desktop chart run one statement on the raw tier. Reads the base <c>query_stats</c> table because it
-    /// projects no text — a read that wanted <c>query_text</c> or <c>query_plan_xml</c> would have to go
-    /// through <c>v_query_stats</c> to resolve the #1767 payload dimensions. Summed bigints come back as
-    /// numeric, so the reads Convert tolerantly. $1 server_id, $2/$3 window (naive UTC).
+    /// The query-stats duration trend — <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over
+    /// <c>query_stats</c>, by alias (#3897; #3653, measurement A11, before it): per collection, the summed
+    /// <c>delta_elapsed_time</c> (→ ms) and <c>delta_execution_count</c> over the collection's STORED
+    /// <c>sample_interval_seconds</c>, then every collection counted in its bucket of <c>$4</c> minutes. The
+    /// per-collection CTE is the viewer's <c>QueryDurationTrendSql</c>'s own text (one builder fragment, so the
+    /// tool's buckets and the desktop chart's points come from the same collections); what the tool adds is the
+    /// bucketing an MCP answer needs (#3897: a day of per-collection points was 160 KB, three days 487 KB).
+    /// Reads the base <c>query_stats</c> table because it projects no text — a read that wanted
+    /// <c>query_text</c> or <c>query_plan_xml</c> would have to go through <c>v_query_stats</c> to resolve the
+    /// #1767 payload dimensions. Summed bigints come back as numeric, so the reads Convert tolerantly. $1
+    /// server_id, $2/$3 window (naive UTC), $4 bucket width in minutes.
     ///
     /// <para><b>Why this is an alias and not the LAG text that stood here.</b> Until #3653 this const was
     /// its own copy of the read, and its denominator was <c>LAG(collection_time)</c> — the seconds between
@@ -456,11 +598,12 @@ internal static class DarlingTrendReader
     /// truthfully its instant, and a window holding exactly one collection is "one collection, no rate yet"
     /// rather than an empty series the empty ladder would mis-describe as a quiet window. The reader carries
     /// the nulls through (<see cref="QueryDurationTrendPoint"/>) and the tool publishes them with the
-    /// reason. The hourly twin below has no such row: its denominator is the bucket width, known for every
-    /// bucket.</para>
+    /// reason. Since #3897 a collection like that is left out of its BUCKET's rates (numerator and denominator
+    /// both), and a bucket holding nothing else is the unrated point. The hourly twin below has no such row: its
+    /// denominator is the bucket width, known for every bucket.</para>
     /// </summary>
     public static readonly string QueryDurationTrendSql =
-        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false);
+        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats");
 
     /* ───────────── the tier ladder and the hourly-tier SQL: aliases of DurationTrendRouting (#3653) ─────────────
 
@@ -496,28 +639,27 @@ internal static class DarlingTrendReader
     /// <summary>
     /// The hourly-tier twin of <see cref="QueryDurationTrendSql"/> (#3541 A2): the same two per-second rates,
     /// read from the <c>query_stats_hourly</c> continuous aggregate for windows whose oldest point the raw
-    /// tier no longer holds. Since #3653 this is
-    /// <see cref="DurationTrendRouting.QueryDurationTrendHourlySql"/> WITHOUT the viewer's database filter —
-    /// the builder's own text, not a copy of it — so the tool and the desktop chart run one statement on the
-    /// hourly tier. The mechanism (why the denominator is the bucket width and not a LAG, why an hour the
-    /// collector covered only partly reads LOW and never high, why the series trails the clock by up to two
-    /// hours) is documented once, on <see cref="DurationTrendRouting.BuildHourlyTrendSql"/>. What is this
-    /// reader's to add: the payload STATES that trade (<c>aggregate_note</c>) rather than hiding it. The raw
-    /// read beside this one reads the interval the store has carried since V128 through the same Storage
-    /// builder's raw twin (the measurement lane's A11a, closed in #3695 for the viewer and here for the
-    /// tool). $1 server_id, $2/$3 window (naive UTC).
+    /// tier no longer holds — <see cref="DurationTrendRouting.BuildBucketedHourlyTrendSql"/> over the legacy
+    /// view, by alias (#3897), which at a 60-minute width is the viewer's hourly statement's figures hour for
+    /// hour and wider gathers whole hours into one point. The mechanism (why the denominator is the bucket width
+    /// and not a LAG, why an hour the collector covered only partly reads LOW and never high, why the series
+    /// trails the clock by up to two hours) is documented once, on
+    /// <see cref="DurationTrendRouting.BuildHourlyTrendSql"/>. What is this reader's to add: the payload STATES
+    /// that trade (<c>aggregate_note</c>) rather than hiding it. The routed read builds this text from the
+    /// route's resolved relation; the constant is the builder over the legacy view, which every store has.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 bucket width in minutes (a whole number of hours).
     /// </summary>
     public static readonly string QueryDurationTrendHourlySql =
-        DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: false);
+        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.QueryStatsHourlyView);
 
     /// <summary>
     /// The hourly-tier twin of <see cref="ProcedureDurationTrendSql"/> (#3541 A2), over
-    /// <c>procedure_stats_hourly</c> — <see cref="DurationTrendRouting.ProcedureDurationTrendHourlySql"/>
-    /// without the database filter, by alias (#3653). Same shape and same bucket-width denominator as
-    /// <see cref="QueryDurationTrendHourlySql"/>; see there. $1 server_id, $2/$3 window (naive UTC).
+    /// <c>procedure_stats_hourly</c> — <see cref="DurationTrendRouting.BuildBucketedHourlyTrendSql"/>, by alias
+    /// (#3897). Same shape and same bucket-width denominator as <see cref="QueryDurationTrendHourlySql"/>; see
+    /// there. $1 server_id, $2/$3 window (naive UTC), $4 bucket width in minutes.
     /// </summary>
     public static readonly string ProcedureDurationTrendHourlySql =
-        DurationTrendRouting.ProcedureDurationTrendHourlySql(withDatabaseFilter: false);
+        DurationTrendRouting.BuildBucketedHourlyTrendSql(TimescaleSupport.ProcedureStatsHourlyView);
 
     /// <summary>
     /// Which tier one unkeyed duration trend read serves from, and the evidence the choice rests on (#3541 A2)
@@ -631,27 +773,29 @@ internal static class DarlingTrendReader
 
     /// <summary>
     /// Runs the query-stats duration trend down <paramref name="route"/> (#3541 A2): the raw read for a
-    /// window raw can serve, the hourly twin otherwise. Coverage is described by <see cref="DescribeCoverage"/>
-    /// so the payload can say what it served.
+    /// window raw can serve, the hourly twin otherwise, bucketed at <paramref name="bucketMinutes"/> (#3897; a
+    /// whole number of hours on the hourly tier, which the tool enforces). Coverage is described by
+    /// <see cref="DescribeCoverage"/> so the payload can say what it served.
     /// </summary>
     public static Task<DurationTrendResult> GetQueryDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
-        CancellationToken cancellationToken = default)
+        int bucketMinutes, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
-            QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
+            QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken);
 
     /* --------------------- procedure + Query Store duration trends (#2484) --------------------- */
 
     /// <summary>
-    /// The procedure-stats duration trend - <see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/>
-    /// without the viewer's database filter, by alias (#3653). The viewer's <c>ProcedureDurationTrendSql</c>
-    /// is the same builder's output with the filter; before the alias the two were hand-kept copies that
-    /// #3695 pinned line-equal to the builder, so making them aliases moved the text and changed no answer.
+    /// The procedure-stats duration trend - <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over
+    /// <c>procedure_stats</c>, by alias (#3897; #3653 before it). Its per-collection CTE is the viewer's
+    /// <c>ProcedureDurationTrendSql</c>'s own text (one builder fragment); before the #3653 alias the two were
+    /// hand-kept copies that #3695 pinned line-equal to the builder, so that alias moved the text and changed no
+    /// answer. The bucketing is #3897's, the same as the query-stats twin's.
     /// <para>Not a duplicate of the query-stats trend, and the difference is the point: <c>query_stats</c>
     /// attributes a procedure's work to the individual statements inside it, so a procedure that got slower
     /// shows up smeared across however many statements it runs. This charges the whole call to the
     /// procedure. When both are available, the pair answers "did ad-hoc SQL regress, or did a procedure?" -
-    /// which one series alone never can. $1 server_id, $2/$3 window (naive UTC).</para>
+    /// which one series alone never can. $1 server_id, $2/$3 window (naive UTC), $4 bucket width in minutes.</para>
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
     /// over the collection's rows, because a plan first seen in an otherwise steady pass carries 0 beside
     /// its siblings' real interval and contributes 0 to the sums; MAX is 0 only when EVERY row was
@@ -663,7 +807,7 @@ internal static class DarlingTrendReader
     /// builder's remarks carry it once for both tables.</para>
     /// </summary>
     public static readonly string ProcedureDurationTrendSql =
-        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false);
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats");
 
     /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
@@ -770,9 +914,9 @@ internal static class DarlingTrendReader
     /// procedure twin of <see cref="GetQueryDurationTrendAsync"/>.</summary>
     public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
-        CancellationToken cancellationToken = default)
+        int bucketMinutes, CancellationToken cancellationToken = default)
         => ReadRoutedDurationTrendAsync(
-            ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, cancellationToken);
+            ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken);
 
     /// <summary>
     /// The shared body of the two routed reads: pick the tier's SQL, read the three-column point shape, and
@@ -781,7 +925,7 @@ internal static class DarlingTrendReader
     /// </summary>
     private static async Task<DurationTrendResult> ReadRoutedDurationTrendAsync(
         string rawSql, NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        DurationTrendRoute route, CancellationToken cancellationToken)
+        DurationTrendRoute route, int bucketMinutes, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(route);
 
@@ -790,13 +934,48 @@ internal static class DarlingTrendReader
            the LEGACY view, and the route may have resolved the interval-honest successor. Same builder, same
            shape — the constants stay as the pinned legacy text and as what a store without the successors
            still runs. */
-        var points = await ReadDurationTrendAsync(
+        await using var command = postgres.CreateCommand(
             route.Tier == RetentionTier.Raw
                 ? rawSql
-                : DurationTrendRouting.BuildHourlyTrendSql(route.HourlyView, withDatabaseFilter: false),
-            postgres, serverId, startUtc, endUtc, cancellationToken);
-        var (effectiveStart, truncated) = DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
+                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyView));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        var points = await ReadBucketedDurationPointsAsync(command, cancellationToken);
+
+        /* effective_start is the first COLLECTION the store held (#2353), not the first bucket's start (#3897):
+           a bucket is stamped at its boundary, which can sit before the window's first collection. */
+        var (effectiveStart, truncated) = DescribeCoverage(points.Count > 0 ? points[0].FirstCollectionTime : null, startUtc);
         return new DurationTrendResult(points, route, effectiveStart, truncated);
+    }
+
+    /// <summary>
+    /// Reads the bucketed duration shape both routed tiers project (#3897): the bucket's start, its two
+    /// time-weighted rates (NULL when nothing in the bucket was rated — kept as an unrated point, #3541 A12),
+    /// the worst single collection's rate (the busiest hour on the hourly tier), the bucket's first collection, and how many
+    /// of its collections were left out of the rates.
+    /// </summary>
+    private static async Task<List<QueryDurationTrendPoint>> ReadBucketedDurationPointsAsync(
+        NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var items = new List<QueryDurationTrendPoint>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var executionsPerSecond = reader.IsDBNull(2) ? (double?)null : Convert.ToDouble(reader.GetValue(2));
+            items.Add(new QueryDurationTrendPoint(
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
+                executionsPerSecond is { } eps ? (long)eps : null,
+                executionsPerSecond)
+            {
+                PeakElapsedMsPerSecond = reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
+                FirstCollectionTime = reader.GetDateTime(4),
+                UnratedCollections = reader.IsDBNull(5) ? 0 : Convert.ToInt64(reader.GetValue(5)),
+            });
+        }
+
+        return items;
     }
 
     /// <summary>
@@ -862,7 +1041,12 @@ internal static class DarlingTrendReader
                 reader.GetDateTime(0),
                 reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
                 executionsPerSecond is { } eps ? (long)eps : null,
-                executionsPerSecond));
+                executionsPerSecond)
+            {
+                /* An unbucketed point is its own single interval: no peak finer than itself to report, and at
+                   most one unrated collection — itself. */
+                UnratedCollections = reader.IsDBNull(1) ? 1 : 0,
+            });
         }
 
         return items;

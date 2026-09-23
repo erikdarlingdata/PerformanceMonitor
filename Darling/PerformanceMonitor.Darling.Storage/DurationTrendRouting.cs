@@ -234,28 +234,130 @@ public static class DurationTrendRouting
             : "";
 
         return $"""
-            WITH raw AS
-            (
-                SELECT
-                    collection_time,
-                    SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
-                    SUM(delta_execution_count) AS total_executions,
-                    CASE WHEN MAX(sample_interval_seconds) IS NULL
-                         THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                         ELSE NULLIF(MAX(sample_interval_seconds), 0)
-                    END AS interval_seconds
-                FROM {rawTable}
-                WHERE server_id = $1
-                AND   collection_time >= $2
-                AND   collection_time <= $3{filter}
-                GROUP BY collection_time
-            )
+            WITH {RawCollectionsCte(rawTable, filter)}
             SELECT
                 collection_time,
                 CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
                 CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
             FROM raw
             ORDER BY collection_time
+            """;
+    }
+
+    /// <summary>
+    /// The per-collection CTE both raw-tier statements read — <see cref="BuildRawTrendSql"/> (the viewer's chart
+    /// and, with its filter, the desktop's Performance Trends) and <see cref="BuildBucketedRawTrendSql"/> (the MCP
+    /// tools, #3897) — one text, so the chart's points and the tool's buckets are built from the same collections
+    /// with the same three-state interval. <paramref name="filter"/> is the viewer's database clause or empty.
+    /// </summary>
+    private static string RawCollectionsCte(string rawTable, string filter) => $"""
+        raw AS
+        (
+            SELECT
+                collection_time,
+                SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,
+                SUM(delta_execution_count) AS total_executions,
+                CASE WHEN MAX(sample_interval_seconds) IS NULL
+                     THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                     ELSE NULLIF(MAX(sample_interval_seconds), 0)
+                END AS interval_seconds
+            FROM {rawTable}
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3{filter}
+            GROUP BY collection_time
+        )
+        """;
+
+    /// <summary>
+    /// The raw-tier duration trend BUCKETED (#3897): <see cref="BuildRawTrendSql"/>'s per-collection read — the same
+    /// CTE, the same three-state interval, the same no-ELSE rate arms — with every collection then counted in the
+    /// bucket of <c>$4</c> minutes its collection time falls in.
+    ///
+    /// <para><b>A bucket's rate is its summed work over its summed seconds</b> — time-weighted, never an average of
+    /// the per-collection rates, which would weight a 30-second collection the same as a 300-second one (fleet
+    /// gaps run p50 299 s, p99 830 s). Only RATED collections enter either sum: a collection whose interval was
+    /// unknowable (a restart's stored 0, or the window's first pre-V128 collection with no LAG) carries fabricated
+    /// zeros, so it is left out of the numerator AND the denominator rather than diluting the bucket toward 0. A
+    /// bucket that held nothing rated has NULL rates — the unrated point #3541 A12 keeps — and
+    /// <c>unrated_collections</c> counts every collection left out, so a restart inside a rated bucket is still
+    /// reported. The peak is the bucket's worst single collection's rate, so a one-minute regression survives an
+    /// hour-wide bucket.</para>
+    ///
+    /// <para><c>first_collection_time</c> is the bucket's first collection, rated or not, which is what
+    /// <c>effective_start</c> reports: the point is stamped at its bucket's start (the first at the window's start,
+    /// <c>GREATEST</c>), and a bucket start is not a collection the store held. MCP only — no database filter.
+    /// $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.</para>
+    /// </summary>
+    public static string BuildBucketedRawTrendSql(string rawTable)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
+
+        return $"""
+            WITH {RawCollectionsCte(rawTable, "")},
+            rated AS
+            (
+                SELECT
+                    collection_time,
+                    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms END AS rated_elapsed_ms,
+                    CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
+                    CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+                    CASE WHEN interval_seconds > 0 THEN total_elapsed_ms / interval_seconds END AS elapsed_ms_per_second,
+                    CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+                FROM raw
+            )
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+                SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
+                CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+                MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) - COUNT(rated_seconds) AS unrated_collections
+            FROM rated
+            GROUP BY 1
+            ORDER BY 1
+            """;
+    }
+
+    /// <summary>
+    /// The hourly-tier duration trend BUCKETED (#3897): <see cref="BuildHourlyTrendSql"/>'s rollup read, with the
+    /// rollup's hours then gathered into buckets of <c>$4</c> minutes (a whole number of hours; the tool refuses
+    /// any other width on this tier). At 60 minutes each bucket is one hour and every figure is the unbucketed
+    /// read's, divided by the same <see cref="HourlyBucketSecondsSql"/>. Wider, a bucket's rate is its hours'
+    /// summed work over <see cref="HourlyBucketSecondsSql"/> per hour the rollup holds in it — the per-hour rates
+    /// time-weighted, so a bucket the window cuts short, or one whose newest hour has not materialized yet, is
+    /// not read low for hours it does not contain. The rollup keeps hourly sums, not the collections inside them,
+    /// so the peak on this tier is the bucket's busiest HOUR — the finest grain the rollup holds, and at 60 minutes
+    /// the point's own rate; nor is any hour unrated, because its denominator is known. $1 server_id, $2/$3 window
+    /// (naive UTC), $4 the bucket width in minutes.
+    /// </summary>
+    public static string BuildBucketedHourlyTrendSql(string hourlyView)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyView);
+
+        return $"""
+            WITH hourly AS
+            (
+                SELECT
+                    bucket,
+                    SUM(elapsed_time_sum) / 1000.0 AS elapsed_ms,
+                    SUM(execution_count_sum) AS executions
+                FROM {hourlyView}
+                WHERE server_id = $1
+                AND   bucket >= $2
+                AND   bucket <= $3
+                GROUP BY bucket
+            )
+            SELECT
+                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', bucket, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+                SUM(elapsed_ms) / (COUNT(*) * {HourlyBucketSecondsSql}) AS elapsed_ms_per_second,
+                CAST(SUM(executions) AS DOUBLE PRECISION) / (COUNT(*) * {HourlyBucketSecondsSql}) AS executions_per_second,
+                MAX(elapsed_ms / {HourlyBucketSecondsSql}) AS peak_elapsed_ms_per_second,
+                MIN(bucket) AS first_collection_time,
+                0 AS unrated_collections
+            FROM hourly
+            GROUP BY 1
+            ORDER BY 1
             """;
     }
 

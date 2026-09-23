@@ -12,6 +12,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -277,16 +278,21 @@ public sealed class QueryHeatmapToolTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.Contains("exceeds maximum of", tooManyCells, StringComparison.Ordinal);
         Assert.Contains("1000", tooManyCells, StringComparison.Ordinal);
 
+        /* #3897: the shared refusal envelope — `invalid`, naming the parameter — not a bare sentence. */
         var zeroBucket = await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 24, null, null, 0);
-        Assert.Contains("Must be between 1 and 1440", zeroBucket, StringComparison.Ordinal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(zeroBucket));
+        Assert.Equal("bucket_minutes", Root(zeroBucket).GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains("Must be between 1 and 1440", McpHelpers.ErrorMessageOf(zeroBucket), StringComparison.Ordinal);
 
         var hugeBucket = await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 24, null, null, 1441);
-        Assert.Contains("Must be between 1 and 1440", hugeBucket, StringComparison.Ordinal);
+        Assert.Contains("Must be between 1 and 1440", McpHelpers.ErrorMessageOf(hugeBucket), StringComparison.Ordinal);
 
         /* An unknown metric is REFUSED rather than turned into duration: a caller who asked for CPU and
            silently got elapsed time would read the wrong grid with nothing to tell them so. */
         var badMetric = await McpQueryTools.GetQueryHeatmap(service, _serverManager, ServerName, 24, "reads");
-        Assert.Contains("Invalid metric 'reads'", badMetric, StringComparison.Ordinal);
+        Assert.True(McpHelpers.IsRefusalEnvelope(badMetric));
+        Assert.Equal("metric", Root(badMetric).GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains("Invalid metric 'reads'", McpHelpers.ErrorMessageOf(badMetric), StringComparison.Ordinal);
         Assert.Contains("logical_reads", badMetric, StringComparison.Ordinal);
     }
 

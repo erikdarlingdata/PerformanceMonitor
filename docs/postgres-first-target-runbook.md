@@ -449,7 +449,7 @@ them; 35 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_deadlock_detail` | one deadlock in full: the complete wait graph and every participant's SQL |
 | `get_pg_log_events` | the server log, classified: errors (WARNING and worse), connections, lock waits, spills with their exact bytes per file (#3602), autovacuum / autoanalyze runs with their duration, pages, tuples, buffers and WAL (#3603), plus checkpoints recognised for later structure — redacted, filtered by `family` and `min_severity`, the page saying what bounded it. The "check the error log" read (#3601) |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split, and the window's peak connected backends per database (`peak_numbackends`, a level — `null` on a pre-V133 history, not 0) |
-| `get_pg_database_trend` | one database's spills, hit ratio, deadlocks and rollback share, interval by interval |
+| `get_pg_database_trend` | one database's spills, hit ratio, deadlocks and rollback share over time, in buckets sized to the window, each with its worst interval |
 | `get_pg_index_usage` | which indexes nothing scans — **and whether each one can actually be dropped** |
 | `get_pg_index_bloat` | how much of each index is reclaimable, **estimated** from statistics with its accuracy stated — read the reason on a row with no estimate, and `exact_measurement_command` when you need certainty on one index |
 | `get_pg_table_bloat` | how much space the vacuum lag above has cost, as an **estimate** with its own error stated |

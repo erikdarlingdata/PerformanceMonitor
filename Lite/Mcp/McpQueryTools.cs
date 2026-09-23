@@ -477,14 +477,18 @@ public sealed class McpQueryTools
                 cell cap.
             */
             var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
-                ?? McpHelpers.ValidateTop(limit)
-                ?? ValidateBucketMinutes(bucket_minutes);
+                ?? McpHelpers.ValidateTop(limit);
             if (validation != null) return validation;
+
+            /* The bin-width bound, refused rather than clamped, and built where the sentence is — Darling's
+               twin's rule (#3897: it was a bare sentence behind a `??` chain). */
+            if (bucket_minutes < 1 || bucket_minutes > LocalDataService.MaxHeatmapBucketMinutes)
+                return McpHelpers.Refusal("bucket_minutes", $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.");
 
             /* A metric we do not know is REFUSED, not quietly turned into duration: a caller who asked for
                CPU and silently got elapsed time would read the wrong grid with nothing to tell them so. */
             if (!LocalDataService.TryParseHeatmapMetric(metric, out var parsedMetric))
-                return InvalidHeatmapMetric(metric!);
+                return McpHelpers.Refusal("metric", $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.");
 
             /*
                 Over-fetch by one. Comparing the row count to the cap reports truncation for a server that
@@ -619,23 +623,14 @@ public sealed class McpQueryTools
             $"Query stats WERE collected for {serverName} in the last {hours_back} hour(s), but no capture recorded an execution: every row carried a zero execution delta, so nothing lands on the grid. A server that is up and idle looks exactly like this, and so does a database_name filter matching nothing collected. Delta-based collection also needs a SECOND cycle before the first non-zero row exists.");
     }
 
-    /// <summary>The bin-width bound. Refuses out of range rather than clamping, for the same reason the row
-    /// cap does: a silently rewritten bin width draws a different grid than the one that was asked for.</summary>
-    private static string? ValidateBucketMinutes(int bucket_minutes) =>
-        bucket_minutes >= 1 && bucket_minutes <= LocalDataService.MaxHeatmapBucketMinutes
-            ? null
-            : $"Invalid bucket_minutes value '{bucket_minutes}'. Must be between 1 and 1440 (one day). The desktop viewer's Query Heatmap uses 5, which is this read's default.";
-
-    private static string InvalidHeatmapMetric(string metric) =>
-        $"Invalid metric '{metric}'. Valid values: duration, cpu, logical_reads, logical_writes, execution_count.";
-
-    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds, the seconds the collector measured between its two snapshots), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_duration_trend"), Description("Gets a time-series of average query duration over time. Useful for spotting overall performance degradation or improvement trends across all queries. Points are time buckets (bucket, aggregate_note); rates are over each collection's STORED sample interval, and a collection whose interval was unknowable - a restart or counter reset, or the window's first collection when none was stored - is left out rather than counted as 0 (unrated_collections counts them; a point with nothing else carries null rates, unrated_points). Lite has one tier - nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -645,8 +640,13 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            var budget = TrendBudget.Mcp(TrendBuckets.DurationMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var grain = Bucketed(bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
             var startUtc = windowEnd.AddHours(-hours_back);
-            var points = await dataService.GetQueryDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var points = await dataService.GetBucketedQueryDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes);
 
             if (points.Count == 0)
             {
@@ -663,16 +663,16 @@ public sealed class McpQueryTools
                     ? EmptyStatus(
                         "empty",
                         $"No query samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected query stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
-                        startUtc, windowEnd, PerCollection)
+                        startUtc, windowEnd, grain)
                     : EmptyStatus(
                         "unavailable",
                         $"No query stats have EVER been recorded for {resolved.ServerName}. This is not an empty window — the query_stats collector has stored nothing at all for this server. Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
-                        startUtc, windowEnd, PerCollection);
+                        startUtc, windowEnd, grain);
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
-            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerCollection,
+            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, grain,
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
         }
         catch (Exception ex)
@@ -681,13 +681,14 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Each point is a rate over the collection's STORED sample interval (sample_interval_seconds), so a collection whose interval was unknowable - a restart or counter reset, stored as 0 - carries null rates rather than a fabricated 0.00; a collection that recorded no interval is rated over the gap since the PREVIOUS collection, so the window's first such collection - which has no previous one to difference against - carries null rates too. Unknowable is never reported as 0 (unrated_points counts them, unrated_note says why). Lite has one tier - every point is per-collection, nothing is rolled up." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_procedure_duration_trend"), Description("Gets a time-series of stored-procedure elapsed time per second and executions per second over time, summed across every procedure. The sibling of get_query_duration_trend, and NOT a duplicate of it: query_stats attributes a procedure's work to the individual statements inside it, so a procedure that got slower is smeared across however many statements it runs. This charges the whole call to the procedure. Read the two together to tell an ad-hoc SQL regression from a procedure regression. Points, rates and unrated collections (unrated_points, unrated_collections) follow get_query_duration_trend exactly." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetProcedureDurationTrend(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -697,8 +698,13 @@ public sealed class McpQueryTools
             var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
             if (hoursError != null) return hoursError;
 
+            var budget = TrendBudget.Mcp(TrendBuckets.DurationMaxPoints);
+            var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
+            if (bucketError != null) return bucketError;
+
+            var grain = Bucketed(bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
             var startUtc = windowEnd.AddHours(-hours_back);
-            var points = await dataService.GetProcedureDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd);
+            var points = await dataService.GetBucketedProcedureDurationTrendAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, bucketMinutes);
             if (points.Count == 0)
             {
                 var gated = await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "procedure_stats");
@@ -709,12 +715,12 @@ public sealed class McpQueryTools
 
                 return await EmptyTrendAsync(
                     dataService.HasAnyProcedureStatAsync(resolved.ServerId), resolved.ServerName, hours_back,
-                    startUtc, windowEnd, PerCollection,
+                    startUtc, windowEnd, grain,
                     "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.");
             }
 
-            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, PerCollection,
+            return SerializeTrend(resolved.ServerName, hours_back, startUtc, windowEnd, points, grain,
                 await dataService.GetBaselineDiscontinuitiesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd));
         }
         catch (Exception ex)
@@ -770,11 +776,22 @@ public sealed class McpQueryTools
         }
     }
 
-    /// <summary>The grain word for a per-collection series (the plan-cache trends).</summary>
-    private const string PerCollection = "per-collection";
+    /// <summary>
+    /// What one point of a Performance-Trends answer is (#3897): the <c>bucket</c> word, the width in minutes, and
+    /// the prose a rolled-up point owes its reader — null on a series that is not time-bucketed. Darling's
+    /// <c>TrendDisclosure</c> carries the same three facts under the same keys.
+    /// </summary>
+    private sealed record TrendGrain(string Bucket, int? Minutes, string? AggregateNote);
 
-    /// <summary>The grain word for the Query Store series, whose points sit at runtime-interval starts.</summary>
-    private const string PerInterval = "per-interval";
+    /// <summary>The grain of a bucketed plan-cache trend (#3897).</summary>
+    private static TrendGrain Bucketed(int bucketMinutes, bool requested, int autoPoints) =>
+        new(TrendBuckets.Word(bucketMinutes), bucketMinutes, TrendBuckets.AggregateNote(bucketMinutes, requested, autoPoints));
+
+    /// <summary>The grain of the Query Store series, whose points sit at runtime-interval starts: not bucketed.</summary>
+    private static readonly TrendGrain PerInterval = new("per-interval", null, null);
+
+    /// <summary>The grain of get_query_trend's per-collection history of one query: not bucketed.</summary>
+    private static readonly TrendGrain PerCollection = new("per-collection", null, null);
 
     /// <summary>
     /// How far past the requested start the first served point may sit before the answer calls itself
@@ -800,7 +817,7 @@ public sealed class McpQueryTools
     /// anonymous type so the data envelope and the empty envelope are built by the same code.
     /// </summary>
     private static void WriteDisclosure(
-        Dictionary<string, object?> envelope, DateTime? firstPointUtc, DateTime startUtc, DateTime windowEndUtc, string bucket)
+        Dictionary<string, object?> envelope, DateTime? firstPointUtc, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain)
     {
         var effectiveStart = firstPointUtc ?? startUtc;
         envelope["source"] = "raw";
@@ -812,8 +829,11 @@ public sealed class McpQueryTools
            writes it. Darling.Tests' McpPayloadContractCensusTests sweeps this file too and fails a bare
            `truncated` beside `effective_hours_back`; the literal stays a literal so that sweep can see it. */
         envelope["window_truncated"] = firstPointUtc is DateTime first && first > startUtc + TruncationSlack;
-        envelope["bucket"] = bucket;
-        envelope["aggregate_note"] = null;
+        envelope["bucket"] = grain.Bucket;
+        /* #3897: the width beside its word, at the position Darling's TrendDisclosure.WriteTo writes it; null on the
+           Query Store series, which is not time-bucketed. */
+        envelope["bucket_minutes"] = grain.Minutes;
+        envelope["aggregate_note"] = grain.AggregateNote;
     }
 
     /// <summary>
@@ -828,7 +848,7 @@ public sealed class McpQueryTools
     /// the one to read; <c>value</c> stays for the consumer already reading it, on the precedent above.</para>
     /// </summary>
     private static string SerializeTrend(
-        string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, string bucket,
+        string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, List<QueryTrendPoint> points, TrendGrain grain,
         IReadOnlyList<BaselineDiscontinuity> discontinuities)
     {
         var envelope = new Dictionary<string, object?>
@@ -836,17 +856,23 @@ public sealed class McpQueryTools
             ["server"] = serverName,
             ["hours_back"] = hours_back,
         };
-        WriteDisclosure(envelope, points.Count > 0 ? points[0].CollectionTime : null, startUtc, windowEndUtc, bucket);
+        /* effective_start is the first COLLECTION the store held — on a bucketed point its first collection, not the
+           bucket's start (#3897). */
+        WriteDisclosure(envelope, points.Count > 0 ? points[0].FirstCollectionTime ?? points[0].CollectionTime : null, startUtc, windowEndUtc, grain);
         /* #3541 A12: a point with no rate is published as null, never as 0, and the envelope says how many
            and why. Two whys since #3695 / v61 (#3653 A11): the plan-cache trends read the STORED interval,
            so a restart collection (stored 0) is unrated beside the first-in-window LAG case; the Query Store
            trend stores no interval and only hits the second arm, and the sentence stays true there. Same keys
            and the same sentence as Darling's twin, byte-identical — pinned by McpMissMessageParityPinTests. */
         var unrated = points.Count(p => !p.HasRate);
+        var unratedCollections = points.Sum(p => p.UnratedInBucket ?? (p.HasRate ? 0 : 1));
         envelope["unrated_points"] = unrated;
-        envelope["unrated_note"] = unrated == 0
+        /* #3897: a bucket leaves an unknowable collection out of its rates, so the collections are counted apart
+           from the points — a restart inside a rated bucket is still reported. Darling's key, at Darling's position. */
+        envelope["unrated_collections"] = unratedCollections;
+        envelope["unrated_note"] = unratedCollections == 0
             ? null
-            : $"{unrated} point(s) carry null rates: a rate is the point's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the point is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — the point is kept so effective_start is the first collection the store held, and its rates are null.";
+            : $"{unratedCollections} collection(s) had no knowable rate: a rate is a collection's work divided by the seconds it accrued over, and that denominator is unknowable two ways — the collection's STORED sample interval is 0 (a restart or counter reset: the collector could not difference its two snapshots, so the zeros beside it were never measured), or the collection is rated against the PREVIOUS one and has none inside the window (the window's first collection where no interval was stored, or one landing in the same second as its predecessor). Unknowable is not 0 — such a collection is left out of its point's rates rather than counted as zero, and a point that held nothing else carries null rates ({unrated} here).";
         envelope["trend"] = points.Select(p => new
         {
             time = p.CollectionTime.ToString("o"),
@@ -854,6 +880,8 @@ public sealed class McpQueryTools
             elapsed_ms_per_second = p.Value,
             execution_count = p.ExecutionCount,
             executions_per_second = p.ExecutionsPerSecond,
+            /* #3897: the bucket's worst single collection; null where a point is not a bucket of collections. */
+            peak_elapsed_ms_per_second = p.PeakElapsedMsPerSecond,
         });
         /* #3653 A5: trailing, after the points, on the data envelope only — the window's baseline
            discontinuities, the same key and shape Darling's SerializeTrend writes (BaselineDiscontinuities). */
@@ -867,14 +895,14 @@ public sealed class McpQueryTools
     /// an empty Performance-Trends answer carries the same six keys the data envelope does (#3541 A2) — a
     /// caller reads <c>source</c> without first checking whether it got data.
     /// </summary>
-    private static string EmptyStatus(string status, string message, DateTime startUtc, DateTime windowEndUtc, string bucket)
+    private static string EmptyStatus(string status, string message, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain)
     {
         var envelope = new Dictionary<string, object?>
         {
             ["status"] = status,
             ["message"] = message,
         };
-        WriteDisclosure(envelope, null, startUtc, windowEndUtc, bucket);
+        WriteDisclosure(envelope, null, startUtc, windowEndUtc, grain);
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }
 
@@ -888,7 +916,7 @@ public sealed class McpQueryTools
     /// unmaterialized state, which only a tiered store can be in).
     /// </summary>
     private static async Task<string> EmptyTrendAsync(
-        Task<bool> probe, string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, string bucket,
+        Task<bool> probe, string serverName, int hours_back, DateTime startUtc, DateTime windowEndUtc, TrendGrain grain,
         string what, string checkThis)
     {
         var everSampled = await probe;
@@ -896,11 +924,11 @@ public sealed class McpQueryTools
             ? EmptyStatus(
                 "empty",
                 $"No {what} samples were recorded for {serverName} in the last {hours_back} hour(s). This server HAS been sampled before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.",
-                startUtc, windowEndUtc, bucket)
+                startUtc, windowEndUtc, grain)
             : EmptyStatus(
                 "unavailable",
                 $"No {what} samples have EVER been recorded for {serverName}. This is not an empty window — nothing at all has been stored for this server, so it is NOT a quiet server. {checkThis}",
-                startUtc, windowEndUtc, bucket);
+                startUtc, windowEndUtc, grain);
     }
 
     [McpServerTool(Name = "get_query_trend"), Description("Gets a time-series of performance metrics for a specific query identified by its query_hash. Use this after identifying a problematic query from get_top_queries_by_cpu or get_query_store_top to see how it has changed over time." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]

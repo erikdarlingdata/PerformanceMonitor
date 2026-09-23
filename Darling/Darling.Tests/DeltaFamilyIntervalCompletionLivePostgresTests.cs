@@ -45,8 +45,8 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
-    /// The procedure duration trend, both copies (the viewer's read and the MCP's SQL, which the pin in
-    /// DarlingMcpTrendToolsTests proves are one string): t1/t2 pre-V128 (NULL) — t1 no prior, no rate (the
+    /// The procedure duration trend, both copies (the viewer's read and the MCP's SQL, whose per-collection CTE the
+    /// pin in DarlingMcpTrendToolsTests proves is one string; the MCP statement buckets it, #3897): t1/t2 pre-V128 (NULL) — t1 no prior, no rate (the
     /// viewer drops it, the MCP keeps it unrated); t2 the LAG's 300 s. t3 a restart — every row 0 — no rate
     /// either. t4 a steady pass with a readmitted plan (its row 0)
     /// beside a measured 120 s row: MAX 120 wins over the LAG's 300, and the readmitted plan adds 0.
@@ -86,17 +86,20 @@ public sealed class DeltaFamilyIntervalCompletionLivePostgresTests
             Assert.Equal(0, points[0].ExecutionCount);             /* 30 / 300 = 0.1 executions/sec, truncated to long as always */
             Assert.Equal(10.0, points[1].Value, precision: 6);     /* 1200 ms / STORED 120 s, not the LAG's 4.0 */
 
-            /* The MCP copy, run as the tool would run it on the raw tier. */
+            /* The MCP copy, run as the tool would run it on the raw tier — since #3897 bucketed, here at one
+               minute so each bucket holds one collection and its figures are that collection's own; the bucket's
+               first collection (ordinal 4) is the collection itself. */
             await using (var command = postgres.CreateCommand(DarlingTrendReader.ProcedureDurationTrendSql))
             {
                 command.Parameters.AddWithValue(ServerId);
                 command.Parameters.AddWithValue(t1.AddMinutes(-1));
                 command.Parameters.AddWithValue(t4.AddMinutes(1));
+                command.Parameters.AddWithValue(1);
                 var mcp = new List<(DateTime At, double? Rate, double? Executions)>();
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
-                    mcp.Add((reader.GetDateTime(0),
+                    mcp.Add((reader.GetDateTime(4),
                         reader.IsDBNull(1) ? null : Convert.ToDouble(reader.GetValue(1)),
                         reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2))));
                 }
