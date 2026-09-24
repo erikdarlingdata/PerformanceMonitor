@@ -94,21 +94,28 @@ public sealed class TimescaleAggregateCompressionTests
     {
         var targets = TimescaleSupport.AggregateCompressionTargets;
 
+        /* #3653 A6: DailyAggregates grew from 7 to 10 (the three interval-honest successor dailies), but
+           they are held out of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane LC's
+           freeze frees the band's slots — so the compressed count stays 23, derived as 9 + 10 + 7 - 3. */
         Assert.Equal(23, targets.Count);
         Assert.Equal(9, TimescaleSupport.HourlyAggregates.Length);
-        Assert.Equal(7, TimescaleSupport.DailyAggregates.Length);
+        Assert.Equal(10, TimescaleSupport.DailyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
+        Assert.Equal(3, TimescaleSupport.CompressionDeferredUntilFreeze.Count);
         Assert.Equal(
-            TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length,
+            TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length
+                - TimescaleSupport.CompressionDeferredUntilFreeze.Count,
             targets.Count);
 
         Assert.Equal(targets.Count, targets.Select(t => t.View).Distinct(StringComparer.Ordinal).Count());
 
         /* Order and tier are the source lists', in order — the same order the ensure sweep creates in, so the
-           hour each aggregate takes on the band follows creation order and nothing else. */
+           hour each aggregate takes on the band follows creation order and nothing else — minus the deferred
+           daily successors, which never reach the band. */
         var expected = TimescaleSupport.HourlyAggregates.Select(a => (a.View, Hourly: true))
             .Concat(TimescaleSupport.DailyAggregates.Select(a => (a.View, Hourly: false)))
             .Concat(TimescaleSupport.BaselineAggregates.Select(a => (a.View, Hourly: true)))
+            .Where(t => !TimescaleSupport.CompressionDeferredUntilFreeze.Contains(t.View))
             .ToArray();
         Assert.Equal(expected, targets.Select(t => (t.View, t.Hourly)).ToArray());
 

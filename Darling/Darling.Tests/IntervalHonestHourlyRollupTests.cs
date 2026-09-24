@@ -136,7 +136,9 @@ public sealed class IntervalHonestHourlyRollupTests
 
         Assert.False(RollupAvailability.WithoutIntervalHourlies.AllPresent);
         Assert.True(RollupAvailability.All.AllPresent);
-        Assert.Equal(16, TimescaleSupport.RollupViews.Length);
+        /* 16 through #3653 Q12, +3 for the A6 successor DAILIES this lane registers
+           (query_stats_interval_daily, procedure_stats_interval_daily, query_stats_db_interval_daily). */
+        Assert.Equal(19, TimescaleSupport.RollupViews.Length);
     }
 
     /// <summary>
