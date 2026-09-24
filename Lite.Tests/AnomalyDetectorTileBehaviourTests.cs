@@ -36,6 +36,7 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
     private readonly DuckDbInitializer _duckDb;
     private readonly BaselineProvider _baselineProvider;
     private readonly AnomalyDetector _detector;
+    private readonly ITestOutputHelper _output;
     private DuckDBConnection? _seedConn;
 
     private const int ServerId = -998;
@@ -54,12 +55,13 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
 
     private long _nextId = -2_000_000;
 
-    public AnomalyDetectorTileBehaviourTests(SharedDuckDbFixture fixture)
+    public AnomalyDetectorTileBehaviourTests(SharedDuckDbFixture fixture, ITestOutputHelper output)
     {
         fixture.ResetData();
         _duckDb = fixture.DuckDb;
         _baselineProvider = new BaselineProvider(_duckDb);
         _detector = new AnomalyDetector(_duckDb, _baselineProvider);
+        _output = output;
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
     }
 
@@ -175,7 +177,21 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
         var startBucket = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.IoLatency, _windowStart);
         Assert.True(startBucket.IsTrustworthy, "the start-hour I/O bucket must be trustworthy");
 
+        // Evidence for CI (this test cannot run on the Mac host): the bucket map's per-hour tiles and
+        // the whole-window mean/peak the fixture seeded, so a red run's log shows what was actually
+        // scored without re-running locally.
+        var map = await _baselineProvider.GetBucketMapAsync(
+            ServerId, MetricNames.IoLatency, _windowStart, _windowStart.AddHours(4));
+        for (var h = 0; h < 4; h++)
+        {
+            var hourStart = _windowStart.AddHours(h);
+            var bucket = map.For(hourStart.Hour, (int)hourStart.DayOfWeek);
+            _output.WriteLine($"hour {h} ({hourStart:HH:00} dow {(int)hourStart.DayOfWeek}): Tier={bucket.Tier} SampleCount={bucket.SampleCount} DistinctDays={bucket.DistinctDays} IsTrustworthy={bucket.IsTrustworthy} Median={bucket.Median} EffectiveRobustSigma={bucket.EffectiveRobustSigma}");
+        }
+        _output.WriteLine($"seeded whole-window mean/peak: mu={IoMuMs} sigma={IoSigmaMs} shift={IoShiftMs}");
+
         var anomalies = await _detector.DetectAnomaliesAsync(CreateContext(_windowStart, _windowStart.AddHours(4)));
+        _output.WriteLine($"fact count: {anomalies.Count}");
         var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_READ_LATENCY");
 
         Assert.True(fact.Metadata.ContainsKey("tile_local_hour"), "the sustained read-latency shift should have scored through the tile path");
