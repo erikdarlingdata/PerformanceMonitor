@@ -21,16 +21,19 @@ public sealed class McpToolGuideHeadsLongQueryTests
     private const string Tool = "get_long_query_completions";
 
     /// <summary>D9: the page is duration-RANKED, so it is the window's SLOWEST rows, never its newest, and the
-    /// two returned-event-time stamps bound how old the slowest runs are, not how far back the read reached.</summary>
+    /// two returned-event-time stamps bound how old the slowest runs are, not how far back the read reached. A
+    /// truncated page cut rows that are no slower than the page: D9 round 1 read truncated as "some of the very
+    /// slowest are missing".</summary>
     private const string PageIsSlowestFact =
-        "THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: completions_returned/truncated say how many " +
-        "you got and whether the window held more; oldest/newest_returned_event_time bound the slowest runs' " +
+        "THE PAGE IS THE window's limit SLOWEST, NOT ITS NEWEST: truncated means the window held more, none " +
+        "slower than the page; oldest/newest_returned_event_time bound the slowest runs' " +
         "ages, NOT how far the read reached.";
 
     /// <summary>D9: the collector is opt-in and OFF by default, so an empty answer is ambiguous between a
-    /// genuinely quiet window and a collector nobody has switched on yet.</summary>
+    /// genuinely quiet window and a collector that was off: never switched on, or switched off since. "Never enabled"
+    /// was too narrow; a collector switched off yesterday leaves the last 24 hours empty too.</summary>
     private const string CollectorGateFact =
-        "Collector is opt-in, OFF by default: empty can mean none in the window, or never enabled";
+        "Collector is opt-in, OFF by default: empty can mean none in the window, or the collector was off";
 
     [Fact]
     public void Head_CarriesThePageRankingTrap_TheCollectorGate_AndThePointer()
