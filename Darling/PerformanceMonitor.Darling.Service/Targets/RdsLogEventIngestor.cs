@@ -44,7 +44,16 @@ public sealed class RdsLogEventIngestor
     /// oversized record must not turn into unbounded memory growth if the file never gives it a closing
     /// boundary.
     /// </summary>
-    private const int MaxCarryLength = 1_048_576;
+    internal const int MaxCarryLength = 1_048_576;
+
+    /// <summary>A carried partial csvlog record and whether its start is a known record boundary (#4053 part c1).</summary>
+    internal readonly record struct CsvCarry(string Partial, bool StartKnown)
+    {
+        public static CsvCarry Empty => new(string.Empty, false);
+    }
+
+    /// <summary>What one csvlog portion parses to, and the carry for the next portion (#4053 part c1).</summary>
+    internal readonly record struct CsvPortion(List<PgLogEntry> Entries, int RecordsDiscarded, CsvCarry Next);
 
     private readonly NpgsqlDataSource _postgres;
     private readonly PgLogEventClassifier _classifier;
@@ -58,7 +67,7 @@ public sealed class RdsLogEventIngestor
     /// <c>DownloadDBLogFilePortion</c> is consume-once, so the carry can only be updated alongside the
     /// marker's own commit — see <see cref="IngestAsync"/>.
     /// </summary>
-    private readonly Dictionary<string, (string Partial, bool StartKnown)> _csvCarry = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CsvCarry> _csvCarry = new(StringComparer.Ordinal);
 
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
@@ -118,7 +127,7 @@ public sealed class RdsLogEventIngestor
         }
 
         string? carryKey = null;
-        (string Partial, bool StartKnown) carry = (string.Empty, false);
+        var carry = CsvCarry.Empty;
 
         if (pgLogUsesCsvlog)
         {
@@ -128,7 +137,7 @@ public sealed class RdsLogEventIngestor
 
             if (!string.IsNullOrEmpty(carryKey))
             {
-                _csvCarry.TryGetValue(carryKey, out carry);
+                carry = _csvCarry.TryGetValue(carryKey, out var held) ? held : CsvCarry.Empty;
             }
         }
 
@@ -157,73 +166,32 @@ public sealed class RdsLogEventIngestor
         return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
     }
 
-    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, (string Partial, bool StartKnown) NextCarry)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, CsvCarry NextCarry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
         bool logTimezoneIsUtc,
         bool pgLogUsesCsvlog,
-        (string Partial, bool StartKnown) carry,
+        CsvCarry carry,
         bool additionalDataPending,
         CancellationToken cancellationToken)
     {
         List<PgLogEvent> events;
         int foreignZoneLines;
         var csvRecordsDiscarded = 0;
-        var nextCarry = (Partial: string.Empty, StartKnown: false);
+        var nextCarry = CsvCarry.Empty;
 
         if (pgLogUsesCsvlog)
         {
-            if (string.IsNullOrEmpty(text) && carry.Partial.Length == 0)
+            if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
             {
-                return (0, 0, 0, nextCarry);
+                return (0, 0, 0, carry);
             }
 
-            /* #4053 part c1: DownloadDBLogFilePortion cuts a portion on a PHYSICAL line, which can land
-               inside a multi-line quoted field, so the portion's own edges are not honest boundaries — the
-               carry from the previous portion, plus what this portion already knows about ITS edges, is
-               what PgServerLogCsvParser is told instead of letting it infer a boundary from a trailing
-               newline that might be inside quotes. */
-            var body = carry.Partial + text;
-
-            var edges = (carry.StartKnown ? PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary : PgServerLogCsvParser.CsvBodyEdges.None)
-                | (additionalDataPending ? PgServerLogCsvParser.CsvBodyEdges.None : PgServerLogCsvParser.CsvBodyEdges.EndsOnRecordBoundary);
-
-            var entries = PgServerLogCsvParser.Parse(body, edges, out csvRecordsDiscarded, out var consumedLength);
-
-            /* Resync guard (#4053 part c1): a StartsOnRecordBoundary call that kept fewer records than it
-               discarded, having seen at least 3 record boundaries, means the carried start was wrong — a
-               wrong StartKnown inverts parity for every later portion and never self-corrects. Drop the
-               carry's trust rather than let that ride forward; csv_records_discarded is still measured for
-               this call as usual. */
-            var sawEnoughBoundaries = entries.Count + csvRecordsDiscarded >= 3;
-            var resyncGuardTripped = edges.HasFlag(PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary)
-                && entries.Count < csvRecordsDiscarded
-                && sawEnoughBoundaries;
-
-            if (resyncGuardTripped)
-            {
-                nextCarry = (string.Empty, false);
-            }
-            else
-            {
-                var partial = body[consumedLength..];
-
-                /* consumedLength is a true boundary only when THIS call stated an edge — under None it is
-                   the winning scored hypothesis's last boundary, a guess, and claiming StartKnown from a
-                   guess inverts parity for every later forward walk (see the parser's own param doc). */
-                var startKnown = edges != PgServerLogCsvParser.CsvBodyEdges.None;
-
-                if (partial.Length > MaxCarryLength)
-                {
-                    /* One oversized record must not grow memory across portions without bound. */
-                    partial = string.Empty;
-                    startKnown = false;
-                    csvRecordsDiscarded++;
-                }
-
-                nextCarry = (partial, startKnown);
-            }
+            var portion = ParseCsvPortion(carry, text, additionalDataPending);
+            var entries = portion.Entries;
+            csvRecordsDiscarded = portion.RecordsDiscarded;
+            nextCarry = portion.Next;
 
             /* The SAME foreign-zone rule the stderr path applies below, via PgLogEventClassifier's own
                assembler-backed overload — restated here because the csv parser accepts every zone and leaves
@@ -252,6 +220,79 @@ public sealed class RdsLogEventIngestor
         }
 
         return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry);
+    }
+
+    /// <summary>
+    /// One csvlog portion through the parser, with the carry (#4053 part c1). A pure step, so the carry rules
+    /// are testable without a store.
+    /// <para>DownloadDBLogFilePortion cuts a portion on a PHYSICAL line, which can land just after a newline
+    /// inside a multi-line quoted field. So a portion's trailing newline is never trusted as a record boundary;
+    /// the parser is told only what is known:</para>
+    /// <list type="bullet">
+    /// <item>the start is a boundary when the carry says so (StartKnown): the previous portion ended at the
+    /// file's end, or a forward walk found the boundary exactly;</item>
+    /// <item>the end is a boundary when no more data is pending: the file's end as of this read. The syslogger
+    /// writes whole records, with the same Low race the self-hosted route names (a record bigger than stdio's
+    /// buffer reaches the file in several writes).</item>
+    /// </list>
+    /// <para>After a portion that ends at the file's end, nothing is carried and the next portion's start is
+    /// known. After a pending portion, the text past the last boundary is carried. Its start is known only
+    /// when a forward walk found that boundary: under no stated edge the boundary is a scored guess (see
+    /// <c>consumedLength</c> on <see cref="PgServerLogCsvParser.Parse(string, PgServerLogCsvParser.CsvBodyEdges, out int, out int)"/>).
+    /// A pending portion with no boundary at all carries whole, and nothing in it is counted as discarded yet.</para>
+    /// <para>Resync: a wrong known start (the race above) inverts the parity of every later forward walk. With
+    /// correct parity a forward walk discards almost nothing, because PostgreSQL writes every record whole,
+    /// and text inside quotes can't make a boundary. So when a known-start parse keeps fewer records than it
+    /// discards, over at least 3, its entries are thrown away (under inverted parity the only lines that parse
+    /// are look-alikes planted inside quoted fields), and the body is re-parsed with the start unknown. When
+    /// the inverted walk finds no boundary at all instead, the carry grows until the bound below drops it.
+    /// That can cost up to <see cref="MaxCarryLength"/> of log once after a race; it can never emit a forged
+    /// row.</para>
+    /// <para>Bound: a carry longer than <see cref="MaxCarryLength"/> is dropped and counted as one discard, and
+    /// the next start is unknown. One oversized record can't grow memory across portions.</para>
+    /// </summary>
+    internal static CsvPortion ParseCsvPortion(CsvCarry carry, string? text, bool additionalDataPending)
+    {
+        var body = (carry.Partial ?? string.Empty) + (text ?? string.Empty);
+        if (body.Length == 0)
+        {
+            return new CsvPortion(new List<PgLogEntry>(), 0, new CsvCarry(string.Empty, carry.StartKnown));
+        }
+
+        var endEdge = additionalDataPending
+            ? PgServerLogCsvParser.CsvBodyEdges.None
+            : PgServerLogCsvParser.CsvBodyEdges.EndsOnRecordBoundary;
+        var edges = (carry.StartKnown ? PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary : PgServerLogCsvParser.CsvBodyEdges.None)
+            | endEdge;
+
+        var entries = PgServerLogCsvParser.Parse(body, edges, out var discarded, out var consumedLength);
+
+        if (edges.HasFlag(PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary)
+            && entries.Count < discarded
+            && entries.Count + discarded >= 3)
+        {
+            edges = endEdge;
+            entries = PgServerLogCsvParser.Parse(body, edges, out discarded, out consumedLength);
+        }
+
+        if (!additionalDataPending)
+        {
+            return new CsvPortion(entries, discarded, new CsvCarry(string.Empty, true));
+        }
+
+        if (consumedLength == 0)
+        {
+            discarded = 0;
+        }
+
+        var partial = body[consumedLength..];
+        if (partial.Length > MaxCarryLength)
+        {
+            return new CsvPortion(entries, discarded + 1, CsvCarry.Empty);
+        }
+
+        var startKnown = edges.HasFlag(PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary);
+        return new CsvPortion(entries, discarded, new CsvCarry(partial, startKnown));
     }
 
     /// <summary>

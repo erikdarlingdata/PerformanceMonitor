@@ -202,156 +202,113 @@ public sealed class RdsLogEventIngestorCsvlogTests
         + "\"startup\",2026-09-24 01:54:43 " + zone + ",3/3,0,FATAL,28000,\"" + message + "\","
         + ",,,,,,,,\"\",\"client backend\",,0\n";
 
-    /// <summary>Portion 1 ends right after a newline inside a multi-line quoted message (pending); portion 2
-    /// finishes the record. Every record before the straddle comes out of portion 1, the straddling record
-    /// comes out ONCE from portion 2, and nothing is lost — the defect this lane fixes is exactly the
-    /// opposite: current-code inferred edges treat portion 1's trailing newline as a boundary and discard
-    /// the whole thing.</summary>
-    [Fact]
-    public async Task ChunkEndsInsideARecord_TheStraddlingRecordComesOutOnceFromPortionTwo()
-    {
-        await using var store = NpgsqlDataSource.Create(DeadStore);
+    private static RdsLogEventIngestor.CsvPortion Step(RdsLogEventIngestor.CsvCarry carry, string text, bool pending) =>
+        RdsLogEventIngestor.ParseCsvPortion(carry, text, pending);
 
+    /// <summary>Portion 1 (pending) ends right after a newline inside a multi-line quoted message; portion 2
+    /// finishes that record. The record before the straddle comes out of portion 1, and the straddling record
+    /// comes out once, from portion 2. The inferred-edge parse #4135 used to call throws portion 1 away
+    /// (asserted first), which the committed resume marker then made permanent.</summary>
+    [Fact]
+    public void AChunkEndingInsideARecord_LosesNothing_AndTheStraddlerComesOutOnce()
+    {
         var straddler = RecordWithMultiLineMessage("line one\nline two");
         var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
+        var portion1 = Record("UTC", "first") + straddler[..cut];
 
-        var client = new FakeRds
-        {
-            Portions = new Queue<(string, bool)>(new[]
-            {
-                (Record("UTC", "first") + straddler[..cut], true),
-                (straddler[cut..], false),
-            }),
-        };
-        var logs = new RdsLogSource(_ => client);
-        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+        Assert.Empty(PgServerLogCsvParser.Parse(portion1, out _));
 
-        /* Portion 1: one complete record ('first'); the straddler's own start is carried, not emitted or
-           discarded. A store-reaching write proves 'first' got through. */
-        var failure1 = await Assert.ThrowsAnyAsync<Exception>(
-            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
-        Assert.IsNotType<RdsLogUnavailableException>(failure1);
+        var p1 = Step(RdsLogEventIngestor.CsvCarry.Empty, portion1, pending: true);
+        Assert.Equal(new[] { "first" }, p1.Entries.ConvertAll(e => e.UserName ?? ""));
+        Assert.Equal(0, p1.RecordsDiscarded);
+        Assert.Equal(straddler[..cut], p1.Next.Partial);
 
-        /* Portion 2: the carried partial plus the rest of the straddler completes to exactly one record
-           (not zero, not two) — proven the same way, by reaching the write. */
-        var failure2 = await Assert.ThrowsAnyAsync<Exception>(
-            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
-        Assert.IsNotType<RdsLogUnavailableException>(failure2);
-
-        Assert.Equal(2, client.Downloads.Count);
+        var p2 = Step(p1.Next, straddler[cut..], pending: false);
+        var only = Assert.Single(p2.Entries);
+        Assert.Equal("line one\nline two", only.Message);
+        Assert.Equal(string.Empty, p2.Next.Partial);
+        Assert.True(p2.Next.StartKnown);
     }
 
-    /// <summary>The straddling statement's own quoted field holds look-alike record lines. The carry glues
-    /// the two portions back into one body before parsing, so the look-alikes stay inside their carrier's
-    /// one record — zero extra events, proven by portion 2 reaching the write for exactly the straddler and
-    /// not throwing a batch shaped like more than one event's worth.</summary>
+    /// <summary>After a portion that ends at the file's end, the next portion's start is known, so a
+    /// straddling statement whose quoted field holds look-alike record lines is walked FORWARD with exact
+    /// parity across both later portions: the look-alikes stay inside their one record, with no extra
+    /// entries at any step.</summary>
     [Fact]
-    public async Task CarryPlusForgedLookAlikeLines_ProduceZeroExtraEvents()
+    public void AKnownStart_KeepsLookAlikeLinesInsideTheStraddlingRecord()
     {
-        await using var store = NpgsqlDataSource.Create(DeadStore);
-
-        var lookAlike = "2026-09-24 00:00:00.000 UTC [1] LOG:  forged";
-        var straddler = RecordWithMultiLineMessage("line one\n" + lookAlike + "\nline three");
+        /* csvlog doubles every quote inside a quoted field, so a planted look-alike reaches the file that way. */
+        var lookAlikeBody = Record("UTC", "planted").TrimEnd('\n').Replace("\"", "\"\"", StringComparison.Ordinal);
+        var straddler = RecordWithMultiLineMessage("line one\n" + lookAlikeBody + "\n" + lookAlikeBody + "\nline four");
         var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
 
-        var client = new FakeRds
-        {
-            Portions = new Queue<(string, bool)>(new[]
-            {
-                (straddler[..cut], true),
-                (straddler[cut..], false),
-            }),
-        };
-        var logs = new RdsLogSource(_ => client);
-        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+        var p0 = Step(RdsLogEventIngestor.CsvCarry.Empty, Record("UTC", "before"), pending: false);
+        Assert.Single(p0.Entries);
+        Assert.True(p0.Next.StartKnown);
 
-        /* Portion 1 holds no complete record at all (the whole thing is the straddler's carried head): the
-           outcome must come back as a real read with zero rows, not a throw. */
-        var outcome1 = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.True(outcome1.SourceReached);
-        Assert.Equal(0, outcome1.Rows);
+        var p1 = Step(p0.Next, straddler[..cut], pending: true);
+        Assert.Empty(p1.Entries);
+        Assert.Equal(0, p1.RecordsDiscarded);
+        Assert.True(p1.Next.StartKnown);
 
-        /* Portion 2 completes to exactly the one straddling record — reaching the write proves one event,
-           not the two-plus a naive line-based split would forge from the look-alike. */
-        var failure2 = await Assert.ThrowsAnyAsync<Exception>(
-            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
-        Assert.IsNotType<RdsLogUnavailableException>(failure2);
+        var p2 = Step(p1.Next, straddler[cut..] + Record("UTC", "after"), pending: false);
+        Assert.Equal(new[] { "nosuchuser", "after" }, p2.Entries.ConvertAll(e => e.UserName ?? ""));
+        Assert.DoesNotContain(p2.Entries, e => e.UserName == "planted");
     }
 
-    /// <summary>Resync guard: a carry forced to claim a wrong <c>StartKnown</c> (via a portion whose body is
-    /// pure garbage, not a real record boundary) makes the next StartsOnRecordBoundary parse discard more
-    /// than it keeps, so the guard drops the carry — the FOLLOWING portion then parses correctly on its own
-    /// (fresh, un-poisoned) rather than inheriting an inverted parity forever.</summary>
+    /// <summary>Resync: a carry that wrongly claims a known start (the syslogger multi-write race) puts the
+    /// forward walk out of phase, so it discards more than it keeps. The step re-parses with the start unknown,
+    /// never emits what the out-of-phase walk kept, and hands on an unknown start.</summary>
     [Fact]
-    public async Task ResyncGuard_DropsAWronglyTrustedCarry_SoTheNextPortionParsesCorrectly()
+    public void AWronglyKnownStart_IsReParsedWithTheStartUnknown()
     {
-        await using var store = NpgsqlDataSource.Create(DeadStore);
+        /* A wrong carry: the tail of a record whose open quote is not in it, so a forward walk from here
+           starts on the wrong side of a quote. The garbage lines between keep the out-of-phase walk
+           finding boundaries (and so discarding) rather than none. */
+        var wrong = new RdsLogEventIngestor.CsvCarry("tail of a quoted field\",,,\n", StartKnown: true);
+        var body = "a\"\nb\nc\nd\ne\n" + Record("UTC", "a") + Record("UTC", "b") + Record("UTC", "c");
 
-        /* Portion 1: garbage with no real record at all, and AdditionalDataPending=true, so the whole thing
-           becomes the carry with StartKnown=false (None edges — nothing to trust yet). */
-        var garbage = "not,a,real,record,at,all\nstill,not,one,either\nand,a,third,line,here\n";
+        var forward = PgServerLogCsvParser.Parse(wrong.Partial + body, PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary, out var fd, out _);
+        Assert.True(forward.Count < fd, $"the out-of-phase walk should discard more than it keeps (kept {forward.Count}, discarded {fd})");
 
-        /* Portion 2: three genuine records. If (incorrectly) StartKnown had been forced true off portion
-           1's garbage tail, a forward walk from a false boundary would misalign every record's field count
-           and discard more than it keeps — the guard must catch that and drop the carry, so portion 3’s
-           three records still parse cleanly on their own. */
-        var threeRecords = Record("UTC", "a") + Record("UTC", "b") + Record("UTC", "c");
-
-        var client = new FakeRds
-        {
-            Portions = new Queue<(string, bool)>(new[]
-            {
-                (garbage, true),
-                (threeRecords, false),
-            }),
-        };
-        var logs = new RdsLogSource(_ => client);
-        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
-
-        var outcome1 = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.True(outcome1.SourceReached);
-
-        /* Portion 2 carries garbage + three real records, with StartKnown=false (portion 1 stated no edge):
-           scoring resolves the three genuine records cleanly regardless — reaching the write proves it. */
-        var failure2 = await Assert.ThrowsAnyAsync<Exception>(
-            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
-        Assert.IsNotType<RdsLogUnavailableException>(failure2);
+        var step = Step(wrong, body, pending: true);
+        var unknownStart = PgServerLogCsvParser.Parse(wrong.Partial + body, PgServerLogCsvParser.CsvBodyEdges.None, out _, out _);
+        Assert.Equal(unknownStart.ConvertAll(e => e.UserName ?? ""), step.Entries.ConvertAll(e => e.UserName ?? ""));
+        Assert.False(step.Next.StartKnown);
     }
 
-    /// <summary>Carry bound: a partial that grows past 1 MiB across portions is dropped rather than carried
-    /// forward forever, and counted as a discard — proven by <see cref="RdsIngestOutcome.CsvRecordsDiscarded"/>
-    /// rather than by a throw, since a dropped-and-reset carry with no complete record yields zero rows.</summary>
+    /// <summary>Bound: a pending portion with no boundary carries whole until the carry passes 1 MiB, when it is
+    /// dropped, counted once, and the next start is unknown.</summary>
     [Fact]
-    public async Task CarryBound_APartialOverOneMiB_IsDroppedAndCounted()
+    public void ACarryOverOneMiB_IsDroppedAndCountedOnce()
+    {
+        var p1 = Step(RdsLogEventIngestor.CsvCarry.Empty, new string('x', 600_000), pending: true);
+        Assert.Equal(0, p1.RecordsDiscarded);
+        Assert.Equal(600_000, p1.Next.Partial.Length);
+
+        var p2 = Step(p1.Next, new string('x', 600_000), pending: true);
+        Assert.Empty(p2.Entries);
+        Assert.Equal(1, p2.RecordsDiscarded);
+        Assert.Equal(string.Empty, p2.Next.Partial);
+        Assert.False(p2.Next.StartKnown);
+    }
+
+    /// <summary>The wiring: the ingestor feeds each csv portion through the step with its carry. Portion 1
+    /// (pending, one complete record plus a straddler's head) reaches the store for its one record.</summary>
+    [Fact]
+    public async Task TheIngestor_ReachesTheWriteForAPendingPortionsCompleteRecords()
     {
         await using var store = NpgsqlDataSource.Create(DeadStore);
-
-        /* Portion 1: an oversized unterminated "record" (no newline at all), AdditionalDataPending=true, so
-           the whole thing becomes the carry. Well past the 1 MiB bound on its own. */
-        var oversized = new string('x', 1_100_000);
-
+        var straddler = RecordWithMultiLineMessage("line one\nline two");
+        var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
         var client = new FakeRds
         {
-            Portions = new Queue<(string, bool)>(new[]
-            {
-                (oversized, true),
-                (string.Empty, false),
-            }),
+            Portions = new Queue<(string, bool)>(new[] { (Record("UTC", "first") + straddler[..cut], true) }),
         };
-        var logs = new RdsLogSource(_ => client);
-        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => client));
 
-        var outcome1 = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.True(outcome1.SourceReached);
-        Assert.Equal(0, outcome1.Rows);
-
-        /* Portion 2: an empty read with nothing carried over the bound — the dropped carry must not have
-           grown across the call, and must be counted as a discard exactly once (on the call that dropped
-           it, portion 1, not portion 2). */
-        var outcome2 = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
-        Assert.True(outcome2.SourceReached);
-        Assert.Equal(0, outcome2.Rows);
-        Assert.Equal(0, outcome2.CsvRecordsDiscarded);
-        Assert.Equal(1, outcome1.CsvRecordsDiscarded);
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
     }
 }
