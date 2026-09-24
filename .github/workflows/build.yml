@@ -971,17 +971,81 @@ jobs:
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
           if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 
+      # #4160: three more small throwaway clusters, one per log-format shape, so the
+      # csvlog/jsonlog/auto_explain live tests stop skipping in CI (their env vars were never set —
+      # every run "passed" without ever exercising the planted-input proofs #4053/#4058 added). No
+      # TimescaleDB jobs run on these targets, so the worker settings above (sized for the 5541
+      # store's hypertable count) would be needless headroom here; 8/16 is plenty.
+      #   5542 (csvlog): lights up PgLogEventsCsvlogLiveTests, PgDeadlocksCsvlogLiveTests,
+      #     PgRaiseShapedRecordsLiveTests (DARLING_TEST_PG_CSVLOG) and PgPlanCaptureCsvLiveTests,
+      #     which LOADs auto_explain per session on top of it (DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN).
+      #     deadlock_timeout is shortened so a two-session deadlock actually fires inside a test's
+      #     patience; log_min_messages is notice, not the tighter warning/error, because LOG ranks
+      #     ABOVE ERROR in Postgres's server-log severity order and a stricter filter would silently
+      #     drop the very deadlock/duration LOG rows these tests read.
+      #   5543 (jsonlog): PgLogEventsJsonlogLiveTests (DARLING_TEST_PG_JSONLOG) — it also asserts
+      #     that csvlog is OFF on this target, so this cluster must not preload csvlog as a sibling.
+      #   5544 (stderr,csvlog): PgPlanCaptureLiveTests (DARLING_TEST_PG_AUTOEXPLAIN) and
+      #     PgLogTailStderrSiblingLiveTests (DARLING_TEST_PG_CSVLOG_SIBLING) — both need stderr
+      #     present alongside csvlog, and the %Q-bearing log_line_prefix those tests parse.
+      - name: Initialize and start the log-format PostgreSQL clusters
+        if: steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        run: |
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+
+          function Start-LogFormatCluster($dataDir, $logFile, $port, $extraConfLines) {
+            & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+            if ($LASTEXITCODE -ne 0) { throw "initdb failed for port $port ($LASTEXITCODE)" }
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "port = $port"
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 16"
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "deadlock_timeout = '100ms'"
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "compute_query_id = on"
+            Add-Content -Path "$dataDir\postgresql.conf" -Value "log_min_messages = notice"
+            foreach ($line in $extraConfLines) { Add-Content -Path "$dataDir\postgresql.conf" -Value $line }
+            & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+            if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed for port $port ($LASTEXITCODE)" }
+            & "$bin\createdb.exe" -h 127.0.0.1 -p $port -U darling darling
+            if ($LASTEXITCODE -ne 0) { throw "createdb failed for port $port ($LASTEXITCODE)" }
+          }
+
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-csvlog" "$env:RUNNER_TEMP\darling-pg-csvlog.log" 5542 @(
+            "logging_collector = on",
+            "log_destination = 'csvlog'"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-jsonlog" "$env:RUNNER_TEMP\darling-pg-jsonlog.log" 5543 @(
+            "logging_collector = on",
+            "log_destination = 'jsonlog'"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog" "$env:RUNNER_TEMP\darling-pg-stderrcsvlog.log" 5544 @(
+            "logging_collector = on",
+            "log_destination = 'stderr,csvlog'",
+            "log_line_prefix = '%m [%p] %Q '"
+          )
+
       # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
       # lights up the managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset — the one
       # live-SQL-Server E2E stays skipped (no SQL Server on the runner). Full suite (not a filtered
       # subset): the ungated ~3s overlap with the build job is negligible and a filter could hide a
       # test the way narrow filters have bitten before.
+      #
+      # #4160: DARLING_TEST_PG_CSVLOG/_CSVLOG_AUTOEXPLAIN point at the 5542 csvlog cluster,
+      # DARLING_TEST_PG_JSONLOG at the 5543 jsonlog cluster, and DARLING_TEST_PG_AUTOEXPLAIN/
+      # _CSVLOG_SIBLING at the 5544 stderr+csvlog cluster. DARLING_TEST_PG (5541) stays the store
+      # for the classes that read one target's log while writing to a separate store.
       - name: Run Darling PG tests
         if: steps.filter.outputs.darling == 'true'
         shell: pwsh
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
+          DARLING_TEST_PG_CSVLOG: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          DARLING_TEST_PG_JSONLOG: "Host=127.0.0.1;Port=5543;Username=darling;Database=darling"
+          DARLING_TEST_PG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
+          DARLING_TEST_PG_CSVLOG_SIBLING: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
         run: |
           $ErrorActionPreference = 'Stop'
           $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
@@ -1004,13 +1068,25 @@ jobs:
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @shardArgs -trx TestResults/darling-pr-${{ matrix.shard }}.trx
           exit $LASTEXITCODE
 
+      # #4160: stop all four clusters (the 5541 store plus the three 5542/5543/5544 log-format
+      # clusters started above). Each stop is independent and best-effort: a cluster that never
+      # started (an earlier step threw) has no data dir to stop, and one shard's stop failing must
+      # not skip the others' cleanup.
       - name: Stop PostgreSQL
         if: always() && steps.filter.outputs.darling == 'true'
         shell: pwsh
         run: |
-          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
-          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
-          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          if (Test-Path "$bin\pg_ctl.exe") {
+            foreach ($dataDir in @(
+              "$env:RUNNER_TEMP\darling-pgdata",
+              "$env:RUNNER_TEMP\darling-pgdata-csvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-jsonlog",
+              "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog"
+            )) {
+              if (Test-Path $dataDir) { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+            }
+          }
           exit 0
 
       - name: Upload PG log and test results on failure
@@ -1021,6 +1097,9 @@ jobs:
           name: darling-pg-failure-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/darling-pg.log
+            ${{ runner.temp }}/darling-pg-csvlog.log
+            ${{ runner.temp }}/darling-pg-jsonlog.log
+            ${{ runner.temp }}/darling-pg-stderrcsvlog.log
             TestResults/
           if-no-files-found: ignore
 
