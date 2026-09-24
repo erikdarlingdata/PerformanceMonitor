@@ -157,6 +157,60 @@ tail AS (
 )";
 
     /// <summary>
+    /// The csvlog twin of <see cref="TailCteSql"/> (#4053 part a1b): the same file, the same offsets, the
+    /// same <c>logging_collector</c> gate — but <c>newest</c> requires <c>'csvlog' = ANY(...)</c> in
+    /// <c>log_destination</c> instead of <c>'stderr'</c>, and selects the newest <c>name ~* '\.csv$'</c>
+    /// sibling instead of excluding it. Sent by <see cref="PgLogEventsCollector"/> alone, in place of
+    /// <see cref="TailCteSql"/>, once <see cref="CollectorContext.PgLogUsesCsvlog"/> says the target's
+    /// <c>log_destination</c> includes <c>csvlog</c> — the deadlock and plan-capture collectors still
+    /// open only with the stderr twin above, and this constant is theirs to ignore. Kept as an
+    /// independent literal rather than built from a shared fragment with <see cref="TailCteSql"/>, for the
+    /// same reason <see cref="TailCteBinarySql"/> is: a change here can never alter the byte-for-byte pin
+    /// on the stderr twins.
+    /// </summary>
+    public const string TailCsvCteSql = @"
+WITH newest AS (
+    SELECT name, size
+    FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
+      AND name ~* '\.csv$'
+      AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+    ORDER BY modification DESC
+    LIMIT 1
+),
+tail AS (
+    SELECT pg_catalog.pg_read_file(
+               pg_catalog.current_setting('log_directory') || '/' || n.name,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
+               " + TailBytesLiteral + @") AS body
+    FROM newest AS n
+)";
+
+    /// <summary>
+    /// The binary-route twin of <see cref="TailCsvCteSql"/> (#4053 part a1b), the same shape
+    /// <see cref="TailCteBinarySql"/> is to <see cref="TailCteSql"/>: <c>pg_read_binary_file</c> in place
+    /// of <c>pg_read_file</c>, sent only once <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> finds
+    /// the grant.
+    /// </summary>
+    public const string TailCsvCteBinarySql = @"
+WITH newest AS (
+    SELECT name, size
+    FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
+      AND name ~* '\.csv$'
+      AND 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+    ORDER BY modification DESC
+    LIMIT 1
+),
+tail AS (
+    SELECT pg_catalog.pg_read_binary_file(
+               pg_catalog.current_setting('log_directory') || '/' || n.name,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
+               " + TailBytesLiteral + @") AS body
+    FROM newest AS n
+)";
+
+    /// <summary>
     /// The predicate the marker arm carries: true exactly when the gate above has refused to list. Each
     /// consumer appends <c>UNION ALL SELECT &lt;marker in its own columns&gt; WHERE</c> + this, because the
     /// marker row has to match the consumer's column list and there is no column-agnostic way to say so.

@@ -89,36 +89,37 @@ public static class PgBinaryTailText
 
     /// <summary>
     /// Some DBCS decoders (EUC-JP/936/EUC-KR, code pages 51932/936/51949) pair an unmapped lead byte with
-    /// whatever byte follows it, even an ASCII byte like 0x0A, so a planted lead byte right before a real
-    /// newline eats the newline and can merge the next real line into the attacker's (#4062 review, Medium).
-    /// Splitting on the raw byte 0x0A before decoding, then decoding each segment and joining with '\n',
-    /// restores the property .NET's own UTF-8 decoder has: an ASCII control byte is never consumed as a
-    /// trail byte. This is safe for every encoding this route is called with: 0x0A is never a valid trail
-    /// byte in EUC-JP, EUC-KR or GBK (their trail bytes are all 0xA1 or higher), and single-byte encodings
-    /// treat 0x0A as one character regardless. Valid text decodes to exactly the same string either way.
+    /// whatever byte follows it, even an ASCII byte like 0x0A or 0x22, so a planted lead byte right before a
+    /// real newline or quote eats the delimiter and can merge the next real line — or, for a quote, invert
+    /// csvlog quote parity for everything before it (#4062 review, Medium; #4053 review M3) — into the
+    /// attacker's. Splitting on the raw bytes 0x0A and 0x22 before decoding, then decoding each segment and
+    /// re-emitting each delimiter byte literally, restores the property .NET's own UTF-8 decoder has: an
+    /// ASCII control or punctuation byte is never consumed as a trail byte. This is safe for every encoding
+    /// this route is called with: neither byte is ever a valid trail byte in EUC-JP, EUC-KR or GBK (their
+    /// trail bytes are all 0xA1 or higher, and GBK's 0x40 floor is still above both), and single-byte
+    /// encodings treat each as one character regardless. Valid text decodes to exactly the same string
+    /// either way.
     /// </summary>
     private static string SplitAndDecode(byte[] bytes, int length, Encoding encoding)
     {
         var sb = new StringBuilder();
         var start = 0;
-        var first = true;
 
-        for (var i = 0; i <= length; i++)
+        for (var i = 0; i < length; i++)
         {
-            if (i < length && bytes[i] != (byte)'\n')
+            var b = bytes[i];
+
+            if (b != (byte)'\n' && b != (byte)'"')
             {
                 continue;
             }
 
-            if (!first)
-            {
-                sb.Append('\n');
-            }
-
             sb.Append(encoding.GetString(bytes, start, i - start));
-            first = false;
+            sb.Append((char)b);
             start = i + 1;
         }
+
+        sb.Append(encoding.GetString(bytes, start, length - start));
 
         return sb.ToString();
     }

@@ -339,13 +339,14 @@ public class CollectionLogDrainForensicsStoreTests
            collector's own query declined to list a log that is not being written. #3997's no-stderr-file
            arm is the eleventh, its sibling: the collector is on but writes no stderr-format file this
            route can read. The pin is what turned that into a merge conflict to resolve rather than a
-           wrong number nobody noticed. */
-        Assert.Equal(11, Regex.Matches(worker, @"drain: null").Count);
+           wrong number nobody noticed. #4053's no-csvlog-file arm is the twelfth, the csvlog route's twin of
+           the eleventh: the collector is on and csvlog is configured, but no .csv file exists yet. */
+        Assert.Equal(12, Regex.Matches(worker, @"drain: null").Count);
 
-        /* And V110's fetch sums stay null on those same eleven arms and for the same reason: no item
+        /* And V110's fetch sums stay null on those same twelve arms and for the same reason: no item
            completed, so no fetch was performed. Counted rather than merely present, so an arm that starts
            passing a real value - which would mean attributing another run's fetch to a failure row - is a red. */
-        Assert.Equal(11, Regex.Matches(worker, @"fetchPhases: null").Count);
+        Assert.Equal(12, Regex.Matches(worker, @"fetchPhases: null").Count);
     }
 
     /// <summary>

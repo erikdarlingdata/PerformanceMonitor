@@ -1385,6 +1385,167 @@ public sealed class PgLogEventsPipelineTests
         Assert.DoesNotContain("position('", deadlockBinarySql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4053 part a1b: the stderr statements are byte-unchanged when context.PgLogUsesCsvlog is false — the
+    /// existing pin above still passes untouched — and the csvlog pair opens with the csv CTE instead of the
+    /// stderr one, gated on PgReadBinaryFileGranted the same way the stderr pair is.
+    /// </summary>
+    [Fact]
+    public void WhenPgLogUsesCsvlog_TheStatementOpensWithTheCsvCte_AndTheStderrPairIsUntouched()
+    {
+        var stderrContext = TestContext();
+        Assert.DoesNotContain("csvlog", PgLogEventsCollector.Instance.BuildQuery(stderrContext).Text, StringComparison.Ordinal);
+
+        var csvContext = TestContext();
+        csvContext.PgLogUsesCsvlog = true;
+        var csvSql = PgLogEventsCollector.Instance.BuildQuery(csvContext).Text;
+        Assert.Contains("name ~* '\\.csv$'", csvSql, StringComparison.Ordinal);
+        Assert.Contains("'csvlog' = ANY", csvSql, StringComparison.Ordinal);
+        Assert.Contains("'" + PgNoCsvlogFileException.Marker + "'", csvSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + PgNoStderrLogFileException.Marker + "'", csvSql, StringComparison.Ordinal);
+
+        var csvBinaryContext = TestContext();
+        csvBinaryContext.PgLogUsesCsvlog = true;
+        csvBinaryContext.PgReadBinaryFileGranted = true;
+        var csvBinarySql = PgLogEventsCollector.Instance.BuildQuery(csvBinaryContext).Text;
+        Assert.Contains("pg_read_binary_file", csvBinarySql, StringComparison.Ordinal);
+        Assert.Contains("name ~* '\\.csv$'", csvBinarySql, StringComparison.Ordinal);
+
+        /* Never both at once: TailCsvCteSql/TailCsvCteBinarySql are new, independent constants — the
+           existing byte pin above already proves TailCteSql/TailCteBinarySql are untouched, and this proves
+           the csv pair is used instead of them once the flag is set. */
+        Assert.DoesNotContain("'stderr' = ANY", csvSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a1b: the probe SQL is PostgreSQL 14+ valid — plain <c>current_setting</c>/
+    /// <c>string_to_array</c>/<c>ANY</c>, nothing gated behind a newer version.
+    /// </summary>
+    [Fact]
+    public void ThePgLogFormatCapabilityProbe_UsesOnlyPostgreSql14PlusFunctions()
+    {
+        Assert.Equal(
+            "SELECT 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))",
+            PgLogFormatCapability.ProbeSql);
+        Assert.DoesNotContain("pg_input_is_valid", PgLogFormatCapability.ProbeSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a1b: ReadAsync over the csvlog route — a forged newline planted through a failed login's
+    /// user name stays inside its own quoted field, so it never starts a second event, and the forged text
+    /// lands verbatim inside the user field of the ONE event the record produced.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_KeepsAForgedNewlineInsideOneUserField()
+    {
+        var forgedUserName = "admin\n" + P + "[9999] FATAL:  a forged stderr line planted through csvlog";
+        var record =
+            "2026-09-24 01:54:43.008 UTC,\"" + forgedUserName + "\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        /* The parser's own contract (PgServerLogCsvParserTests), reconfirmed at the wiring seam: the forged
+           newline stays inside the record's UserName field rather than starting a second record. */
+        var entries = PgServerLogCsvParser.Parse(record, out var discardedAtParse);
+        var entry = Assert.Single(entries);
+        Assert.Equal(0, discardedAtParse);
+        Assert.Equal(forgedUserName, entry.UserName);
+
+        /* And exactly one event reaches the classifier — the forged text never opens a second event, and
+           no row carries the forged line's pid. */
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.DoesNotContain(rows, r => r.Pid == 9999);
+    }
+
+    /// <summary>
+    /// #4053 part a1b: the csvlog route's own no-file-yet marker throws <see cref="PgNoCsvlogFileException"/>,
+    /// never the stderr route's <see cref="PgNoStderrLogFileException"/>.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_ThrowsTheCsvNamedSkip_OnItsOwnMarker()
+    {
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { PgNoCsvlogFileException.Marker, null } });
+        await Assert.ThrowsAsync<PgNoCsvlogFileException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+
+        using var offReader = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker, null } });
+        await Assert.ThrowsAsync<PgLoggingCollectorOffException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(offReader, context, CancellationToken.None));
+    }
+
+    /// <summary>#4053 part a1b: a record the parser discarded during resync or for a bad shape is measured.</summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_MeasuresDiscardedRecords()
+    {
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        /* A cut fragment that never parses: no complete record anywhere in the body. */
+        using var reader = new FakeReader(new object?[][] { new object?[] { "not,a,valid,csvlog,record\n", "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+    }
+
+    /// <summary>
+    /// #4053 review H1: with the target's log_timezone not UTC, a csvlog record in another zone throws
+    /// <see cref="PgLogTimezoneUnsupportedException"/> — the same refusal the stderr route makes — rather
+    /// than the parser silently discarding it and the target reading as quiet.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_UnderANonUtcLogTimezone_ThrowsOnAForeignZoneRecord()
+    {
+        var record =
+            "2026-09-24 01:54:43.008 PST,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "America/New_York" } });
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// #4053 review H1: with the target's log_timezone at UTC, a csvlog record in another zone is skipped and
+    /// counted in <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/>, the same as the stderr route's
+    /// #4046 behaviour — never <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>, which would
+    /// give it the wrong note.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_UnderAUtcLogTimezone_SkipsAndCountsAForeignZoneRecord()
+    {
+        var record =
+            "2026-09-24 01:54:43.008 PST,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+    }
+
     [Fact]
     public async Task TheCollector_ClassifiesTheBody_ThrowsOnTheMarker_AndWritesTheColumnsInOrder()
     {

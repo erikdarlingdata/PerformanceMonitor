@@ -42,6 +42,14 @@ public sealed class PgServerLogCsvParserTests
         + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"" + message.Replace("\"", "\"\"") + "\","
         + ",,,,,,,,\"\",\"client backend\",,0\n";
 
+    /* Same shape as RealRecord, but log_time carries a non-zero-offset zone (#4053 review H1): the
+       parser must still return this as a record, leaving the zone judgment to the collector's
+       foreign-zone filter. */
+    private static string RecordWithZone(string zone) =>
+        "2026-09-24 01:54:43.008 " + zone + ",\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+        + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\","
+        + ",,,,,,,,\"\",\"client backend\",,0\n";
+
     /* --- 1: forged newline in a quoted field stays inside the record ---------------------------------- */
 
     [Fact]
@@ -244,5 +252,54 @@ public sealed class PgServerLogCsvParserTests
            trailing partial is not emitted and not counted as discarded. */
         Assert.Single(entries);
         Assert.Equal(1, recordsDiscarded);
+    }
+
+    /* --- 8: a non-UTC log_time is returned, not rejected (#4053 review H1) ------------------------------ */
+
+    [Fact]
+    public void NonUtcZoneRecordIsReturnedWithItsZoneText()
+    {
+        var body = CutHead + RecordWithZone("PST");
+
+        var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
+
+        var entry = Assert.Single(entries);
+        Assert.Equal(1, recordsDiscarded);
+        Assert.Equal("PST", entry.ZoneText);
+    }
+
+    /* --- 9: mid-write anchor scoring picks the parity that yields the most real records (#4053 review M1) */
+
+    [Fact]
+    public void MidWriteCut_InsideAMultiLineQuotedField_ChoosesTheAnchorThatYieldsTheRealRecords()
+    {
+        /* The text before the cut, inside the still-open quoted field, is shaped like unquoted records —
+           a forged look-alike a client could plant in a multi-line statement or DETAIL. Several embedded
+           newlines sit between the last true boundary and the body's end, so the walk must try more than
+           one candidate; scoring by total records parsed under each candidate, rather than accepting the
+           first one-record validation, must still land on the true parity. */
+        var lookAlike1 = "2026-09-24 00:00:00.000 UTC,\"a\",\"b\",1,\"c\",1.1,1,\"d\",2026-09-24 00:00:00 UTC,"
+            + "1/1,0,LOG,00000,fake1,,,,,,,,,,backend,,0";
+        var lookAlike2 = "2026-09-24 00:00:00.000 UTC,\"a\",\"b\",1,\"c\",1.1,1,\"d\",2026-09-24 00:00:00 UTC,"
+            + "1/1,0,LOG,00000,fake2,,,,,,,,,,backend,,0";
+
+        /* The multi-line field is left OPEN (no closing quote) so the body's tail is genuinely mid-write:
+           quote parity for the trailing text is unknown until an anchor is chosen and walked. Cutting right
+           before "still going" keeps every embedded newline and both look-alikes, but drops the field's
+           closing quote and the rest of the record. */
+        var midWrite = RecordWithMessage("open\n" + lookAlike1 + "\n" + lookAlike2 + "\nstill going");
+        var cut = midWrite.IndexOf("still going", System.StringComparison.Ordinal);
+        var trailingFragment = midWrite[..cut] + "still going, not yet closed";
+
+        /* Ten real records ahead of the cut mean the true parity's score (~10) is nowhere near a tie with
+           the two forged look-alikes an inverted-parity candidate could yield — the exact margin M1's fix
+           relies on: "a candidate yields at most a few planted valid records, while true parity yields
+           almost all of them." */
+        var body = CutHead + string.Concat(System.Linq.Enumerable.Repeat(RealRecord, 10)) + trailingFragment;
+
+        var entries = PgServerLogCsvParser.Parse(body, out _);
+
+        Assert.True(entries.Count >= 9, $"expected the real records to dominate, got {entries.Count}");
+        Assert.DoesNotContain(entries, e => e.Message.Contains("fake", System.StringComparison.Ordinal));
     }
 }

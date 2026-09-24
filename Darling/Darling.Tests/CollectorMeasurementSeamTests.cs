@@ -557,6 +557,10 @@ public class CollectorMeasurementSeamTests
                    line never does, so each one is a forgery, skipped rather than stored under query id 0. Measured by
                    plan capture's own ReadAsync, which is why the const lives in PgPlanCaptureCollector.cs. */
                 PgPlanCaptureCollector.ForgedCaptureMeasurement,
+                /* #4053 part a1b: csvlog records the parser discarded during resync or for a bad shape. Measured by
+                   pg_log_events' own ReadAsync on the csvlog route, which is why the const lives in
+                   PgLogEventsCollector.cs. */
+                PgLogEventsCollector.CsvRecordsDiscardedMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

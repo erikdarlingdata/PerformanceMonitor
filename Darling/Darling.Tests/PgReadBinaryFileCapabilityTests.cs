@@ -254,10 +254,12 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
 
     /// <summary>
     /// The runner's gate (#4046 part 1c): a PostgreSQL log-tail collector takes the probe's answer; any other
-    /// collector, and any SQL Server target, stays on the text route with no round trip.
+    /// collector, and any SQL Server target, stays on the text route with no round trip. pg_log_events makes a
+    /// second probe (#4053: <c>PgLogFormatCapability</c>, whether csvlog is configured); deadlocks and plan capture
+    /// still read stderr only, so they make just the one.
     /// </summary>
     [Theory]
-    [InlineData(CollectorTargetEngine.PostgreSql, "pg_log_events", true, 1)]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_log_events", true, 2)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_deadlocks", true, 1)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_plan_capture", true, 1)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_database_stats", false, 0)]

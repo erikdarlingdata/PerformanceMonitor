@@ -95,6 +95,34 @@ UNION ALL
 SELECT pg_catalog.convert_to('" + PgNoStderrLogFileException.Marker + @"', 'UTF8'), NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
+    /* The csvlog pair (#4053 part a1b), sent instead of the two above once context.PgLogUsesCsvlog says the
+       target's log_destination includes csvlog. Same shape as QueryText/BinaryQueryText, opened on
+       PgServerLogTail.TailCsvCteSql/TailCsvCteBinarySql instead: the marker arms carry
+       PgLoggingCollectorOffException.Marker for the shared "collector is off" state, and
+       PgNoCsvlogFileException.Marker — not PgNoStderrLogFileException.Marker — for "on, but no .csv file
+       yet", so the fault message this route throws names csvlog, never stderr. */
+    private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
     public override string Name => "pg_log_events";
 
     public override string TargetTable => "pg_log_events";
@@ -118,7 +146,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         _ = RequireKey(context);
-        return new(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText);
+        return new(context.PgLogUsesCsvlog
+            ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+            : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
     }
 
     private static PgLogHashKey RequireKey(CollectorContext context) =>
@@ -198,6 +228,36 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 throw new PgLoggingCollectorOffException();
             }
 
+            var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
+
+            if (context.PgLogUsesCsvlog)
+            {
+                /* #4053 part a1b: the csvlog route's own "no file yet" marker — distinct from the stderr
+                   route's PgNoStderrLogFileException, so the fault message names csvlog, not stderr. */
+                if (string.Equals(body, PgNoCsvlogFileException.Marker, StringComparison.Ordinal))
+                {
+                    throw new PgNoCsvlogFileException();
+                }
+
+                var entries = PgServerLogCsvParser.Parse(body ?? string.Empty, out var recordsDiscarded);
+
+                /* The same foreign-zone rule the stderr path applies through
+                   PgLogEntryAssembler.Assemble(body, logTimezoneIsUtc, out foreignZoneLines): under a UTC
+                   log_timezone a record in another zone is not the server's own and is skipped and counted
+                   rather than refusing the whole read; otherwise a foreign zone refuses the read whole, the
+                   #2993 trade. */
+                var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
+                PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+                if (recordsDiscarded > 0)
+                {
+                    context.Measure(CsvRecordsDiscardedMeasurement, recordsDiscarded);
+                }
+
+                rows.AddRange(classifier.Classify(kept));
+                continue;
+            }
+
             /* The second marker row (#3997): logging_collector is on but the tail excluded every file as a
                csvlog/jsonlog sibling, so there is no stderr-format file this cycle. Same reasoning as above. */
             if (string.Equals(body, PgNoStderrLogFileException.Marker, StringComparison.Ordinal))
@@ -209,11 +269,59 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                abandons the batch, which is the trade the deadlock parser argues for (#2993) — unless the
                target's own log_timezone renders UTC, when a line in another zone is not the server's and is
                skipped and counted instead (#4046). */
-            rows.AddRange(classifier.Classify(body, PgServerLogTail.LogTimezoneIsUtc(reader, 1), out var foreignZoneLines));
-            PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+            rows.AddRange(classifier.Classify(body, logTimezoneIsUtc, out var stderrForeignZoneLines));
+            PgServerLogTail.MeasureForeignZoneLines(context, stderrForeignZoneLines);
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The count a consumer records on its collection-log row when the csvlog parser discarded a record
+    /// (a resync fragment or a bad shape) (#4053 part a1b): reported only when &gt; 0, following
+    /// <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>'s exact pattern.
+    /// </summary>
+    public const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
+
+    /// <summary>
+    /// Filters <paramref name="entries"/> the same way <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>
+    /// filters stderr lines (#4053 part a1b): under a UTC <c>log_timezone</c> a record in another zone is not the
+    /// server's own and is dropped and counted in <paramref name="foreignZoneLines"/>; otherwise a foreign zone
+    /// throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole batch, the same #2993 trade the
+    /// stderr assembler makes.
+    /// </summary>
+    private static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
+    {
+        foreignZoneLines = 0;
+
+        if (!logTimezoneIsUtc)
+        {
+            foreach (var entry in entries)
+            {
+                if (!PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+                {
+                    throw new PgLogTimezoneUnsupportedException(entry.ZoneText);
+                }
+            }
+
+            return entries;
+        }
+
+        var kept = new List<PgLogEntry>(entries.Count);
+
+        foreach (var entry in entries)
+        {
+            if (PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+            {
+                kept.Add(entry);
+            }
+            else
+            {
+                foreignZoneLines++;
+            }
+        }
+
+        return kept;
     }
 
     /// <exception cref="InvalidOperationException">The event was never stamped with the store's keyed identities
