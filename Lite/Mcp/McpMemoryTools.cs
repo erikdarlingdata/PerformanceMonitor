@@ -166,17 +166,7 @@ public sealed class McpMemoryTools
         }
     }
 
-    [McpServerTool(Name = "get_memory_pressure_events"), Description(@"Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.
-
-Indicator scale (applies to both memory_indicators_process and memory_indicators_system):
-  0-1 = normal, no pressure
-  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)
-  3+  = severe pressure (aggressive buffer pool / plan cache eviction)
-
-memory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).
-memory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).
-
-Not available on Azure SQL DB (ring buffer not exposed). Process pressure: check get_memory_grants and get_memory_clerks. System pressure with process normal: check get_server_properties (likely another process on the box, not SQL Server).")]
+    [McpServerTool(Name = "get_memory_pressure_events"), Description("Gets memory pressure notification events (memory_notification: RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, RESOURCE_MEM_STEADY) from the RING_BUFFER_RESOURCE_MONITOR ring buffer (sp_pressuredetector's source), over a sample_time window ending at as_of (default 24h), oldest first. memory_indicators_process/_system: 0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction); process is this instance, system is the whole box. Empty: none in the window. not_collected: Azure SQL DB has no ring buffer.\n<<GUIDE>> Gets memory pressure notifications from the RING_BUFFER_RESOURCE_MONITOR ring buffer (same source as sp_pressuredetector). Returns RESOURCE_MEMPHYSICAL_LOW, RESOURCE_MEMVIRTUAL_LOW, RESOURCE_MEMPHYSICAL_HIGH, and RESOURCE_MEM_STEADY notifications with indicator values.\n\nIndicator scale (applies to both memory_indicators_process and memory_indicators_system):\n  0-1 = normal, no pressure\n  2   = medium pressure (SQL Server's Resource Monitor starts trimming caches and reducing grants)\n  3+  = severe pressure (aggressive buffer pool / plan cache eviction)\n\nmemory_indicators_process = SQL Server process itself is under memory pressure (workload-induced).\nmemory_indicators_system  = Windows is signaling low memory system-wide (could be other tenants on the box).\n\nNot available on Azure SQL DB (ring buffer not exposed). Process pressure: check get_memory_grants and get_memory_clerks. System pressure with process normal: check get_server_properties (likely another process on the box, not SQL Server).")]
     public static async Task<string> GetMemoryPressureEvents(
         LocalDataService dataService,
         ServerManager serverManager,

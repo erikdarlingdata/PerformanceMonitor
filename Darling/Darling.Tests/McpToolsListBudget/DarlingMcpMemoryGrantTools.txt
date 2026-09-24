@@ -4,7 +4,7 @@ param get_memory_grants.as_of 167
 param get_memory_grants.hours_back 120
 param get_memory_grants.server_name 28
 
-tool get_memory_pressure_events 835
+tool get_memory_pressure_events 606
 param get_memory_pressure_events.as_of 167
 param get_memory_pressure_events.hours_back 29
 param get_memory_pressure_events.server_name 28
