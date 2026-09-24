@@ -1,5 +1,5 @@
 # McpLongQueryTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_long_query_completions 1037
+tool get_long_query_completions 617
 param get_long_query_completions.as_of 167
 param get_long_query_completions.hours_back 29
 param get_long_query_completions.limit 134
