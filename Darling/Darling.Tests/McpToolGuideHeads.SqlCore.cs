@@ -232,3 +232,67 @@ public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
         Assert.Contains("unique_queries=null (NOT 0", McpToolGuideTests.Served("get_daily_summary_range").Tail!, StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// #3898 D2 head pins for <c>get_active_queries</c>, joining the sqlCore family. Converted out of
+/// <c>DarlingMcpSessionTools</c> (Darling) and its Lite twin. Lite's twin is
+/// <c>Lite.Tests/McpToolGuideHeadsSqlCoreActiveQueriesTests</c>. The head is byte-identical on both SKUs (the
+/// generic cross-SKU pin in <see cref="McpToolGuideTests"/> also covers this); each product's own tail keeps its
+/// own original prose, including the one line that names that product's own blocked-process-report tool.
+/// </summary>
+public sealed class McpToolGuideHeadsSqlCoreActiveQueriesTests
+{
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_active_queries", "database_name/blocking_only filter IN SQL"),
+        ("get_active_queries", "total_snapshots is the filtered count"),
+        ("get_active_queries", "truncated means over limit"),
+        ("get_active_queries", "serve null for zero and not-applicable alike"),
+        ("get_active_queries", "Head blockers are never stripped"),
+        ("get_active_queries", "not_captured, filtered, or past_page"),
+        ("get_active_queries", "A filtered empty doesn't mean nothing was ever collected"),
+    ];
+
+    [Fact]
+    public void Head_CarriesItsGuardrailFacts_AndThePointer()
+    {
+        var served = McpToolGuideTests.Served("get_active_queries");
+        Assert.NotNull(served.Tail);
+        Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+        Assert.True(served.Served.Length <= 620, $"get_active_queries: served head {served.Served.Length} is over the 620 target");
+        Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"get_active_queries.{p.Parameter}: {p.Length} > 200"));
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>D2 trimmed <c>blocking_only</c>'s description from 238 to 134 chars to fit the 200-char
+    /// parameter cap; the elaboration sentence it lost moved verbatim into the tail rather than being dropped.</summary>
+    [Fact]
+    public void BlockingOnlyParameter_KeepsItsGuardrailClause_AndMovesTheRestToTheTail()
+    {
+        var served = McpToolGuideTests.Served("get_active_queries");
+        var blockingOnly = Assert.Single(served.ParameterDescriptionLengths, p => p.Parameter == "blocking_only");
+        Assert.True(blockingOnly.Length <= 200, $"blocking_only: {blockingOnly.Length} > 200");
+
+        Assert.Contains(
+            "Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it.",
+            served.Tail,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>The two blocking disclosures (D2's densest guardrail) both survive the move: the head states
+    /// the shape, Darling's own tail keeps the original prose that explains each reason code and names
+    /// Darling's own blocking tool, <c>get_blocking</c>.</summary>
+    [Fact]
+    public void BlockerNotShownCodes_AreExplainedInTheTail()
+    {
+        var tail = McpToolGuideTests.Served("get_active_queries").Tail!;
+        Assert.Contains("not_captured (the blocker held no running request at that capture", tail, StringComparison.Ordinal);
+        Assert.Contains("get_blocking has its input buffer", tail, StringComparison.Ordinal);
+        Assert.Contains("filtered (your database_name filter excluded it)", tail, StringComparison.Ordinal);
+        Assert.Contains("past_page (it is in the filtered population but beyond limit)", tail, StringComparison.Ordinal);
+    }
+}
