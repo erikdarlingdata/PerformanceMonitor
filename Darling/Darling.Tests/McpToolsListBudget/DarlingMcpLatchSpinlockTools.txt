@@ -5,7 +5,7 @@ param get_latch_stats.hours_back 37
 param get_latch_stats.server_name 28
 param get_latch_stats.top 50
 
-tool get_spinlock_stats 597
+tool get_spinlock_stats 561
 param get_spinlock_stats.as_of 167
 param get_spinlock_stats.hours_back 37
 param get_spinlock_stats.server_name 28
