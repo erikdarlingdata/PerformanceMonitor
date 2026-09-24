@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -132,6 +134,12 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
     private const string PlanMarkerLiteral = "LOG:  duration: ";
 
+    /* The csvlog twin of PlanMarkerLiteral (#4053 part b2): csvlog's own "message" field never carries the
+       severity label — that is its own column — so a captured record's message reads "duration: N ms
+       plan:\n{json}" with no "LOG:  " head, verified live on a pg18 rig with logging_collector=on and
+       log_destination=csvlog. */
+    private const string PlanMarkerCsvLiteral = "duration: ";
+
     /* #4058 item 3: (m[1])::bigint and (m[2])::double precision throw when a forged capture ("LOG:  duration:"
        with any query id, planted the same way #4008 planted a whole block) exceeds the target type — a
        19-plus-digit query id, or a duration with hundreds of digits — and PostgreSQL raises the cast error
@@ -161,6 +169,52 @@ UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 2000";
+
+    /* The csvlog pair (#4053 part b2), sent instead of QueryText/BinaryQueryText once
+       context.PgLogUsesCsvlog says the target's log_destination includes csvlog — the same flag
+       PgLogEventsCollector reads for its own csvlog pair (#4053 part a1b). Opened on
+       PgServerLogTail.TailCsvCteSql/TailCsvCteBinarySql instead of the stderr twins, this collector's own
+       regexp_matches is dropped entirely: a csvlog record already carries the plan JSON quoted whole in
+       its own "message" field (see PgServerLogCsvParser's type header for the 26-column shape), so there
+       is no block to extract with SQL — ReadAsync gets the raw body and calls PgServerLogCsvParser.Parse
+       itself, the same shape PgLogEventsCollector's csv branch takes. The marker arms carry
+       PgNoCsvlogFileException.Marker, not PgNoStderrLogFileException.Marker, so the fault this route
+       throws names csvlog rather than stderr — PgLogEventsCollector's csv branch makes the identical
+       choice. */
+    private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /* The binary-route twin of CsvQueryText (#4053 part b2), the same shape BinaryQueryText is to
+       QueryText: pg_read_binary_file in place of pg_read_file, sent only once
+       PgReadBinaryFileCapability.IsGrantedAsync finds the grant. tail.body is bytea here, so the marker
+       arms are cast through convert_to, the same reason PgLogEventsCollector's own binary-route csv pair
+       gives. */
+    private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /* The guarded duration shape, in C# (#4053 part b2): the same "^[0-9]{1,15}(\.[0-9]{1,9})?$" the two
+       stderr statements above cast under a CASE chain, so a forged duration text — csvlog quotes it inside
+       the "message" field the same as any other value, so nothing server-side can guard it the way the
+       stderr regex does — is rejected before double.TryParse ever sees it rather than trusted to fail
+       parsing on every malformed shape ("1.2.3" parses as 1.2 under some cultures' TryParse otherwise). */
+    private static readonly Regex s_csvDurationShape = new(
+        @"^[0-9]{1,15}(\.[0-9]{1,9})?$", RegexOptions.Compiled, TimeSpan.FromSeconds(1));
 
     /* The binary-route twin (#4046 part 1c) — same parity gap as the deadlock reader, since both filter
        tail.body with a server-side regexp_matches: encode(..., 'escape') feeds the identical pattern, and
@@ -229,7 +283,9 @@ LIMIT 2000";
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
-        new(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText);
+        new(context.PgLogUsesCsvlog
+            ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+            : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -265,10 +321,163 @@ LIMIT 2000";
         + "capture always has: a client can plant one through a syntax error whose STATEMENT: companion "
         + "echoes attacker-chosen text back into the log (#4058). The read went on without them";
 
+    /// <summary>
+    /// The count a consumer records on its collection-log row when the csvlog parser discarded a record
+    /// (#4053 part b2), following <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>'s exact
+    /// pattern — the same underlying parser, the same discard reasons (a resync fragment or a bad shape).
+    /// </summary>
+    /* A literal on purpose: the measurement-label gate (CollectorMeasurementSeamTests) reads labels only as
+       string-literal consts in the collector's own file. It must stay equal to PgLogEventsCollector's label. */
+    public const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
+
+    /// <summary>
+    /// The csvlog branch (#4053 part b2): <c>PgServerLogCsvParser.Parse</c> on the raw body — the same call
+    /// <see cref="PgLogEventsCollector"/>'s own csv branch makes — then keeps only the records whose
+    /// <c>Message</c> is an auto_explain duration-plan message, verified on the rig: csvlog quotes the
+    /// entire "duration: N ms  plan:\n{...}" text, tabs and all, inside the record's own <c>message</c>
+    /// field, and PostgreSQL's own <c>query_id</c> column (PG14+) carries the identity — preferred over
+    /// parsing it out of any prefix text, because csvlog has no <c>%Q</c>-in-prefix text to parse at all.
+    /// The duration is taken from the message with the SAME guarded shape the stderr SQL casts under a CASE
+    /// chain (<see cref="s_csvDurationShape"/>), so a forged duration in a planted message is skipped and
+    /// counted under <see cref="ForgedCaptureMeasurement"/> exactly as the stderr route's guarded cast
+    /// would null it, rather than parsed by double.TryParse's own more permissive grammar.
+    /// </summary>
+    private async ValueTask<List<Row>> ReadCsvAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var rows = new List<Row>();
+        var forgedCaptures = 0;
+        var totalRecordsDiscarded = 0;
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* #4046 part 1c: on the binary route column 0 is bytea, real tail data and the convert_to'd
+               marker rows alike — the identical decode PgLogEventsCollector's own csv branch applies. */
+            var body = reader.IsDBNull(0)
+                ? null
+                : context.PgReadBinaryFileGranted
+                    ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0), context.PgLogEncoding ?? System.Text.Encoding.UTF8)
+                    : reader.GetString(0);
+
+            if (string.Equals(body, PgLoggingCollectorOffException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgLoggingCollectorOffException();
+            }
+
+            if (string.Equals(body, PgNoCsvlogFileException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgNoCsvlogFileException();
+            }
+
+            var entries = PgServerLogCsvParser.Parse(body ?? string.Empty, out var recordsDiscarded);
+            totalRecordsDiscarded += recordsDiscarded;
+
+            foreach (var entry in entries)
+            {
+                /* csvlog carries severity in its own field ("error_severity"), never glued onto Message the
+                   way the stderr line's log_line_prefix glues "LOG:  " on — verified on the rig: the
+                   captured record's message field is "duration: N ms  plan:\n{json}", not
+                   "LOG:  duration: ...". PlanMarkerCsvLiteral is that literal minus the stderr-only
+                   "LOG:  " head. A record whose Message does not start with it is not an auto_explain
+                   capture and is not this collector's concern — PgLogEventsCollector's own classifier
+                   reads the same tail for every OTHER family. */
+                if (entry.Message is null || !entry.Message.StartsWith(PlanMarkerCsvLiteral, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                /* auto_explain writes at LOG. The stderr route's regex requires the LOG label, so the csv route
+                   does too (review round 1): without it, a client's RAISE NOTICE or WARNING whose message
+                   starts with the marker would reach the parse, which the stderr route never allows. */
+                if (!string.Equals(entry.Severity, "LOG", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var rest = entry.Message[PlanMarkerCsvLiteral.Length..];
+                var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
+
+                /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way.
+                   It is not a capture, and not forged, so it is skipped WITHOUT counting (review round 1);
+                   counting it would grow forged_captures_skipped with every slow statement. */
+                if (msIndex < 0)
+                {
+                    continue;
+                }
+
+                var durationText = rest[..msIndex];
+                var planJson = rest[(msIndex + " ms  plan:".Length)..].TrimStart('\r', '\n');
+
+                /* The query_id column (PG14+, 0-based index 25) — preferred over any prefix text, because
+                   csvlog carries no %Q-rendered prefix at all: the identity is PostgreSQL's own column. A
+                   query id that is not a real value — %Q renders 0 when compute_query_id is off, never an
+                   unparseable string — marks this record as one this collector cannot attribute. */
+                if (!long.TryParse(
+                        entry.RawText.Length > 0 ? QueryIdFromRawText(entry.RawText) : null,
+                        NumberStyles.Integer | NumberStyles.AllowLeadingSign,
+                        CultureInfo.InvariantCulture,
+                        out var queryId))
+                {
+                    forgedCaptures++;
+                    continue;
+                }
+
+                if (!s_csvDurationShape.IsMatch(durationText)
+                    || !double.TryParse(durationText, NumberStyles.Float, CultureInfo.InvariantCulture, out var durationMs))
+                {
+                    forgedCaptures++;
+                    continue;
+                }
+
+                var parsed = PgPlanLogParser.FromBlock(queryId, durationMs, planJson);
+
+                if (parsed is not null)
+                {
+                    rows.Add(new Row(
+                        QueryId: parsed.Value.QueryId,
+                        PlanHash: parsed.Value.PlanHash,
+                        DurationMs: parsed.Value.DurationMs,
+                        NodeCount: parsed.Value.NodeCount,
+                        TopNodeType: parsed.Value.TopNodeType,
+                        PlanJson: parsed.Value.PlanJson));
+                }
+            }
+        }
+
+        if (forgedCaptures > 0)
+        {
+            context.Measure(ForgedCaptureMeasurement, forgedCaptures);
+        }
+
+        if (totalRecordsDiscarded > 0)
+        {
+            context.Measure(CsvRecordsDiscardedMeasurement, totalRecordsDiscarded);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Reads the <c>query_id</c> field — the last of the 26 csvlog columns (#4053 part b2) — straight off
+    /// the record's own raw text rather than re-splitting it through <c>PgServerLogCsvParser</c>'s private
+    /// field splitter, which <see cref="PgLogEntry"/> does not expose past field 19 (its own consumers never
+    /// needed the trailing columns). <c>query_id</c> is PostgreSQL's own bigint rendering — never quoted —
+    /// so it is the text after the LAST comma in the record.
+    /// </summary>
+    private static string? QueryIdFromRawText(string rawText)
+    {
+        var lastComma = rawText.LastIndexOf(',');
+        return lastComma < 0 ? null : rawText[(lastComma + 1)..].TrimEnd('\r', '\n');
+    }
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
         var forgedCaptures = 0;
+
+        if (context.PgLogUsesCsvlog)
+        {
+            return await ReadCsvAsync(reader, context, cancellationToken);
+        }
 
         while (await reader.ReadAsync(cancellationToken))
         {

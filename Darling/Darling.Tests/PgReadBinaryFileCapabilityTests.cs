@@ -262,12 +262,12 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     /// The runner's gate (#4046 part 1c): a PostgreSQL log-tail collector takes the probe's answer; any other
     /// collector, and any SQL Server target, stays on the text route with no round trip. A log-tail collector in
     /// <c>PgLogFormatCapability.RoutedCollectors</c> makes a second probe (#4053: whether csvlog is configured) —
-    /// pg_log_events since part a1b and pg_deadlocks since part b1 (pg_plan_capture joins with part b2).
+    /// pg_log_events since part a1b, pg_deadlocks since part b1 and pg_plan_capture since part b2.
     /// </summary>
     [Theory]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_log_events", true, 2)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_deadlocks", true, 2)]
-    [InlineData(CollectorTargetEngine.PostgreSql, "pg_plan_capture", true, 1)]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_plan_capture", true, 2)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_database_stats", false, 0)]
     [InlineData(CollectorTargetEngine.SqlServer, "pg_log_events", false, 0)]
     public async Task TheRunnerGateProbesOnlyAPostgresLogTailCollector(

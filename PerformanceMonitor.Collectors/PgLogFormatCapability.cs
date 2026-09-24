@@ -53,16 +53,16 @@ public static class PgLogFormatCapability
     /// <summary>
     /// The collectors that read the csvlog tail when this cache says csvlog is on, and so whose no-file marker
     /// is evidence about THIS cache (#4053 review L1): <c>pg_log_events</c> (part a1b) and <c>pg_deadlocks</c>
-    /// (part b1). A collector still reading only the stderr tail must NOT be listed: its own
-    /// <see cref="PgNoStderrLogFileException"/> says nothing about whether csvlog is configured, and on a
-    /// csvlog-only target it would drop this verdict every cycle. <c>pg_plan_capture</c> joins with its own
-    /// csvlog route (part b2). Deliberately narrower than
+    /// (part b1) and <c>pg_plan_capture</c> (part b2). A collector still reading only the stderr tail must NOT
+    /// be listed: its own <see cref="PgNoStderrLogFileException"/> says nothing about whether csvlog is
+    /// configured, and on a csvlog-only target it would drop this verdict every cycle. Deliberately narrower than
     /// <see cref="PgReadBinaryFileCapability"/>'s own grant cache, which is genuinely shared by all three.
     /// </summary>
     public static readonly IReadOnlySet<string> RoutedCollectors = new HashSet<string>(StringComparer.Ordinal)
     {
         "pg_log_events",
         "pg_deadlocks",
+        "pg_plan_capture",
     };
 
     private sealed record CacheEntry(bool UsesCsvlog, DateTime CheckedAtUtc);
