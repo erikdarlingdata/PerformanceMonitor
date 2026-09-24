@@ -787,7 +787,10 @@ public sealed class PgTargetBlockingTests
             var anomaly = Assert.Single(anomalies, a => a.Key == PgTargetFactKeys.AnomalyBlocking);
             Assert.Equal(3, anomaly.Value);
             Assert.Equal(3, anomaly.Metadata["peak_blocked_sessions"]);
-            Assert.InRange(anomaly.Metadata["avg_blocked_sessions"], 2.9, 3.0);
+            /* #3653 A8 option B: avg_blocked_sessions now comes from the WORST-SCORING TILE's own mean (one target-local
+               hour of the 4h chain), not the whole window's mean across all four hours — so it can differ slightly from
+               the pre-tile whole-window figure (was pinned 2.9–3.0; the worst tile's hour reads 2.8333...). */
+            Assert.InRange(anomaly.Metadata["avg_blocked_sessions"], 2.8, 3.0);
             Assert.Equal(0, anomaly.Metadata["baseline_low_quality"]);
             Assert.Equal(0, anomaly.Metadata["threshold_lineage"]);
             Assert.True(anomaly.Metadata["deviation_sigma"] >= 2.0);
