@@ -114,10 +114,10 @@ public static class McpSchemaCompat
 
             /* #3898 D10: the four entry tools carry _meta["anthropic/alwaysLoad"] = true so Claude Code
                keeps them loaded when it defers the rest. JsonObject seeds McpServerToolCreateOptions.Meta,
-               which the SDK copies onto the served Tool.Meta (ModelContextProtocol.Core 2.2.0). */
-            var meta = AlwaysLoadedToolNames.Contains(toolName)
-                ? new JsonObject { ["anthropic/alwaysLoad"] = true }
-                : null;
+               which the SDK copies onto the served Tool.Meta (ModelContextProtocol.Core 2.2.0). The factory
+               below builds a fresh JsonObject per created tool: a JsonNode is mutable and belongs to one
+               parent, so one instance must not be shared by every service provider that builds the tool. */
+            var alwaysLoad = AlwaysLoadedToolNames.Contains(toolName);
 
             /* Mirror the SDK's static-method registration (McpServerBuilderExtensions.WithTools<T>):
                Services = the DI provider so service-typed parameters are excluded from the schema and
@@ -131,7 +131,7 @@ public static class McpSchemaCompat
                         Services = services,
                         SchemaCreateOptions = GeminiCompatSchemaOptions,
                         Description = served,
-                        Meta = meta
+                        Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
                     })));
         }
 
