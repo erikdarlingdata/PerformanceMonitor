@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
@@ -27,6 +28,99 @@ public sealed partial class PgTargetAnomalyDetector
     /// PostgreSQL dialect, server-scoped, window-bound, collector tables only) reflects it.
     /// </summary>
     public const string CpuBurnWindowSql = PgTargetFactCollector.PgTargetKernelCpuSql;
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3c): <see cref="CpuBurnWindowSql"/>'s tile twin — keeps every upstream CTE
+    /// (<c>ranked</c>/<c>series</c>/<c>deltas</c>/<c>rated</c>, which already expose <c>collection_time</c> under
+    /// that name) and groups the <c>per_collection</c> aggregation, and the outer select, by target-local hour
+    /// instead of collapsing the whole window. Column order per tile: 0 local_hour, 1 peak_cores_busy,
+    /// 2 mean_cores_busy, 3 rated_samples, 4 peak_time, 5 top_query_id — the top query rides per tile, the worst
+    /// tile's is what the detector reports (design's "extra window scalars" rule). Binds <c>$4..$6</c> from the
+    /// analysis window's clock.
+    /// </summary>
+    public const string CpuBurnTileWindowSql = @"
+WITH ranked AS (
+    SELECT
+        collection_time,
+        database_name,
+        query_id,
+        coalesce(exec_user_time_ms, 0)   AS user_ms_total,
+        coalesce(exec_system_time_ms, 0) AS system_ms_total,
+        coalesce(plan_cpu_time_ms, 0)    AS plan_ms_total,
+        stats_since,
+        DENSE_RANK() OVER (ORDER BY collection_time) AS k
+    FROM pg_kernel_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   query_id IS NOT NULL
+),
+series AS (
+    SELECT
+        collection_time,
+        database_name,
+        query_id,
+        user_ms_total,
+        system_ms_total,
+        plan_ms_total,
+        stats_since,
+        k,
+        LAG(k)               OVER identity AS prev_k,
+        LAG(collection_time) OVER identity AS prev_time,
+        LAG(user_ms_total)   OVER identity AS prev_user,
+        LAG(system_ms_total) OVER identity AS prev_system,
+        LAG(plan_ms_total)   OVER identity AS prev_plan,
+        LAG(stats_since)     OVER identity AS prev_since
+    FROM ranked
+    WINDOW identity AS (PARTITION BY database_name, query_id ORDER BY collection_time)
+),
+deltas AS (
+    SELECT
+        collection_time,
+        database_name,
+        query_id,
+        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', prev_time))) AS interval_sec,
+        (stats_since IS DISTINCT FROM prev_since OR user_ms_total < prev_user) AS reset_here,
+        CASE WHEN stats_since IS DISTINCT FROM prev_since OR user_ms_total < prev_user
+             THEN user_ms_total   ELSE user_ms_total   - prev_user   END AS user_ms,
+        CASE WHEN stats_since IS DISTINCT FROM prev_since OR user_ms_total < prev_user
+             THEN system_ms_total ELSE system_ms_total - prev_system END AS system_ms,
+        CASE WHEN stats_since IS DISTINCT FROM prev_since OR user_ms_total < prev_user
+             THEN plan_ms_total   ELSE GREATEST(plan_ms_total - prev_plan, 0) END AS plan_ms
+    FROM series
+    WHERE prev_k = k - 1
+),
+rated AS (
+    SELECT *
+    FROM deltas
+    WHERE interval_sec > 0
+),
+per_collection AS (
+    SELECT
+        collection_time,
+        interval_sec,
+        SUM(user_ms)   AS user_ms,
+        SUM(system_ms) AS system_ms,
+        SUM(plan_ms)   AS plan_ms,
+        (SUM(user_ms) + SUM(system_ms) + SUM(plan_ms)) / (interval_sec * 1000.0) AS cores_busy
+    FROM rated
+    GROUP BY collection_time, interval_sec
+),
+by_query AS (
+    SELECT " + WindowTiles.LocalHourSql + @" AS local_hour, database_name, query_id, SUM(user_ms + system_ms + plan_ms) AS cpu_ms,
+           ROW_NUMBER() OVER (PARTITION BY " + WindowTiles.LocalHourSql + @" ORDER BY SUM(user_ms + system_ms + plan_ms) DESC, query_id) AS rk
+    FROM rated
+    GROUP BY " + WindowTiles.LocalHourSql + @", database_name, query_id
+)
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(cores_busy) AS peak_cores_busy,
+       AVG(cores_busy) AS mean_cores_busy,
+       CAST(count(*) AS integer) AS rated_samples,
+       (array_agg(collection_time ORDER BY cores_busy DESC))[1] AS peak_time,
+       (SELECT query_id FROM by_query AS b WHERE b.local_hour = " + WindowTiles.LocalHourSql + @" AND b.rk = 1) AS top_query_id
+FROM per_collection
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>
     /// <c>ANOMALY_PG_CPU_BURN</c> (/* filled by lane 28 of #3691 — the marker stays, as v1's did */): the window's
@@ -62,42 +156,82 @@ public sealed partial class PgTargetAnomalyDetector
     {
         try
         {
-            double peakCores, meanCores;
-            long ratedSamples;
-            double? topQueryId = null;
+            /* #3653 A8 option B: per-hour tiles against the tile's own (hour, dow) bucket, never-blind fallback to
+               today's window-peak path when no tile scores. */
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgCpuBurnCores, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
+            var tiles = new List<WindowTile>();
+            /* top_query_id has no home in WindowTile (a family-specific extra scalar, design's "worst tile" rule),
+               so it rides beside the tile list keyed by the tile's own LocalHour. */
+            var topQueryIdByTile = new Dictionary<DateTime, double>();
 
             await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
-                using var cmd = WindowCommand(CpuBurnWindowSql, connection, context);
+                using var cmd = WindowCommand(CpuBurnTileWindowSql, connection, context);
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-                if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-                peakCores = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-                meanCores = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-                ratedSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-                if (!reader.IsDBNull(9))
-                    topQueryId = Convert.ToDouble(reader.GetValue(9));
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    var tile = WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
+                    tiles.Add(tile);
+                    if (!reader.IsDBNull(5))
+                        topQueryIdByTile[tile.LocalHour] = Convert.ToDouble(reader.GetValue(5));
+                }
             }
 
-            if (ratedSamples == 0 || peakCores <= 0) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0 || whole.Peak <= 0) return;
 
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgCpuBurnCores, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
-
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakCores, meanCores,
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpuBurnCores), PgCpuBurnCoresFloor, PgCpuBurnCoresFallback, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakCores, meanCores;
+            long ratedSamples;
+            double? topQueryId;
+
+            if (tv is null)
+            {
+                /* Never-blind fallback: today's whole-window path against the start bucket. */
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgCpuBurnCores, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, whole.Peak, whole.Mean,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpuBurnCores), PgCpuBurnCoresFloor, PgCpuBurnCoresFallback, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+
+                peakCores = whole.Peak;
+                meanCores = whole.Mean;
+                ratedSamples = whole.Samples;
+                /* The whole-window fallback's top query: the WORST tile's own value — there is no whole-window
+                   aggregate for a scalar WindowTiles.WholeWindow does not carry. */
+                topQueryId = topQueryIdByTile.Count > 0 ? topQueryIdByTile.Values.Max() : null;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakCores = tv.Value.Tile.Peak;
+                meanCores = tv.Value.Tile.Mean;
+                ratedSamples = tv.Value.Tile.Samples;
+                topQueryId = topQueryIdByTile.TryGetValue(tv.Value.Tile.LocalHour, out var top) ? top : null;
+                if (!decision.Fire) return;
+            }
 
             /* unmeasured: both bars (see AnomalyThresholds) — the helper's default stamp, threshold_lineage = 0. */
             var metadata = ZScoreMetadata(baseline, decision, ratedSamples);
             metadata["peak_cores_busy"] = peakCores;
             metadata["mean_cores_busy"] = meanCores;
             metadata["mean_sigma"] = decision.MeanSigma ?? 0.0;
-            if (topQueryId is { } top)
-                metadata[PgTargetScorer.KernelTopQueryIdKey] = top;
+            if (topQueryId is { } topId)
+                metadata[PgTargetScorer.KernelTopQueryIdKey] = topId;
             /* The ratio the advice states ("4.2 cores busy against a routine of 1.1 for this hour"): peak over the
                bucket's robust centre — the median when the bucket has one, the mean otherwise — the same centre the
                deviation prose names, so the sentence's two numbers agree. Stamped only when the centre is a number
@@ -105,6 +239,8 @@ public sealed partial class PgTargetAnomalyDetector
             var centre = baseline.Median > 0 ? baseline.Median : baseline.Mean;
             if (centre > 0)
                 metadata["baseline_ratio"] = peakCores / centre;
+            if (tv is { } verdict)
+                WindowTiles.AddTileMetadata(metadata, verdict, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {
