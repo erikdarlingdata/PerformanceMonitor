@@ -763,3 +763,5 @@ Copyright (c) 2026 Darling Data, LLC. Licensed under the MIT License. See [LICEN
 ## Author
 
 Erik Darling — [erikdarling.com](https://erikdarling.com) — [Darling Data, LLC](https://darlingdata.com)
+
+<!-- probe: docs-only fast path check, PR #4163 -->
