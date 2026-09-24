@@ -725,6 +725,131 @@ public sealed class RdsDeadlockIngestorTests
             () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
 
         Assert.IsNotType<RdsLogUnavailableException>(failure);
+
+        /* Also: portion 2's own download presents portion 1's committed marker — the carry's marker
+           moved even though portion 1 held no events, exactly as the plain (non-csvlog) split test above
+           already checks for the stderr route. */
+        Assert.Equal("MARKER-1", client.Downloads[1].Marker);
+    }
+
+    /// <summary>
+    /// Lane 4053-rds-tests item 1: the carry survives a store failure on the SECOND portion, and re-serving
+    /// the same bytes (as the transport would if the write never committed) throws again over an identical
+    /// request. Portion 1 (pending) holds only the straddling record's head, so there is no write and the
+    /// carry's own marker commits; portion 2 holds the tail and throws on the dead store — a write was
+    /// attempted. Serving portion 2 again presents the SAME marker as the first attempt (the failed write
+    /// never advanced it) and throws again, because the record is still whole rather than half-consumed.
+    /// </summary>
+    [Fact]
+    public async Task AStoreFailureOnTheSecondPortion_PresentsTheSameMarkerAgain_AndThrowsAgain()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var full = CsvDeadlockRecord();
+        var cut = full.IndexOf("Process 5012 waits", StringComparison.Ordinal);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvPortions = new Queue<(string, bool)>(new[]
+            {
+                (full[..cut], true),
+            }),
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        /* Portion 1: pending, holds only the record's head. No events, so no write; the carry commits. */
+        var first = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, first.Rows);
+
+        /* Portion 2: the tail, served through CsvBody/NextCsvMarker so it resumes with the committed carry.
+           Reaches the write, which throws on the dead store — the marker does NOT advance past portion 1's. */
+        client.CsvBody = full[cut..];
+        client.NextCsvMarker = "MARKER-2";
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+
+        /* Serve the SAME bytes again: client.CsvBody/NextCsvMarker are untouched, so this is exactly the
+           request a resumed-but-not-yet-advanced caller would make. The third download must present the
+           SAME marker as the second, and the record — still whole — must throw again rather than being
+           silently dropped or split. */
+        var third = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(third);
+        Assert.Equal(3, client.Downloads.Count);
+        Assert.Equal(client.Downloads[1].Marker, client.Downloads[2].Marker);
+    }
+
+    /// <summary>
+    /// Lane 4053-rds-tests item 2: a record stamped in a non-UTC zone, under <c>logTimezoneIsUtc: false</c>,
+    /// makes the csvlog route throw <see cref="PgLogTimezoneUnsupportedException"/> — the same #2993 refusal
+    /// the stderr route and <see cref="ARefusedLogTimezoneDoesNotAdvanceTheMarker"/> above pin — and the
+    /// refusal must not move the marker: the next download presents the same (unmoved) marker as the first.
+    /// </summary>
+    [Fact]
+    public async Task ANonUtcZoneRecord_ThrowsPgLogTimezoneUnsupportedException_AndTheNextDownloadPresentsTheOldMarker()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvBody = CsvDeadlockRecord("PST"),
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: false, pgLogUsesCsvlog: true));
+
+        Assert.Single(client.Downloads);
+
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: false, pgLogUsesCsvlog: true));
+
+        Assert.Equal(2, client.Downloads.Count);
+        Assert.Equal(client.Downloads[0].Marker, client.Downloads[1].Marker);
+    }
+
+    /// <summary>
+    /// Lane 4053-rds-tests item 3: a stale csvlog listing — the newest stderr file more than 5 minutes newer
+    /// than the newest .csv, held for the full debounce — makes <see cref="RdsLogSource"/> throw
+    /// <see cref="PgNoCsvlogFileException"/>, and it reaches this ingestor's caller UNWRAPPED (not folded
+    /// into <see cref="RdsLogUnavailableException"/>), the same arm <see cref="RdsLogEventIngestor"/>'s own
+    /// suite pins, so <c>DarlingWorker</c>'s dedicated catch arm can invalidate the cached csvlog verdict.
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListingHeldFor5Minutes_ThrowsPgNoCsvlogFileExceptionUnwrapped()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 10_000_000 },
+                new() { LogFileName = CsvFile, LastWritten = 1000 },
+            },
+        };
+        var logs = new RdsLogSource(_ => client, () => now);
+        var ingestor = new RdsDeadlockIngestor(store, logs);
+
+        /* First sighting: the debounce records it but does not throw yet, so this falls through to an
+           ordinary (empty) csv read. */
+        var first = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, first.Rows);
+
+        now = now.AddMinutes(5);
+
+        /* Held for the full debounce against the SAME still-stale listing: throws, unwrapped, before a
+           byte is requested. */
+        await Assert.ThrowsAsync<PgNoCsvlogFileException>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
     }
 
     /// <summary>
