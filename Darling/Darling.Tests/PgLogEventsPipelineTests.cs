@@ -1666,6 +1666,29 @@ public sealed class PgLogEventsPipelineTests
 
     /* ---- helpers ------------------------------------------------------------------------------------- */
 
+    /// <summary>
+    /// #4058 item 3 (security review round 1, L1): a row whose query id or duration came back NULL from the
+    /// guarded casts is a forgery (a real auto_explain line always has an in-range id and a <c>%.3f</c>
+    /// duration). It is skipped and counted, never stored under query id 0 with a 0 ms duration.
+    /// </summary>
+    [Fact]
+    public async Task PlanCapture_SkipsAndCountsARowWithANullIdOrDuration()
+    {
+        const string plan = "{\"Plan\": {\"Node Type\": \"Result\", \"Total Cost\": 0.01}}";
+        var context = TestContext();
+        using var reader = new FakeReader(new object?[][]
+        {
+            new object?[] { null, 1.0, plan },
+            new object?[] { 43L, null, plan },
+            new object?[] { 42L, 12.345, plan },
+        });
+
+        var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Contains(context.Measurements, m => m.Label == PgPlanCaptureCollector.ForgedCaptureMeasurement && m.Value == 2);
+    }
+
     private static CollectorContext TestContext() => new()
     {
         LogHashKey = TestLogHashKeys.Fixed,
@@ -2209,5 +2232,106 @@ public sealed class PgLogEventsLivePostgresTests
             writer.EndPayload(definition.PayloadColumns.Count);
         }
         await importer.CompleteAsync(ct);
+    }
+}
+
+/// <summary>
+/// #4058 item 3 (security review round 1, M2 and L1): the plan-capture collector's OWN SQL, both routes, over a
+/// hand-made log body. The live plan-capture tests plant forgeries through a real server log, and there a forged
+/// line only reaches the casts under a <c>log_line_prefix</c> that echoes <c>%u</c>/<c>%d</c> unescaped, so
+/// those tests never exercise the guarded casts. Here the tail CTE is swapped for one over a literal body that
+/// carries a correctly prefixed real capture, one whose query id overflows bigint, and one whose duration is
+/// <c>1.2.3</c>. Everything after the tail CTE is the collector's shipped text. Gated on DARLING_TEST_PG only
+/// (no auto_explain or log setup), so CI's PostgreSQL job runs it.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class PgPlanCaptureGuardedCastLiveTests
+{
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private const string PlanLine = "\t{\"Plan\": {\"Node Type\": \"Result\", \"Total Cost\": 0.01}}\n";
+
+    private static readonly string ForgedBody =
+        "2026-09-23 10:00:00.123 UTC [4101] 42 LOG:  duration: 12.345 ms  plan:\n" + PlanLine
+        + "2026-09-23 10:00:01.000 UTC [4102] 99999999999999999999 LOG:  duration: 1.000 ms  plan:\n" + PlanLine
+        + "2026-09-23 10:00:02.000 UTC [4103] 43 LOG:  duration: 1.2.3 ms  plan:\n" + PlanLine;
+
+    private static readonly string NoMarkerBody = "2026-09-23 10:00:00.123 UTC [4101] 42 LOG:  statement: SELECT 1\n";
+
+    private static CollectorContext Context(bool binary) => new()
+    {
+        LogHashKey = TestLogHashKeys.Fixed,
+        ServerId = 1,
+        ServerName = "target-a",
+        CollectionTime = new DateTime(2026, 9, 18, 3, 10, 0, DateTimeKind.Unspecified),
+        Deltas = new CollectorDeltaCalculator(),
+        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+        PgReadBinaryFileGranted = binary,
+    };
+
+    /// <summary>The shipped statement with its tail CTE replaced by one over <c>@body</c>.</summary>
+    private static string OverLiteralBody(bool binary)
+    {
+        var text = PgPlanCaptureCollector.Instance.BuildQuery(Context(binary)).Text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var tail = (binary ? PgServerLogTail.TailCteBinarySql : PgServerLogTail.TailCteSql).Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.StartsWith(tail, text, StringComparison.Ordinal);
+        var literal = binary
+            ? "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\ntail AS (SELECT pg_catalog.convert_to(@body, 'UTF8') AS body)"
+            : "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\ntail AS (SELECT @body::text AS body)";
+        return literal + text[tail.Length..];
+    }
+
+    private static async Task<List<(long? QueryId, double? DurationMs, string? Plan)>> RunAsync(NpgsqlConnection connection, bool binary, string body, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(OverLiteralBody(binary), connection);
+        command.Parameters.AddWithValue("body", body);
+        var rows = new List<(long?, double?, string?)>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var plan = reader.IsDBNull(2) ? null : reader.GetString(2);
+            /* The logging-collector marker arms read the rig's own settings; they're not what this test is about. */
+            if (plan == PgLoggingCollectorOffException.Marker || plan == PgNoStderrLogFileException.Marker)
+            {
+                continue;
+            }
+
+            rows.Add((reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetDouble(1), plan));
+        }
+
+        return rows;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AForgedOutOfRangeNumber_ComesBackNull_AndTheRealCaptureSurvives(bool binary)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the guarded-cast proof.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        /* Before #4058 item 3 the 20-digit id raised 22003 and '1.2.3' raised 22P02, and either one failed the
+           whole statement. */
+        var rows = await RunAsync(connection, binary, ForgedBody, ct);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Contains(rows, r => r.QueryId == 42 && r.DurationMs == 12.345);
+        Assert.Contains(rows, r => r.QueryId is null && r.DurationMs == 1.0);
+        Assert.Contains(rows, r => r.QueryId == 43 && r.DurationMs is null);
+    }
+
+    [Fact]
+    public async Task TheBinaryRoute_WithNoMarkerInTheTail_ReturnsNoCaptures_AndNoError()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the guarded-cast proof.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        Assert.Empty(await RunAsync(connection, binary: true, NoMarkerBody, ct));
     }
 }
