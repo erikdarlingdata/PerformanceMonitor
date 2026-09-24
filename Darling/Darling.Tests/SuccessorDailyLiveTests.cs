@@ -24,6 +24,11 @@ namespace Darling.Tests;
 /// idempotently, with a refresh policy and NO compression policy, and that they fill to match their
 /// legacy siblings' totals once refreshed.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here goes through
+   ScratchPostgres.CreateAsync, which reaches DARLING_TEST_PG only to CREATE and DROP its own database and then
+   works entirely inside it. It never touches the shared database's tables, so it cannot race the live
+   collection, and serializing it would be pure slowdown. Leave it out; this comment is here so the next sweep
+   does not "fix" it. */
 public sealed class SuccessorDailyLiveTests
 {
     private const int ServerId = -936537;

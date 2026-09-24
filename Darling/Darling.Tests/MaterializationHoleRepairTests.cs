@@ -40,7 +40,7 @@ public sealed class MaterializationHoleRepairTests
         var registered = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.DailyAggregates).Concat(TimescaleSupport.BaselineAggregates).ToArray();
 
         Assert.Equal(registered.Length, targets.Count);
-        Assert.Equal(23, targets.Count);
+        Assert.Equal(26, targets.Count); // #3653 A6 lane LB: +3 for the interval-honest successor dailies added to DailyAggregates
         Assert.Equal(registered.Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal), targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal));
 
         /* The rollups come first in the backfill's dependency order — every raw-sourced rollup before the
