@@ -162,12 +162,13 @@ ORDER BY ranked.{orderColumn} DESC NULLS LAST, ranked.queryid
 LIMIT $2";
 
     [McpServerTool(Name = "get_store_query_stats"), Description(
-        "Ranks the STORE's own SQL statements by server-side cost, from pg_stat_statements: not a monitored " +
-        "server's queries, answering which one is slow. No server_name: the store is the subject. Each " +
-        "statement is attributed to its role (owner, admin, viewer, mcp); by_role is each role's TIME SHARE, " +
+        "Ranks the STORE's own SQL statements by server-side cost (pg_stat_statements), not a monitored " +
+        "server's queries. No server_name: the store is the subject. Each " +
+        "statement carries its role (owner, admin, viewer, mcp); by_role is each role's TIME SHARE, " +
         "not how slow it felt. Figures are cumulative since stats_since, server-side only: ms, rows, block " +
         "counts. Zero matches: a normal payload with empty arrays, not status empty. Gated: status " +
-        "precondition, with the remedy, when pg_stat_statements is missing, not loaded, too old or not granted. " +
+        "precondition, with the remedy, when pg_stat_statements is missing, not loaded or too old, its reader " +
+        "isn't built yet, or this role has no grant. " +
         "<<GUIDE>> Ranks the monitoring STORE's own SQL statements by server-side cost, from pg_stat_statements, not a monitored server's queries. Answers 'the web viewer / MCP tools are slow: which query?'. Each statement is attributed to the role that ran it; on a managed or compose store viewer = the web viewer, remote read-only Viewer seats and custom-alert rule evaluation, mcp = MCP tools, admin = the local Darling Viewer, owner = the service (and a bring-your-own store's web viewer and MCP tools without logins of their own). by_role gives each role's share of the recorded time; statements lists the top statements with calls, total/mean/max ms, rows and block I/O, the text normalized ($1, $2) and cut to a preview unless full_text. Figures are cumulative since stats_since and server-side only; the note says what they leave out. Answers status precondition, with the remedy, when pg_stat_statements is missing, not loaded, too old or not granted. No server_name: the store is the subject.")]
     public static async Task<string> GetStoreQueryStats(
         NpgsqlDataSource postgres,

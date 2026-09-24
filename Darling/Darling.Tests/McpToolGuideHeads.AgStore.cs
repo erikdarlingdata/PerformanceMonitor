@@ -77,14 +77,15 @@ public sealed class McpToolGuideHeadsAgStoreTests
 
     /// <summary>D9: a store with zero matching statements answers a NORMAL payload with empty arrays, not a
     /// status empty envelope — this tool has no empty/unavailable branch at all. The only non-JSON status is
-    /// precondition, gated on pg_stat_statements being missing, not loaded, too old or not granted.</summary>
+    /// precondition, gated on pg_stat_statements being missing, not loaded or too old, its reader not built yet, or
+    /// the role having no grant (<c>PreconditionReason</c> has all five).</summary>
     [Fact]
     public void StoreQueryStatsHead_SeparatesZeroRowsFromThePreconditionGate()
     {
         var served = McpToolGuideTests.Served("get_store_query_stats").Served;
         Assert.Contains("Zero matches: a normal payload with empty arrays, not status empty.", served, StringComparison.Ordinal);
         Assert.Contains(
-            "Gated: status precondition, with the remedy, when pg_stat_statements is missing, not loaded, too old or not granted.",
+            "Gated: status precondition, with the remedy, when pg_stat_statements is missing, not loaded or too old, its reader isn't built yet, or this role has no grant.",
             served, StringComparison.Ordinal);
     }
 }
