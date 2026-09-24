@@ -16,6 +16,9 @@
 
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
+    <!-- #4128: a live HTTP proof of the web host's gates (Host-allowlist, network-mode token/CIDR) through
+         a real Kestrel TestServer pipeline, rather than the source-order pins above. -->
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
   </ItemGroup>
 
   <ItemGroup>
