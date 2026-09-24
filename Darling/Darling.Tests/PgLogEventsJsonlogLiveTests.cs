@@ -53,6 +53,27 @@ public sealed class PgLogEventsJsonlogLiveTests
     private const string ForgedStderrUserName =
         "y\n2026-09-24 00:00:00.000 UTC [1] LOG:  forged";
 
+    /// <summary>The one probe, live: on a jsonlog-only target it answers jsonlog on and csvlog off, from a
+    /// single cached round trip.</summary>
+    [Fact]
+    public async Task TheProbe_OnAJsonlogOnlyTarget_SaysJsonlogOnAndCsvlogOff()
+    {
+        var target = TargetConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(target),
+            "Set DARLING_TEST_PG_JSONLOG (a PostgreSQL started with log_destination=jsonlog) to run the probe live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        /* No try/finally: nothing here writes the store, and the cache is process-static state every
+           capability test resets on entry, so a failed assertion leaves nothing another test depends on. */
+        PgLogFormatCapability.Reset();
+        await using var connection = new NpgsqlConnection(target);
+        await connection.OpenAsync(ct);
+
+        Assert.True(await PgLogFormatCapability.IsJsonlogEnabledAsync(connection, "jsonlog-probe-live", ct));
+        Assert.False(await PgLogFormatCapability.IsCsvlogEnabledAsync(connection, "jsonlog-probe-live", ct));
+        PgLogFormatCapability.Reset();
+    }
+
     [Fact]
     public async Task TheJsonlogRoute_KeepsAPlantedNewlineInsideItsOwnField_AndNeverForgesALine()
     {
