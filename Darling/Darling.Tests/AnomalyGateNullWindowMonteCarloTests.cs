@@ -185,71 +185,62 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// #3653 A8 option B (lane L1a): the TILE arm of the same validation — does <c>AnomalyGate.EvaluateTiles</c>'s
-    /// union-fire rule (≥ 1 of H tiles fires) hold the 4h-vs-24h null-window rate within the design's 20%
-    /// tolerance, for the tile-count families the design actually runs (4 tiles at 4h, 24 tiles at 24h;
-    /// design §1's table)? Each tile draws its OWN n = 12 per-tile samples (the 5-minute family: 12 draws/hour)
-    /// and is scored against a fixed trustworthy bucket (mean 0, stddev 1) through <c>EvaluateTiles</c> with the
-    /// SAME window length every tile in the pass shares — the window's own k_W applies to every tile (design §1).
-    /// The window mean per tile is fixed comfortably above threshold, for the same peak-clause-isolation reason
-    /// the whole-window arm above gives.
+    /// #3653 A8 option B (lane L1a): the TILE arm of the same validation, for <c>AnomalyGate.EvaluateTiles</c>'s
+    /// union rule (the window fires when at least 1 of H tiles fires). It covers the tile counts the design runs: 4 tiles at 4 h
+    /// and 24 tiles at 24 h (design §1's table). Each tile draws n = 12 samples (the 5-minute family) and is scored
+    /// against a fixed trustworthy bucket (mean 0, stddev 1).
+    /// <para>INDEPENDENT samples (rho = 0): the pair gate needs the tile MEAN past the cutoff as well as the peak, and
+    /// the mean of 12 independent draws almost never is. So the union rate is near zero at both window lengths. That
+    /// is what the first test pins, and it is why it cannot test the correction's calibration.</para>
+    /// <para>HOUR-CORRELATED samples (rho = 0.95, a shared per-hour level plus noise: the worst case design §5 names):
+    /// the tile mean moves with the hour, so fires are frequent enough to measure. Only there does the per-tile cutoff
+    /// k_W = <c>NAwarePeakCutoff(k, W)</c> have to hold the 4 h and 24 h union rates within 20 %. A mutation guard
+    /// scores the 24 tiles WITHOUT the correction (window = 4 h, so the cutoff stays k) and requires a clearly higher
+    /// rate, so the equality check cannot pass for a reason other than the correction.</para>
     /// </summary>
     [Theory]
-    [InlineData(4, 12)]   // 4 tiles × 12 samples/tile at the 4h reference window
-    [InlineData(24, 12)]  // 24 tiles × 12 samples/tile at 24h
-    public void EvaluateTiles_NullWindow_FireRate_AtEachTileCount_IsMeasuredAndReported(int tileCount, int samplesPerTile)
+    [InlineData(4)]
+    [InlineData(24)]
+    public void EvaluateTiles_IndependentNullTiles_AlmostNeverFire(int tileCount)
     {
-        const int trials = 20_000;
-        var rng = new Random(4058);
-        var window = TimeSpan.FromHours(tileCount); // one tile per hour, so tileCount hours == tileCount tiles
+        var rate = MeasureTileUnionFireRate(tileCount, samplesPerTile: 12, rho: 0.0,
+            window: TimeSpan.FromHours(tileCount), seed: 4058, trials: 20_000);
+        output.WriteLine($"rho=0 tiles={tileCount} window={tileCount}h fire_rate={rate:0.#####}");
 
-        var fires = 0;
-        for (var i = 0; i < trials; i++)
-        {
-            var tiles = BuildNullTiles(rng, tileCount, samplesPerTile);
-            var map = TrustworthySingleBucketMap();
-            var verdict = AnomalyGate.EvaluateTiles(
-                tiles, map, Threshold, AnomalyThresholds.ModifiedZThreshold, MagnitudeFloor,
-                AbsoluteFallbackBar, SigmaCap, window);
-            if (verdict is { Decision.Fire: true }) fires++;
-        }
-
-        var rate = fires / (double)trials;
-        output.WriteLine($"tiles={tileCount} window={tileCount}h fire_rate={rate:0.#####} ({fires}/{trials})");
-        Assert.InRange(rate, 0.0, 1.0);
+        Assert.True(rate < 1e-3, $"independent null tiles fired at {rate:0.#####} (tiles={tileCount}); the pair gate should keep this under 1e-3.");
     }
 
     [Fact]
-    public void EvaluateTiles_NullWindow_UnionFireRate_4hVs24h_WithinDesignTolerance()
+    public void EvaluateTiles_HourCorrelatedNull_UnionFireRate_4hVs24h_WithinTwentyPercent_AndTheCorrectionIsWhatHoldsIt()
     {
         const int trials = 20_000;
-        var rate4h = MeasureTileUnionFireRate(tileCount: 4, samplesPerTile: 12, window: TimeSpan.FromHours(4), seed: 4058, trials: trials);
-        var rate24h = MeasureTileUnionFireRate(tileCount: 24, samplesPerTile: 12, window: TimeSpan.FromHours(24), seed: 4059, trials: trials);
-        output.WriteLine($"tiles=4@4h rate={rate4h:0.#####} vs tiles=24@24h rate={rate24h:0.#####}");
+        const double rho = 0.95;
+        var rate4h = MeasureTileUnionFireRate(4, 12, rho, TimeSpan.FromHours(4), seed: 4058, trials: trials);
+        var rate24h = MeasureTileUnionFireRate(24, 12, rho, TimeSpan.FromHours(24), seed: 4059, trials: trials);
+        var uncorrected24h = MeasureTileUnionFireRate(24, 12, rho, TimeSpan.FromHours(4), seed: 4059, trials: trials);
+        output.WriteLine($"rho={rho} tiles=4@4h rate={rate4h:0.#####} | tiles=24@24h rate={rate24h:0.#####} | 24 tiles uncorrected={uncorrected24h:0.#####}");
 
-        if (rate4h < 1e-3 && rate24h < 1e-3)
-        {
-            Assert.True(true, $"both union rates below 1e-3: 4h={rate4h:0.#####}, 24h={rate24h:0.#####} — trivially equalized");
-            return;
-        }
+        // Large enough to measure (derived about 0.08 at 4 h for the classical k = 2.0 this bucket falls to), so the gap
+        // below is not two zeros compared.
+        Assert.True(rate4h > 0.02 && rate24h > 0.02, $"rates too small to compare: 4h={rate4h:0.#####}, 24h={rate24h:0.#####}");
 
-        var larger = Math.Max(rate4h, rate24h);
-        var smaller = Math.Min(rate4h, rate24h);
-        var relativeGap = larger > 0 ? (larger - smaller) / larger : 0.0;
-
+        var relativeGap = Math.Abs(rate4h - rate24h) / Math.Max(rate4h, rate24h);
         Assert.True(relativeGap <= 0.20,
-            $"tiles=4@4h rate={rate4h:0.#####} vs tiles=24@24h rate={rate24h:0.#####} — relative gap "
-            + $"{relativeGap:0.###} exceeds the design's 20% tolerance ({trials} trials/window, seeds 4058/4059).");
+            $"tiles=4@4h rate={rate4h:0.#####} vs tiles=24@24h rate={rate24h:0.#####}: relative gap {relativeGap:0.###} exceeds 20% ({trials} trials each, seeds 4058/4059).");
+
+        // Mutation guard: the same 24 tiles at the uncorrected cutoff fire far more often (derived about 0.39).
+        Assert.True(uncorrected24h > 2 * rate24h,
+            $"24 tiles uncorrected={uncorrected24h:0.#####} vs corrected={rate24h:0.#####}: the correction is not what holds the rates equal.");
     }
 
-    private static double MeasureTileUnionFireRate(int tileCount, int samplesPerTile, TimeSpan window, int seed, int trials)
+    private static double MeasureTileUnionFireRate(int tileCount, int samplesPerTile, double rho, TimeSpan window, int seed, int trials)
     {
         var rng = new Random(seed);
+        var map = TrustworthySingleBucketMap();
         var fires = 0;
         for (var i = 0; i < trials; i++)
         {
-            var tiles = BuildNullTiles(rng, tileCount, samplesPerTile);
-            var map = TrustworthySingleBucketMap();
+            var tiles = BuildNullTiles(rng, tileCount, samplesPerTile, rho);
             var verdict = AnomalyGate.EvaluateTiles(
                 tiles, map, Threshold, AnomalyThresholds.ModifiedZThreshold, MagnitudeFloor,
                 AbsoluteFallbackBar, SigmaCap, window);
@@ -259,9 +250,9 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
         return fires / (double)trials;
     }
 
-    /// <summary>One null (mean 0, stddev 1) bucket that answers EVERY (hour, dow) key the same way — the
-    /// null-rate question here is about the union rule across tiles, not about bucket selection, so every
-    /// tile in a trial is deliberately scored against the identical trustworthy baseline.</summary>
+    /// <summary>One null bucket (mean 0, stddev 1) that answers EVERY (hour, dow) key the same way. The question
+    /// here is the union rule across tiles, not bucket selection, so every tile in a trial is scored against the
+    /// same trustworthy baseline.</summary>
     private static BaselineBucketMap TrustworthySingleBucketMap()
     {
         var dict = new Dictionary<(int, int), BaselineBucket>();
@@ -275,23 +266,28 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
         return new BaselineBucketMap(dict, LocalClockWindow.Utc(new DateTime(2026, 9, 24)));
     }
 
-    private static WindowTile[] BuildNullTiles(Random rng, int tileCount, int samplesPerTile)
+    /// <summary>Null tiles: each sample is sqrt(rho)·u + sqrt(1 − rho)·e, where u is the tile's shared per-hour level
+    /// and e is per-sample noise, both standard normal. So every sample is N(0, 1) whatever rho is, and rho is
+    /// the within-hour correlation.</summary>
+    private static WindowTile[] BuildNullTiles(Random rng, int tileCount, int samplesPerTile, double rho)
     {
         var tiles = new WindowTile[tileCount];
+        var shared = Math.Sqrt(rho);
+        var own = Math.Sqrt(1 - rho);
         for (var t = 0; t < tileCount; t++)
         {
+            var hourLevel = NextStandardNormal(rng);
             var peak = double.NegativeInfinity;
             var sum = 0.0;
             for (var s = 0; s < samplesPerTile; s++)
             {
-                var z = NextStandardNormal(rng);
+                var z = shared * hourLevel + own * NextStandardNormal(rng);
                 if (z > peak) peak = z;
                 sum += z;
             }
 
-            var mean = sum / samplesPerTile;
             var localHour = new DateTime(2026, 9, 24, t % 24, 0, 0, DateTimeKind.Unspecified);
-            tiles[t] = new WindowTile(localHour, peak, mean, samplesPerTile);
+            tiles[t] = new WindowTile(localHour, peak, sum / samplesPerTile, samplesPerTile);
         }
 
         return tiles;
