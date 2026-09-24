@@ -699,6 +699,22 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// <paramref name="result"/> with <see cref="PgPlanCaptureCollector.ForgedCaptureNote"/> merged into its host
+    /// note when the run's definition recorded <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>
+    /// (#4058 L1), following the exact pattern <see cref="WithForeignZoneLinesNote"/> sets above; otherwise
+    /// <paramref name="result"/> unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithForgedCaptureNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgPlanCaptureCollector.ForgedCaptureMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgPlanCaptureCollector.ForgedCaptureNote) }
+            : result;
+    }
+
+    /// <summary>
     /// <paramref name="result"/> with <see cref="PgReadBinaryFileAdvisory.Sentence"/> merged into its host
     /// note when <paramref name="server"/> is still on the text route AND has not been noted inside
     /// <see cref="PgReadBinaryFileAdvisory.NoteInterval"/> (#4046); otherwise <paramref name="result"/>

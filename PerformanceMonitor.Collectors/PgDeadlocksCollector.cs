@@ -140,7 +140,7 @@ SELECT
 FROM tail,
      regexp_matches(
          tail.body,
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
@@ -168,17 +168,25 @@ LIMIT 500";
        database name lands in the FATAL line unescaped) can grow the 4 MB tail to roughly 16 MB of text
        before the regex engine ever sees it — about 64 MB of internal engine state, on EVERY cycle, whether
        or not the tail holds a deadlock report at all. The WHERE clause below is evaluated on tail.body
-      (bytea) BEFORE encode()/regexp_matches() run, and PostgreSQL's planner does not need to be told to
-       order it that way: encode(tail.body, 'escape') and regexp_matches(...) are both volatile-cost table
-       expressions in the SELECT list of a one-row FROM tail — there is exactly one row to filter, so the
-       WHERE applies before the target list is ever evaluated for it (proved on the rig: a PL/pgSQL function
-       standing in for encode() that RAISEs unconditionally is never invoked when the marker is absent, and
-       fires normally when it is present). position() on bytea is a byte-for-byte substring search — no
-       encoding, no regex — so it costs a single pass over the SAME 4 MB the tail already is, not a second
-       4 MB. It cannot skip a real report: DeadLockReport's ERROR line always contains this exact literal
-       verbatim before %Q or anything else is glued to it, so the marker is a NECESSARY substring of every
-       candidate the pattern beneath it could ever match, and the guard changes nothing about which rows the
-       query returns or their order when it IS present — see LiveGuardMatchesUnguardedRowsExactly below. */
+      (bytea) BEFORE encode()/regexp_matches() run: its qual references only tail.body, and
+       pg_read_binary_file is volatile, so the CTE stays materialized and this filter runs at the CTE scan,
+       below the lateral regexp_matches call — not "the SELECT list", and not because encode()/regexp_matches
+       are "volatile-cost"; encode() and regexp_matches() are in fact IMMUTABLE, and the conclusion holds for
+       the reason just given, not that one. A refactor that referenced m in this WHERE would silently break
+       the ordering the guard depends on (proved on the rig: a PL/pgSQL function standing in for encode()
+       that RAISEs unconditionally is never invoked when the marker is absent, and fires normally when it
+       is present). position() on bytea is a byte-for-byte substring search — no encoding, no regex — so it
+       costs a single pass over the SAME 4 MB the tail already is, not a second 4 MB. It cannot skip a real
+       report: DeadLockReport's ERROR line always contains this exact literal verbatim before %Q or anything
+       else is glued to it, so the marker is a NECESSARY substring of every candidate the pattern beneath it
+       could ever match, and the guard changes nothing about which rows the query returns or their order
+       when it IS present.
+
+       This is an OPTIMIZATION, not a bound: position() needs only the substring somewhere in the 4 MB, not
+       at a line start, so an attacker can plant the marker the same way the deadlock report's own bytes can
+       be planted — a failed login whose role name IS "ERROR:  deadlock detected" defeats this guard for as
+       long as that line stays in the tail. See the type header's #4058 M1 remarks (still open on the
+       issue) for the remaining exposure and why it is bounded rather than closed. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
 SELECT
     m[1]    AS report_text,
@@ -186,7 +194,7 @@ SELECT
 FROM tail,
      regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
-         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
+         '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
 WHERE pg_catalog.position(tail.body, '" + DeadlockMarkerLiteral + @"'::bytea) > 0
 UNION ALL

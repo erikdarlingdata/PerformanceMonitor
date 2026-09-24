@@ -152,7 +152,7 @@ SELECT
 FROM tail,
      regexp_matches(
          tail.body,
-         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
          'gn') AS m
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
@@ -176,10 +176,16 @@ LIMIT 2000";
        result. The marker cannot skip a real capture: auto_explain's LOG line always contains this exact
        literal before the query id or duration is glued around it, so it is a NECESSARY substring of every
        row the pattern beneath it could match, present or not present makes no difference to which rows
-       come back or in what order — see LiveGuardMatchesUnguardedRowsExactly below.
+       come back or in what order. Its qual references only tail.body, and pg_read_binary_file is volatile,
+       so the CTE stays materialized and this filter runs at the CTE scan, below the lateral regexp_matches
+       call — a refactor that referenced m in this WHERE would silently break that ordering.
 
        #4058 item 3: the same guarded casts as the text route, immediately above — a forged capture on the
-       binary route is the identical shape after encode()/decode, so it gets the identical treatment. */
+       binary route is the identical shape after encode()/decode, so it gets the identical treatment.
+
+       This is an OPTIMIZATION, not a bound: an attacker can plant the marker the same way #4008 planted a
+       whole block, and plan capture needs no plant at all — the marker is present on every cycle wherever
+       auto_explain logs anything. See the type header's #4058 M1 remarks (still open on the issue). */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
 SELECT
     CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
@@ -189,7 +195,7 @@ SELECT
 FROM tail,
      regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
-         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
+         '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
          'gn') AS m
 WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
 UNION ALL
@@ -238,9 +244,31 @@ LIMIT 2000";
         new CollectorColumn("plan_json", CollectorColumnType.Varchar),
     };
 
+    /// <summary>
+    /// The count a consumer records on its collection-log row when a capture's query id OR duration came
+    /// back NULL from the guarded CASE chain — a forged capture (#4058 L1), never a real one: <c>%Q</c>
+    /// always prints an in-range signed int64 (0 when <c>compute_query_id</c> is off) and the duration is
+    /// always <c>%.3f</c>, so neither can fail the CASE's shape check on a genuine auto_explain line. Before
+    /// this, a forged row's NULL columns were passed to <see cref="PgPlanLogParser.FromBlock"/> as literal
+    /// 0s, which stored the forgery under query id 0 with a 0 ms duration instead of dropping it — the same
+    /// pattern <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/> follows for its own skip.
+    /// </summary>
+    public const string ForgedCaptureMeasurement = "forged_captures_skipped";
+
+    /// <summary>
+    /// The sentence the Darling runner puts beside <see cref="ForgedCaptureMeasurement"/> on the row: a count
+    /// label alone cannot say why the row is forged or why it matters, and an operator who finds the count
+    /// needs both.
+    /// </summary>
+    public const string ForgedCaptureNote =
+        "Skipped auto_explain captures whose query id or duration did not match the guarded shape a real "
+        + "capture always has: a client can plant one through a syntax error whose STATEMENT: companion "
+        + "echoes attacker-chosen text back into the log (#4058). The read went on without them";
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
+        var forgedCaptures = 0;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -275,12 +303,24 @@ LIMIT 2000";
                 planJson = PgBinaryTailText.UnescapeAndDecode(planJson);
             }
 
+            /* #4058 L1: a NULL query id or duration here is the guarded CASE chain's own refusal — a
+               capture whose shape does not fit the target type, which a real auto_explain line can never
+               produce. Passing 0 for either NULL (as the parser's other call site below still does for a
+               genuine mid-block cut) would store the forgery under query id 0 with a 0 ms duration instead
+               of dropping it. Counted rather than silently dropped, the same way
+               PgServerLogTail.MeasureForeignZoneLines counts its own skip. */
+            if (reader.IsDBNull(0) || reader.IsDBNull(1))
+            {
+                forgedCaptures++;
+                continue;
+            }
+
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
                transport (#2538). Two implementations of the redaction would eventually disagree, and the
                cost of THAT divergence is customer data rather than a wrong number. */
             var parsed = PgPlanLogParser.FromBlock(
-                reader.IsDBNull(0) ? 0 : reader.GetInt64(0),
-                reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
+                reader.GetInt64(0),
+                reader.GetDouble(1),
                 planJson);
 
             /* Null is a block the bounded tail read cut in half, which is ordinary rather than
@@ -295,6 +335,11 @@ LIMIT 2000";
                     TopNodeType: parsed.Value.TopNodeType,
                     PlanJson: parsed.Value.PlanJson));
             }
+        }
+
+        if (forgedCaptures > 0)
+        {
+            context.Measure(ForgedCaptureMeasurement, forgedCaptures);
         }
 
         return rows;
