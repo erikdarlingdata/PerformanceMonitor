@@ -41,7 +41,7 @@ param get_query_store_top.module_name 186
 param get_query_store_top.server_name 28
 param get_query_store_top.top 34
 
-tool get_query_trend 798
+tool get_query_trend 792
 param get_query_trend.as_of 167
 param get_query_trend.database_name 39
 param get_query_trend.hours_back 29
