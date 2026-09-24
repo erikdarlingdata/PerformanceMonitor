@@ -83,4 +83,19 @@ public static class PgLogFormatCapability
 
     /// <summary>Drops every cached verdict. Tests only — a real restart already starts with an empty cache.</summary>
     public static void Reset() => s_cache.Clear();
+
+    /// <summary>
+    /// Drops <paramref name="targetKey"/>'s cached verdict, so the next <see cref="IsCsvlogEnabledAsync"/>
+    /// re-checks instead of waiting out <see cref="CacheTtl"/> (#4053 review L1). <c>log_destination</c> is
+    /// SIGHUP and the verdict can be up to an hour stale: a target that just threw
+    /// <see cref="PgNoCsvlogFileException"/> (the cache said csvlog, but csvlog was removed) or
+    /// <see cref="PgNoStderrLogFileException"/> (the cache said stderr-only, but csvlog was just added) has
+    /// direct evidence the cached verdict is wrong right now, the same shape
+    /// <see cref="PgReadBinaryFileCapability.Invalidate"/> answers for a stale grant.
+    /// </summary>
+    public static void Invalidate(string targetKey)
+    {
+        ArgumentNullException.ThrowIfNull(targetKey);
+        s_cache.TryRemove(targetKey, out _);
+    }
 }

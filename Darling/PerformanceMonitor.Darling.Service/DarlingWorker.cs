@@ -9842,6 +9842,13 @@ LIMIT 1";
                and a SUCCESS row with zero rows would read as a target with nothing to report rather than
                one this route cannot read at all. Same slot rule too: only the pg_read_file route produces
                this marker, so the elapsed time is a target query and belongs in sqlMs. */
+
+            /* #4053 review L1: the cache said stderr-only, but no stderr-format file is left — the far more
+               likely explanation is csvlog/jsonlog was just added and the cache has not caught up, not that
+               log_destination emptied entirely. Drop the verdict so the next cycle re-probes instead of
+               reading no stderr file (and, on the csvlog route, no rows) for up to an hour. */
+            PgLogFormatCapability.Invalidate(runtime.StorageName);
+
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
                 server.Config.DisplayName, collectorName);
 
@@ -9859,6 +9866,15 @@ LIMIT 1";
                same reasons: a setting on the monitored server, satisfiable and re-derived every cycle, not
                broken on the monitoring side. Only the csvlog route produces this marker, so the elapsed
                time is a target query and belongs in sqlMs. */
+
+            /* #4053 review L1: the cache said csvlog was one of the destinations, but no .csv file exists.
+               The most likely explanation once the syslogger has had time to roll a file is that csvlog was
+               REMOVED from log_destination since the cache checked — the exception's own message text
+               ("was only just added") is aimed at the fresher case, but this fault is exactly the evidence a
+               stale cache needs. Drop the verdict so the next cycle re-probes; a genuinely fresh csvlog
+               addition simply gets the same true verdict back next time. */
+            PgLogFormatCapability.Invalidate(runtime.StorageName);
+
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no csvlog file has appeared for this target yet",
                 server.Config.DisplayName, collectorName);
 
