@@ -56,6 +56,24 @@ public sealed class RdsLogSource
     /// </summary>
     private const int FirstReadLines = 10_000;
 
+    /// <summary>
+    /// Which of an instance's PostgreSQL log files a read is for (#4053 part c1). RDS writes a target's
+    /// <c>csvlog</c> output as the stderr file's own name with <c>.csv</c> appended, so the two share one
+    /// <c>DescribeDBLogFiles</c> listing and differ only in which name <see cref="NewestLogFileAsync"/>
+    /// picks out of it. The resume marker needs no separate design for this: it is already keyed by
+    /// (instance, file name), so the csv file gets its own marker the first time anything asks for it.
+    /// </summary>
+    public enum LogFileKind
+    {
+        /// <summary>The default stderr-format file — today's only caller, and every caller but the
+        /// csvlog-aware log-event ingestor.</summary>
+        Stderr,
+
+        /// <summary>The <c>.csv</c> sibling <c>csvlog</c> writes beside the stderr file, read only when
+        /// the caller already knows the target's <c>log_destination</c> includes it.</summary>
+        Csv,
+    }
+
     private readonly Dictionary<string, string> _markers = new(StringComparer.Ordinal);
 
     private readonly Func<string, IAmazonRDS> _clientFactory;
@@ -117,7 +135,16 @@ public sealed class RdsLogSource
     /// it is not stable between calls and plans captured through one would be attributed to whichever
     /// replica answered.</para>
     /// </summary>
-    public async Task<LogChunk?> ReadNewestAsync(string host, CancellationToken cancellationToken = default)
+    public Task<LogChunk?> ReadNewestAsync(string host, CancellationToken cancellationToken = default)
+        => ReadNewestAsync(host, LogFileKind.Stderr, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ReadNewestAsync(string, CancellationToken)"/>, but for the csvlog sibling rather than the
+    /// stderr file (#4053 part c1) when <paramref name="kind"/> is <see cref="LogFileKind.Csv"/>. Every other
+    /// behaviour — the writer resolution, the marker discipline, the bounded first read — is unchanged; only
+    /// which file name <see cref="NewestLogFileAsync"/> picks differs.
+    /// </summary>
+    public async Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
     {
         var endpoint = RdsEndpoint.TryParse(host);
 
@@ -143,7 +170,7 @@ public sealed class RdsLogSource
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
             : parsed.Identifier;
 
-        var newest = await NewestLogFileAsync(client, instanceId, cancellationToken);
+        var newest = await NewestLogFileAsync(client, instanceId, kind, cancellationToken);
 
         var key = instanceId + "|" + newest;
         _markers.TryGetValue(key, out var marker);
@@ -233,7 +260,7 @@ public sealed class RdsLogSource
     /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
     private static async Task<string> NewestLogFileAsync(
-        IAmazonRDS client, string instanceId, CancellationToken cancellationToken)
+        IAmazonRDS client, string instanceId, LogFileKind kind, CancellationToken cancellationToken)
     {
         var files = await client.DescribeDBLogFilesAsync(
             new DescribeDBLogFilesRequest
@@ -249,25 +276,39 @@ public sealed class RdsLogSource
            'source')". It short-circuits the whole chain, so absent and empty both arrive as null and reach
            the one message below.
 
-           The name filter excludes .csv/.json siblings (#3997) — see the method's own remarks. AWS's own
-           docs state that enabling csvlog on RDS for PostgreSQL always writes stderr alongside it, so
-           filtering these out is not expected to ever empty the list on its own; it exists for the same
-           reason the self-hosted tail's exclusion does; a target where it somehow did would fall through to
-           the same "no log file" refusal below, which is the honest answer either way. */
+           The name filter picks the file this READ wants (#4053 part c1): the stderr route excludes the
+           .csv/.json siblings (#3997) — see the method's own remarks — while the csvlog route (LogFileKind.Csv)
+           selects the newest name that ENDS with .csv, its own mirror of that same defect. AWS's own docs state
+           that enabling csvlog on RDS for PostgreSQL always writes stderr alongside it, so the stderr filter is
+           not expected to ever empty the list on its own; a target where it somehow did, on either route, falls
+           through to the same "no log file" refusal below, which is the honest answer either way. */
+        Func<string?, bool> matchesKind = kind == LogFileKind.Csv
+            ? name => !string.IsNullOrEmpty(name) && name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+            : name => !string.IsNullOrEmpty(name)
+                && !name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
         return files.DescribeDBLogFiles?
             .OrderByDescending(f => f.LastWritten)
             .Select(f => f.LogFileName)
-            .FirstOrDefault(name => !string.IsNullOrEmpty(name)
-                && !name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
-                && !name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault(name => matchesKind(name))
             ?? throw new InvalidOperationException(
-                $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
-                + "filtered on 'postgresql' returned nothing it could name that was not a csvlog/jsonlog "
-                + "sibling (#3997). NO LOG WAS OPENED this cycle, "
-                + "so this is not an empty log — whatever this window held is unread. This records as a "
-                + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
-                + "that is stopped, still being created, or has just rotated its logs answers this way and "
-                + "clears itself on the first cycle that finds a log, while one that keeps answering this "
-                + "way is a target nobody can read and wants a decision rather than silence.");
+                kind == LogFileKind.Csv
+                    ? $"RDS listed no PostgreSQL csvlog file for instance '{instanceId}': DescribeDBLogFiles "
+                        + "filtered on 'postgresql' returned nothing it could name ending '.csv' (#4053 part c1). "
+                        + "NO LOG WAS OPENED this cycle, so this is not an empty log — whatever this window held is "
+                        + "unread. This records as a collection ERROR and not as a permissions skip, because no "
+                        + "grant fixes it: an instance that only just added csvlog to log_destination and has not "
+                        + "rolled a .csv file yet answers this way and clears itself on the first cycle that finds "
+                        + "one, while one that keeps answering this way is a target nobody can read and wants a "
+                        + "decision rather than silence."
+                    : $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
+                        + "filtered on 'postgresql' returned nothing it could name that was not a csvlog/jsonlog "
+                        + "sibling (#3997). NO LOG WAS OPENED this cycle, "
+                        + "so this is not an empty log — whatever this window held is unread. This records as a "
+                        + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
+                        + "that is stopped, still being created, or has just rotated its logs answers this way and "
+                        + "clears itself on the first cycle that finds a log, while one that keeps answering this "
+                        + "way is a target nobody can read and wants a decision rather than silence.");
     }
 }

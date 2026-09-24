@@ -43,7 +43,11 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <see cref="PerformanceMonitor.Collectors.PgServerLogTail.ForeignZoneLinesMeasurement"/>. Always 0 for a
 /// transport that does not carry a zone-stamped prefix (<c>RdsPlanIngestor</c>, <c>RdsCpuIngestor</c>) and
 /// for a cycle where the target's setting could not be read, which keeps today's refusal instead.</param>
-public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached, int ForeignZoneLines = 0)
+/// <param name="CsvRecordsDiscarded">#4053 part c1: records the csv parser discarded as a resync fragment or a
+/// bad shape, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>. Always 0 for
+/// every transport but the csvlog-aware log-event ingestor, and for a cycle that read the stderr file instead.</param>
+public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -55,5 +59,6 @@ public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached, int
     /// The source was read and held <paramref name="rows"/> rows worth storing — including zero, which here
     /// is a genuine all-clear bounded by the read's own window rather than an absence of information.
     /// </summary>
-    public static RdsIngestOutcome Read(int rows, int foreignZoneLines = 0) => new(rows, true, foreignZoneLines);
+    public static RdsIngestOutcome Read(int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0)
+        => new(rows, true, foreignZoneLines, csvRecordsDiscarded);
 }
