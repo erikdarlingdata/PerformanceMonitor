@@ -31,7 +31,7 @@ public enum ComposeSourceTier
 /// carries no relation (the compiler keeps its existing <c>SourceTable</c> + prefix-time-column path); a CAGG tier
 /// names the rollup view, whose time column is always the <c>bucket</c> the CAGG produced.
 /// </summary>
-public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
+public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null)
 {
     /// <summary>The raw route — the compiler's unchanged behaviour.</summary>
     public static readonly ComposeRoute Raw = new(ComposeSourceTier.Raw, null);
@@ -40,6 +40,10 @@ public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
 
     /// <summary>Every CAGG's time dimension is the <c>time_bucket(...) AS bucket</c> column.</summary>
     public const string CaggTimeColumn = "bucket";
+
+    /// <summary>The compiler's fact-table alias every CAGG <see cref="CaggFromClause"/> is built with (#3653
+    /// A6): <c>f</c>, matching <c>ComposeCompiler.FactAlias</c>.</summary>
+    public const string FactAlias = "f";
 }
 
 /// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
@@ -336,7 +340,16 @@ public static class ComposeSourceRouter
         return tier switch
         {
             RetentionTier.Raw => (ComposeRoute.Raw, null),
-            RetentionTier.Hourly => (new ComposeRoute(ComposeSourceTier.Hourly, coverage.HourlyRelationFor(hourlyView, windowStartUtc)), tierCoverage.HourlyFloorUtc),
+            /* #3653 A6: CaggRelation stays the by-NAME answer (probes/logs/registry lookups); CaggFromClause is
+               the FROM-clause item the compiler actually splices in, which may stitch the legacy hourly to its
+               interval-honest successor. With no successor this is byte-identical to
+               "collect.<hourlyView> AS f" — the same text the old CaggRelation-only path produced once the
+               compiler appended " AS f" itself. */
+            RetentionTier.Hourly => (new ComposeRoute(
+                ComposeSourceTier.Hourly,
+                coverage.HourlyRelationNameFor(hourlyView, windowStartUtc),
+                coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly)),
+                tierCoverage.HourlyFloorUtc),
             _ => (new ComposeRoute(ComposeSourceTier.Daily, dailyView!), tierCoverage.DailyFloorUtc),
         };
     }

@@ -44,6 +44,10 @@ public sealed partial class ViewerDataService
     /// <see cref="DailySummarySql.RangeSqlFor(RetentionTier, string)"/>.</summary>
     public static string DailySummaryRangeSqlFor(RetentionTier tier, string hourlyRelation) => DailySummarySql.RangeSqlFor(tier, hourlyRelation);
 
+    /// <summary>The stitch-aware routed form (#3653 A6, lane LA-3b2). See
+    /// <see cref="DailySummarySql.RangeSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
+    public static string DailySummaryRangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) => DailySummarySql.RangeSqlFor(tier, coverage, windowStartUtc);
+
     /// <summary>
     /// Returns one <see cref="DailySummaryRow"/> per collected day in the half-open [fromDate, toDate)
     /// window. Powers the Performance Calendar month grid.
@@ -96,7 +100,7 @@ public sealed partial class ViewerDataService
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window, so the calendar
            and get_daily_health (DarlingHealthReader, same call) count the same queries for the same day. */
-        await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, fromDate)));
+        await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier, coverage, fromDate));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromDate.Date, DateTimeKind.Unspecified) });

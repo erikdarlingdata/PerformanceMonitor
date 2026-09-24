@@ -408,6 +408,75 @@ public sealed class RollupCoverageRoutingTests
     }
 
     /// <summary>
+    /// #3653 A6, decision 5: no reader outside <c>TimescaleSupport.cs</c> itself (the builder) may call
+    /// <c>HourlyRelationFor(</c> any more — every hourly-tier reader routes through
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> instead, so a frozen legacy hourly still answers a
+    /// window past its successor's floor without a visible gap.
+    ///
+    /// <para>Marked <c>[Fact(Explicit = true)]</c> until LA-3b's readers (<c>DarlingTrendReader.cs</c>'s
+    /// route and query-history read, <c>DailySummary.cs</c>/<c>DailySummarySql.cs</c>,
+    /// <c>DarlingHealthReader.cs</c>) are also routed — LA-3a alone leaves <c>HourlyRelationFor(</c> call
+    /// sites in those files, and a guard that starts red teaches nobody anything. LA-3b flips it to a plain
+    /// <c>[Fact]</c> once all ten readers are routed.</para>
+    ///
+    /// <para>Matched by literal substring on the method name plus an open paren, over comment-stripped
+    /// text (<see cref="StripComments"/>) so a doc-comment <c>&lt;see cref="RollupCoverage.HourlyRelationFor"/&gt;</c>
+    /// is not a false offender. <see cref="IsExcludedFromScan"/> keeps the test project and build output out
+    /// of the walk, same as <see cref="EveryProductionRoutingCaller_PassesCoverage"/> above — the one file
+    /// allowed to still call it is <c>TimescaleSupport.cs</c>, the builder <see cref="RollupCoverage.HourlyRelationFor"/>
+    /// and <see cref="RollupCoverage.StitchedRelationSql"/> both live in, and which keeps
+    /// <c>HourlyRelationFor</c> around for the pins (lane-3653-A6-LA-2.md).</para>
+    /// </summary>
+    [Fact]
+    public void NoReaderOutsideTheBuilder_CallsHourlyRelationForDirectly()
+    {
+        var root = FindRepoRoot();
+
+        Assert.True(root is not null,
+            "Could not locate the repository root (walked up from the test binary looking for " +
+            "PerformanceMonitor.sln). This test scans the source tree, so it cannot run without it — fix the " +
+            "walk-up rather than skipping.");
+
+        var offenders = new List<string>();
+        var scanned = 0;
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root!, "Darling"), "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(root!, file);
+            if (IsExcludedFromScan(relative))
+            {
+                continue;
+            }
+
+            /* TimescaleSupport.cs is the builder: HourlyRelationFor is DEFINED there, and its own method
+               body/XML doc necessarily says the name. Kept out of the scan entirely rather than pattern-
+               matched around, because a definition site saying its own name is not a call site. */
+            if (string.Equals(Path.GetFileName(relative), "TimescaleSupport.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = StripComments(File.ReadAllText(file));
+            var index = 0;
+            while ((index = text.IndexOf("HourlyRelationFor(", index, StringComparison.Ordinal)) >= 0)
+            {
+                scanned++;
+                var line = text.AsSpan(0, index).Count('\n') + 1;
+                offenders.Add($"{relative}:{line}");
+                index += "HourlyRelationFor(".Length;
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "These call sites still name the hourly relation by NAME (RollupCoverage.HourlyRelationFor) " +
+            "instead of routing through RollupCoverage.StitchedRelationSql (#3653 A6, decision 5). A reader " +
+            "that splices a bare name into its SQL rather than the stitch's FROM-clause item will read only " +
+            "the frozen legacy once its successor exists — silently missing every bucket at or after the " +
+            "successor's floor. Route through StitchedRelationSql instead; HourlyRelationFor stays reserved " +
+            "for the pins and for probes/logs that need the plain relation NAME (decision 1).\n\n" +
+            string.Join("\n", offenders));
+    }
+
+    /// <summary>
     /// True when a path is generated build output, or the test project's own source. Compared as whole
     /// path SEGMENTS against BOTH separator characters, so the scanned set is the same wherever this runs
     /// and a directory merely named <c>Objects</c> stays in it.

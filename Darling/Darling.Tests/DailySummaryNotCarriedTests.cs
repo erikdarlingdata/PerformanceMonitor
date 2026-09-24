@@ -379,23 +379,27 @@ public sealed class DailySummaryNotCarriedLiveTests
             Assert.Equal(2, days[3].GetProperty("unique_queries").GetInt32());
         }
 
-        /* And the recent server's window through the same reader: ten days back routes HOURLY by age (inside
-           HourlyMaxAge, past RawMaxAge), and the supply rule keeps the LEGACY — the successor's oldest bucket is
-           the 01:00 collection, an hour past the window's midnight start, so it does not reach as far as the
-           legacy does and "loses nothing" fails by that hour (PrefersSuccessor's own bar; asserted through the
-           probe the reader uses, not assumed). So the reader carries the legacy's answer: the restart-only D1 is
-           the legacy's hole and reads NULL, D2 is carried, and days_missing names D1 — the hole scan's rule
-           surfacing on the wire for a day whose only row is one the successor would have refused. */
+        /* And the recent server's window through the same reader, since #3653 A6, lane LA-3b2: ten days back
+           routes HOURLY by age (inside HourlyMaxAge, past RawMaxAge), and the read now STITCHES the legacy and
+           the successor at the successor's floor F, day-aligned (this PR's own fix) — not the pre-A6 supply
+           rule this leg used to assert, which carried the legacy's answer whole. In this seed the successor's
+           oldest bucket is R(0) 01:00, so F falls inside R(0) and the day-aligned boundary is R(1): the legacy
+           alone supplies R(0), and R(1) onward reads through the successor's own probe. D1 (R(1), the control,
+           an empty day) is genuinely absent — its only row is the restart row (interval 0), which the
+           successor's WHERE refuses, and its own not-carried probe carries the same filter, so a day with no
+           admitted row is not named a hole. D2 (R(2)) is the daily rollup's skip carried up through the hourly
+           successor's own hole: NULL, and named. D3 and D4 read their planted counts. */
         var coverage = await TimescaleSupport.DetectRollupCoverageAsync(postgres, await TimescaleSupport.DetectRollupsAsync(postgres, ct), ct);
         Assert.Equal(hourly, coverage.HourlyRelationFor(hourly, R(0)));
+        Assert.True(coverage.StitchFloor(hourly, RollupCoverage.StitchTier.Hourly, R(0)).HasValue, "the stitch must apply over this window (LA-3 decision 4) for the assertions below to hold");
         var recentRange = await DarlingHealthReader.GetDailySummaryRangeAsync(postgres, RecentServerId, R(0), R(5), cancellationToken: ct);
-        Assert.Equal(new[] { R(0), R(1), R(2), R(3), R(4) }, recentRange.Rows.Select(r => r.SummaryDate).ToArray());
-        Assert.Equal(new long?[] { 3L, null, 5L, 7L, 2L }, recentRange.Rows.Select(r => r.UniqueQueries).ToArray());
-        Assert.Equal(new[] { R(1) }, recentRange.DaysMissing);
+        Assert.Equal(new[] { R(0), R(2), R(3), R(4) }, recentRange.Rows.Select(r => r.SummaryDate).ToArray());
+        Assert.Equal(new long?[] { 3L, null, 7L, 2L }, recentRange.Rows.Select(r => r.UniqueQueries).ToArray());
+        Assert.Equal(new[] { R(2) }, recentRange.DaysMissing);
         var recentWire = await DarlingMcpHealthTools.GetDailySummaryRange(postgres, RecentServerName, days_back: 5, as_of: R(4).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         using (var doc = JsonDocument.Parse(recentWire))
         {
-            Assert.Equal(new[] { R(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) }, doc.RootElement.GetProperty("days_missing").EnumerateArray().Select(e => e.GetString()).ToArray());
+            Assert.Equal(new[] { R(2).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) }, doc.RootElement.GetProperty("days_missing").EnumerateArray().Select(e => e.GetString()).ToArray());
         }
 
         var single = await DarlingMcpHealthTools.GetDailySummary(postgres, OldServerName, O(2).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));

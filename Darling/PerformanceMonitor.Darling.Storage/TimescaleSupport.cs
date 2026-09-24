@@ -11220,6 +11220,14 @@ public sealed class RollupCoverage
             : legacyHourly;
     }
 
+    /// <summary>The routed relation's NAME, for probes, logs and registry lookups ONLY; never splice it into
+    /// SQL (use <see cref="StitchedRelationSql"/>). Same routing as <see cref="HourlyRelationFor"/> — this is
+    /// the by-name half of decision 1 (#3653 A6): a reader that only needs to say which relation applies
+    /// (a probe, a log line, a registry lookup) calls this; a reader building a FROM clause calls
+    /// <see cref="StitchedRelationSql"/> instead.</summary>
+    public string HourlyRelationNameFor(string legacyHourly, DateTime windowStartUtc) =>
+        HourlyRelationFor(legacyHourly, windowStartUtc);
+
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
     /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
     public static RollupCoverage Unknown { get; } = new(
@@ -11250,6 +11258,280 @@ public sealed class RollupCoverage
             FloorOf(hourlyView),
             dailyView is null ? null : FloorOf(dailyView),
             rawTable is null ? null : RawOldestOf(rawTable));
+    }
+
+    /// <summary>Which tier <see cref="StitchedRelationSql"/> is stitching (#3653 A6): the boundary is the
+    /// hourly grid's own bucket for <see cref="Hourly"/>, and the ceiling-of-day boundary described on
+    /// <see cref="StitchedRelationSql"/> for <see cref="Daily"/>.</summary>
+    public enum StitchTier { Hourly, Daily }
+
+    /// <summary>
+    /// LA's local stub of the daily-pair registry LB owns (#3653 A6 design v2 §2): each superseded LEGACY daily,
+    /// its interval-honest successor daily, and the successor HOURLY it is hierarchical from (needed for F_d).
+    /// LB replaces this with <c>TimescaleSupport.SupersededDailyRollups</c>. Until then, on any store built
+    /// before LB ships, the successor daily name is absent from <see cref="RollupAvailability"/> and
+    /// <see cref="StitchedRelationSql"/> answers legacy-only — inert, as designed.
+    /// </summary>
+    private static readonly (string LegacyDaily, string SuccessorDaily, string SuccessorHourly)[] s_supersededDailyRollupsStub =
+    {
+        (TimescaleSupport.QueryStatsDailyView,     "query_stats_interval_daily",     TimescaleSupport.QueryStatsIntervalHourlyView),
+        (TimescaleSupport.ProcedureStatsDailyView,  "procedure_stats_interval_daily", TimescaleSupport.ProcedureStatsIntervalHourlyView),
+        (TimescaleSupport.QueryStatsDbDailyView,    "query_stats_db_interval_daily",  TimescaleSupport.QueryStatsDbIntervalHourlyView),
+    };
+
+    /// <summary>Each stitched pair's explicit column list (#3653 A6 design v2 §2): the LEGACY's own columns,
+    /// with no <c>sample_interval_seconds_sum</c> — no reader selects that column, and the legacy side of the
+    /// UNION does not carry it. Pinned as a subset of both sides' CREATE text by
+    /// <c>StitchedRelationSqlTests</c>. Keyed by the LEGACY view name for both tiers (the daily pair's legacy is
+    /// also the lookup key).</summary>
+    private static readonly Dictionary<string, string[]> s_stitchColumnsByLegacy = new(StringComparer.Ordinal)
+    {
+        [TimescaleSupport.QueryStatsHourlyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "query_hash", "sql_handle", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.ProcedureStatsHourlyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "schema_name", "object_name", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.QueryStatsDbHourlyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "bucket",
+            "worker_time_sum", "logical_reads_sum", "physical_reads_sum", "logical_writes_sum",
+            "execution_count_sum", "last_execution_time_max", "sample_count",
+        },
+        [TimescaleSupport.QueryStatsDailyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "query_hash", "sql_handle", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.ProcedureStatsDailyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "schema_name", "object_name", "bucket",
+            "worker_time_sum", "worker_time_min", "worker_time_max",
+            "elapsed_time_sum", "elapsed_time_min", "elapsed_time_max",
+            "execution_count_sum", "execution_count_min", "execution_count_max", "sample_count",
+        },
+        [TimescaleSupport.QueryStatsDbDailyView] = new[]
+        {
+            "server_id", "server_name", "database_name", "bucket",
+            "worker_time_sum", "logical_reads_sum", "physical_reads_sum", "logical_writes_sum",
+            "execution_count_sum", "last_execution_time_max", "sample_count",
+        },
+    };
+
+    /// <summary>
+    /// THE STITCH (#3653 A6 design v2 §2): a FROM-clause item that reads a frozen legacy rollup and its
+    /// interval-honest successor as ONE relation, split at the successor's first bucket, so a caller never has
+    /// to choose between "the frozen legacy, forever" and "the successor, missing everything before it" —
+    /// which is exactly what lets the freeze (#3653 A6 lane LC) ship without waiting for raw to age out of the
+    /// legacy's reach.
+    ///
+    /// <para><b>Three shapes.</b> <c>collect.&lt;legacy&gt; AS alias</c> when there is no successor (an
+    /// unsuperseded pair, or a store predating LB); <c>collect.&lt;successor&gt; AS alias</c> when there is no
+    /// legacy, the legacy is empty, the successor is itself empty (nothing to stitch to yet — the same "empty
+    /// never wins" guard <see cref="PrefersSuccessor"/> applies), or the successor's floor already reaches at
+    /// or before <paramref name="windowStartUtc"/> (the legacy side would contribute nothing this read could
+    /// use); otherwise a <c>UNION ALL</c> split at the boundary, aliased once at the end (PostgreSQL 14/15
+    /// require the FROM-subquery alias).</para>
+    ///
+    /// <para><b>The hourly boundary</b> is the successor's own materialized floor: both sides share the same
+    /// <c>time_bucket</c> grid, so <c>bucket &lt; F</c> / <c>bucket &gt;= F</c> partitions every row exactly
+    /// once, for any F between the successor's true floor and the legacy's frozen ceiling — a cached probe
+    /// that is slightly stale is still safe.</para>
+    ///
+    /// <para><b>The daily boundary</b> is <c>F_d = max(FloorOf(successorDaily), ceilDay(FloorOf(successorHourly)))</c>:
+    /// the later of the successor daily's own floor and the first WHOLE day after the successor hourly's first
+    /// bucket. Ceiling rather than floor keeps the successor hourly's partial first day on the LEGACY side of
+    /// the split, so the daily stitch never reports a partial day as if it were whole. If the successor daily
+    /// is absent or empty, or the successor hourly it hangs off has not materialized, the read is legacy-only —
+    /// inert until both exist, which is exactly LB's job.</para>
+    ///
+    /// <para><b>Column lists.</b> Each pair's explicit list omits <c>sample_interval_seconds_sum</c>: no reader
+    /// selects it, and it exists only on the successor side.</para>
+    ///
+    /// <para><b>Why a literal, not a view or a scalar subquery.</b> A view breaks the by-name lookups
+    /// <see cref="DailySummarySql"/> and the backfill/repair targets depend on, and a <c>min(bucket)</c> probed
+    /// on a view would answer the LEGACY floor, hiding the successor's own. A scalar-subquery boundary only
+    /// allows run-time chunk exclusion; the literal lets the planner prune chunks on each side before the query
+    /// runs.</para>
+    /// </summary>
+    public string StitchedRelationSql(string legacy, string alias, DateTime windowStartUtc, StitchTier tier)
+    {
+        if (legacy is null)
+        {
+            throw new ArgumentNullException(nameof(legacy));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(alias);
+
+        var legacyOnly = $"collect.{legacy} AS {alias}";
+
+        string? successor;
+        string? successorHourly = null;
+        if (tier == StitchTier.Hourly)
+        {
+            successor = TimescaleSupport.SuccessorOf(legacy);
+
+            /* Hourly names are wired into RollupAvailability (#3653, Q12), so "does this store even HAVE the
+               relation" is answered by the probe's own availability shape, the same guard HourlyRelationFor
+               applies — an absent successor must never be named in a reader's SQL (a 42P01 at the user). */
+            if (successor is null || !_availability.Has(successor))
+            {
+                return legacyOnly;
+            }
+        }
+        else
+        {
+            /* Daily names are LB's registry (SupersededDailyRollups); this is LA's local stub, and
+               RollupAvailability has no field for them yet. "Does the store have the relation" therefore
+               collapses to "did the probe report a floor for it" — the SAME null-floor test that "empty"
+               already uses below, which is exactly the design's daily rule: absent or empty is legacy-only,
+               either way (lane-3653-A6-LA.md). */
+            var pair = s_supersededDailyRollupsStub.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            successor = pair.SuccessorDaily;
+            successorHourly = pair.SuccessorHourly;
+
+            if (successor is null)
+            {
+                return legacyOnly;
+            }
+        }
+
+        var successorOnly = $"collect.{successor} AS {alias}";
+
+        var legacyExists = _availability.Has(legacy);
+        var legacyFloor = legacyExists ? FloorOf(legacy) : null;
+        if (!legacyExists || legacyFloor is null)
+        {
+            return successorOnly;
+        }
+
+        var successorFloor = FloorOf(successor);
+        if (successorFloor is null)
+        {
+            /* Empty successor never wins while the legacy holds rows — the same guard PrefersSuccessor applies,
+               and "absent or empty" reads legacy-only per this method's own remarks. */
+            return legacyOnly;
+        }
+
+        DateTime boundary;
+        if (tier == StitchTier.Hourly)
+        {
+            boundary = successorFloor.Value;
+        }
+        else
+        {
+            var successorHourlyFloor = successorHourly is null ? null : FloorOf(successorHourly);
+            if (successorHourlyFloor is null)
+            {
+                return legacyOnly;
+            }
+
+            var hourlyFloor = successorHourlyFloor.Value;
+            var ceilDay = hourlyFloor == hourlyFloor.Date ? hourlyFloor : hourlyFloor.Date.AddDays(1);
+            boundary = successorFloor.Value > ceilDay ? successorFloor.Value : ceilDay;
+        }
+
+        if (boundary <= windowStartUtc)
+        {
+            return successorOnly;
+        }
+
+        if (!s_stitchColumnsByLegacy.TryGetValue(legacy, out var columns))
+        {
+            throw new ArgumentException(
+                $"'{legacy}' has no stitch column list registered (RollupCoverage.s_stitchColumnsByLegacy) — add one before stitching it (#3653 A6).",
+                nameof(legacy));
+        }
+
+        var columnList = string.Join(", ", columns);
+        var literal = $"TIMESTAMP '{boundary:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        return "(SELECT " + columnList + " FROM collect." + legacy + " WHERE bucket < " + literal
+            + " UNION ALL SELECT " + columnList + " FROM collect." + successor + " WHERE bucket >= " + literal
+            + ") AS " + alias;
+    }
+
+    /// <summary>
+    /// THE STITCH'S OWN BOUNDARY (#3653 A6, lane LA-3b2): the same F <see cref="StitchedRelationSql"/> would
+    /// split <paramref name="legacy"/>/<paramref name="tier"/> at for a read starting at
+    /// <paramref name="windowStartUtc"/>, or null when that call would answer legacy-only or successor-only —
+    /// nothing to split for THIS window. <see cref="DailySummarySql"/>'s not-carried probe uses this to decide
+    /// between one probe and two (UNION ALL, one per relation name, split at F), so it MUST agree with
+    /// <see cref="StitchedRelationSql"/>'s own decision exactly rather than re-derive it — the guard chain
+    /// below is deliberately the same chain, kept side by side with it rather than factored through it, so a
+    /// future edit to one is a visible diff next to the other instead of a shared private path either could
+    /// drift under without a test noticing.
+    /// </summary>
+    public DateTime? StitchFloor(string legacy, StitchTier tier, DateTime windowStartUtc)
+    {
+        if (legacy is null)
+        {
+            throw new ArgumentNullException(nameof(legacy));
+        }
+
+        string? successor;
+        string? successorHourly = null;
+        if (tier == StitchTier.Hourly)
+        {
+            successor = TimescaleSupport.SuccessorOf(legacy);
+            if (successor is null || !_availability.Has(successor))
+            {
+                return null;
+            }
+        }
+        else
+        {
+            var pair = s_supersededDailyRollupsStub.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            successor = pair.SuccessorDaily;
+            successorHourly = pair.SuccessorHourly;
+            if (successor is null)
+            {
+                return null;
+            }
+        }
+
+        var legacyExists = _availability.Has(legacy);
+        var legacyFloor = legacyExists ? FloorOf(legacy) : null;
+        if (!legacyExists || legacyFloor is null)
+        {
+            return null;
+        }
+
+        var successorFloor = FloorOf(successor);
+        if (successorFloor is null)
+        {
+            return null;
+        }
+
+        DateTime boundary;
+        if (tier == StitchTier.Hourly)
+        {
+            boundary = successorFloor.Value;
+        }
+        else
+        {
+            var successorHourlyFloor = successorHourly is null ? null : FloorOf(successorHourly);
+            if (successorHourlyFloor is null)
+            {
+                return null;
+            }
+
+            var hourlyFloor = successorHourlyFloor.Value;
+            var ceilDay = hourlyFloor == hourlyFloor.Date ? hourlyFloor : hourlyFloor.Date.AddDays(1);
+            boundary = successorFloor.Value > ceilDay ? successorFloor.Value : ceilDay;
+        }
+
+        return boundary <= windowStartUtc ? null : boundary;
     }
 
     /// <summary>The raw table a rollup view's tier ladder falls back TO, or null for a name outside
