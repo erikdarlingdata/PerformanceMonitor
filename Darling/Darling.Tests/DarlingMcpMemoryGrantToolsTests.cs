@@ -298,6 +298,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
 
                 Assert.Equal(JsonValueKind.Null, byPool[3].GetProperty("sample_interval_seconds").ValueKind);
                 Assert.False(byPool[3].GetProperty("interval_known").GetBoolean());
+
+                /* #3653 item 17: interval_seconds is sample_interval_seconds under the name get_latch_stats and
+                   get_spinlock_stats use, including null for the same restart-marker and pre-column rows. */
+                Assert.Equal(JsonValueKind.Null, byPool[1].GetProperty("interval_seconds").ValueKind);
+                Assert.Equal(byPool[2].GetProperty("sample_interval_seconds").GetInt32(), byPool[2].GetProperty("interval_seconds").GetInt32());
+                Assert.Equal(JsonValueKind.Null, byPool[3].GetProperty("interval_seconds").ValueKind);
             }
 
             var grantsJson = await DarlingMcpMemoryGrantTools.GetMemoryGrants(postgres, ServerName);
