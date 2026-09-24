@@ -205,6 +205,47 @@ SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 500";
 
+    /* The csvlog pair (#4053 part b1), sent instead of the two above once context.PgLogUsesCsvlog says the
+       target's log_destination includes csvlog — the same flag PgLogEventsCollector reads, extended to this
+       collector by DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync. Unlike QueryText/BinaryQueryText,
+       this pair runs NO server-side regexp_matches: PgServerLogCsvParser resyncs and shape-checks the whole
+       tail into typed PgLogEntry records in C#, and ReadAsync picks the deadlock ones out by calling
+       PgDeadlockLogParser.FromEntry on each. The marker arms are PgLogEventsCollector's own shape: the
+       collector-off arm is shared, and the no-file-yet arm is PgNoCsvlogFileException.Marker — never
+       PgNoStderrLogFileException's — so the fault message names csvlog rather than stderr. */
+    private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /* The binary-route twin of CsvQueryText (#4053 part b1), the same shape BinaryQueryText is to QueryText:
+       pg_read_binary_file in place of pg_read_file, and the marker arms cast through convert_to for the
+       reason BinaryQueryText's own remarks give — a bytea/text UNION mismatch would ask PostgreSQL to parse
+       the marker text as bytea input rather than hand back its own UTF-8 bytes. */
+    private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /// <summary>
+    /// The count a consumer records on its collection-log row when the csvlog parser discarded a record
+    /// (#4053 part b1), the same measurement <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>
+    /// spells — ONE label, so an operator reads the same name whichever collector's row carries it.
+    /// </summary>
+    private const string CsvRecordsDiscardedMeasurement = PgLogEventsCollector.CsvRecordsDiscardedMeasurement;
+
     public override string Name => "pg_deadlocks";
 
     public override string TargetTable => "pg_deadlocks";
@@ -221,7 +262,9 @@ LIMIT 500";
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
-        new(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText);
+        new(context.PgLogUsesCsvlog
+            ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+            : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -248,6 +291,12 @@ LIMIT 500";
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            if (context.PgLogUsesCsvlog)
+            {
+                ReadCsvRow(reader, context, rows);
+                continue;
+            }
+
             var firstColumn = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
 
             /* The marker row the query returns instead of listing the log directory when
@@ -294,19 +343,113 @@ LIMIT 500";
                 continue;
             }
 
-            rows.Add(new Row(
-                OccurredAtUtc: parsed.Value.OccurredAtUtc,
-                VictimPid: parsed.Value.VictimPid,
-                ParticipantCount: parsed.Value.ParticipantCount,
-                DeadlockHash: parsed.Value.DeadlockHash,
-                LockModes: parsed.Value.LockModes,
-                Resources: parsed.Value.Resources,
-                VictimStatement: parsed.Value.VictimStatement,
-                GraphText: parsed.Value.GraphText));
+            rows.Add(ToRow(parsed.Value));
         }
 
         return rows;
     }
+
+    /// <summary>
+    /// The csvlog route's own row read (#4053 part b1): decode the whole tail body, check its two marker
+    /// values, resync it into typed entries with <see cref="PgServerLogCsvParser"/>, apply the same
+    /// foreign-zone rule the stderr path applies through <see cref="PgDeadlockLogParser.FromReport(string?, bool, out int)"/>'s
+    /// assembler, then keep only the entries that are deadlock reports (<see cref="PgDeadlockLogParser.FromEntry"/>
+    /// returns non-null for those and null for every other row the tail carries — most of it). Column 0 is the
+    /// whole tail body here, never a regexp candidate, so it is decoded exactly as <c>PgLogEventsCollector</c>'s
+    /// own csvlog branch decodes it.
+    /// </summary>
+    private static void ReadCsvRow(DbDataReader reader, CollectorContext context, List<Row> rows)
+    {
+        var body = reader.IsDBNull(0)
+            ? null
+            : context.PgReadBinaryFileGranted
+                ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0), context.PgLogEncoding ?? System.Text.Encoding.UTF8)
+                : reader.GetString(0);
+
+        if (string.Equals(body, PgLoggingCollectorOffException.Marker, System.StringComparison.Ordinal))
+        {
+            throw new PgLoggingCollectorOffException();
+        }
+
+        /* The csvlog route's own "no file yet" marker (#4053 part b1) — distinct from the stderr route's
+           PgNoStderrLogFileException, so the fault message names csvlog, never stderr. */
+        if (string.Equals(body, PgNoCsvlogFileException.Marker, System.StringComparison.Ordinal))
+        {
+            throw new PgNoCsvlogFileException();
+        }
+
+        var entries = PgServerLogCsvParser.Parse(body ?? string.Empty, out var recordsDiscarded);
+
+        if (recordsDiscarded > 0)
+        {
+            context.Measure(CsvRecordsDiscardedMeasurement, recordsDiscarded);
+        }
+
+        var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
+        var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
+        PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+        foreach (var entry in kept)
+        {
+            var parsed = PgDeadlockLogParser.FromEntry(entry);
+
+            if (parsed is not null)
+            {
+                rows.Add(ToRow(parsed.Value));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The same foreign-zone rule <c>PgLogEventsCollector.FilterForeignZoneEntries</c> applies (#4053 part b1),
+    /// kept as this collector's own copy rather than a shared call: under a UTC <c>log_timezone</c> a record in
+    /// another zone is not the server's own and is dropped and counted in <paramref name="foreignZoneLines"/>;
+    /// otherwise a foreign zone throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole
+    /// batch, the #2993 trade every reader of this tail makes.
+    /// </summary>
+    private static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
+    {
+        foreignZoneLines = 0;
+
+        if (!logTimezoneIsUtc)
+        {
+            foreach (var entry in entries)
+            {
+                if (!PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+                {
+                    throw new PgLogTimezoneUnsupportedException(entry.ZoneText);
+                }
+            }
+
+            return entries;
+        }
+
+        var kept = new List<PgLogEntry>(entries.Count);
+
+        foreach (var entry in entries)
+        {
+            if (PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+            {
+                kept.Add(entry);
+            }
+            else
+            {
+                foreignZoneLines++;
+            }
+        }
+
+        return kept;
+    }
+
+    private static Row ToRow(PgDeadlockLogParser.ParsedDeadlock parsed) => new(
+        OccurredAtUtc: parsed.OccurredAtUtc,
+        VictimPid: parsed.VictimPid,
+        ParticipantCount: parsed.ParticipantCount,
+        DeadlockHash: parsed.DeadlockHash,
+        LockModes: parsed.LockModes,
+        Resources: parsed.Resources,
+        VictimStatement: parsed.VictimStatement,
+        GraphText: parsed.GraphText);
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
     {

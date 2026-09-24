@@ -33,12 +33,18 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     {
         PgReadBinaryFileCapability.Reset();
         PgReadBinaryFileCapability.CacheTtl = TimeSpan.FromHours(1);
+        /* #4053 part b1: PgLogFormatCapability's cache is process-wide static state too, keyed the same way
+           (target-key), and TheRunnerGateProbesOnlyAPostgresLogTailCollector's theory rows all probe
+           "gate-target" — without this reset, a later row's csvlog probe hits the cache an earlier row in
+           the same run already filled and makes one fewer round trip than expected. */
+        PgLogFormatCapability.Reset();
     }
 
     public void Dispose()
     {
         PgReadBinaryFileCapability.Reset();
         PgReadBinaryFileCapability.CacheTtl = TimeSpan.FromHours(1);
+        PgLogFormatCapability.Reset();
     }
 
     /// <summary>A runtime keyed as <paramref name="storageName"/>. The cache helpers take the runtime, not a
@@ -254,13 +260,13 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
 
     /// <summary>
     /// The runner's gate (#4046 part 1c): a PostgreSQL log-tail collector takes the probe's answer; any other
-    /// collector, and any SQL Server target, stays on the text route with no round trip. pg_log_events makes a
-    /// second probe (#4053: <c>PgLogFormatCapability</c>, whether csvlog is configured); deadlocks and plan capture
-    /// still read stderr only, so they make just the one.
+    /// collector, and any SQL Server target, stays on the text route with no round trip. A log-tail collector in
+    /// <c>PgLogFormatCapability.RoutedCollectors</c> makes a second probe (#4053: whether csvlog is configured) —
+    /// pg_log_events since part a1b and pg_deadlocks since part b1 (pg_plan_capture joins with part b2).
     /// </summary>
     [Theory]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_log_events", true, 2)]
-    [InlineData(CollectorTargetEngine.PostgreSql, "pg_deadlocks", true, 1)]
+    [InlineData(CollectorTargetEngine.PostgreSql, "pg_deadlocks", true, 2)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_plan_capture", true, 1)]
     [InlineData(CollectorTargetEngine.PostgreSql, "pg_database_stats", false, 0)]
     [InlineData(CollectorTargetEngine.SqlServer, "pg_log_events", false, 0)]

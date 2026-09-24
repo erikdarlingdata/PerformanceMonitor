@@ -323,14 +323,37 @@ public static class PgDeadlockLogParser
                 && entry.Message.TrimEnd() == "deadlock detected"
                 && !string.IsNullOrWhiteSpace(entry.Detail))
             {
-                return FromEntry(entry);
+                return BuildFromEntry(entry);
             }
         }
 
         return null;
     }
 
-    private static ParsedDeadlock? FromEntry(PgLogEntry entry)
+    /// <summary>
+    /// One report, built directly from an already-assembled <see cref="PgLogEntry"/> (#4053 part b1) — the
+    /// csvlog route's entry point, used in place of <see cref="FromReport(string?, bool, out int)"/> because
+    /// <see cref="PgServerLogCsvParser"/> hands <see cref="PgDeadlocksCollector"/> already-typed entries rather
+    /// than raw text for the assembler to re-derive a prefix from. Applies the same check
+    /// <see cref="FromReport(string?, bool, out int)"/> applies inside its assembler loop — severity ERROR, the
+    /// message the deadlock marker with its severity prefix already stripped by the entry's own field split,
+    /// and a non-empty DETAIL — so an entry that is not a deadlock report (an ordinary ERROR row the csvlog
+    /// tail also carries) is null here exactly as it is null there. Null does not mean a bad shape: most
+    /// entries the csvlog tail yields are not deadlocks at all.
+    /// </summary>
+    public static ParsedDeadlock? FromEntry(PgLogEntry entry)
+    {
+        if (entry.Severity != "ERROR"
+            || entry.Message.TrimEnd() != "deadlock detected"
+            || string.IsNullOrWhiteSpace(entry.Detail))
+        {
+            return null;
+        }
+
+        return BuildFromEntry(entry);
+    }
+
+    private static ParsedDeadlock? BuildFromEntry(PgLogEntry entry)
     {
         /* The queries normalized before anything is read out of the block (#4005): the victim's statement is
            then the graph's own, and the identity is over text a reader of the row can see. Newlines stay: they
