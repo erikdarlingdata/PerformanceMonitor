@@ -43,7 +43,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// null expectation grew with the number of samples in the window (a 24-hour anchored pass reported
 /// more anomalies than the 4-hour scheduled pass on identical behaviour; the post-install pages ran
 /// 11 → 24/h on the measured population). Every window read here already computed AVG beside MAX
-/// except <see cref="IoWindowSql"/>, which read AVG ALONE while its siblings read the peak under the
+/// except <see cref="IoTileWindowSql"/>, which read AVG ALONE while its siblings read the peak under the
 /// same shared cutoffs; it now reads both and reports the peak like the rest. The reported deviation
 /// (Value, deviation_sigma) stays the PEAK's; the mean's rides beside it as mean_deviation_sigma.
 /// Lite's AnomalyDetector carries the identical reads, verbatim.
@@ -54,7 +54,7 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// gets the same pair. Its window read computed a peak ms/sec and nothing else, and its inline gate
 /// tested that peak alone — modified z on the median/MAD frame at the heavy-tail 5.0 cutoff AND the
 /// 250 ms/sec floor — so one hot collection in an otherwise quiet window fired the one metric the
-/// fleet measured as heavy-tailed by nature. <see cref="WaitRateWindowSql"/> now reads AVG beside MAX
+/// fleet measured as heavy-tailed by nature. <see cref="WaitRateTileWindowSql"/> now reads AVG beside MAX
 /// and the trustworthy robust arm is ONE <see cref="AnomalyGate"/> pair call: peak and mean both clear
 /// the 5.0 cutoff, the floor stays on the peak. The ratio arm (a trustworthy bucket without robust
 /// statistics) asks the same of both ratios; the no-baseline arm stays on the peak's absolute bar, as
@@ -190,17 +190,6 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
      + (SELECT COUNT(*) FROM v_cpu_utilization_stats
         WHERE server_id = $1 AND collection_time >= $2)";
 
-    public const string CpuWindowSql = @"
-SELECT MAX(sqlserver_cpu_utilization) AS peak_cpu,
-       AVG(sqlserver_cpu_utilization) AS avg_cpu,
-       COUNT(*) AS sample_count,
-       (SELECT collection_time FROM v_cpu_utilization_stats
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-        ORDER BY sqlserver_cpu_utilization DESC LIMIT 1) AS peak_time
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   collection_time >= $2 AND collection_time < $3";
-
     /* #3653 A8 option B (lane L2a): the tiled CPU window read — one row per target-local hour
        (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock, never the cached
        baseline clock — see the recipe doc). The peak-time subquery is dropped for a per-tile
@@ -232,29 +221,6 @@ ORDER BY local_hour";
        window read as a profile shift; the mean of N collections drawn from the baseline sits at the
        baseline whatever N is, and requiring it to clear the same bar removes that bias without a new
        number. Column ORDER is the reader's ordinal contract (0 peak, 1 avg, 2 total, 3 count) — pinned. */
-    public const string WaitRateWindowSql = @"
-WITH per_collection AS (
-    SELECT collection_time,
-           SUM(delta_wait_time_ms)::DOUBLE PRECISION AS total_wait_ms,
-           /* #3540: the collection's STORED interval (MAX over its rows — a wait type first seen in an otherwise
-              steady pass carries 0 beside its siblings' real interval and adds 0 to the sum; MAX is 0 only when
-              EVERY row was unknowable, a restart) mapped through NULLIF so that collection is NOT a sample; a
-              pre-V127 collection (NULL) falls back to the LAG this read always used. */
-           CASE WHEN MAX(sample_interval_seconds) IS NULL
-                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
-                ELSE NULLIF(MAX(sample_interval_seconds), 0)
-           END AS interval_sec
-    FROM v_wait_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-    AND   delta_wait_time_ms >= 0
-    GROUP BY collection_time
-)
-SELECT MAX(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS peak_ms_per_sec,
-       AVG(CASE WHEN interval_sec > 0 THEN total_wait_ms / interval_sec END) AS avg_ms_per_sec,
-       SUM(total_wait_ms) AS total_wait_ms,
-       COUNT(*) FILTER (WHERE interval_sec IS NOT NULL) AS sample_count
-FROM per_collection";
-
     /* #3653 A8 option B (lane L2a): the tiled wait-rate window read. The per_collection CTE is
        unchanged — it must expose collection_time under that name for WindowTiles.LocalHourSql to key
        on — and the OUTER select groups by local_hour instead of collapsing to one row. Column order
@@ -313,15 +279,6 @@ SELECT
        ReadLatencyFloorMs / IoLatencyFallbackMs bars were sized for. The baseline is the per-file-row read ratio
        at this same grain (PgBaselineProvider's io_latency arm), so MAX over the same rows is the statistic the
        other families test. Lite-verbatim. */
-    public const string IoWindowSql = @"
-SELECT MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
-       AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
-       MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat
-FROM v_file_io_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   (delta_reads > 0 OR delta_writes > 0)";
-
     /* #3653 A8 option B (lane L2a): the tiled I/O window read — ONE read feeds both the read-latency
        and write-latency gates, each scored through EvaluateTiles with its own WindowTile list built
        from this one row set (design's I/O row: "ONE tiled read feeds both gates"). Column order
