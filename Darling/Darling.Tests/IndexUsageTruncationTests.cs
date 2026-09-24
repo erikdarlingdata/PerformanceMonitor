@@ -41,6 +41,19 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class IndexUsageTruncationTests
 {
+    /// <summary>
+    /// #4134: the capped page's ORDER BY must end on a key that is unique per row (database, schema, table,
+    /// index), or tied rows can land on either side of the LIMIT from one call to the next. A live test cannot
+    /// catch its removal (PostgreSQL's sort is free to return the same page anyway), so pin the text.
+    /// </summary>
+    [Fact]
+    public void TheIndexUsageOrderByEndsOnAUniqueKey()
+    {
+        Assert.Matches(
+            @"reserved_mb DESC,\s*database_name,\s*schema_name,\s*table_name,\s*index_name\s*LIMIT \$3",
+            DarlingObjectStatsReader.IndexUsageSql);
+    }
+
     private static string ReaderSql => DarlingObjectStatsReaderSource.IndexUsageSql;
 
     /// <summary>
@@ -291,9 +304,13 @@ public sealed class IndexUsageTruncationLivePostgresTests
             var capture = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
             var collectionId = CollectionIdGenerator.Next();
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            await PlantIndexAsync(connection, ct, collectionId, capture, "DbA", "IX_1", objectId: 300, indexId: 2, reservedMb: 10m, seeks: 0);
-            await PlantIndexAsync(connection, ct, collectionId, capture, "DbA", "IX_2", objectId: 300, indexId: 3, reservedMb: 10m, seeks: 0);
+            /* Planted in reverse of the expected order, so insertion order doesn't line up with the page by
+               accident. This proves the ORDER BY contract, not the nondeterminism: PostgreSQL's top-N sort
+               happened to return the same page on dev too, so TheIndexUsageOrderByEndsOnAUniqueKey pins the
+               key itself. */
             await PlantIndexAsync(connection, ct, collectionId, capture, "DbB", "IX_1", objectId: 400, indexId: 2, reservedMb: 10m, seeks: 0);
+            await PlantIndexAsync(connection, ct, collectionId, capture, "DbA", "IX_2", objectId: 300, indexId: 3, reservedMb: 10m, seeks: 0);
+            await PlantIndexAsync(connection, ct, collectionId, capture, "DbA", "IX_1", objectId: 300, indexId: 2, reservedMb: 10m, seeks: 0);
 
             var expected = new (string, string?)[] { ("DbA", "IX_1"), ("DbA", "IX_2") };
 
