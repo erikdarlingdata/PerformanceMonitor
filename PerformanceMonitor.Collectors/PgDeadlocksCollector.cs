@@ -244,7 +244,10 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     /// (#4053 part b1), the same measurement <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>
     /// spells — ONE label, so an operator reads the same name whichever collector's row carries it.
     /// </summary>
-    private const string CsvRecordsDiscardedMeasurement = PgLogEventsCollector.CsvRecordsDiscardedMeasurement;
+    /* A literal, not a reference to PgLogEventsCollector.CsvRecordsDiscardedMeasurement: the measurement-label gate
+       (CollectorMeasurementSeamTests) reads labels only as string-literal consts in the collector's own file. It
+       must stay equal to PgLogEventsCollector's label. */
+    private const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
 
     public override string Name => "pg_deadlocks";
 
