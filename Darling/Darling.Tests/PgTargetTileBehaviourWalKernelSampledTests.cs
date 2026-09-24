@@ -338,7 +338,11 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
     private static readonly int CpuShiftServerId = ServerIdHelper.GetDeterministicHashCode(CpuShiftServerName);
 
     private const double CpuBaseCores = 1.0;   // routine
-    private const double CpuShiftCores = 5.0;  // shifted — clears PgCpuBurnCoresFloor (0.5)
+    // 30% above the routine rate: same shape as the WAL family's shift comment above — the routine's 5%
+    // deterministic ripple gives the bucket sigma ≈ 5% of its mean, so this shift sits at ≈ mean + 6·sigma
+    // on the robust scale (clears the modified-z cutoff on its own tile; the two-hour-diluted whole-window
+    // average sits well under it). Also clears PgCpuBurnCoresFloor (0.5).
+    private const double CpuShiftCores = CpuBaseCores * 1.3;
 
     /// <summary>Scenario 1 for CPU burn: <c>pg_kernel_stats</c> user/system time per minute, rated to cores busy —
     /// same shift shape as the WAL family's. Copies <c>PgTargetKernelTests</c>' live seeding.</summary>
@@ -368,6 +372,7 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var startBucket = await baselines.GetBaselineAsync(CpuShiftServerId, MetricNames.PgCpuBurnCores, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour CPU-burn bucket must be trustworthy");
+            Console.WriteLine($"[DIAG cpu] Median={startBucket.Median} EffectiveRobustSigma={startBucket.EffectiveRobustSigma} Mean={startBucket.Mean} EffectiveStdDev={startBucket.EffectiveStdDev}");
 
             var wholeWindowMean = (CpuBaseCores + CpuShiftCores) / 2.0;
             var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
@@ -400,7 +405,10 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
 
     private const int SampledCycleMinutes = 5, SampledMs = 30_000, SampledPeriodMs = 1_000;
     private const int SampledBaseRelation = 20;   // 20 samples * 1s period = 20 s / 30 s watched -> ~667 ms/s
-    private const int SampledShiftRelation = 90;  // 90 s / 30 s watched -> 3,000 ms/s, clears the fallback (500 ms/s)
+    // 30 s / 30 s watched -> 1,000 ms/s. The bucket's robust sigma here runs ≈ 50 ms/s (measured, not a ripple
+    // fraction of the mean like the other two families), so this shift sits at ≈ median + 6·sigma on the robust
+    // scale, the same "~6σ" shape as WAL/CPU; still clears the fallback bar (500 ms/s).
+    private const int SampledShiftRelation = 30;
 
     /// <summary>
     /// Scenario 1 for sampled waits: only the ROBUST arm tiles (lesson 2), so the start bucket must be
@@ -435,6 +443,7 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             var startBucket = await baselines.GetBaselineAsync(SampledWaitShiftServerId, MetricNames.PgSampledWaitMsPerSec, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour sampled-wait bucket must be trustworthy");
             Assert.True(startBucket.EffectiveRobustSigma > 0, "the start-hour bucket must carry a robust sigma so the robust arm — the only one this lane tiles — runs");
+            Console.WriteLine($"[DIAG sampled] Median={startBucket.Median} EffectiveRobustSigma={startBucket.EffectiveRobustSigma} Mean={startBucket.Mean} EffectiveStdDev={startBucket.EffectiveStdDev}");
 
             var baseRatePerSec = SampledBaseRelation * SampledPeriodMs / (SampledMs / 1000.0);
             var shiftRatePerSec = SampledShiftRelation * SampledPeriodMs / (SampledMs / 1000.0);
