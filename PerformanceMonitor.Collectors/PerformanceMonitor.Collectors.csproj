@@ -17,5 +17,7 @@
     <!-- #4053 c3: the RDS plan ingestor calls PgPlanCaptureCollector.PlanRowsFromCsvEntries, which is internal
          because it is sound only over csv-parser entries (see its remarks). -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
+    <!-- #4058 r3: PgLogEntryProvenanceTests exercises RaisedByPlpgsql/ReportedByOther directly. -->
+    <InternalsVisibleTo Include="Darling.Tests" />
   </ItemGroup>
 </Project>

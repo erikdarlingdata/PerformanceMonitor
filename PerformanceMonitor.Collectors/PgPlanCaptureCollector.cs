@@ -319,7 +319,8 @@ LIMIT 2000";
     public const string ForgedCaptureNote =
         "Skipped auto_explain captures whose query id or duration did not match the guarded shape a real "
         + "capture always has: a client can plant one through a syntax error whose STATEMENT: companion "
-        + "echoes attacker-chosen text back into the log (#4058). The read went on without them";
+        + "echoes attacker-chosen text back into the log (#4058); a capture raised by a PL/pgSQL RAISE "
+        + "rather than auto_explain is also counted here (#4058). The read went on without them";
 
     /// <summary>
     /// The count a consumer records on its collection-log row when the csvlog parser discarded a record
@@ -437,11 +438,24 @@ LIMIT 2000";
             var rest = entry.Message[PlanMarkerCsvLiteral.Length..];
             var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
 
-            /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way.
-               It is not a capture, and not forged, so it is skipped WITHOUT counting (review round 1);
-               counting it would grow forged_captures_skipped with every slow statement. */
+            /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way,
+               and under verbose logging its Location is exec_simple_query or exec_execute_message, never
+               explain_ExecutorEnd — the same shape the provenance guard below would flag as forged. Checked
+               FIRST (review round 1 of #4058, round 2 of #4137): it is not a capture, and not forged, so it
+               is skipped WITHOUT counting; counting it would grow forged_captures_skipped with every slow
+               statement, and running the provenance guard on it first would count a real record as forged. */
             if (msIndex < 0)
             {
+                continue;
+            }
+
+            /* #4058 item 3: a RAISE LOG can imitate this marker text verbatim — the client controls the
+               whole message. Caught here rather than left to the query-id/duration guards below, because a
+               forged capture that also happens to carry a real-looking query id and duration would
+               otherwise pass them; counted the same way those guards count a forgery. */
+            if (PgLogEntryProvenance.RaisedByPlpgsql(entry) || PgLogEntryProvenance.ReportedByOther(entry, "explain_ExecutorEnd"))
+            {
+                forgedCaptures++;
                 continue;
             }
 

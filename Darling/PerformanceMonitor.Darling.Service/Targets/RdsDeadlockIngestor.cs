@@ -123,7 +123,7 @@ public sealed class RdsDeadlockIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry) = await StoreAsync(
+        var (written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
             carry, chunk.Value.MoreAvailable, cancellationToken);
 
@@ -145,7 +145,7 @@ public sealed class RdsDeadlockIngestor
             csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
         }
 
-        return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
+        return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped: raiseShapedSkipped);
     }
 
     /// <summary>
@@ -154,7 +154,7 @@ public sealed class RdsDeadlockIngestor
     /// deadlocks in it — is a legitimate zero that loses nothing, and every way it can FAIL leaves via an
     /// exception rather than a zero the caller would have to tell apart from those.
     /// </summary>
-    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, int RaiseShapedSkipped, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
@@ -167,13 +167,14 @@ public sealed class RdsDeadlockIngestor
         List<PgDeadlockLogParser.ParsedDeadlock> deadlocks;
         int foreignZoneLines;
         var csvRecordsDiscarded = 0;
+        var raiseShapedSkipped = 0;
         var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
 
         if (pgLogUsesCsvlog)
         {
             if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
             {
-                return (0, 0, 0, carry);
+                return (0, 0, 0, 0, carry);
             }
 
             var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
@@ -189,6 +190,19 @@ public sealed class RdsDeadlockIngestor
             deadlocks = new List<PgDeadlockLogParser.ParsedDeadlock>();
             foreach (var entry in kept)
             {
+                /* #4058 item 1: the same restricted RAISE-shaped check PgDeadlocksCollector's own csvlog
+                   branch applies — checked only for an entry that already matches the deadlock candidate
+                   shape FromEntry itself tests, and counted rather than falling through FromEntry's silent
+                   null for "not a deadlock at all". */
+                if (entry.Severity == "ERROR"
+                    && entry.Message.TrimEnd() == "deadlock detected"
+                    && !string.IsNullOrWhiteSpace(entry.Detail)
+                    && PgDeadlockLogParser.IsRaiseShaped(entry))
+                {
+                    raiseShapedSkipped++;
+                    continue;
+                }
+
                 var parsed = PgDeadlockLogParser.FromEntry(entry);
 
                 if (parsed is not null)
@@ -201,7 +215,7 @@ public sealed class RdsDeadlockIngestor
         {
             if (string.IsNullOrEmpty(text))
             {
-                return (0, 0, 0, nextCarry);
+                return (0, 0, 0, 0, nextCarry);
             }
 
             /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
@@ -218,7 +232,7 @@ public sealed class RdsDeadlockIngestor
         if (deadlocks.Count == 0)
         {
             /* A log slab with no deadlocks in it is the ordinary case. Not worth a log line every cycle. */
-            return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry);
+            return (0, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry);
         }
 
         var rows = new List<PgDeadlocksCollector.Row>(deadlocks.Count);
@@ -236,7 +250,9 @@ public sealed class RdsDeadlockIngestor
                 GraphText: deadlock.GraphText));
         }
 
-        return (await WriteAsync(serverId, storageName, rows, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry);
+        return (
+            await WriteAsync(serverId, storageName, rows, cancellationToken),
+            foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry);
     }
 
     /// <summary>

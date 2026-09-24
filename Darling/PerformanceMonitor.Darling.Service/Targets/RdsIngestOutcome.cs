@@ -52,8 +52,15 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// managed-route twin of
 /// <see cref="PerformanceMonitor.Collectors.PgPlanCaptureCollector.ForgedCaptureMeasurement"/>. Always 0 for every
 /// transport but the csvlog-aware plan ingestor.</param>
+/// <param name="RaiseShapedSkipped">#4058 item 1: deadlock-shaped entries the deadlock ingestor's csvlog route
+/// skipped because <see cref="PerformanceMonitor.Collectors.PgDeadlockLogParser.IsRaiseShaped"/> found they were
+/// not written by PostgreSQL's own <c>DeadLockReport</c>, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement"/>. Always 0
+/// for every transport but the csvlog-aware deadlock ingestor. LAST member, added rather than inserted, for the
+/// same source-compatibility reason <see cref="PerformanceMonitor.Collectors.PgLogEntry.Location"/> gives.</param>
 public readonly record struct RdsIngestOutcome(
-    int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0, int ForgedCaptures = 0)
+    int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0, int ForgedCaptures = 0,
+    int RaiseShapedSkipped = 0)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -66,6 +73,7 @@ public readonly record struct RdsIngestOutcome(
     /// is a genuine all-clear bounded by the read's own window rather than an absence of information.
     /// </summary>
     public static RdsIngestOutcome Read(
-        int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0, int forgedCaptures = 0)
-        => new(rows, true, foreignZoneLines, csvRecordsDiscarded, forgedCaptures);
+        int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
+        int raiseShapedSkipped = 0)
+        => new(rows, true, foreignZoneLines, csvRecordsDiscarded, forgedCaptures, raiseShapedSkipped);
 }

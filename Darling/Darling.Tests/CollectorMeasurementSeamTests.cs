@@ -565,6 +565,9 @@ public class CollectorMeasurementSeamTests
                    pg_log_events' own ReadAsync on the jsonlog route, which is why the const lives in
                    PgLogEventsCollector.cs. */
                 PgLogEventsCollector.JsonRecordsDiscardedMeasurement,
+                /* #4058: deadlock-shaped records that IsRaiseShaped caught before FromEntry ever ran. Measured
+                   by pg_deadlocks' own ReadAsync, which is why the const lives in PgDeadlocksCollector.cs. */
+                PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

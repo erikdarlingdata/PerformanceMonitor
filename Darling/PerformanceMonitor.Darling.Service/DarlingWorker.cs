@@ -9671,6 +9671,11 @@ LIMIT 1";
                beside it, on the same HostNote channel, following the ForeignZoneLines pattern above. */
             result = DarlingCollectorRunner.WithForgedCaptureNote(result);
 
+            /* #4058 item 1: a deadlock-capture run that skipped RAISE-shaped entries (not written by
+               PostgreSQL's own DeadLockReport) carries their count; this puts the sentence that names the
+               issue beside it, on the same HostNote channel, following the ForgedCapture pattern above. */
+            result = DarlingCollectorRunner.WithRaiseShapedDeadlocksSkippedNote(result);
+
             /* #4046: the once-a-day nudge for a self-hosted target still on the text route, BEFORE it ever
                hits the 22021 byte — gated to pg_log_events alone so a target with all three log-tail
                collectors scheduled gets one note a day, not whichever of the three wins the 24-hour gate.
