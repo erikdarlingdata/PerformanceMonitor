@@ -1,14 +1,14 @@
 # DarlingMcpPgTrendTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_database_trend 1373
+tool get_pg_database_trend 609
 param get_pg_database_trend.as_of 167
 param get_pg_database_trend.bucket_minutes 55
 param get_pg_database_trend.database 152
 param get_pg_database_trend.hours_back 29
 param get_pg_database_trend.server_name 28
 
-tool get_pg_io_trend 1596
+tool get_pg_io_trend 614
 param get_pg_io_trend.as_of 167
-param get_pg_io_trend.backend_type 205
+param get_pg_io_trend.backend_type 86
 param get_pg_io_trend.bucket_minutes 55
 param get_pg_io_trend.context 194
 param get_pg_io_trend.hours_back 29

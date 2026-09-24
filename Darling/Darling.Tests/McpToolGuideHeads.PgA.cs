@@ -261,3 +261,97 @@ public sealed class McpToolGuideHeadsPgPlanTests
         }
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for the pgA trend/CPU batch: <c>get_pg_io_trend</c>, <c>get_pg_database_trend</c> and
+/// <c>get_pg_cpu_utilization</c>, converted out of <c>DarlingMcpPgTrendTools</c> and
+/// <c>DarlingMcpPgCpuUtilizationTools</c> (Darling only — none of the three has a Lite twin). Shares this
+/// file's "PgA" home per the coordinator's file assignment, distinct from the other classes here. Follows the
+/// pattern in <see cref="McpToolGuideHeadsHealthParserTests"/>.
+///
+/// <para><b>Correction:</b> <c>get_pg_cpu_utilization</c>'s original tail said "Aurora and RDS only" and "this
+/// returns empty" for self-hosted PostgreSQL. <c>PgCpuUtilizationCollector.AppliesTo</c> gates on
+/// <c>target.IsAurora</c> alone (matching <c>PgWaitStatsCollector</c>'s own gate, per that collector's doc
+/// comment) — a plain, non-Aurora RDS PostgreSQL target is not currently reached either, and the miss for both
+/// it and a self-hosted target is <c>not_collected</c>, not <c>empty</c>. The tail now says so.</para>
+/// </summary>
+public sealed class McpToolGuideHeadsPgTrendCpuTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_pg_io_trend",
+        "get_pg_database_trend",
+        "get_pg_cpu_utilization",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_pg_io_trend", "avg_read_ms/avg_write_ms are null, never 0.000, when track_io_timing is off"),
+        ("get_pg_io_trend", "Write fields are null, not 0, on Amazon Aurora"),
+        ("get_pg_io_trend", "Byte rates: measured (18+), estimated (earlier), or null"),
+        ("get_pg_io_trend", "Empty: no pair was active, or the window holds one snapshot"),
+        ("get_pg_io_trend", "A point spanning a stats reset reports everything since the reset, not a quiet interval"),
+        ("get_pg_io_trend", "Requires PostgreSQL 16+"),
+        ("get_pg_database_trend", "Differenced per interval - the raw counters are cumulative"),
+        ("get_pg_database_trend", "cache_hit_pct/rollback_pct are null, not 0"),
+        ("get_pg_database_trend", "deadlocks is a COUNT per point, not a rate"),
+        ("get_pg_database_trend", "A point spanning a stats reset reports everything since, never a quiet interval"),
+        ("get_pg_database_trend", "Empty: wrong name, only one snapshot so far, or none in the window - the message says which"),
+        ("get_pg_cpu_utilization", "Aurora only; RDS and self-hosted are not_collected"),
+        ("get_pg_cpu_utilization", "cpu_percent is percent of the capacity CURRENTLY ALLOCATED, not a fixed ceiling"),
+        ("get_pg_cpu_utilization", "100% is often a scale-up, not saturation"),
+        ("get_pg_cpu_utilization", "acu_utilization_percent is percent of the CONFIGURED ceiling and is the saturation figure to alert on"),
+        ("get_pg_cpu_utilization", "null ACU means no sample, never headroom"),
+        ("get_pg_cpu_utilization", "Host-memory bytes (since V136) are null when unmeasured, never 0"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>Nothing dropped: the parameter-overflow sentence D2 moved off <c>get_pg_io_trend.backend_type</c>
+    /// lands verbatim in that tool's tail rather than disappearing when the parameter itself was trimmed to its
+    /// guardrail clause (what a backend_type value IS).</summary>
+    [Fact]
+    public void D2ParameterOverflow_LandsInTheTail_NotJustTheGuardrailSentence()
+    {
+        var ioTrend = McpToolGuideTests.Served("get_pg_io_trend");
+        Assert.Contains("Naming this alone follows the busiest CONTEXT for that backend", ioTrend.Tail!, StringComparison.Ordinal);
+    }
+
+    /// <summary>D8: no renames, no consolidation — all three still resolve as the same tool names with the same
+    /// parameters, just a shorter served head and the over-cap <c>backend_type</c> parameter (D2) trimmed to its
+    /// guardrail clause.</summary>
+    [Fact]
+    public void OverCapParameters_StayAtOrUnder200()
+    {
+        var served = McpToolGuideTests.Served("get_pg_io_trend");
+        var p = Assert.Single(served.ParameterDescriptionLengths, x => x.Parameter == "backend_type");
+        Assert.True(p.Length <= 200, $"get_pg_io_trend.backend_type: {p.Length} > 200");
+    }
+
+    /// <summary>The correction: the tail no longer claims RDS is reached or that the miss is <c>empty</c> for a
+    /// non-Aurora target.</summary>
+    [Fact]
+    public void CpuUtilizationTail_CorrectsTheAuroraOnlyClaim()
+    {
+        var served = McpToolGuideTests.Served("get_pg_cpu_utilization");
+        Assert.Contains("Aurora only - a plain RDS or self-hosted target has no route here and this is not_collected for it", served.Tail!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Aurora and RDS only", served.Tail!, StringComparison.Ordinal);
+    }
+}
