@@ -106,12 +106,17 @@ public sealed class McpDescriptionTruthPinTests
     /// corroboration for a statement already measured slow and never a diagnosis, names the fixed per-row
     /// <c>caveat</c> and its regression-risk clause, and keeps <c>impact_basis</c> labelled. The suppression sentence
     /// must not come back. The Darling four are pinned in <c>Darling.Tests</c> (<c>DarlingMcpPlanToolsTests</c>)
-    /// with the same fragments.
+    /// with the same fragments. #3898 split <c>analyze_query_plan</c> into a served head plus a
+    /// <c>get_tool_guide</c> tail: the fragments below now split the same way, checked against whichever half
+    /// the split actually put them in.
     /// </summary>
     [Fact]
     public void PlanTools_DescribeTheStatedOperatorCut_AndTheCreateStatement()
     {
-        foreach (var tool in new[] { "analyze_query_plan", "analyze_procedure_plan", "analyze_plan_xml" })
+        /* analyze_procedure_plan and analyze_plan_xml are still unconverted (#3898 lanes e2/e3): Head is the
+           whole description for them (McpToolGuide.Split finds no marker), so every fragment below is still
+           found there directly. */
+        foreach (var tool in new[] { "analyze_procedure_plan", "analyze_plan_xml" })
         {
             var description = Description(typeof(McpPlanTools), tool);
             Assert.Contains("operators_returned / total_operators / truncated", description, StringComparison.Ordinal);
@@ -124,6 +129,26 @@ public sealed class McpDescriptionTruthPinTests
             Assert.DoesNotContain("no CREATE INDEX text", description, StringComparison.Ordinal);
             Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
         }
+
+        /* analyze_query_plan (#3898 lane e1, converted): the safety-critical half of this guardrail --
+           create_statement is corroboration, never a diagnosis, and costs writes / can regress other plans --
+           stays in the served HEAD, in the head's own words under D2's 620-char cap. The exact original
+           phrasing this loop used to check, including every fragment below, is unchanged in get_tool_guide's
+           tail (dropcheck, and McpToolGuideHeadsAnalyzeQueryPlanTests.Tail_CarriesLitesOwnOriginalSentences_Verbatim,
+           both pin that). */
+        var queryPlanServed = global::Lite.Tests.McpToolGuideTests.Served("analyze_query_plan");
+        Assert.Contains("create_statement corroborates, never a diagnosis", queryPlanServed.Served, StringComparison.Ordinal);
+        Assert.Contains("it costs writes and can regress plans", queryPlanServed.Served, StringComparison.Ordinal);
+        Assert.DoesNotContain("no CREATE INDEX text", queryPlanServed.Served, StringComparison.Ordinal);
+        Assert.DoesNotContain("a hint, not a design", queryPlanServed.Served, StringComparison.Ordinal);
+        var queryPlanTail = queryPlanServed.Tail!;
+        Assert.Contains("operators_returned / total_operators / truncated", queryPlanTail, StringComparison.Ordinal);
+        Assert.Contains("operators_ranked_by", queryPlanTail, StringComparison.Ordinal);
+        Assert.Contains("labelled impact_basis", queryPlanTail, StringComparison.Ordinal);
+        Assert.Contains("create_statement — the optimizer's suggested CREATE INDEX for this statement", queryPlanTail, StringComparison.Ordinal);
+        Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", queryPlanTail, StringComparison.Ordinal);
+        Assert.Contains("every row carries the fixed caveat", queryPlanTail, StringComparison.Ordinal);
+        Assert.Contains("regression risk for other plans", queryPlanTail, StringComparison.Ordinal);
 
         /* #3898 Phase 2 (D5, D6): the instructions' anti-pattern bullet that used to restate this is gone on
            both SKUs — the descriptions checked above are now the only surface. */
