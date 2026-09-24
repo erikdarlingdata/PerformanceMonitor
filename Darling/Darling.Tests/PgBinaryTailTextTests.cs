@@ -255,4 +255,30 @@ public sealed class PgBinaryTailTextTests
         Assert.Equal(2, parts.Length);
         Assert.Equal("x", parts[1]);
     }
+
+    /// <summary>#4053 a2 review W2: on an EUC_CN target (decoded as GBK), a lone lead byte just before a
+    /// backslash must not take the backslash as its trail byte. If it did, jsonlog's escaped quote after the
+    /// backslash would read as a bare quote and close the string early. The split on the backslash keeps it.</summary>
+    [Fact]
+    public void DecodeWhole_EucCnLeadByteBeforeABackslash_KeepsTheBackslash()
+    {
+        Assert.True(PgServerEncoding.TryGet("EUC_CN", out var eucCn));
+        var bytes = new byte[] { (byte)'u', 0x81, (byte)'\\', (byte)'"', (byte)'v' };
+
+        var decoded = PgBinaryTailText.DecodeWhole(bytes, eucCn);
+
+        Assert.Contains("\\\"v", decoded, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same split leaves valid EUC_CN text byte-identical: genuine GB2312 characters' bytes are all
+    /// 0xA1 and up, so no backslash, quote or newline is ever one of them.</summary>
+    [Fact]
+    public void DecodeWhole_ValidEucCnTextWithBackslashes_RoundTrips()
+    {
+        Assert.True(PgServerEncoding.TryGet("EUC_CN", out var eucCn));
+        const string decodedText = "\u4e2d\u6587 a\\b \"c\"\n\u4e2d";
+        var bytes = eucCn.GetBytes(decodedText);
+
+        Assert.Equal(decodedText, PgBinaryTailText.DecodeWhole(bytes, eucCn));
+    }
 }

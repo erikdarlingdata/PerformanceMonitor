@@ -170,4 +170,15 @@ public sealed class PgServerLogJsonParserTests
         Assert.Equal(0, recordsDiscarded);
         Assert.Equal("PST", entry.ZoneText);
     }
+
+    /* --- #4053 a2 review S2: a body with no newline is one record longer than the tail --------------- */
+
+    [Fact]
+    public void ABodyWithNoNewlineAtAll_YieldsNothing_AndCountsOneDiscard()
+    {
+        var entries = PgServerLogJsonParser.Parse(RealRecord.TrimEnd('\n'), out var recordsDiscarded);
+
+        Assert.Empty(entries);
+        Assert.Equal(1, recordsDiscarded);
+    }
 }

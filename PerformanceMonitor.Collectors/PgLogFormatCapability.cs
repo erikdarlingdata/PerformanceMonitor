@@ -146,6 +146,15 @@ public static class PgLogFormatCapability
     public static void Reset() => s_cache.Clear();
 
     /// <summary>
+    /// Whether the cached verdict for <paramref name="targetKey"/> (fresh or not) says the target writes
+    /// neither csvlog nor jsonlog, the only verdict a missing stderr file contradicts (#4053 a2 review W1).
+    /// On a jsonlog-only target, pg_deadlocks and pg_plan_capture still read stderr and find no file every
+    /// cycle; that fault agrees with a jsonlog verdict and must not clear it. False when nothing is cached.
+    /// </summary>
+    public static bool CachedVerdictIsStderrOnly(string targetKey) =>
+        s_cache.TryGetValue(targetKey, out var cached) && !cached.UsesCsvlog && !cached.UsesJsonlog;
+
+    /// <summary>
     /// Drops <paramref name="targetKey"/>'s cached verdict, so the next <see cref="IsCsvlogEnabledAsync"/>
     /// re-checks instead of waiting out <see cref="CacheTtl"/> (#4053 review L1). <c>log_destination</c> is
     /// SIGHUP and the verdict can be up to an hour stale: a target that just threw

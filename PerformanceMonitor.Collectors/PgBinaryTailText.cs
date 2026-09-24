@@ -109,7 +109,11 @@ public static class PgBinaryTailText
         {
             var b = bytes[i];
 
-            if (b != (byte)'\n' && b != (byte)'"')
+            /* #4053 a2 review W2: the backslash too. GBK (code page 936, the decoder for EUC_CN) accepts 0x40-0x7E
+               as a trail byte, so an unmapped lead byte before a backslash could eat it, and jsonlog's escaped
+               quote after it would then close the string early. Every PostgreSQL server encoding's genuine
+               multibyte trail bytes are 0xA1 and up, so no valid character is split. */
+            if (b != (byte)'\n' && b != (byte)'"' && b != (byte)'\\')
             {
                 continue;
             }

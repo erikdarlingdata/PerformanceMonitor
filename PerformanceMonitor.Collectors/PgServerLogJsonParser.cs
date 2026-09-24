@@ -66,7 +66,7 @@ public static class PgServerLogJsonParser
     /// usable shape: malformed JSON (including a cut head), a missing or unparseable <c>timestamp</c>, a
     /// non-numeric <c>pid</c>, or a <c>session_id</c> not shaped <c>hex.hex</c>. Does not count the
     /// trailing partial line, because nothing about it was rejected — it was never complete enough to
-    /// judge.</param>
+    /// judge. A non-empty body with no newline at all (one record longer than the tail) counts as one.</param>
     public static List<PgLogEntry> Parse(string body, out int recordsDiscarded)
     {
         var entries = new List<PgLogEntry>();
@@ -78,6 +78,16 @@ public static class PgServerLogJsonParser
         }
 
         var lines = body.Split('\n');
+
+        /* #4053 a2 review S2: a body with no newline at all is one record longer than the whole tail (a long
+           logged statement can make one). Nothing in it can be emitted, but a silently empty cycle hides
+           that, so it counts as one discard. A body that merely ENDS mid-record still drops its partial
+           last line uncounted, as below. */
+        if (lines.Length == 1)
+        {
+            recordsDiscarded = 1;
+            return entries;
+        }
 
         /* body.Split('\n') on "a\nb\n" yields ["a","b",""] — the trailing empty element after the final
            newline is not a line at all, and dropping the last element also drops it correctly. On "a\nb"

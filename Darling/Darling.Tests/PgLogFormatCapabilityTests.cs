@@ -111,6 +111,24 @@ public sealed class PgLogFormatCapabilityTests : IDisposable
         Assert.Equal(1, connection.ExecuteCount);
     }
 
+    /// <summary>#4053 a2 review W1: only a stderr-only verdict is contradicted by a missing stderr file, so
+    /// only that verdict lets the stderr arm clear the cache. A jsonlog or csvlog verdict, or no verdict, does
+    /// not.</summary>
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, false)]
+    public async Task CachedVerdictIsStderrOnly_OnlyForAVerdictOfNeither(bool csvlog, bool jsonlog, bool expected)
+    {
+        Assert.False(PgLogFormatCapability.CachedVerdictIsStderrOnly("target-a"));
+
+        using var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = Scalar(csvlog, jsonlog) };
+        await PgLogFormatCapability.IsJsonlogEnabledAsync(connection, "target-a", CancellationToken.None);
+
+        Assert.Equal(expected, PgLogFormatCapability.CachedVerdictIsStderrOnly("target-a"));
+    }
+
     /// <summary>#4053 part a2: Invalidate drops BOTH cached booleans, not just the csvlog one.</summary>
     [Fact]
     public async Task InvalidateDropsBothCachedFlags()

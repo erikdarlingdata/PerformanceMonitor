@@ -9944,10 +9944,17 @@ LIMIT 1";
                which read only the stderr tail on this branch and never consulted this cache to begin with —
                their own no-stderr-file fault says nothing about whether csvlog is configured, so it must not
                drop pg_log_events' verdict out from under it. Gate on RoutedCollectors, the same set the runner
-               keys the probe itself on, so only a collector this cache actually informs can invalidate it. */
-            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+               keys the probe itself on, so only a collector this cache actually informs can invalidate it.
+
+               #4053 a2 review W1: and only when the cached verdict said stderr-only. A missing stderr file
+               contradicts that verdict and nothing else. On a jsonlog-only target the deadlock and plan
+               collectors (still stderr readers) hit this arm every cycle, and clearing a jsonlog verdict there
+               would re-probe the target on every routed run. */
+            var cacheKey = DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime);
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName)
+                && PgLogFormatCapability.CachedVerdictIsStderrOnly(cacheKey))
             {
-                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+                PgLogFormatCapability.Invalidate(cacheKey);
             }
 
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
