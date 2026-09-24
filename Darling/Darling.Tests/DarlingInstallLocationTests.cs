@@ -1311,6 +1311,13 @@ function Get-CimInstance {
                 'phase1Protected=' + (Get-Acl -LiteralPath $root).AreAccessRulesProtected
                 'phase1Service=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $service }).Count
 
+                # #4038's leftover shape (round 3, #4052): an install locked BEFORE this fix left an explicit
+                # (OI)(CI)M ACE for the service on $root, and plain icacls /grant only ADDS to an existing
+                # explicit ACE for that SID rather than replacing it - so re-running the OLD lock would never
+                # have cleared it. Planted directly (not through the old code, which no longer exists) so the
+                # phase-2 assertions below prove /grant:r removes it rather than merely never having added it.
+                $null = & icacls.exe $root /grant "*$($service.Value):(OI)(CI)M" 2>&1
+
                 # Phase 2, as step 4b2 and the upgrade run it: the service's grant, and the walk's report.
                 $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
                 $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
@@ -1321,6 +1328,11 @@ function Get-CimInstance {
                 'usersRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $users } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'serviceRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $service } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'postgresServiceInherited=' + @(Rules "$root\pg-runtime\pgsql\bin\postgres.exe" | Where-Object { $_.IdentityReference -eq $service -and $_.IsInherited }).Count
+                # #4052: the service's own real access is Modify on pg-runtime\ and pg-runtime-prev\ (an
+                # explicit ACE there, not inherited from root, since root only grants RX), and NOTHING on the
+                # svc.exe / planted paths above - those are a stranger's grant even though the SID is the same.
+                'pgRuntimeServiceRights=' + ((Rules "$root\pg-runtime" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'pgRuntimePrevServiceRights=' + ((Rules "$root\pg-runtime-prev" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'jsonProtected=' + (Get-Acl -LiteralPath "$root\darling.json").AreAccessRulesProtected
                 'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'jsonOwnerIsService=' + ((Get-Acl -LiteralPath "$root\darling.json").GetOwner($sidType) -eq $service)
@@ -1393,8 +1405,13 @@ function Get-CimInstance {
         Assert.Contains("protected=True", answers);
         Assert.Contains("authenticatedUsers=0", answers);
         Assert.Contains("usersRights=ReadAndExecute, Synchronize", answers);
-        Assert.Contains("serviceRights=Modify, Synchronize", answers);
+        /* #4052: the service's grant on $root is /grant:r'd to Read & Execute only - not Modify - so a
+           leftover Modify ACE from an earlier #4038-shaped install (an explicit (OI)(CI)M ADD, which plain
+           /grant would only ADD to and never remove) does not survive an upgrade through this lock. */
+        Assert.Contains("serviceRights=ReadAndExecute, Synchronize", answers);
         Assert.Contains("postgresServiceInherited=1", answers);
+        Assert.Contains("pgRuntimeServiceRights=Modify, Synchronize", answers);
+        Assert.Contains("pgRuntimePrevServiceRights=Modify, Synchronize", answers);
         Assert.Contains("jsonProtected=True", answers);
         Assert.Contains("jsonInteractive=Read, Synchronize", answers);
     }

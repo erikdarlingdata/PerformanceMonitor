@@ -391,6 +391,38 @@ function Get-DarlingServiceLogonName([string]$name) {
 # DarlingLogHashKeyFile.BringYourOwnDirectoryName, when that mode is configured - #4052's resolution of
 # #4050's open write-site row). Every one of those directories is created ahead of time if missing, so the
 # grant has something to land on and the first extraction never has to create its own root-owned folder.
+
+# What $extraServiceDirectories should hold for a given install root (#4052): the bring-your-own-Postgres
+# log-hash-key folder, DarlingLogHashKeyFile.BringYourOwnDirectoryName ('darling-keys'), beside darling.json -
+# but ONLY when that install is configured for it (postgres.managed = false). A managed install's log-hash key
+# lives inside the credential directory pg-runtime already covers, so granting a second directory there would
+# widen the service's Modify footprint for nothing it writes.
+#
+# darling.json is JSONC (comments, trailing commas) and the file this runs against may not exist yet (a fresh
+# extraction, or an operator who has not copied darling.sample.json over) or may not parse (hand-edited,
+# mid-write) - none of those is this function's problem to solve, and guessing wrong here would silently drop
+# the service's Modify grant on its own key folder in BYO mode. So every failure to read or parse falls back to
+# treating the install as managed (no extra directory): that is always safe, because a BYO install with the
+# grant missing is caught and reported by the same untrusted-write-grantee walk that catches everything else -
+# an operator sees a finding on darling-keys\ and re-runs after fixing darling.json, rather than the lock
+# silently widening access on a config it could not trust. A regex, not ConvertFrom-Json: Windows PowerShell
+# 5.1's ConvertFrom-Json rejects comments and trailing commas outright, and this only ever needs one boolean
+# out of one well-known key - not a general JSONC parser. It matches the LAST 'managed' key at the top level's
+# "postgres" object width (a value of false explicitly disables managed mode; true or absent are both managed).
+function Get-DarlingExtraServiceWriteDirectories([string]$root, [string]$configPath) {
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return @() }
+    try { $text = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop }
+    catch { return @() }
+    # Strip // line comments (never inside a string in this file's own shipped shape) before matching, so a
+    # commented-out "managed": false example above the real key can never be mistaken for it.
+    $stripped = ($text -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }) -join "`n"
+    $isManaged = $true
+    $match = [regex]::Matches($stripped, '"managed"\s*:\s*(true|false)')
+    if ($match.Count -gt 0) { $isManaged = ($match[$match.Count - 1].Groups[1].Value -eq 'true') }
+    if ($isManaged) { return @() }
+    return @((Join-Path (Split-Path -LiteralPath $configPath -Parent) 'darling-keys'))
+}
+
 function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string[]]$extraServiceDirectories = @()) {
     # icacls reports a file it could not change on stderr (under /C it carries on), and Windows PowerShell 5.1
     # turns redirected native stderr into a TERMINATING error when the preference is Stop, as both scripts set
@@ -1818,7 +1850,7 @@ function Invoke-UpgradeTreeLock([string]$when) {
     }
     $open = @()
     try {
-        $open = @(Lock-DarlingInstallTree $InstallRoot $logonAccount)
+        $open = @(Lock-DarlingInstallTree $InstallRoot $logonAccount (Get-DarlingExtraServiceWriteDirectories $InstallRoot $configPath))
     }
     catch {
         $open = @("$InstallRoot ($($_.Exception.Message))")
