@@ -87,14 +87,15 @@ public sealed class PgNoStderrLogFileException : Exception
 
     private static string BuildMessage() =>
         $"logging_collector is on, but {SettingName} on this target does not include stderr, so there is no "
-        + "server-managed stderr-format log file to read — only its csvlog and/or jsonlog output, if any, "
-        + "which this product does not parse as stderr text (a csvlog row is comma-delimited and a jsonlog "
-        + "row opens with '{', so a reader built for the stderr shape would either find nothing or, worse, "
-        + "misread a CSV field as a log line). There are no server-managed log files to read of the format "
-        + "this reads, so nothing was read this cycle, and this is NOT 'the log held nothing'. To capture "
-        + $"deadlocks, plans and log events from this server's log, add stderr to {SettingName} (for example "
-        + "'stderr,csvlog' to keep csvlog too) and reload the configuration — it is a SIGHUP setting, so a "
-        + "reload is enough and this does NOT need a server restart. Recorded as a named non-fatal skip "
-        + "rather than an error so it does not fill the log every cycle; the collector retries every cycle "
-        + $"and starts collecting on the first one after {SettingName} carries stderr.";
+        + "server-managed stderr-format log file to read for deadlocks or plan captures — only its csvlog "
+        + "and/or jsonlog output, if any, which this product does not parse as stderr text (a csvlog row is "
+        + "comma-delimited and a jsonlog row opens with '{', so a reader built for the stderr shape would "
+        + "either find nothing or, worse, misread a CSV field as a log line). pg_log_events is read from the "
+        + $"csvlog file directly when {SettingName} includes csvlog (#4053), so log events keep flowing even "
+        + "without stderr — this refusal is deadlocks' and plan captures' only, and this is NOT 'the log held "
+        + $"nothing'. To capture deadlocks and plans from this server's log too, add stderr to {SettingName} "
+        + "(for example 'stderr,csvlog' to keep csvlog too) and reload the configuration — it is a SIGHUP "
+        + "setting, so a reload is enough and this does NOT need a server restart. Recorded as a named "
+        + "non-fatal skip rather than an error so it does not fill the log every cycle; the collector retries "
+        + $"every cycle and starts collecting on the first one after {SettingName} carries stderr.";
 }

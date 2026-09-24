@@ -9850,6 +9850,23 @@ LIMIT 1";
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
+        catch (PgNoCsvlogFileException ex)
+        {
+            /* #4053 part a1b's own narrow state: pg_log_events is on the csvlog route (log_destination
+               includes csvlog), logging_collector is on, but no .csv file has appeared under log_directory
+               yet — most likely csvlog was only just added to the destinations and the syslogger has not
+               rolled a file since the reload. Same disposition as PgNoStderrLogFileException and for the
+               same reasons: a setting on the monitored server, satisfiable and re-derived every cycle, not
+               broken on the monitoring side. Only the csvlog route produces this marker, so the elapsed
+               time is a target query and belongs in sqlMs. */
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no csvlog file has appeared for this target yet",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
         catch (SqlException ex) when (ex.Number == 1222 && CollectorCatalog.YieldsOnLockTimeout(collectorName))
         {
             /* The 1-second LOCK_TIMEOUT guard doing its job (#1805): the snapshot sweep stepped aside

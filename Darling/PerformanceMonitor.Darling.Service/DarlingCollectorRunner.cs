@@ -1133,6 +1133,16 @@ public sealed class DarlingCollectorRunner
                     ? encoding
                     : null;
         }
+
+        /* #4053 part a1b: pg_log_events alone — the deadlock and plan-capture collectors still read only the
+           stderr tail, unchanged. Checked on the same connection, before BuildQuery decides which tail this
+           collector opens with, the same shape as the grant check just above. */
+        if (server.Target.Engine == CollectorTargetEngine.PostgreSql
+            && string.Equals(collectorName, "pg_log_events", StringComparison.Ordinal))
+        {
+            context.PgLogUsesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+        }
     }
 
     /// <summary>
