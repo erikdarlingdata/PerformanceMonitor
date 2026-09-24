@@ -189,4 +189,50 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             + $"EXECUTE 'DROP OWNED BY {role}'; EXECUTE 'DROP ROLE {role}'; END IF; END $$";
         await drop.ExecuteNonQueryAsync();
     }
+
+    /// <summary>
+    /// #4062: the probe on a database whose server_encoding is not UTF-8. WIN1252 is mapped, so a superuser
+    /// (who holds EXECUTE on pg_read_binary_file) is granted the binary route and the cache carries the
+    /// 1252 code page. Before #4062 the probe's CASE gate answered NULL here and the route was refused.
+    /// </summary>
+    [Fact]
+    public async Task IsGrantedAsync_OnAWin1252Database_GrantsTheRoute_AndCachesItsEncoding()
+    {
+        var connectionStringRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(connectionStringRoot), "Set DARLING_TEST_PG to run the WIN1252 probe.");
+        var ct = TestContext.Current.CancellationToken;
+        const string database = "pm_test_enc1252";
+
+        await using var admin = new NpgsqlConnection(connectionStringRoot);
+        await admin.OpenAsync(ct);
+        await using (var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {database}", admin)) { await drop.ExecuteNonQueryAsync(ct); }
+        await using (var create = new NpgsqlCommand($"CREATE DATABASE {database} ENCODING 'WIN1252' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0", admin))
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        try
+        {
+            var builder = new NpgsqlConnectionStringBuilder(connectionStringRoot) { Database = database, Pooling = false };
+            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            await connection.OpenAsync(ct);
+            var key = "enc1252-" + Guid.NewGuid().ToString("N");
+
+            Assert.True(await PgReadBinaryFileCapability.IsGrantedAsync(connection, key, ct));
+            Assert.True(PgReadBinaryFileCapability.TryGetCachedEncoding(key, out var encoding));
+            Assert.Equal(1252, encoding!.CodePage);
+            Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(key));
+
+            /* The route's own read works on this database: the server's own PG_VERSION file as bytea. */
+            await using var read = new NpgsqlCommand("SELECT pg_catalog.pg_read_binary_file('PG_VERSION')", connection);
+            var bytes = (byte[])(await read.ExecuteScalarAsync(ct))!;
+            Assert.NotEmpty(PgBinaryTailText.DecodeWhole(bytes, encoding));
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            await using var cleanup = new NpgsqlCommand($"DROP DATABASE IF EXISTS {database} WITH (FORCE)", admin);
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+    }
 }
