@@ -883,9 +883,10 @@ public sealed class DarlingCollectorRunner
     /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
     /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
     /// self-hosted collectors.</summary>
-    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(ServerRuntime server, int foreignZoneLines)
+    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
+        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0)
     {
-        if (foreignZoneLines <= 0)
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0)
         {
             return CollectorContext.NoMeasurements;
         }
@@ -898,6 +899,15 @@ public sealed class DarlingCollectorRunner
             Deltas = _deltas,
         };
         PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+        /* #4053 part c1: the csvlog route's own discard count, same measurement label the self-hosted
+           PgLogEventsCollector.ReadAsync records for its own csvlog route (CsvRecordsDiscardedMeasurement),
+           reported only when > 0, following that method's exact pattern. */
+        if (csvRecordsDiscarded > 0)
+        {
+            context.Measure(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, csvRecordsDiscarded);
+        }
+
         return context.Measurements;
     }
 
@@ -921,17 +931,50 @@ public sealed class DarlingCollectorRunner
            the target fresh each cycle rather than caching it at connect. */
         var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
 
+        /* #4053 part c1: the same target-configuration read the self-hosted pg_read_file route makes through
+           ResolvePgReadBinaryFileGrantAsync, on the managed route's own throwaway connection for the same reason
+           TryReadLogTimezoneIsUtcAsync above needs one — this ingestor reaches the log through the AWS API, not
+           SQL, so it carries no target connection of its own to probe with. Cached the same hour by
+           PgLogFormatCapability itself, keyed the same way as the binary-file grant (ReadBinaryFileCacheKey), so
+           this is a cache hit on every cycle but the first and the one after a switch. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded);
 
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
+    }
+
+    /// <summary>
+    /// #4053 part c1: whether this target's <c>log_destination</c> includes <c>csvlog</c>, read the same way
+    /// <see cref="TryReadLogTimezoneIsUtcAsync"/> reads <c>log_timezone</c> — over a throwaway connection, since
+    /// the RDS ingestors carry none of their own. False (today's stderr route) when the setting cannot be read,
+    /// the same fallback shape as the timezone probe beside it.
+    /// </summary>
+    private async Task<bool> TryReadPgLogUsesCsvlogAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            return await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                connection, ReadBinaryFileCacheKey(server), cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex,
+                "Could not read log_destination for '{Server}' (#4053 part c1) — the RDS log-event route "
+                + "reads the stderr file this cycle, as if csvlog were off.", server.Config.DisplayName);
+            return false;
+        }
     }
 
     /// <summary>

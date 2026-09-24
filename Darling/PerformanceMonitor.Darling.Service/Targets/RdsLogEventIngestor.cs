@@ -59,18 +59,26 @@ public sealed class RdsLogEventIngestor
     /// <exception cref="PgLogTimezoneUnsupportedException">The log is stamped in a non-UTC zone (#2993).
     /// Propagated so the runner names the setting; the marker is not committed, so the window comes back
     /// once the setting is fixed.</exception>
+    /// <param name="pgLogUsesCsvlog">#4053 part c1: whether the target's <c>log_destination</c> includes
+    /// <c>csvlog</c>, read by the caller through <see cref="PgLogFormatCapability"/> on its own connection —
+    /// this ingestor reaches the log through the AWS API, not SQL, so it has no connection of its own to probe
+    /// with. True reads the newest <c>.csv</c> file through <see cref="PgServerLogCsvParser"/> instead of the
+    /// stderr file; false is today's stderr route, unchanged.</param>
     public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
         bool logTimezoneIsUtc = false,
+        bool pgLogUsesCsvlog = false,
         CancellationToken cancellationToken = default)
     {
         RdsLogSource.LogChunk? chunk;
 
+        var kind = pgLogUsesCsvlog ? RdsLogSource.LogFileKind.Csv : RdsLogSource.LogFileKind.Stderr;
+
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -92,39 +100,105 @@ public sealed class RdsLogEventIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var (written, foreignZoneLines) = await StoreAsync(serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, cancellationToken);
+        var (written, foreignZoneLines, csvRecordsDiscarded) = await StoreAsync(
+            serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008). Everything the chunk held is in the store or was
            nothing to store; anything else threw out of StoreAsync and left the marker where it was. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return RdsIngestOutcome.Read(written, foreignZoneLines);
+        return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
     }
 
-    private async Task<(int Written, int ForeignZoneLines)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded)> StoreAsync(
         int serverId,
         string storageName,
         string text,
         bool logTimezoneIsUtc,
+        bool pgLogUsesCsvlog,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(text))
         {
-            return (0, 0);
+            return (0, 0, 0);
         }
 
-        /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
-           about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
-           logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
-           self-hosted route already makes. */
-        var events = _classifier.Classify(text, logTimezoneIsUtc, out var foreignZoneLines);
+        List<PgLogEvent> events;
+        int foreignZoneLines;
+        var csvRecordsDiscarded = 0;
+
+        if (pgLogUsesCsvlog)
+        {
+            /* #4053 part c1: DownloadDBLogFilePortion text may start mid-record — the csv parser's own
+               resync walk handles that, the same shape the self-hosted csv route (PgLogEventsCollector.ReadAsync)
+               already relies on, so the chunk is handed to it unchanged; no pre-trim. */
+            var entries = PgServerLogCsvParser.Parse(text, out csvRecordsDiscarded);
+
+            /* The SAME foreign-zone rule the stderr path applies below, via PgLogEventClassifier's own
+               assembler-backed overload — restated here because the csv parser accepts every zone and leaves
+               the decision to this filter (its own #4053 fix), the same trade PgLogEventsCollector.ReadAsync's
+               csvlog arm makes on the self-hosted route. */
+            var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
+            events = _classifier.Classify(kept);
+        }
+        else
+        {
+            /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
+               about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
+               logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
+               self-hosted route already makes. */
+            events = _classifier.Classify(text, logTimezoneIsUtc, out foreignZoneLines);
+        }
 
         if (events.Count == 0)
         {
-            return (0, foreignZoneLines);
+            return (0, foreignZoneLines, csvRecordsDiscarded);
         }
 
-        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines);
+        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded);
+    }
+
+    /// <summary>
+    /// #4053 part c1: the same filter <see cref="PgLogEventsCollector"/>'s private method of the same name
+    /// applies on the self-hosted csvlog route — under a UTC <c>log_timezone</c> a record in another zone is
+    /// not the server's own and is dropped and counted in <paramref name="foreignZoneLines"/>; otherwise a
+    /// foreign zone throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole batch, the
+    /// same #2993 trade the stderr path makes. Restated here rather than shared because the collector's method
+    /// is private and this ingestor has no CollectorContext of its own to route the measurement through until
+    /// after this call returns.
+    /// </summary>
+    private static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
+    {
+        foreignZoneLines = 0;
+
+        if (!logTimezoneIsUtc)
+        {
+            foreach (var entry in entries)
+            {
+                if (!PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+                {
+                    throw new PgLogTimezoneUnsupportedException(entry.ZoneText);
+                }
+            }
+
+            return entries;
+        }
+
+        var kept = new List<PgLogEntry>(entries.Count);
+
+        foreach (var entry in entries)
+        {
+            if (PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+            {
+                kept.Add(entry);
+            }
+            else
+            {
+                foreignZoneLines++;
+            }
+        }
+
+        return kept;
     }
 
     /// <summary>

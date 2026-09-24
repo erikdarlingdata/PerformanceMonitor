@@ -201,6 +201,41 @@ public class RdsLogSourceTests
     }
 
     /// <summary>
+    /// #4053 part c1: <c>LogFileKind.Csv</c> selects the newest name ENDING <c>.csv</c> — the same fixture
+    /// #3997's stderr-route test uses, read the other way. The default kind (Stderr, the test above) still
+    /// picks the stderr sibling from this exact listing.
+    /// </summary>
+    [Fact]
+    public async Task LogFileKindCsv_SelectsTheNewestCsvFile()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-sibling" });
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.Equal("error/postgresql.log.2026-08-25-18.csv", client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c1: the csv and stderr routes get their OWN resume markers, keyed by file name as the
+    /// existing (instance, file) key already does — no new design, just proof that the two kinds do not
+    /// collide on one target.
+    /// </summary>
+    [Fact]
+    public async Task LogFileKindCsvAndStderr_KeepIndependentMarkers()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-sibling" });
+
+        var stderrChunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+        source.CommitResume(stderrChunk!.Value.Resume);
+        var csvChunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.NotEqual(stderrChunk.Value.Resume.Key, csvChunk!.Value.Resume.Key);
+        /* The csv read is still a FIRST read on its own key — no marker sent — even though the stderr read
+           on the same instance already committed one. */
+        Assert.Null(client.Downloads[1].Marker);
+    }
+
+    /// <summary>
     /// First read asks for a bounded TAIL; the next resumes from the marker, ONCE THE FIRST CHUNK HAS BEEN
     /// COMMITTED. Without the tail, a first read against a rotated multi-GB log would pull all of it across
     /// the network — #2565 measured 772 MB in twenty seconds at capture-everything.
