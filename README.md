@@ -68,8 +68,6 @@ All editions include real-time alerts (email + webhooks), charts and graphs, dar
 
 🤖 **Built-in MCP server** with read-only tools for AI analysis — ask Claude Code or Cursor "what are the top wait types on my server?" and get answers from your actual monitoring data
 
-🧰 **Community tools installed automatically** — sp_WhoIsActive, sp_BlitzLock, sp_HealthParser, sp_HumanEventsBlockViewer
-
 🔒 **Your data never leaves** — no telemetry, no cloud dependency, no phoning home. Credentials stored in Windows Credential Manager with OS-level encryption.
 
 ---
