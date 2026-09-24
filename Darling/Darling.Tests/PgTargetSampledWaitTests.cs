@@ -104,12 +104,14 @@ public sealed class PgTargetSampledWaitTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(source);
         Assert.Contains("catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))", code, StringComparison.Ordinal);
         Assert.Contains("MetricNames.PgSampledWaitMsPerSec", code, StringComparison.Ordinal);
-        Assert.Contains("if (collectionCount == 0 || exactCollections > 0 || sampleCount == 0) return;", code, StringComparison.Ordinal);
+        /* #3653 A8 option B (lane L3c): sampleCount is now per-arm (whole-window or the fired tile's), so the
+           fence reads the whole-window sample count directly. */
+        Assert.Contains("if (collectionCount == 0 || exactCollections > 0 || wholeSampleCount == 0) return;", code, StringComparison.Ordinal);
         /* #3653 A8 slice 1: this gate is inline (not the shared AnomalyGate.EvaluateZScore pair overload), so the
            Šidák-corrected peak cutoff is applied here directly, to the peak clause alone. */
         Assert.Contains("var modifiedZThresholdForPeak = NAwarePeakCutoff(HeavyTailModifiedZThreshold, window);", code, StringComparison.Ordinal);
         Assert.Contains("var ratioThresholdForPeak = NAwarePeakCutoff(PgRatioAnomalyThreshold, window);", code, StringComparison.Ordinal);
-        Assert.Contains("modifiedZ < modifiedZThresholdForPeak || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
+        Assert.Contains("modifiedZFallback < modifiedZThresholdForPeak || meanModifiedZFallback < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
         Assert.Contains("ratio < ratioThresholdForPeak || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", code, StringComparison.Ordinal);
         /* The is_new arm is the one arm NOT pair-gated — lane 35's ruling; the parity pin below owns its shape. */
         Assert.Contains("if (fallbackExceedance < 1.0) return;", code, StringComparison.Ordinal);
@@ -152,7 +154,9 @@ public sealed class PgTargetSampledWaitTests
         Assert.True(start > 0, "the sampled wait-profile detector moved");
         var body = code[start..];
         /* Three arms, in order: robust (pair), classical (pair), first-occurrence (peak alone). */
-        var robust = body.IndexOf("modifiedZ < modifiedZThresholdForPeak || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", StringComparison.Ordinal);
+        /* #3653 A8 option B (lane L3c): the robust arm's never-blind fallback names its own variables
+           (modifiedZFallback/meanModifiedZFallback), fired only when no tile scores. */
+        var robust = body.IndexOf("modifiedZFallback < modifiedZThresholdForPeak || meanModifiedZFallback < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", StringComparison.Ordinal);
         var classical = body.IndexOf("ratio < ratioThresholdForPeak || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec", StringComparison.Ordinal);
         var first = body.IndexOf("if (fallbackExceedance < 1.0) return;", StringComparison.Ordinal);
         Assert.True(robust > 0 && classical > robust && first > classical, "the three arms are not in lane 24's order");

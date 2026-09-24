@@ -303,6 +303,8 @@ public sealed class PgTargetAnomalyTests
         PgTargetAnomalyDetector.ReplayLagWindowSql,   /* lane 12 (#3691) */
         /* v2 (#3691) lane 15 */
         PgTargetAnomalyDetector.WalVolumeWindowSql,
+        /* #3653 A8 option B (lane L3c): the WAL-volume tile twin */
+        PgTargetAnomalyDetector.WalVolumeTileWindowSql,
         /* wave 3 (#3691) lane 17 */
         PgTargetAnomalyDetector.BlockedSessionsWindowSql,
         /* lane 27 (#3691 v3): the server-wide per-call statement mean — since lane 39 the COLD FALLBACK only */
@@ -312,8 +314,12 @@ public sealed class PgTargetAnomalyTests
         /* lane 24 (#3691): the sampled wait profile's two reads */
         PgTargetAnomalyDetector.SampledWaitRateWindowSql,
         PgTargetAnomalyDetector.SampledWaitContribWindowSql,
+        /* #3653 A8 option B (lane L3c): the sampled-waits tile twin (robust arm only) */
+        PgTargetAnomalyDetector.SampledWaitRateTileWindowSql,
         /* lane 28 (#3691 v3): the CPU-burn window read, the collector's text by alias */
         PgTargetAnomalyDetector.CpuBurnWindowSql,
+        /* #3653 A8 option B (lane L3c): the CPU-burn tile twin */
+        PgTargetAnomalyDetector.CpuBurnTileWindowSql,
         /* lane 34 (#3691, ruled 2026-09-20): the candidate statements' per-collection shares — the bad actor's own-normal read */
         PgTargetAnomalyDetector.StatementShareWindowSql,
         /* lane 38 (#3691): the instance-growth window read over pg_database_size_stats */
@@ -445,9 +451,11 @@ public sealed class PgTargetAnomalyTests
         var blockingDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Blocking.cs"));
         Assert.Contains("baseline, peakBlocked, avgBlocked,", blockingDetector, StringComparison.Ordinal);
         Assert.DoesNotContain("=> Task.CompletedTask;", blockingDetector, StringComparison.Ordinal);
-        /* Lane 28's CPU-burn detector is the second on the pair gate — a cores-busy series is spiky by nature. */
+        /* Lane 28's CPU-burn detector is the second on the pair gate — a cores-busy series is spiky by nature.
+           #3653 A8 option B (lane L3c) moved it onto tiles: the never-blind fallback still runs the pair gate,
+           over the whole-window peak/mean read (WindowTiles.WholeWindow), when no tile scores. */
         var kernelDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Kernel.cs"));
-        Assert.Contains("baseline, peakCores, meanCores,", kernelDetector, StringComparison.Ordinal);
+        Assert.Contains("baseline, whole.Peak, whole.Mean,", kernelDetector, StringComparison.Ordinal);
         Assert.DoesNotContain("=> Task.CompletedTask;", kernelDetector, StringComparison.Ordinal);
         /* Lane 34's detector is on the pair gate as well, reads the KEYED seam (five arguments — the queryid as the key
            ahead of the analysis time), and never grades a statement without a trustworthy own-normal: the trust check
@@ -493,9 +501,11 @@ public sealed class PgTargetAnomalyTests
             @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakBytes,\s*avgBytes,[\s\S]{0,300}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
             replicationDetector);
 
+        /* #3653 A8 option B (lane L3c): moved onto tiles — the never-blind fallback still runs the pair gate,
+           over the whole-window peak/mean read (WindowTiles.WholeWindow), when no tile scores. */
         var walDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Wal.cs"));
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peak,\s*avg,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*whole\.Peak,\s*whole\.Mean,[\s\S]{0,200}?window:\s*window\)",
             walDetector);
 
         /* #3538 A7: the deadlock rate is per OBSERVED hour, never per nominal window. */
