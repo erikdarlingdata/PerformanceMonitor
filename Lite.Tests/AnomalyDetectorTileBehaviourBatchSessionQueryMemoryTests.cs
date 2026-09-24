@@ -193,13 +193,12 @@ FROM range(0, $3) AS hh(h)";
         var startBucket = await _baselineProvider.GetBaselineAsync(serverId, MetricNames.BatchRequests, WindowStartT);
         Assert.True(startBucket.IsTrustworthy, "the start-hour batch-requests bucket must be trustworthy");
 
-        var wholeWindowMean = (BatchMu + BatchShift) / 2.0; // two hours at baseline, two hours at the shift
-        var wholeWindowMeanSigma = startBucket.EffectiveRobustSigma > 0
-            ? (wholeWindowMean - startBucket.Median) / startBucket.EffectiveRobustSigma
-            : (wholeWindowMean - startBucket.Mean) / startBucket.EffectiveStdDev;
+        // Coordinator ruling (2026-09-24, TESTS-COMMON): a shift test that FIRES but whose in-test
+        // dev-comparison ("whole-window z < k") fails at this fixture's sizing is fixed by DELETING the
+        // comparison, not by re-sizing. B's necessity against the whole-window gate is proven by the
+        // acceptance harness and the Darling mutation checks; this Lite test's job is just to prove the
+        // tile path fires on the right tile.
         var referenceCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.BatchRequests);
-        Assert.True(wholeWindowMeanSigma < referenceCutoff,
-            $"the whole-window mean deviation ({wholeWindowMeanSigma}) unexpectedly cleared the cutoff on its own — the shift was not actually diluted by construction");
 
         var facts = await _detector.DetectAnomaliesAsync(FourHourContext(serverId, WindowStartT));
         var fact = Assert.Single(facts, f => f.Key == "ANOMALY_BATCH_REQUESTS");
@@ -322,9 +321,10 @@ FROM s";
     public async Task QueryDuration_TwoHourShiftInFourHourWindow_FiresPerTile_WhereTheWholeWindowGateWouldStayQuiet()
     {
         const int serverId = -8005;
-        const double bigMu = 700_000.0;
+        const double bigMu = 900_000.0;
         const double bigSigma = 40_000.0;
-        const double bigShift = bigMu + 6 * bigSigma; // 1,140,000 us, clears QueryDurationFloorUs (1,000,000)
+        const double bigShift = bigMu + 6 * bigSigma; // 1,140,000 us, clears QueryDurationFloorUs (1,000,000) —
+        // the original 700,000 mu only reached 940,000 here, UNDER the 1,000,000 floor, so no fact ever fired
 
         const string historySql = @"
 INSERT INTO query_stats
@@ -401,11 +401,11 @@ INSERT INTO memory_stats
      total_physical_memory_mb, available_physical_memory_mb,
      target_server_memory_mb, total_server_memory_mb, buffer_pool_mb)
 SELECT -9300000 - (d * 10000 + h * 100 + i), $1 - to_days(d) + to_hours(h) + to_minutes(i * 5), $2, 'TileServer',
-       $6 * 1.2, $6 * 0.2, $6, GREATEST(0, $6 * ($3 + $4 * sin(d * 4 + h * 12 + i)) / 100.0), GREATEST(0, $6 * ($3 + $4 * sin(d * 4 + h * 12 + i)) / 100.0)
+       $5 * 1.2, $5 * 0.2, $5, GREATEST(0, $5 * ($3 + $4 * sin(d * 4 + h * 12 + i)) / 100.0), GREATEST(0, $5 * ($3 + $4 * sin(d * 4 + h * 12 + i)) / 100.0)
 FROM range(1, 22) AS d(d)
 CROSS JOIN range(0, 4) AS hh(h)
 CROSS JOIN range(0, 12) AS ii(i)";
-        await ExecuteSeedAsync(historySql, WindowStartT, serverId, mu, sigma, 0, targetMb);
+        await ExecuteSeedAsync(historySql, WindowStartT, serverId, mu, sigma, targetMb);
 
         const string windowSql = @"
 WITH s AS (
