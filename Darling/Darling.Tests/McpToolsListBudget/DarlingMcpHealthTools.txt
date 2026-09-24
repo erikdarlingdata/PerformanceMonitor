@@ -1,9 +1,9 @@
 # DarlingMcpHealthTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_daily_summary 1414
+tool get_daily_summary 571
 param get_daily_summary.server_name 28
 param get_daily_summary.summary_date 155
 
-tool get_daily_summary_range 1903
+tool get_daily_summary_range 588
 param get_daily_summary_range.as_of 166
 param get_daily_summary_range.days_back 84
 param get_daily_summary_range.server_name 28

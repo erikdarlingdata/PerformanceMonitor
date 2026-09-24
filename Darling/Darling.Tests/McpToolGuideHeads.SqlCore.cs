@@ -172,3 +172,61 @@ public sealed class McpToolGuideHeadsSqlCoreTests
         Assert.DoesNotContain("#3653", full, StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// #3898 head pins for <c>get_daily_summary</c> and <c>get_daily_summary_range</c>, joining the sqlCore family.
+/// Lite's twin is <c>Lite.Tests/McpToolGuideHeadsSqlCoreDailySummaryTests</c>. Both tools' heads are
+/// byte-identical on both SKUs (the generic cross-SKU pin in <see cref="McpToolGuideTests"/> also covers this):
+/// neither tool's guardrail facts differ by product on the head. Darling's own tail carries one extra paragraph
+/// (the rollup-tier <c>unique_queries=null</c>/<c>days_missing</c> disclosure) that Lite's original prose never
+/// had, because Lite's daily-summary payload has no rollup tier to disclose (<c>Lite/Mcp/McpHealthTools.cs</c>'s
+/// <c>GetDailySummary</c>/<c>GetDailySummaryRange</c> bodies carry no <c>days_missing</c> key at all).
+/// </summary>
+public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_daily_summary",
+        "get_daily_summary_range",
+    ];
+
+    [Fact]
+    public void BothHeads_CarryTheStatusVocabulary_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        Assert.Contains("status empty: no row for that day.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
+        Assert.Contains("data_state purged, zeros are absences not measurements, no verdict.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
+
+        Assert.Contains("status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);
+        Assert.Contains("zeros are absences, never Healthy.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);
+    }
+
+    /// <summary>D9: <c>get_daily_summary_range</c>'s top-level "unavailable" means no collection has EVER been
+    /// recorded for the server; a purged day still returns as an ordinary row, with data_state purged, inside
+    /// the days array rather than as the top-level status. The head keeps the two apart so a reader does not
+    /// conflate "this one row is purged" with "the whole range call failed".</summary>
+    [Fact]
+    public void RangeHead_TiesUnavailableToNeverCollected_NotToAPurgedRow()
+    {
+        var head = McpToolGuideTests.Served("get_daily_summary_range").Served;
+        Assert.Contains("status unavailable: nothing was ever collected.", head, StringComparison.Ordinal);
+        Assert.Contains("a row is data_state purged or past_horizon", head, StringComparison.Ordinal);
+    }
+
+    /// <summary>D6: Darling's own tail keeps the rollup-tier disclosure (<c>unique_queries=null</c>,
+    /// <c>days_missing</c>) that only Darling's payload carries.</summary>
+    [Fact]
+    public void DarlingsTail_CarriesTheRollupTierDisclosure()
+    {
+        Assert.Contains("unique_queries is null (NOT 0)", McpToolGuideTests.Served("get_daily_summary").Tail!, StringComparison.Ordinal);
+        Assert.Contains("unique_queries=null (NOT 0", McpToolGuideTests.Served("get_daily_summary_range").Tail!, StringComparison.Ordinal);
+    }
+}
