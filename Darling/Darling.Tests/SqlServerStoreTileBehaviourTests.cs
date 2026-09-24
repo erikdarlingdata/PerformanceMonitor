@@ -31,6 +31,10 @@ namespace Darling.Tests;
 ///
 /// <para>First family (CPU): all four scenarios. The other two families (waits, I/O) get scenario 1 only, per
 /// the lane brief.</para>
+///
+/// <para>I/O's tiled fire path is covered by <see cref="DarlingAnomalyBaselineTests"/>'s
+/// EndToEnd_IoDetector_… (#3653 B); a separate 4 h I/O shift fixture was dropped after four attempts (PR
+/// #4172 comment 5819831541).</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class SqlServerStoreTileBehaviourTests
@@ -435,101 +439,6 @@ public sealed class SqlServerStoreTileBehaviourTests
         }
     }
 
-    // ───────────────────────── I/O: scenario 1 only ─────────────────────────
-
-    /// <summary>I/O — scenario 1 only. Copies <c>EndToEnd_IoDetector_…</c>'s file_io_stats seeding
-    /// (delta_reads/delta_writes/delta_stall_read_ms rows). Hours 1-2 (local 10, 11) at the baseline read
-    /// latency; hours 3-4 (local 12, 13) run the WHOLE hour at 6x the baseline's effective sigma above its
-    /// mean.</summary>
-    [Fact]
-    public async Task Io_TwoHourSustainedShift_FiresOnWorstTile_WhereWholeWindowMeanWouldNotClearCutoff()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        const int serverId = -4172_06;
-        const string serverName = "sqlstore-tile-io-shift-e2e";
-        const string insertIo =
-            "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
-
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await CleanupIoAsync(connection, serverId, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var bodySucceeded = false;
-        try
-        {
-            var id = 900_000L;
-            // 21 Wednesdays of history at local hours 10 and 11, 12 rows/hour at a fixed 20 ms read latency
-            // (10 reads, 200 ms stall — matches the sibling live test's 10/0/20 shape, MAD 0 -> the I/O
-            // absolute floor drives EffectiveRobustSigma, exactly as the sibling test measures it).
-            for (var week = 0; week < 21; week++)
-            {
-                foreach (var hourOffset in new[] { 0, 1 })
-                {
-                    var hourStart = T.AddDays(-7 * week).AddHours(hourOffset);
-                    for (var i = 0; i < 12; i++)
-                        await InsertAsync(connection, insertIo, id++, TruncateToSeconds(hourStart.AddMinutes(5 * i)), serverId, serverName, 10L, 0L, 200L);
-                }
-            }
-
-            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
-            var provider = new PgBaselineProvider(postgres);
-            // Read the START bucket at T itself (Wednesday 10:00) — the SAME (hour, day-of-week) key the
-            // detector's own tile map will look up for the window's first tile. Reading at T.AddHours(-24)
-            // (a Tuesday) missed the seeded Wednesday-10/11 Full bucket entirely and fell through to a
-          // pooled HourOnly bucket over only the last ~4 weeks inside the 30-day baseline window, an
-            // under-sized, untrustworthy sigma that mis-sized the shift (recipe: "size the shift from the
-            // bucket you ACTUALLY read").
-            var baseline = await provider.GetBaselineAsync(serverId, MetricNames.IoLatency, T, ct);
-            Assert.True(baseline.IsTrustworthy, "the tiled arm requires a trustworthy start bucket");
-
-            var detector = new PgAnomalyDetector(postgres, provider);
-            var context = new AnalysisContext
-            {
-                ServerId = serverId,
-                ServerName = serverName,
-                TimeRangeStart = T,
-                TimeRangeEnd = T.AddHours(4),
-                ServerUtcOffset = TimeSpan.Zero
-            };
-
-            var shiftedStallMs = (long)((baseline.Mean + 6 * baseline.EffectiveRobustSigma) * 10); // 10 reads/row
-            for (var h = 0; h < 4; h++)
-            {
-                var hourStart = T.AddHours(h);
-                var seededHigh = h >= 2;
-                for (var i = 0; i < 12; i++)
-                {
-                    var at = TruncateToSeconds(hourStart.AddMinutes(5 * i));
-                    var stallMs = seededHigh ? shiftedStallMs : 200L;
-                    await InsertAsync(connection, insertIo, id++, at, serverId, serverName, 10L, 0L, stallMs);
-                }
-            }
-
-            var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_READ_LATENCY"));
-
-            var tileLocalHour = fact.Metadata["tile_local_hour"];
-            Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
-            Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
-            Assert.Equal(2.0, fact.Metadata["tiles_fired"]);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                await CleanupIoAsync(cleanup, serverId, cleanupCt);
-                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
-            });
-        }
-    }
-
     // ───────────────────────── shared helpers ─────────────────────────
 
     /// <summary>The 21-Wednesday CPU baseline's population stddev for the deterministic pseudo-noise shape
@@ -614,12 +523,6 @@ CROSS JOIN LATERAL (SELECT $1::timestamp + i * INTERVAL '5 minutes') AS _(ts)", 
     private static async Task CleanupWaitsAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         await using var cleanup = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {serverId};", connection);
-        await cleanup.ExecuteNonQueryAsync(ct);
-    }
-
-    private static async Task CleanupIoAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
-    {
-        await using var cleanup = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {serverId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 
