@@ -11453,6 +11453,79 @@ public sealed class RollupCoverage
             + ") AS " + alias;
     }
 
+    /// <summary>
+    /// THE STITCH'S OWN BOUNDARY (#3653 A6, lane LA-3b2): the same F <see cref="StitchedRelationSql"/> would
+    /// split <paramref name="legacy"/>/<paramref name="tier"/> at for a read starting at
+    /// <paramref name="windowStartUtc"/>, or null when that call would answer legacy-only or successor-only —
+    /// nothing to split for THIS window. <see cref="DailySummarySql"/>'s not-carried probe uses this to decide
+    /// between one probe and two (UNION ALL, one per relation name, split at F), so it MUST agree with
+    /// <see cref="StitchedRelationSql"/>'s own decision exactly rather than re-derive it — the guard chain
+    /// below is deliberately the same chain, kept side by side with it rather than factored through it, so a
+    /// future edit to one is a visible diff next to the other instead of a shared private path either could
+    /// drift under without a test noticing.
+    /// </summary>
+    public DateTime? StitchFloor(string legacy, StitchTier tier, DateTime windowStartUtc)
+    {
+        if (legacy is null)
+        {
+            throw new ArgumentNullException(nameof(legacy));
+        }
+
+        string? successor;
+        string? successorHourly = null;
+        if (tier == StitchTier.Hourly)
+        {
+            successor = TimescaleSupport.SuccessorOf(legacy);
+            if (successor is null || !_availability.Has(successor))
+            {
+                return null;
+            }
+        }
+        else
+        {
+            var pair = s_supersededDailyRollupsStub.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            successor = pair.SuccessorDaily;
+            successorHourly = pair.SuccessorHourly;
+            if (successor is null)
+            {
+                return null;
+            }
+        }
+
+        var legacyExists = _availability.Has(legacy);
+        var legacyFloor = legacyExists ? FloorOf(legacy) : null;
+        if (!legacyExists || legacyFloor is null)
+        {
+            return null;
+        }
+
+        var successorFloor = FloorOf(successor);
+        if (successorFloor is null)
+        {
+            return null;
+        }
+
+        DateTime boundary;
+        if (tier == StitchTier.Hourly)
+        {
+            boundary = successorFloor.Value;
+        }
+        else
+        {
+            var successorHourlyFloor = successorHourly is null ? null : FloorOf(successorHourly);
+            if (successorHourlyFloor is null)
+            {
+                return null;
+            }
+
+            var hourlyFloor = successorHourlyFloor.Value;
+            var ceilDay = hourlyFloor == hourlyFloor.Date ? hourlyFloor : hourlyFloor.Date.AddDays(1);
+            boundary = successorFloor.Value > ceilDay ? successorFloor.Value : ceilDay;
+        }
+
+        return boundary <= windowStartUtc ? null : boundary;
+    }
+
     /// <summary>The raw table a rollup view's tier ladder falls back TO, or null for a name outside
     /// <see cref="TimescaleSupport.RollupViews"/> (which answers "no evidence" rather than guessing).</summary>
     ///
