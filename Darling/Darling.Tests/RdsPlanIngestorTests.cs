@@ -337,6 +337,28 @@ public sealed class RdsPlanIngestorTests
         var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
 
         Assert.Equal(0, outcome.Rows);
+        /* Not dropped as forged: the look-alike never became a plan record at all (review round 1). */
+        Assert.Equal(0, outcome.ForgedCaptures);
+    }
+
+    /// <summary>
+    /// #4053 c3 review: the RDS csv route counts a forged capture the way the self-hosted route does. A
+    /// LOG-severity plan record whose duration has the wrong shape is skipped and counted, and nothing is
+    /// written, so no store is opened.
+    /// </summary>
+    [Fact]
+    public async Task APlanRecordWithAMalformedDuration_IsCountedAsForged_AndNotWritten()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var forged = CsvPlanRecord.Replace("duration: 0.020 ms  plan:", "duration: 1.2.3 ms  plan:", StringComparison.Ordinal);
+        Assert.NotEqual(CsvPlanRecord, forged);
+        var client = new CsvFakeRds { CsvBody = forged };
+        var ingestor = new RdsPlanIngestor(store, new RdsLogSource(_ => client));
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Equal(1, outcome.ForgedCaptures);
     }
 
     /// <summary>

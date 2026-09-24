@@ -392,16 +392,20 @@ LIMIT 2000";
     /// The per-entry half of <see cref="ReadCsvAsync"/> (#4053 part c3): classify csvlog entries into plan
     /// rows, with no reader and no context — a shared step the RDS/Aurora plan ingestor can call over
     /// entries the RDS log API handed it, rather than a second copy of the marker check, the LOG-severity
-    /// gate, the query-id and duration guards and <see cref="PgPlanLogParser.FromBlock"/>. Public for that
-    /// caller, which lives in a different assembly. The self-hosted csv route has no foreign-zone filter of
-    /// its own — <c>pg_read_file</c> reads the target's own log, never another target's untrusted content —
-    /// so none is added here; the RDS caller applies <c>PgLogEventsCollector.FilterForeignZoneEntries</c>
-    /// itself, upstream of this call, exactly as it already does for deadlocks.
+    /// gate, the query-id and duration guards and <see cref="PgPlanLogParser.FromBlock"/>. Internal, visible
+    /// to the Darling service (that caller's assembly) and nothing else (#4053 c3 review).
+    /// <para><b>Precondition: csv-parser entries only.</b> The query id is read from the text after the LAST
+    /// comma of <see cref="PgLogEntry.RawText"/>. That is the unquoted <c>query_id</c> column only because
+    /// <see cref="PgServerLogCsvParser"/> admits a record only with exactly 26 fields. An entry from the stderr
+    /// assembler or the jsonlog parser carries raw line text, whose last comma can sit in client-written
+    /// message text, so a client could choose the query id. Never pass those entries here.</para>
+    /// <para>No foreign-zone filter, on either route: plan rows are stamped with the collection time, never a
+    /// log timestamp, and the stderr plan routes never filtered either.</para>
     /// </summary>
     /// <param name="forgedCaptures">The count this batch of entries added to
     /// <see cref="ForgedCaptureMeasurement"/> — a query id or duration that did not match the guarded shape
     /// a real capture always has (#4058 L1).</param>
-    public static List<Row> PlanRowsFromCsvEntries(IEnumerable<PgLogEntry> entries, out int forgedCaptures)
+    internal static List<Row> PlanRowsFromCsvEntries(IEnumerable<PgLogEntry> entries, out int forgedCaptures)
     {
         ArgumentNullException.ThrowIfNull(entries);
 

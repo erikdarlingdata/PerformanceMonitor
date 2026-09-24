@@ -12,4 +12,10 @@
     <NoWarn>CA1849;CA2007;CA1508;CA1822;CA1805;CA1510;CA1816;CA1861;CA1845;CA2201;CA1848;CA1852;CA1305;CA1860;CA1707;CA1507;CA1806;CA2254</NoWarn>
     <WarningsAsErrors>CS4014</WarningsAsErrors>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- #4053 c3: the RDS plan ingestor calls PgPlanCaptureCollector.PlanRowsFromCsvEntries, which is internal
+         because it is sound only over csv-parser entries (see its remarks). -->
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
+  </ItemGroup>
 </Project>
