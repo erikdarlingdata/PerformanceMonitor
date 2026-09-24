@@ -21,7 +21,11 @@ namespace PerformanceMonitorLite.Tests;
 ///
 /// <para><b>Scope-trimmed to scenario 1 (the 4 h shift) for CPU, waits and I/O</b>, per the coordinator's
 /// SCOPE TRIM ruling (issue-3653 A8 option B): the 24 h cutoff, the lone spike and the fallback are already
-/// covered by the gate's unit tests and B's acceptance harness.</para>
+/// covered by the gate's unit tests and B's acceptance harness. Each test asserts only that the shift fires
+/// through the tile path with the right metadata (per a later coordinator ruling, the in-test "whole-window
+/// z stays below k" dev-comparison was dropped rather than re-sized on this Windows CI-only rig — there is
+/// no mutation check for Lite here, and B's necessity is already proven by the acceptance harness and by
+/// the Darling mutation checks).</para>
 ///
 /// <para>Fixture, seeding and helper conventions are copied from <see cref="AnomalyDetectorTests"/>
 /// (constructor, <c>SeedConnectionAsync</c>/<c>ExecuteSeedAsync</c>, <c>SeedCpuAsync</c>/<c>SeedWaitStatAsync</c>/
@@ -108,9 +112,6 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
 
         var startBucket = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.Cpu, _windowStart);
         Assert.True(startBucket.IsTrustworthy, "the start-hour CPU bucket must be trustworthy");
-        var wholeWindowPeakZ = (CpuShift - startBucket.Mean) / startBucket.EffectiveStdDev;
-        Assert.True(wholeWindowPeakZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.Cpu),
-            $"the whole-window peak z ({wholeWindowPeakZ}) unexpectedly cleared the cutoff on its own — the shift was not actually diluted by construction");
 
         var anomalies = await _detector.DetectAnomaliesAsync(CreateContext(_windowStart, _windowStart.AddHours(4)));
         var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
@@ -142,9 +143,6 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
         var startBucket = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.WaitMsPerSec, _windowStart);
         Assert.True(startBucket.IsTrustworthy, "the start-hour wait-profile bucket must be trustworthy");
         Assert.True(startBucket.EffectiveRobustSigma > 0, "the wait profile is scored on the robust frame");
-        var wholeWindowPeakZ = (WaitShift - startBucket.Median) / startBucket.EffectiveRobustSigma;
-        Assert.True(wholeWindowPeakZ < AnomalyThresholds.HeavyTailModifiedZThreshold,
-            $"the whole-window peak modified-z ({wholeWindowPeakZ}) unexpectedly cleared the cutoff on its own");
 
         var anomalies = await _detector.DetectAnomaliesAsync(CreateContext(_windowStart, _windowStart.AddHours(4)));
         var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
@@ -176,9 +174,6 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
 
         var startBucket = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.IoLatency, _windowStart);
         Assert.True(startBucket.IsTrustworthy, "the start-hour I/O bucket must be trustworthy");
-        var wholeWindowPeakZ = (IoShiftMs - startBucket.Mean) / startBucket.EffectiveStdDev;
-        Assert.True(wholeWindowPeakZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.IoLatency),
-            $"the whole-window peak z ({wholeWindowPeakZ}) unexpectedly cleared the cutoff on its own");
 
         var anomalies = await _detector.DetectAnomaliesAsync(CreateContext(_windowStart, _windowStart.AddHours(4)));
         var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_READ_LATENCY");
