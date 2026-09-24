@@ -30,6 +30,54 @@ public sealed partial class PgTargetAnomalyDetector
     public const string WalVolumeWindowSql = PgTargetFactCollector.PgTargetWalVolumeSql;
 
     /// <summary>
+    /// #3653 A8 option B (lane L3c): <see cref="WalVolumeWindowSql"/>'s tile twin — keeps the <c>sampled</c>/<c>rated</c>
+    /// CTEs (<c>rated</c> already exposes <c>collection_time</c> under that name, so <see cref="WindowTiles.LocalHourSql"/>
+    /// reads it unchanged) and groups the OUTER select by target-local hour. Column order per tile mirrors the
+    /// whole-window read (0 local_hour, 1 peak, 2 avg, 3 rated_samples, 4 wal_bytes, 5 wal_records, 6 wal_reset_count,
+    /// 7 wal_tracked, 8 sample_count), with a per-tile peak-time column appended at the end for
+    /// <see cref="WindowTiles.ReadTile"/>. Binds <c>$4..$6</c> from the analysis window's clock.
+    /// </summary>
+    public const string WalVolumeTileWindowSql = @"
+WITH sampled AS (
+    SELECT
+        collection_time,
+        wal_bytes   - LAG(wal_bytes)   OVER series AS raw_wal_bytes,
+        wal_records - LAG(wal_records) OVER series AS raw_wal_records,
+        extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER series))) AS interval_sec,
+        (ROW_NUMBER() OVER series > 1
+         AND wal_stats_reset IS DISTINCT FROM LAG(wal_stats_reset) OVER series) AS wal_reset_here,
+        (wal_bytes IS NOT NULL) AS wal_tracked
+    FROM pg_write_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    WINDOW series AS (ORDER BY collection_time)
+),
+rated AS (
+    SELECT
+        collection_time,
+        raw_wal_bytes,
+        raw_wal_records,
+        wal_reset_here,
+        wal_tracked,
+        CASE WHEN raw_wal_bytes IS NOT NULL AND interval_sec > 0
+             THEN GREATEST(raw_wal_bytes, 0)::DOUBLE PRECISION / interval_sec END AS bytes_per_sec
+    FROM sampled
+)
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(bytes_per_sec) AS peak_wal_bytes_per_sec,
+       AVG(bytes_per_sec) AS avg_wal_bytes_per_sec,
+       CAST(count(*) FILTER (WHERE bytes_per_sec IS NOT NULL) AS integer) AS rated_samples,
+       coalesce(SUM(GREATEST(raw_wal_bytes, 0)), 0) AS wal_bytes,
+       CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint) AS wal_records,
+       CAST(count(*) FILTER (WHERE wal_reset_here) AS integer) AS wal_reset_count,
+       coalesce(bool_or(wal_tracked), false) AS wal_tracked,
+       (array_agg(collection_time ORDER BY bytes_per_sec DESC NULLS LAST))[1] AS peak_time
+FROM rated
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
+
+    /// <summary>
     /// <c>ANOMALY_PG_WAL_VOLUME</c> (/* filled by lane 15 — #3691 step 15, design §3.11 */): the window's peak WAL
     /// bytes per second per collection against the <c>pg_wal_bytes_per_sec</c> bucket, through the shared gate —
     /// robust modified-z at the standard 3.5 cutoff when the bucket carries median/MAD, classical 2σ otherwise,
@@ -55,39 +103,83 @@ public sealed partial class PgTargetAnomalyDetector
     {
         try
         {
-            double peak, avg, walBytes;
-            long ratedSamples, walRecords;
-            bool walTracked;
+            /* #3653 A8 option B: per-hour tiles against the tile's own (hour, dow) bucket, never-blind fallback to
+               today's window-peak path when no tile scores. The trackedness/zero-volume early return (design's
+               own reason: an untracked window has nothing to judge before a bucket is even fetched) still reads
+               the WHOLE window first, summed across tiles, because that decision is about the window's data
+               shape, not about any one hour. */
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgWalBytesPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
+            var tiles = new List<WindowTile>();
+            double totalWalBytes = 0;
+            long totalWalRecords = 0;
+            var anyTracked = false;
 
             await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
-                using var cmd = new NpgsqlCommand(WalVolumeWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
+                using var cmd = new NpgsqlCommand(WalVolumeTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
                 cmd.Parameters.AddWithValue(context.ServerId);
                 cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
                 cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                /* #3653 A8 option B: the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds $4..$6 from the
+                   ANALYSIS window's clock — bound here, not in PgTargetAnomalyDetector.cs, per this lane's brief. */
+                cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-                if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-                peak = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-                avg = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-                ratedSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-                walBytes = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
-                walRecords = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4));
-                walTracked = !reader.IsDBNull(6) && reader.GetBoolean(6);
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 8));
+                    totalWalBytes += reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+                    totalWalRecords += reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
+                    anyTracked |= !reader.IsDBNull(7) && reader.GetBoolean(7);
+                }
             }
 
-            if (!walTracked || (walBytes <= 0 && walRecords <= 0) || ratedSamples == 0) return;
+            if (!anyTracked || (totalWalBytes <= 0 && totalWalRecords <= 0)) return;
 
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgWalBytesPerSec, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peak, avg,
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgWalBytesPerSec), PgWalBytesFloorPerSec, PgWalBytesFallbackPerSec, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peak, avg;
+            long ratedSamples;
+
+            if (tv is null)
+            {
+                /* Never-blind fallback: today's whole-window path against the start bucket. */
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgWalBytesPerSec, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, whole.Peak, whole.Mean,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgWalBytesPerSec), PgWalBytesFloorPerSec, PgWalBytesFallbackPerSec, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+
+                peak = whole.Peak;
+                avg = whole.Mean;
+                ratedSamples = whole.Samples;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peak = tv.Value.Tile.Peak;
+                avg = tv.Value.Tile.Mean;
+                ratedSamples = tv.Value.Tile.Samples;
+                if (!decision.Fire) return;
+            }
 
             var metadata = ZScoreMetadata(baseline, decision, ratedSamples);
             metadata["peak_wal_bytes_per_sec"] = peak;
@@ -99,6 +191,8 @@ public sealed partial class PgTargetAnomalyDetector
             var centre = baseline.Median > 0 ? baseline.Median : baseline.Mean;
             if (centre > 0)
                 metadata["baseline_ratio"] = peak / centre;
+            if (tv is { } verdict)
+                WindowTiles.AddTileMetadata(metadata, verdict, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {
