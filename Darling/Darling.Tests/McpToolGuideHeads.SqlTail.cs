@@ -158,16 +158,16 @@ public sealed class McpToolGuideHeadsSqlTailQueryStoreHealthTests
     /// <summary>The per-tool guardrail phrase the head must state.</summary>
     private static readonly string[] HeadFacts =
     [
-        "READ_WRITE->READ_ONLY after the storage cap = the classic failure",
+        "desired READ_WRITE, actual READ_ONLY = the storage-cap failure",
         "ALL (2016/17 default) churns most",
         "AUTO (2019+ default) skips minor ones",
         "CUSTOM tunes AUTO",
         "NONE stops new capture",
         "wait_stats_capture_mode: ON default, OFF empties per-query waits",
-        "null on either: predates the rung, or pre-2017 engine for wait_stats - never OFF",
+        "null on either: pre-rung row, or pre-2017 engine for wait_stats - never OFF",
         "No verdict rendered",
-        "No server rows = unavailable",
-        "an unmatched database_name answers database_count 0",
+        "No rows = unavailable or not_collected",
+        "an unmatched database_name gives database_count 0",
         "LATEST IS A TIME: captured_at is the newest hourly capture",
     ];
 
@@ -234,7 +234,7 @@ public sealed class McpToolGuideHeadsSqlTailDefaultTraceTests
         "ErrorLog writes at severity 16+ (a null severity also counts)",
         "over an event_time window ending at as_of, newest first",
         "Config-change events are excluded: use get_server_config_changes / get_database_config_changes / get_trace_flag_changes",
-        "Empty means none passed the gate in this window",
+        "Empty: nothing significant in the window, or nothing collected in it",
         "not_collected means this engine has no default trace (Azure SQL Database)",
     ];
 
