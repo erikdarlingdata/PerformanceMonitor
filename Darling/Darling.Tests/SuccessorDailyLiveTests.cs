@@ -55,6 +55,12 @@ public sealed class SuccessorDailyLiveTests
         Assert.SkipWhen(!timescaleEnabled,
             "The live successor-daily test needs TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        /* #3653 A6 lane LB-6: the worker's real start order converts collection_log to a hypertable
+           BEFORE the ensure sweep (DarlingWorker.cs ~:306/:316/:346); collection_health_hourly selects
+           FROM collect.collection_log, so on the RIG-RULE store (template1 without timescaledb, so V23
+           skips the conversion) skipping this step here leaves collection_log a plain table and its
+           CREATE is rejected with 0A000. IntervalHonestHourlyRollupTests.cs:530 already does this. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
 
         var successorDailies = new[]
         {
@@ -119,6 +125,12 @@ public sealed class SuccessorDailyLiveTests
         Assert.SkipWhen(!timescaleEnabled,
             "The live successor-daily test needs TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        /* #3653 A6 lane LB-6: the worker's real start order converts collection_log to a hypertable
+           BEFORE the ensure sweep (DarlingWorker.cs ~:306/:316/:346); collection_health_hourly selects
+           FROM collect.collection_log, so on the RIG-RULE store (template1 without timescaledb, so V23
+           skips the conversion) skipping this step here leaves collection_log a plain table and its
+           CREATE is rejected with 0A000. IntervalHonestHourlyRollupTests.cs:530 already does this. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
 
         /* Four whole UTC days, aligned to midnight so the daily buckets are unambiguous. Naive-UTC storage,
            as PgCollectorRowWriter writes it. */
@@ -215,6 +227,12 @@ public sealed class SuccessorDailyLiveTests
         Assert.SkipWhen(!timescaleEnabled,
             "The live backfill-runbook test needs TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        /* #3653 A6 lane LB-6: the worker's real start order converts collection_log to a hypertable
+           BEFORE the ensure sweep (DarlingWorker.cs ~:306/:316/:346); collection_health_hourly selects
+           FROM collect.collection_log, so on the RIG-RULE store (template1 without timescaledb, so V23
+           skips the conversion) skipping this step here leaves collection_log a plain table and its
+           CREATE is rejected with 0A000. IntervalHonestHourlyRollupTests.cs:530 already does this. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
 
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
         var historyStart = now.AddDays(-6);
