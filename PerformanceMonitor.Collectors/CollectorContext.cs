@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -252,6 +253,16 @@ public sealed class CollectorContext
     /// definition, the same shape as <see cref="CurrentDatabaseName"/> and <see cref="Watermark"/>.
     /// </summary>
     public bool PgReadBinaryFileGranted { get; set; }
+
+    /// <summary>
+    /// The <see cref="Encoding"/> to decode the binary route's bytes with (#4062) — the connected database's own
+    /// <c>server_encoding</c>, mapped by <see cref="PgServerEncoding.TryGet"/>. Set alongside
+    /// <see cref="PgReadBinaryFileGranted"/> in <c>DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync</c>.
+    /// Null whenever <see cref="PgReadBinaryFileGranted"/> is false: a caller must never read the bytea as text
+    /// without checking the grant first, and a null encoding here is one more way that mistake fails loudly
+    /// instead of silently defaulting to UTF-8.
+    /// </summary>
+    public Encoding? PgLogEncoding { get; set; }
 
     /// <summary>
     /// The store's log-hash key (#4004): the secret the <c>pg_log_events</c> collector keys its two stored identities

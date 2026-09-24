@@ -227,8 +227,9 @@ public class PostgresFaultOutcomeTests
     }
 
     /// <summary>
-    /// #4051 round-2 review, L-1: a 22P05 is a WIN1252 byte with no UTF-8 equivalent, on a database the byte route
-    /// does not serve. The sentence says that the grant does not help there, and it names #4062.
+    /// #4051 round-2 review, L-1 (#4062 changed the sentence's own reasoning, not this pin): a 22P05 is a
+    /// WIN1252 byte with no UTF-8 equivalent, on a database whose encoding this collector does not map. The
+    /// sentence says that the grant does not help there, with no issue reference in the served text.
     /// </summary>
     [Fact]
     public void ALogReader22P05SaysTheGrantDoesNotHelp()
@@ -240,7 +241,7 @@ public class PostgresFaultOutcomeTests
         Assert.NotNull(explanation);
         Assert.Contains("22P05", explanation, StringComparison.Ordinal);
         Assert.Contains("does not help", explanation, StringComparison.Ordinal);
-        Assert.Contains("#4062", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("#4062", explanation, StringComparison.Ordinal);
         Assert.DoesNotContain("Grant EXECUTE", explanation, StringComparison.Ordinal);
     }
 
