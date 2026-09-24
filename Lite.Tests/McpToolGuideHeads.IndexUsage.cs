@@ -37,8 +37,9 @@ public sealed class McpToolGuideHeadsIndexUsageTests
         Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
 
         /* D9: unused/write-only always sort ahead of Active, so a capped, all-Unused answer is not proof the
-           server has few Active indexes — sharper here than on Darling, since Lite has no database_name filter
-           and no truncated field to say so. */
+           server has few Active indexes — the trap #2636 exists to name. As of #2636, Lite carries the same
+           database_name filter and truncated field as Darling, so the head's caution applies identically on
+           both products now. */
         Assert.Contains(
             "Unused/write-only sort first as drop candidates: on a server with many, results can be one "
             + "database's unused indexes, hiding Active ones elsewhere.",
@@ -61,13 +62,19 @@ public sealed class McpToolGuideHeadsIndexUsageTests
         Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200));
     }
 
-    /// <summary>Nothing the original Lite description said was lost, and the tail names the trap that is
-    /// sharper on Lite than on Darling: no database_name filter and no truncation signal at all, so a capped
-    /// answer here carries no sign that it was capped.</summary>
+    /// <summary>#2636: Lite gained the same database_name filter, matching_index_count, and truncated signal
+    /// Darling has always had, so the tail now tells the same truth on both products — mirrored verbatim from
+    /// Darling's tail rather than kept as a near-duplicate wording of an identical behavior.</summary>
     [Fact]
-    public void Tail_CarriesTheClassificationRule_AndTheNoTruncationSignalCaveat()
+    public void Tail_CarriesTheDatabaseFilterGuidance_AndTheClassificationRule()
     {
         var tail = McpToolGuideTests.Served("get_index_usage").Tail!;
+
+        Assert.Contains(
+            "Pass database_name to ask about one database, which is almost always what you want; the response "
+            + "carries matching_index_count and truncated so a short answer is never mistaken for an absent one.",
+            tail,
+            StringComparison.Ordinal);
 
         Assert.Contains(
             "Classification: Unused is zero seeks, scans and lookups AND zero updates; Write-only is zero of "
@@ -75,12 +82,9 @@ public sealed class McpToolGuideHeadsIndexUsageTests
             tail,
             StringComparison.Ordinal);
 
-        Assert.Contains(
-            "This read has no database_name filter and no truncation signal: it always returns every "
-            + "database's indexes on the server together, capped at 200 rows, unused and write-only first.",
-            tail,
-            StringComparison.Ordinal);
-
-        Assert.Contains("this tool never returns status empty", tail, StringComparison.Ordinal);
+        /* #2636: database_name matching zero rows while the server has index data elsewhere is status empty,
+           not unavailable — a different answer from a truly uncollected server. */
+        Assert.Contains("status is empty, not unavailable", tail, StringComparison.Ordinal);
+        Assert.Contains("this tool never reports a truly empty server as empty", tail, StringComparison.Ordinal);
     }
 }

@@ -140,11 +140,18 @@ LIMIT {topN}";
 
     /// <summary>
     /// Per-index usage from the latest snapshot for a server, surfacing unused/write-only indexes.
+    /// <paramref name="databaseName"/> null means every database (the shape this had before #2636), so every
+    /// existing caller that does not pass it keeps its old server-wide answer. Mirrors Darling's
+    /// <c>DarlingObjectStatsReader.GetIndexUsageAsync</c> — the optional filter and the database-scoped cap it
+    /// exists to make answerable, ported from Postgres's NULL-tolerant parameter to the literal-SQL-filter
+    /// pattern <see cref="GetIndexLockingAsync"/> already uses for DuckDB's parameter typing.
     /// </summary>
-    public async Task<List<IndexUsageRow>> GetIndexUsageAsync(int serverId, int topN = 200)
+    public async Task<List<IndexUsageRow>> GetIndexUsageAsync(int serverId, int topN = 200, string? databaseName = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+
+        var dbFilter = databaseName == null ? "" : " AND database_name = $2";
 
         command.CommandText = $@"
 SELECT
@@ -171,13 +178,15 @@ SELECT
     END AS classification
 FROM v_index_object_stats
 WHERE server_id = $1
-AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
+AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbFilter}
 ORDER BY
     CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
     reserved_mb DESC
 LIMIT {topN}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (databaseName != null)
+            command.Parameters.Add(new DuckDBParameter { Value = databaseName });
 
         var items = new List<IndexUsageRow>();
         using var reader = await command.ExecuteReaderAsync();
@@ -203,6 +212,33 @@ LIMIT {topN}";
             });
         }
         return items;
+    }
+
+    /// <summary>
+    /// How many index rows the same server and database filter match at the latest snapshot, ignoring the cap
+    /// (#2636) — read alongside <see cref="GetIndexUsageAsync"/> so <c>get_index_usage</c> can report
+    /// <c>matching_index_count</c> and <c>truncated</c> instead of a silent 200-row cap. A separate query
+    /// rather than a window function over the capped read: the count has to be of the whole match, and a
+    /// count taken over the LIMITed rows is a count of the page, which is the exact mistake #2636 reports.
+    /// </summary>
+    public async Task<long> GetIndexUsageMatchCountAsync(int serverId, string? databaseName = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var dbFilter = databaseName == null ? "" : " AND database_name = $2";
+
+        command.CommandText = $@"
+SELECT count(*)
+FROM v_index_object_stats
+WHERE server_id = $1
+AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1){dbFilter}";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        if (databaseName != null)
+            command.Parameters.Add(new DuckDBParameter { Value = databaseName });
+
+        return Convert.ToInt64(await command.ExecuteScalarAsync());
     }
 
     /// <summary>
