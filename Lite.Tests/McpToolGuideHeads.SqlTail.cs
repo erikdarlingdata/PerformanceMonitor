@@ -185,12 +185,13 @@ public sealed class McpToolGuideHeadsSqlTailMemoryGrantTests
     /// <summary>The per-tool guardrail phrase each head must state.</summary>
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
-        ("get_resource_semaphore", "TWO READS: grants[] is the NEWEST snapshot"),
+        ("get_resource_semaphore", "TWO READS, per semaphore+pool: grants[] is the NEWEST snapshot"),
         ("get_resource_semaphore", "window[] aggregates EVERY snapshot"),
-        ("get_resource_semaphore", "No rows: unavailable (or not_collected first)"),
+        ("get_resource_semaphore", "No rows: unavailable (not_collected first)"),
         ("get_resource_semaphore", "sample_interval_seconds/interval_known null/false on a restart-marker or pre-column row"),
         ("get_memory_grants", "TWO READS: grants[] is the NEWEST snapshot"),
-        ("get_memory_grants", "window[] aggregates EVERY snapshot"),
+        ("get_memory_grants", "one row per pool"),
+        ("get_memory_grants", "window[] aggregates EVERY snapshot in it, per pool"),
         ("get_memory_grants", "No rows: unavailable (or not_collected first)"),
     ];
 
