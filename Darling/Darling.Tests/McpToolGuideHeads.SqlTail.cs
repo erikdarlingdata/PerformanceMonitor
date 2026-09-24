@@ -350,7 +350,7 @@ public sealed class McpToolGuideHeadsSqlTailPlanCorrectionsTests
     [
         "Rows recur per capture, not per distinct recommendation.",
         "THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page.",
-        "automatic_tuning ignores the window: a latest snapshot, as_of says when.",
+        "automatic_tuning ignores the window: the latest snapshot; each row's as_of says when.",
         "All timestamps are UTC.",
         "No rows and no automatic_tuning: empty (not_collected checked first).",
     ];
