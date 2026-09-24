@@ -294,4 +294,60 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
         cmd.Parameters.Add(new DuckDBParameter { Value = (object?)timeZoneId ?? DBNull.Value });
         await cmd.ExecuteNonQueryAsync();
     }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1b): the Lite twin of <c>PgBaselineProvider.GetBucketMapAsync</c>. Same seeding
+    /// as <see cref="Provider_ZoneId_EstAndEdtRowsAcrossTheSpringForward_ShareOneLocalBucket"/>'s spring-forward
+    /// row, but the window CPU seed is moved inside the provider's 30-day lookback from windowStart (the copied
+    /// test's own Feb 24 seed is outside a 30-day-back-from-Mar-8 window).
+    /// </summary>
+    [Fact]
+    public async Task Provider_GetBucketMapAsync_ResolvesTheWindowClock_OverTheAnalysisWindow_AcrossTheSpringForward()
+    {
+        await SeedServerClockAsync(-300, EasternWindowsId);
+
+        var windowStart = new DateTime(2026, 3, 8, 4, 0, 0);
+        var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0);
+        var estTuesday = new DateTime(2026, 2, 24, 22, 0, 0); // 17:00 EST, inside the 30-day lookback from windowStart
+        for (var i = 0; i < 6; i++)
+            await SeedCpuAsync(estTuesday.AddMinutes(i * 5), 40 + i);
+
+        var map = await _provider.GetBucketMapAsync(ServerId, MetricNames.Cpu, windowStart, windowEnd);
+
+        Assert.Equal(SpringForward2026, map.WindowClock.TransitionAtUtc);
+        Assert.Equal(-300, map.WindowClock.OffsetBeforeMinutes);
+        Assert.Equal(-240, map.WindowClock.OffsetAfterMinutes);
+
+        /* Compare For(hour, dow) at windowStart's local key against the SAME cached compute GetBaselineAsync
+           resolves for windowStart — a cache hit, no second read. */
+        _provider.ClearCache();
+        var direct = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, windowStart);
+        var (hourOfDay, dayOfWeek) = map.WindowClock.LocalKey(windowStart);
+        var viaMap = map.For(hourOfDay, dayOfWeek);
+        Assert.Equal(direct.Mean, viaMap.Mean, 0.001);
+        Assert.Equal(direct.SampleCount, viaMap.SampleCount);
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1b): a server with no CPU history gets a map with NO USABLE bucket, and the call never
+    /// throws. Lite's scaffold (GROUPING SETS over zero rows) returns one zero-sample placeholder at the flat key
+    /// (-1, -1), not an empty dictionary. So the contract is checked the way the tile gate reads it: every
+    /// (hour, dow) resolves to a zero-sample bucket, and <c>AnomalyGate.EvaluateTiles</c> skips every tile. There is
+    /// no Lite twin of the Darling cache-hit test on purpose. This class's constructor sets the static
+    /// <c>BaselineProvider.CacheTtl</c> to 1 ms, and other classes set it in parallel, so a "second call is a hit"
+    /// assertion cannot be deterministic here. The accessor calls the same <c>GetOrComputeBaselinesAsync</c> that
+    /// <c>BaselineProviderTests</c>' cache tests cover, and the Darling live test pins the shared cache key.
+    /// </summary>
+    [Fact]
+    public async Task Provider_GetBucketMapAsync_NoHistory_HasNoUsableBucket_AndDoesNotThrow()
+    {
+        var windowStart = new DateTime(2026, 3, 8, 4, 0, 0);
+        var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0);
+
+        var map = await _provider.GetBucketMapAsync(ServerId, MetricNames.Cpu, windowStart, windowEnd);
+
+        for (var hour = 0; hour < 24; hour++)
+            for (var dow = 0; dow < 7; dow++)
+                Assert.Equal(0L, map.For(hour, dow).SampleCount);
+    }
 }

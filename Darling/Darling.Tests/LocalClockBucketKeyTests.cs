@@ -578,4 +578,191 @@ public sealed class LocalClockBucketKeyLiveTests
             command.Parameters.AddWithValue(value);
         await command.ExecuteNonQueryAsync(ct);
     }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1b): <c>GetBucketMapAsync</c> re-resolves the window clock over the ANALYSIS
+    /// window (<paramref name="windowStart"/>/<paramref name="windowEnd"/>), not the cached 30-day baseline
+    /// window, so a DST step that falls inside the short window is caught even though it does not fall inside
+    /// (or falls at a different instant within) the longer cached one. Same seeding as the spring-forward test
+    /// above: a <c>server_properties</c> row at UTC−5 with the Eastern zone id, and CPU rows straddling the
+    /// 2026-03-08 07:00Z transition.
+    /// </summary>
+    [Fact]
+    public async Task Live_GetBucketMapAsync_ResolvesTheWindowClock_OverTheAnalysisWindow_AcrossTheSpringForward()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live local-clock baseline test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -3653_13;
+        const string serverName = "q6-bucket-map-e2e";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            /* The window is 2026-03-08 04:00 -> 10:00Z, straddling the spring-forward at 07:00Z. The CPU history
+               must lie inside the provider's 30-day lookback from windowStart (04:00Z): the spring-forward test's
+               own seed dates (Feb 24 / Mar 10) are outside a 30-day-back-from-Mar-8 window, so this test seeds its
+               own rows in the two weeks before Mar 8 instead — Tue 2026-02-24 17:00 EST/EDT-local hour, keyed the
+               same way the provider keys the analysis window's lookup hour. */
+            var windowStart = new DateTime(2026, 3, 8, 4, 0, 0, DateTimeKind.Unspecified);
+            var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0, DateTimeKind.Unspecified);
+            var estTuesday = new DateTime(2026, 2, 24, 22, 0, 0, DateTimeKind.Unspecified); // 17:00 EST
+
+            await ExecAsync(connection, ct,
+                "INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, utc_offset_minutes, time_zone_id) VALUES ($1, $2, $3, $4, $5, $6)",
+                CollectionIdGenerator.Next(), estTuesday, serverId, serverName, -300, EasternWindowsId);
+
+            for (var i = 0; i < 6; i++)
+            {
+                var at = estTuesday.AddMinutes(i * 5);
+                await ExecAsync(connection, ct,
+                    "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    CollectionIdGenerator.Next(), at, serverId, serverName, at, 40 + i, 5);
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+
+            var map = await provider.GetBucketMapAsync(serverId, MetricNames.Cpu, windowStart, windowEnd, ct);
+
+            Assert.Equal(new DateTime(2026, 3, 8, 7, 0, 0, DateTimeKind.Unspecified), map.WindowClock.TransitionAtUtc);
+            Assert.Equal(-300, map.WindowClock.OffsetBeforeMinutes);
+            Assert.Equal(-240, map.WindowClock.OffsetAfterMinutes);
+
+            /* windowStart (04:00Z) is 2026-03-08's own local hour before the transition (UTC-5): Sat 23:00. The
+               seeded row's own local hour is Tue 17:00, so instead compare For(hour, dow) against the same
+               (hour, dow) key GetBaselineAsync resolves for windowStart, over the SAME cached compute — a cache
+               hit, no second read. */
+            provider.ClearCache();
+            var direct = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, null, windowStart, ct);
+            var (hourOfDay, dayOfWeek) = map.WindowClock.LocalKey(windowStart);
+            var viaMap = map.For(hourOfDay, dayOfWeek);
+            Assert.Equal(direct.Mean, viaMap.Mean, 0.001);
+            Assert.Equal(direct.SampleCount, viaMap.SampleCount);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await CleanupAsync(cleanup, serverId, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1b): <c>GetBucketMapAsync</c> reuses the SAME cached compute
+    /// <c>GetBaselineAsync</c> uses for the same (serverId, metric, analysisTime = windowStart) — a second call
+    /// after the underlying rows are gone must still return the SAME <c>Buckets</c> object, proving no second
+    /// compute happened (a recompute over deleted rows would return an empty map).
+    /// </summary>
+    [Fact]
+    public async Task Live_GetBucketMapAsync_SecondCall_IsACacheHit_NoSecondCompute()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live local-clock baseline test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -3653_14;
+        const string serverName = "q6-bucket-map-cache-e2e";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var windowStart = new DateTime(2026, 3, 8, 4, 0, 0, DateTimeKind.Unspecified);
+            var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0, DateTimeKind.Unspecified);
+            var seedTime = new DateTime(2026, 2, 24, 22, 0, 0, DateTimeKind.Unspecified);
+
+            for (var i = 0; i < 10; i++)
+            {
+                var at = seedTime.AddMinutes(i * 5);
+                await ExecAsync(connection, ct,
+                    "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    CollectionIdGenerator.Next(), at, serverId, serverName, at, 50, 5);
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+
+            var first = await provider.GetBucketMapAsync(serverId, MetricNames.Cpu, windowStart, windowEnd, ct);
+            Assert.NotEmpty(first.Buckets);
+
+            /* Delete only the seeded rows, then call again with the same arguments: a cache hit returns the
+               SAME Buckets object; a recompute would see no rows and return an empty map. */
+            await ExecAsync(connection, ct, "DELETE FROM cpu_utilization_stats WHERE server_id = $1", serverId);
+
+            var second = await provider.GetBucketMapAsync(serverId, MetricNames.Cpu, windowStart, windowEnd, ct);
+
+            Assert.Same(first.Buckets, second.Buckets);
+            Assert.NotEmpty(second.Buckets);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await CleanupAsync(cleanup, serverId, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1b): a server with no CPU history at all must return an empty map, never throw —
+    /// the tile gate then skips every tile and the caller falls back to <c>EvaluateZScore</c> (design §1's
+    /// never-blind rule).
+    /// </summary>
+    [Fact]
+    public async Task Live_GetBucketMapAsync_NoHistory_ReturnsAnEmptyMap_AndDoesNotThrow()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live local-clock baseline test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -3653_15;
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupAsync(connection, serverId, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var windowStart = new DateTime(2026, 3, 8, 4, 0, 0, DateTimeKind.Unspecified);
+            var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0, DateTimeKind.Unspecified);
+
+            var provider = new PgBaselineProvider(postgres);
+
+            var map = await provider.GetBucketMapAsync(serverId, MetricNames.Cpu, windowStart, windowEnd, ct);
+
+            Assert.Empty(map.Buckets);
+            Assert.Equal(0L, map.For(0, 0).SampleCount);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await CleanupAsync(cleanup, serverId, cleanupCt);
+            });
+        }
+    }
 }

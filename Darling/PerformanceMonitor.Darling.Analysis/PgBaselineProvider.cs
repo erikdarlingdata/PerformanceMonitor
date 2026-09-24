@@ -219,6 +219,35 @@ public class PgBaselineProvider
     }
 
     /// <summary>
+    /// #3653 A8 option B (lane L1b): the per-hour bucket map for a tiled window
+    /// <c>[<paramref name="windowStart"/>, <paramref name="windowEnd"/>]</c>, plus a clock re-resolved over that
+    /// window rather than the cached 30-day baseline window (design §1 — a DST step inside a short analysis
+    /// window can fall outside, or at a different instant than, the transition the cached clock resolved).
+    ///
+    /// <para>It calls <see cref="GetOrComputeBaselinesAsync"/> with <paramref name="windowStart"/> as the analysis
+    /// time — the SAME instant <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>
+    /// is called with for the same pass, so this is the SAME cache key and costs no second compute. The raw
+    /// <c>(UtcOffsetMinutes, TimeZoneId)</c> the compute read (<see cref="ReadServerClockAsync"/>) rides on the
+    /// cached entry for exactly this: re-resolving in memory, never re-reading the store.</para>
+    ///
+    /// <para>A failed compute (<c>Buckets</c> null) returns <see cref="BaselineBucketMap.Empty"/>, never throws —
+    /// the tile gate then skips every tile and the caller falls back to <c>EvaluateZScore</c> (design §1's
+    /// never-blind rule).</para>
+    /// </summary>
+    public async Task<BaselineBucketMap> GetBucketMapAsync(
+        int serverId, string metricName, DateTime windowStart, DateTime windowEnd, CancellationToken cancellationToken = default)
+    {
+        var entry = await GetOrComputeBaselinesAsync(serverId, metricName, windowStart, cancellationToken);
+        if (entry.Buckets is null || entry.Buckets.Count == 0)
+        {
+            return BaselineBucketMap.Empty(windowEnd);
+        }
+
+        var windowClock = _localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, AsNaive(windowStart), AsNaive(windowEnd));
+        return new BaselineBucketMap(entry.Buckets, windowClock);
+    }
+
+    /// <summary>
     /// The KEYED series of a whole member SET in one read (#3901): for every key in <paramref name="keys"/>, exactly
     /// the bucket the five-argument <see cref="GetBaselineAsync(int, string, string?, DateTime, CancellationToken)"/>
     /// returns for it, keyed by that string (ordinal). The keys still cached for this analysis hour are hits; every
@@ -332,14 +361,16 @@ public class PgBaselineProvider
             return cached;
         }
 
-        var (byMember, clock) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
+        var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
         var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = DateTime.UtcNow,
             Buckets = BucketsOf(byMember, UnkeyedMember),
-            Clock = clock
+            Clock = clock,
+            UtcOffsetMinutes = utcOffsetMinutes,
+            TimeZoneId = timeZoneId
         };
         Store(serverId, cacheKey, entry);
 
@@ -398,7 +429,7 @@ public class PgBaselineProvider
 
         foreach (var set in misses.Chunk(KeyedSetWidth))
         {
-            var (byMember, clock) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
+            var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, set, analysisTime, cancellationToken);
 
             var computedAt = DateTime.UtcNow;
             for (var member = 1; member <= set.Length; member++)
@@ -410,6 +441,8 @@ public class PgBaselineProvider
                     RealTime = computedAt,
                     Buckets = BucketsOf(byMember, member),
                     Clock = clock,
+                    UtcOffsetMinutes = utcOffsetMinutes,
+                    TimeZoneId = timeZoneId,
                     Key = key
                 };
                 Store(serverId, CacheKeyFor(serverId, metricName, key), entry);
@@ -530,14 +563,14 @@ public class PgBaselineProvider
             keyedEntries, KeyedBaselineCacheWarnCount, serverId, metricName);
     }
 
-    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock)> ComputeBaselinesAsync(
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBaselinesAsync(
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, CancellationToken cancellationToken)
     {
         /* Two seams, never one: a keyed lookup resolves ONLY through the keyed seam, so a metric with an unkeyed arm
            and no keyed one answers "no baseline" to a keyed call rather than the population's buckets under a member's
            name — and the reverse, so lane 27's server-wide arm keeps answering the unkeyed call it always answered. */
         var query = keys is null ? ResolveBaselineQuery(metricName) : ResolveKeyedBaselineQuery(metricName);
-        if (query == null) return (null, LocalClockWindow.Utc(analysisTime));
+        if (query == null) return (null, LocalClockWindow.Utc(analysisTime), null, null);
 
         return await ComputeBucketsAsync(serverId, metricName, keys, analysisTime, query, cancellationToken);
     }
@@ -757,10 +790,12 @@ LIMIT 1";
     /// eight robust ones — the 1-based position in <paramref name="keys"/> of the key the row belongs to (#3901, see
     /// <see cref="PerMemberScaffold"/>). Null on failure, through the one classified catch.
     /// </summary>
-    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock)> ComputeBucketsAsync(
+    private async Task<(Dictionary<long, Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>>? ByMember, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBucketsAsync(
         int serverId, string metricName, IReadOnlyList<string>? keys, DateTime analysisTime, string query, CancellationToken cancellationToken)
     {
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
+        int? rawUtcOffsetMinutes = null;
+        string? rawTimeZoneId = null;
 
         /* #3941: the window ends at the analysis HOUR, not the analysis instant. The cache has always keyed an entry on
            that hour, but computed it over whichever instant inside the hour asked first, so a later caller in the same
@@ -792,6 +827,8 @@ LIMIT 1";
                aggregate scan either, and one classified catch (AnalysisShutdownResidueTests pins exactly one) is
                the right number of places for "this metric has no baseline this pass" to be said. */
             var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, AsNaive(windowEnd), cancellationToken);
+            rawUtcOffsetMinutes = utcOffsetMinutes;
+            rawTimeZoneId = timeZoneId;
             clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, AsNaive(windowStart), AsNaive(windowEnd));
 
             using var cmd = new NpgsqlCommand(query, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
@@ -868,7 +905,7 @@ LIMIT 1";
                 };
             }
 
-            return (byMember, clock);
+            return (byMember, clock, rawUtcOffsetMinutes, rawTimeZoneId);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, cancellationToken))
         {
@@ -897,7 +934,7 @@ LIMIT 1";
                     metricName, elapsed.Elapsed.TotalSeconds, ex.Message);
             }
 
-            return (null, clock);
+            return (null, clock, rawUtcOffsetMinutes, rawTimeZoneId);
         }
     }
 
@@ -1473,6 +1510,17 @@ clean AS (
 
         /// <summary>The clock the buckets were keyed with (#3653 Q6) — the lookup must use the SAME one.</summary>
         public LocalClockWindow Clock { get; init; } = LocalClockWindow.Utc(DateTime.MinValue);
+
+        /// <summary>The raw offset <see cref="ReadServerClockAsync"/> read for this compute, beside the resolved
+        /// <see cref="Clock"/> (#3653 A8 option B, lane L1b): <see cref="GetBucketMapAsync"/> re-resolves
+        /// <see cref="BaselineLocalClock.Resolve"/> from this pair over the ANALYSIS window instead of the cached
+        /// 30-day baseline window, so a DST step inside a short window is never missed. Null exactly when the read
+        /// found no offset (UTC keying).</summary>
+        public int? UtcOffsetMinutes { get; init; }
+
+        /// <summary>The raw time zone id <see cref="ReadServerClockAsync"/> read for this compute, beside
+        /// <see cref="UtcOffsetMinutes"/> — see its remarks.</summary>
+        public string? TimeZoneId { get; init; }
 
         /// <summary>The member key this series is scoped to (#3691 lane 33); null for the population-wide series.
         /// Read only by <see cref="KeyedEntryCount"/> — the entry's identity is the cache key string.</summary>
