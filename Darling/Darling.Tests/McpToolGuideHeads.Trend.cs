@@ -35,6 +35,7 @@ public sealed class McpToolGuideHeadsTrendTests
         ("get_query_store_duration_trend", "not_collected: engine cannot run Query Store."),
         ("get_query_store_duration_trend", "unavailable: never sampled here."),
         ("get_query_store_duration_trend", "empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap"),
+        ("get_query_store_duration_trend", "each interval counted once, at the hour it ran"),
         ("get_query_store_duration_trend", "window_truncated marks the retention floor, not a page cut"),
     ];
 
@@ -64,6 +65,7 @@ public sealed class McpToolGuideHeadsTrendTests
     {
         var served = McpToolGuideTests.Served("get_perfmon_trend");
         Assert.Contains("No points never returns empty:", served.Served, StringComparison.Ordinal);
+        Assert.Contains("unavailable: no counter at all collected in the window.", served.Served, StringComparison.Ordinal);
         Assert.StartsWith("Gets one performance counter over time in time buckets.", served.Tail!, StringComparison.Ordinal);
         Assert.EndsWith(BaselineDiscontinuities.DescriptionSentence, served.Tail!, StringComparison.Ordinal);
         foreach (var kind in new[] { "'gauge'", "'rate'", "'other'" })
