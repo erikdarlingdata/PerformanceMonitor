@@ -206,7 +206,14 @@ public sealed class DarlingMcpPgTableBloatTools
 
     [McpServerTool(Name = "get_pg_table_bloat")]
     [Description(
-        "PostgreSQL per-table bloat - the damage autovacuum lag causes, next to the cause chain "
+        "PostgreSQL per-table bloat. ESTIMATE, NOT MEASUREMENT: about 2 points off with current "
+        + "statistics, up to 81 when stale - so it is SUPPRESSED (nulled), not shown, when statistics "
+        + "are stale, the table was never analyzed, or the login lacks SELECT (pg_monitor alone does "
+        + "not grant it; unsuppressed this silently misreports). Sizes, dead-tuple pct and growth are "
+        + "always reported. Every row ships the exact pgstattuple command. PAGE BOUNDED BY limit: "
+        + "tables_returned/truncated. empty: every table under the 1 MB floor, real all-clear. "
+        + "unavailable: no snapshots ever or in window. <<GUIDE>> "
+        + "PostgreSQL per-table bloat - the damage autovacuum lag causes, next to the cause chain "
         + "get_pg_autovacuum_health, get_pg_wraparound_risk and get_pg_xmin_horizon already report. THE BLOAT "
         + "FIGURE IS AN ESTIMATE, NOT A MEASUREMENT: it is arithmetic over PostgreSQL's column-width "
         + "statistics and never reads the table, which is what makes it cheap enough to collect hourly. "
@@ -218,12 +225,15 @@ public sealed class DarlingMcpPgTableBloatTools
         + "Measured sizes, the dead-tuple fraction from the server's own counters, and the growth across the "
         + "window are always reported, so a suppressed estimate degrades the answer rather than removing it. "
         + "Every row ships the exact pgstattuple command that would settle the question. Collected hourly per "
-        + "database on writers only, for tables of at least 1 MB.")]
+        + "database on writers only, for tables of at least 1 MB. Maximum tables to return, biggest "
+        + "estimated waste first. Default 25. This is what bounds the page - read truncated to know "
+        + "whether the server held more measured tables than were returned; it is observed by fetching "
+        + "one row past this cap, never inferred from a full page.")]
     public static async Task<string> GetPgTableBloat(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days), which shows whether the waste is growing or being reclaimed.")] int hours_back = 168,
-        [Description("Maximum tables to return, biggest estimated waste first. Default 25. This is what bounds the page - read truncated to know whether the server held more measured tables than were returned; it is observed by fetching one row past this cap, never inferred from a full page.")] int limit = 25,
+        [Description("Maximum tables to return, biggest estimated waste first. Default 25. This is what bounds the page - read truncated to know whether the server held more measured tables than were returned.")] int limit = 25,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
