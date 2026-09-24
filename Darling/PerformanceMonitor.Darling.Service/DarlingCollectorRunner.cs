@@ -414,6 +414,12 @@ public sealed class DarlingCollectorRunner
        LogTimezoneReadFailureLevel. In memory on purpose: a restart that warns once more is the right answer. */
     private readonly ConcurrentDictionary<int, DateTime> _logTimezoneReadWarnedUtc = new();
 
+    /* #4053 part c1: the same throttle as _logTimezoneReadWarnedUtc, for TryReadPgLogUsesCsvlogAsync's own
+       probe — its own dictionary because a target can fail one read and not the other (they run on separate
+       throwaway connections), and LogTimezoneReadFailureLevel already takes the dictionary as a parameter
+       for exactly this reuse (see LogTimezoneReadFailureLevelTests). */
+    private readonly ConcurrentDictionary<int, DateTime> _pgLogUsesCsvlogReadWarnedUtc = new();
+
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
     public DateTime? LastQueryStoreItemFailureUtc(int serverId)
@@ -956,7 +962,11 @@ public sealed class DarlingCollectorRunner
     /// #4053 part c1: whether this target's <c>log_destination</c> includes <c>csvlog</c>, read the same way
     /// <see cref="TryReadLogTimezoneIsUtcAsync"/> reads <c>log_timezone</c> — over a throwaway connection, since
     /// the RDS ingestors carry none of their own. False (today's stderr route) when the setting cannot be read,
-    /// the same fallback shape as the timezone probe beside it.
+    /// the same fallback shape as the timezone probe beside it, including its throttled Warning-then-Debug
+    /// logging (#4051 round-2 review, L-2): a target whose probe fails every cycle silently and permanently
+    /// falls back to the stderr route, and that deserves the same "stay visible without a stack trace on every
+    /// cycle" treatment the timezone probe already gets, on its own <see cref="_pgLogUsesCsvlogReadWarnedUtc"/>
+    /// throttle.
     /// </summary>
     private async Task<bool> TryReadPgLogUsesCsvlogAsync(ServerRuntime server, CancellationToken cancellationToken)
     {
@@ -965,12 +975,16 @@ public sealed class DarlingCollectorRunner
             var provider = TargetProviders.For(server.Target);
             await using var connection = provider.CreateConnection(server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            return await PgLogFormatCapability.IsCsvlogEnabledAsync(
+            var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
                 connection, ReadBinaryFileCacheKey(server), cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _pgLogUsesCsvlogReadWarnedUtc.TryRemove(server.ServerId, out _);
+            return usesCsvlog;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogDebug(ex,
+            _logger?.Log(LogTimezoneReadFailureLevel(_pgLogUsesCsvlogReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
                 "Could not read log_destination for '{Server}' (#4053 part c1) — the RDS log-event route "
                 + "reads the stderr file this cycle, as if csvlog were off.", server.Config.DisplayName);
             return false;
