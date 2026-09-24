@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
@@ -52,6 +53,22 @@ public static class McpSchemaCompat
         {
             TransformSchemaNode = CollapseGeminiUnsupportedKeywords
         }
+    };
+
+    /// <summary>
+    /// The four MCP entry-point tools (#3898 D10): list the monitored servers, size up the fleet, run
+    /// the inference engine on one server, and read the reading guides <c>tools/list</c> leaves out. Any
+    /// tool named here is served with <c>_meta["anthropic/alwaysLoad"] = true</c>, which the Claude Code
+    /// MCP docs' "Exempt a server from deferral" section documents as keeping that tool loaded even when
+    /// tool search defers the rest. Lite has no <c>get_fleet_overview</c> (central-store-only, Darling
+    /// only); that name simply never matches one of Lite's tools, so Lite ends up with the other three.
+    /// </summary>
+    private static readonly HashSet<string> AlwaysLoadedToolNames = new(StringComparer.Ordinal)
+    {
+        "list_servers",
+        "get_fleet_overview",
+        "analyze_server",
+        "get_tool_guide"
     };
 
     /// <summary>
@@ -128,13 +145,21 @@ public static class McpSchemaCompat
                serves the head (plus the guide pointer) of a description carrying McpToolGuide.Marker, and the
                whole description of one that does not. The tail goes to the catalog get_tool_guide reads.
                Split throws on a malformed marker, so a bad conversion fails at registration, not on the wire. */
+            var toolName = toolAttribute.Name ?? toolMethod.Name;
             var description = toolMethod.GetCustomAttribute<DescriptionAttribute>()?.Description;
             var served = description is null ? null : McpToolGuide.Served(description);
-            catalog.Register(toolAttribute.Name ?? toolMethod.Name, description);
+            catalog.Register(toolName, description);
+
+            /* #3898 D10: the four entry tools carry _meta["anthropic/alwaysLoad"] = true so Claude Code
+               keeps them loaded when it defers the rest. JsonObject seeds McpServerToolCreateOptions.Meta,
+               which the SDK copies onto the served Tool.Meta (ModelContextProtocol.Core 2.2.0). The factory
+               below builds a fresh JsonObject per created tool: a JsonNode is mutable and belongs to one
+               parent, so one instance must not be shared by every service provider that builds the tool. */
+            var alwaysLoad = AlwaysLoadedToolNames.Contains(toolName);
 
             /* Mirror the SDK's static-method registration (McpServerBuilderExtensions.WithTools<T>):
                Services = the DI provider so service-typed parameters are excluded from the schema and
-               resolved per-request. The additions are SchemaCreateOptions and the served Description. */
+               resolved per-request. The additions are SchemaCreateOptions, the served Description, and Meta. */
             builder.Services.AddSingleton((Func<IServiceProvider, McpServerTool>)(services =>
                 McpServerTool.Create(
                     toolMethod,
@@ -143,7 +168,8 @@ public static class McpSchemaCompat
                     {
                         Services = services,
                         SchemaCreateOptions = SchemaOptionsFor(services),
-                        Description = served
+                        Description = served,
+                        Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
                     })));
         }
 

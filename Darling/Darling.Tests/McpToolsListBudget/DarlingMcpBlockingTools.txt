@@ -29,9 +29,9 @@ param get_deadlock_trend.as_of 167
 param get_deadlock_trend.hours_back 29
 param get_deadlock_trend.server_name 28
 
-tool get_deadlocks 822
+tool get_deadlocks 591
 param get_deadlocks.as_of 167
-param get_deadlocks.dedup_key 406
+param get_deadlocks.dedup_key 191
 param get_deadlocks.hours_back 29
 param get_deadlocks.limit 133
 param get_deadlocks.server_name 28

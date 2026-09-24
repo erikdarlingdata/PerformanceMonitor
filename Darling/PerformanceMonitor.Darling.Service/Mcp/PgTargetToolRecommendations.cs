@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Analysis;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -314,6 +315,17 @@ internal static class PgTargetToolRecommendations
 
         return null;
     }
+
+    /// <summary>Every distinct tool name this table's <c>next_tools</c> can name (#3898 D7) — the <c>/core</c>
+    /// profile's closure computation reads this instead of re-walking <see cref="ByFactKey"/> by hand. The
+    /// prefix-matched fallbacks (<c>WaitReads</c>, <c>BadActorReads</c>) are already reachable through their own
+    /// direct <see cref="ByFactKey"/> entries (<c>AnomalyWaitProfile</c> / <c>AnomalySampledWaitProfile</c> /
+    /// <c>AnomalyBadActorShare</c>), so walking the dictionary's values alone is complete.</summary>
+    internal static IReadOnlyCollection<string> AllToolNames { get; } =
+        ByFactKey.Values
+            .SelectMany(recommendations => recommendations)
+            .Select(recommendation => recommendation.Tool)
+            .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>The queries family's reads, for a <c>PG_BAD_ACTOR_*</c> card and (lane 34) for the own-normal anomaly
     /// that walks into it. The advice (PgTargetAdvice.Queries.cs) ends on "which is the first question": whether the

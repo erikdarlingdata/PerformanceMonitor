@@ -17,6 +17,10 @@ conflict.
 - `<CHANGELOG_BUFFER_DIR>`;
 - `<CO_AUTHOR_TRAILER>`, `<SESSION_URL>`.
 
+If your brief leaves one unfilled, don't invent a value. Skip the step that needs it and say so in the PR body.
+In wave E (2026-09-24), a lane whose brief left `<CHANGELOG_BUFFER_DIR>` unfilled wrote its changelog entry to a
+made-up path inside the repo.
+
 Isolated worktrees live under `.claude/worktrees/` inside the repo, so a repo-scanning test must not exclude that
 path.
 
@@ -88,7 +92,8 @@ census, one of them introduced by that night's own wave).
 
 - **Never edit, build in, or check out branches in the shared main checkout.** Your first action is creating your
   own worktree.
-- Never paste full test output. Grep for `[FAIL]|Total:`.
+- Never paste full test output. Grep for `[FAIL]|Total:`. A test log saved to a file is still test output: grep
+  it, never Read it.
 - Read files by offset/limit. Never read a whole large file.
 - grep prints whole lines. Pipe it through `cut -c1-200` in files with long lines: each MCP `Description(...)` is
   one line of 1-3k characters.

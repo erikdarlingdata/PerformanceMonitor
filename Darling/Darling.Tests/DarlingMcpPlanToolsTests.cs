@@ -160,6 +160,10 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
     /// design" on a rule that was never made — suppression; the maintainer's reframing is honesty, "corroboration,
     /// with caveats", and the suppression sentence must not come back. Lite's three are pinned in <c>Lite.Tests</c>
     /// (<c>McpDescriptionTruthPinTests</c>) with the same fragments, so the two SKUs describe one field in one voice.
+    /// #3898 D3, as on Lite: the fragments must be in the SERVED head, because a caller needs these caveats from
+    /// tools/list before acting on a missing-index row, so they may not move into get_tool_guide's tail. The
+    /// suppression sentence is checked against the whole description, head and tail, so it cannot come back in
+    /// either.
     /// </summary>
     [Fact]
     public void AnalyzeDescriptions_NameCreateStatementAndImpactBasis_NotTheSuppression()
@@ -171,14 +175,15 @@ public sealed class DarlingMcpPlanToolsSurfaceAndSqlTests
 
         Assert.All(analyzeTools, m =>
         {
-            var description = m.GetCustomAttribute<DescriptionAttribute>()!.Description;
-            Assert.Contains("labelled impact_basis", description, StringComparison.Ordinal);
-            Assert.Contains("create_statement — the optimizer's suggested CREATE INDEX for this statement", description, StringComparison.Ordinal);
-            Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", description, StringComparison.Ordinal);
-            Assert.Contains("every row carries the fixed caveat", description, StringComparison.Ordinal);
-            Assert.Contains("regression risk for other plans", description, StringComparison.Ordinal);
-            Assert.DoesNotContain("no CREATE INDEX text", description, StringComparison.Ordinal);
-            Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
+            var whole = m.GetCustomAttribute<DescriptionAttribute>()!.Description;
+            var head = McpToolGuide.Split(whole).Head;
+            Assert.Contains("labelled impact_basis", head, StringComparison.Ordinal);
+            Assert.Contains("create_statement — the optimizer's suggested CREATE INDEX for this statement", head, StringComparison.Ordinal);
+            Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", head, StringComparison.Ordinal);
+            Assert.Contains("every row carries the fixed caveat", head, StringComparison.Ordinal);
+            Assert.Contains("regression risk for other plans", head, StringComparison.Ordinal);
+            Assert.DoesNotContain("no CREATE INDEX text", whole, StringComparison.Ordinal);
+            Assert.DoesNotContain("a hint, not a design", whole, StringComparison.Ordinal);
         });
 
         /* #3898 Phase 2 (D5): the instructions' family paragraph that used to restate this is gone — the four

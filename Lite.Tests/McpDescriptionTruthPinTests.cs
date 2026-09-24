@@ -39,7 +39,7 @@ public sealed class McpDescriptionTruthPinTests
     {
         var description = Description(typeof(McpAnalysisTools), "audit_config");
 
-        Assert.DoesNotContain("accounting for edition", description, StringComparison.Ordinal);
+        Assert.DoesNotContain("accounting for edition", WholeDescription(typeof(McpAnalysisTools), "audit_config"), StringComparison.Ordinal);
         Assert.Contains("NO check branches on it", description, StringComparison.Ordinal);
 
         var source = File.ReadAllText(RepoPath("Lite", "Mcp", "McpAnalysisTools.cs"));
@@ -114,6 +114,7 @@ public sealed class McpDescriptionTruthPinTests
         foreach (var tool in new[] { "analyze_query_plan", "analyze_procedure_plan", "analyze_plan_xml" })
         {
             var description = Description(typeof(McpPlanTools), tool);
+            var whole = WholeDescription(typeof(McpPlanTools), tool);
             Assert.Contains("operators_returned / total_operators / truncated", description, StringComparison.Ordinal);
             Assert.Contains("operators_ranked_by", description, StringComparison.Ordinal);
             Assert.Contains("labelled impact_basis", description, StringComparison.Ordinal);
@@ -121,8 +122,8 @@ public sealed class McpDescriptionTruthPinTests
             Assert.Contains("corroboration for a statement already measured slow, never a diagnosis", description, StringComparison.Ordinal);
             Assert.Contains("every row carries the fixed caveat", description, StringComparison.Ordinal);
             Assert.Contains("regression risk for other plans", description, StringComparison.Ordinal);
-            Assert.DoesNotContain("no CREATE INDEX text", description, StringComparison.Ordinal);
-            Assert.DoesNotContain("a hint, not a design", description, StringComparison.Ordinal);
+            Assert.DoesNotContain("no CREATE INDEX text", whole, StringComparison.Ordinal);
+            Assert.DoesNotContain("a hint, not a design", whole, StringComparison.Ordinal);
         }
 
         /* #3898 Phase 2 (D5, D6): the instructions' anti-pattern bullet that used to restate this is gone on
@@ -135,10 +136,15 @@ public sealed class McpDescriptionTruthPinTests
     /// pinned here is a guardrail a caller needs from tools/list itself (the edition is not consulted; the
     /// operator cut and its basis; create_statement is corroboration, with its caveat), so it may not move into
     /// get_tool_guide's tail. Unconverted, the head is the whole description.</summary>
-    private static string Description(Type toolType, string toolName) => PerformanceMonitor.Common.McpToolGuide.Split(toolType
+    private static string Description(Type toolType, string toolName)
+        => PerformanceMonitor.Common.McpToolGuide.Split(WholeDescription(toolType, toolName)).Head;
+
+    /// <summary>The whole description, head and tail. The DoesNotContain pins read this one: a false or
+    /// suppressing sentence must not come back in get_tool_guide's tail either.</summary>
+    private static string WholeDescription(Type toolType, string toolName) => toolType
         .GetMethods(BindingFlags.Public | BindingFlags.Static)
         .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName)
-        .GetCustomAttribute<DescriptionAttribute>()!.Description).Head;
+        .GetCustomAttribute<DescriptionAttribute>()!.Description;
 
     private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
 

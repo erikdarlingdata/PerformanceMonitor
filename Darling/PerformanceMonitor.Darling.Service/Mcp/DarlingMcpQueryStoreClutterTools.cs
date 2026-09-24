@@ -358,6 +358,28 @@ public sealed class DarlingMcpQueryStoreClutterTools
         }
     }
 
+    private const string ToolQueryStoreHealth = "get_query_store_health";
+    private const string ToolCollectionHealth = "get_collection_health";
+    private const string ToolQueryStoreTop = "get_query_store_top";
+    private const string ToolCollectionLog = "get_collection_log";
+    private const string ToolWaitStats = "get_wait_stats";
+    private const string ToolMemoryClerks = "get_memory_clerks";
+
+    /// <summary>Every tool name <see cref="NextTools"/> can put in its payload (#3898 D7) — named constants
+    /// rather than a second hand-typed list, so the <c>/core</c> profile's closure computation and the emitted
+    /// payload can never drift apart. Unlike the fact-keyed tables in <see cref="ToolRecommendations"/> and
+    /// <see cref="PgTargetToolRecommendations"/>, this reader's <c>next_tools</c> is not keyed by fact at all —
+    /// every clutter row points at (a subset of) the same six reads.</summary>
+    internal static readonly string[] FixedNextToolNames =
+    [
+        ToolQueryStoreHealth,
+        ToolCollectionHealth,
+        ToolQueryStoreTop,
+        ToolCollectionLog,
+        ToolWaitStats,
+        ToolMemoryClerks
+    ];
+
     /// <summary>
     /// The reads that carry one database's detail — only tools this server hosts. The pair the clutter view
     /// is composed FROM (<c>get_query_store_health</c>, <c>get_collection_health</c>) come first, then the
@@ -367,18 +389,18 @@ public sealed class DarlingMcpQueryStoreClutterTools
     {
         var tools = new List<object>
         {
-            new { tool = "get_query_store_health", reason = "the full options row and the readonly_reason decode for this database, with the newest hourly capture's stamp", suggested_params = new { server_name = serverName, database_name = row.DatabaseName } },
-            new { tool = "get_collection_health", reason = "the query_store collector's fanout block (items / slowest / slowest_share_pct / dominance on the window's worst run) and its run statistics", suggested_params = new { server_name = serverName } },
+            new { tool = ToolQueryStoreHealth, reason = "the full options row and the readonly_reason decode for this database, with the newest hourly capture's stamp", suggested_params = new { server_name = serverName, database_name = row.DatabaseName } },
+            new { tool = ToolCollectionHealth, reason = "the query_store collector's fanout block (items / slowest / slowest_share_pct / dominance on the window's worst run) and its run statistics", suggested_params = new { server_name = serverName } },
         };
 
         if (!row.Excluded)
         {
-            tools.Add(new { tool = "get_query_store_top", reason = "which queries and plans in this database carry the cost; query_id + plan_id feed analyze_query_store_plan", suggested_params = new { server_name = serverName, database_name = row.DatabaseName, hours_back = hoursBack } });
-            tools.Add(new { tool = "get_collection_log", reason = "the slowest query_store runs in the window, with slowest_item naming the database each one spent its time in", suggested_params = new { server_name = serverName, collector_name = DarlingQueryStoreClutterReader.CollectorName, hours_back = hoursBack, min_duration_ms = 0 } });
+            tools.Add(new { tool = ToolQueryStoreTop, reason = "which queries and plans in this database carry the cost; query_id + plan_id feed analyze_query_store_plan", suggested_params = new { server_name = serverName, database_name = row.DatabaseName, hours_back = hoursBack } });
+            tools.Add(new { tool = ToolCollectionLog, reason = "the slowest query_store runs in the window, with slowest_item naming the database each one spent its time in", suggested_params = new { server_name = serverName, collector_name = DarlingQueryStoreClutterReader.CollectorName, hours_back = hoursBack, min_duration_ms = 0 } });
         }
 
-        tools.Add(new { tool = "get_wait_stats", reason = "the QDS_* waits in the context of every other wait type on the server", suggested_params = new { server_name = serverName, hours_back = hoursBack } });
-        tools.Add(new { tool = "get_memory_clerks", reason = "MEMORYCLERK_QUERYDISKSTORE beside the other clerks on the newest capture", suggested_params = new { server_name = serverName } });
+        tools.Add(new { tool = ToolWaitStats, reason = "the QDS_* waits in the context of every other wait type on the server", suggested_params = new { server_name = serverName, hours_back = hoursBack } });
+        tools.Add(new { tool = ToolMemoryClerks, reason = "MEMORYCLERK_QUERYDISKSTORE beside the other clerks on the newest capture", suggested_params = new { server_name = serverName } });
         return tools.ToArray();
     }
 
