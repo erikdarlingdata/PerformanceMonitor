@@ -136,16 +136,18 @@ public sealed class PgPlanCaptureCollector : PostgresCollectorDefinitionBase<PgP
        with any query id, planted the same way #4008 planted a whole block) exceeds the target type — a
        19-plus-digit query id, or a duration with hundreds of digits — and PostgreSQL raises the cast error
        OUT OF THE SELECT LIST, which aborts the whole statement and blinds every OTHER real capture in the
-       same 4 MB tail, not just the forged one. pg_input_is_valid (PG 16+; #4058 restricts the binary route
-       to targets that grant pg_read_binary_file, and gates both routes' minimum version the same way
-       PgReadBinaryFileCapability already requires 16+) checks the literal against the target type's own
-       input parser without raising, so a forged row is nulled rather than aborting capture for every real
-       row beside it — the parser already treats query_id = 0 as "the prefix carried no %Q" and DurationMs
+       same 4 MB tail, not just the forged one. The guard is a CASE chain, evaluated in order, that only
+       casts a capture already shaped like the target type: a query id of at most 19 digits whose numeric
+       value is inside bigint's range, and a duration of at most 15 integer and 9 fractional digits (the
+       ([0-9.]+) capture also admits '1.2.3', which fails the cast as invalid input, not only as overflow).
+       No pg_input_is_valid: it is PostgreSQL 16+, and the TEXT route serves 14 and 15 targets too. So a
+       forged row is nulled rather than aborting capture for every real row beside it — the parser already treats query_id = 0 as "the prefix carried no %Q" and DurationMs
        is not identity, so NULL reads the same as a block this bounded tail cut in half. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT
-    CASE WHEN pg_catalog.pg_input_is_valid(m[1], 'bigint') THEN (m[1])::bigint END             AS query_id,
-    CASE WHEN pg_catalog.pg_input_is_valid(m[2], 'double precision') THEN (m[2])::double precision END AS duration_ms,
+    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
+         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
+    CASE WHEN m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,
     replace(m[3], chr(9), '')                        AS plan_json
 FROM tail,
      regexp_matches(
@@ -180,15 +182,16 @@ LIMIT 2000";
        binary route is the identical shape after encode()/decode, so it gets the identical treatment. */
     private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
 SELECT
-    CASE WHEN pg_catalog.pg_input_is_valid(m[1], 'bigint') THEN (m[1])::bigint END             AS query_id,
-    CASE WHEN pg_catalog.pg_input_is_valid(m[2], 'double precision') THEN (m[2])::double precision END AS duration_ms,
+    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
+         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
+    CASE WHEN m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,
     replace(m[3], chr(9), '')                        AS plan_json
 FROM tail,
      regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
          '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
          'gn') AS m
-WHERE pg_catalog.position('" + PlanMarkerLiteral + @"'::bytea IN tail.body) > 0
+WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
 UNION ALL
 SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"

@@ -188,7 +188,7 @@ FROM tail,
          pg_catalog.encode(tail.body, 'escape'),
          '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*ERROR:  deadlock detected\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*ERROR:  deadlock detected)\d{4}-\d\d-\d\d [^\n]*\n)?)',
          'gn') AS m
-WHERE pg_catalog.position('" + DeadlockMarkerLiteral + @"'::bytea IN tail.body) > 0
+WHERE pg_catalog.position(tail.body, '" + DeadlockMarkerLiteral + @"'::bytea) > 0
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
