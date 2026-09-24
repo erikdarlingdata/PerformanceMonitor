@@ -77,9 +77,10 @@ FROM per_collection";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakBytes,
+                baseline, peakBytes, avgBytes,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgReplayLagBytes),
-                PgTargetScorer.PgReplayLagBytesFloor, PgTargetScorer.PgReplayLagBytesFallback, SigmaDisplayCap);
+                PgTargetScorer.PgReplayLagBytesFloor, PgTargetScorer.PgReplayLagBytesFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = ZScoreMetadata(baseline, decision, windowSamples);

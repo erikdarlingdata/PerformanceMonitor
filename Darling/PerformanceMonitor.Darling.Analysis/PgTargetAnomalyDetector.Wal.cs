@@ -84,8 +84,9 @@ public sealed partial class PgTargetAnomalyDetector
             if (baseline.SampleCount == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peak,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgWalBytesPerSec), PgWalBytesFloorPerSec, PgWalBytesFallbackPerSec, SigmaDisplayCap);
+                baseline, peak, avg,
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgWalBytesPerSec), PgWalBytesFloorPerSec, PgWalBytesFallbackPerSec, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = ZScoreMetadata(baseline, decision, ratedSamples);
