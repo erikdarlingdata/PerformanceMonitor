@@ -319,7 +319,7 @@ internal static class DarlingObjectStatsReader
             database_name,
             schema_name,
             table_name,
-            index_name
+            index_name NULLS LAST
         LIMIT $3
         """;
 

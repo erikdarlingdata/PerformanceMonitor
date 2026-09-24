@@ -127,8 +127,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
            products' order the same, and the names break reserved_mb ties so a capped page is stable. */
         SqlTextPin.AssertExpresses("reserved_mb DESC NULLS LAST", sql, "an unsized index sorts ahead of sized ones");
         SqlTextPin.AssertExpresses(
-            "reserved_mb DESC NULLS LAST, database_name, schema_name, table_name, index_name", sql,
-            "reserved_mb ties no longer break by name, so a capped page can change between calls");
+            "reserved_mb DESC NULLS LAST, database_name, schema_name, table_name, index_name NULLS LAST", sql,
+            "reserved_mb ties no longer break by name (a heap's NULL name last, as on Lite), so a capped page can change between calls");
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
         SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
         /* Case is NOT normalised: these are the values the tool emits and callers compare. */

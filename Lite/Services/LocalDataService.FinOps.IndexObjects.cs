@@ -185,7 +185,7 @@ ORDER BY
     database_name,
     schema_name,
     table_name,
-    index_name
+    index_name NULLS LAST
 LIMIT {topN}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });

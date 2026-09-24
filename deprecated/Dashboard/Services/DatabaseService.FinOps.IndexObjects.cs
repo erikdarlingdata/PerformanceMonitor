@@ -255,6 +255,7 @@ ORDER BY
     ios.database_name,
     ios.schema_name,
     ios.table_name,
+    CASE WHEN ios.index_name IS NULL THEN 1 ELSE 0 END,
     ios.index_name
 OPTION(MAXDOP 1, RECOMPILE);";
 
