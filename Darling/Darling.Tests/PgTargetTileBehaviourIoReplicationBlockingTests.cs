@@ -70,6 +70,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var windowStart = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Unspecified);
             var windowEnd = windowStart.AddHours(4);
             var baselineStart = windowStart.AddDays(-21);
+            await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
 
             const double mu = 3.0;
             const double sigma = 0.5;
@@ -140,6 +141,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var windowStart = t.AddHours(-22);
             var windowEnd = t.AddHours(2);
             var baselineStart = windowStart.AddDays(-21);
+            await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
 
             const double mu = 3.0;
             const double sigma = 0.5;
@@ -195,6 +197,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var windowStart = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Unspecified);
             var windowEnd = windowStart.AddHours(4);
             var baselineStart = windowStart.AddDays(-21);
+            await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
 
             const double mu = 3.0;
             const double sigma = 0.5;
@@ -245,6 +248,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var windowStart = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Unspecified);
             var windowEnd = windowStart.AddHours(4);
             var baselineStart = windowStart.AddDays(-21);
+            await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
 
             const double mu = 3.0;
             const double sigma = 0.5;
@@ -305,6 +309,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var windowStart = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Unspecified);
             var windowEnd = windowStart.AddHours(4);
             var baselineStart = windowStart.AddDays(-21);
+            await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
 
             const double mu = 1_048_576.0; // 1 MiB, well clear of PgReplayLagBytesFloor (16 MiB is the noise floor,
             const double sigma = 131_072.0; // so the shift below is planted well above it too.
@@ -369,6 +374,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var windowStart = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Unspecified);
             var windowEnd = windowStart.AddHours(4);
             var baselineStart = windowStart.AddDays(-21);
+            await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
             var totalMinutes = (int)(windowEnd - baselineStart).TotalMinutes;
             var shiftFromMinute = (int)(windowStart.AddHours(2) - baselineStart).TotalMinutes;
 
@@ -412,6 +418,31 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
     }
 
     /* ───────────────────────── helpers ───────────────────────── */
+
+    /// <summary>
+    /// Plants one hourly <c>pg_database_stats</c> row per hour from <paramref name="start"/> through
+    /// <paramref name="end"/> (inclusive) — the baseline-data gate's canary
+    /// (<c>PgTargetAnomalyDetector.HasBaselineDataSql</c>), the one universal one-minute series every family's
+    /// window read is gated behind. Without it <c>DetectAnomaliesAsync</c> returns no facts of ANY family,
+    /// regardless of how the family's own table is planted.
+    /// </summary>
+    private static async Task PlantDatabaseStatsSpanAsync(
+        NpgsqlConnection connection, int serverId, string serverName, DateTime start, DateTime end, CancellationToken ct)
+    {
+        var hours = (int)Math.Ceiling((end - start).TotalHours) + 1;
+        using var command = new NpgsqlCommand(@"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+SELECT $1 + n, $2 + (n * interval '1 hour'), $3, $4, 'appdb', 1000 + n, 10, 100, 9000, 0, 0, 0, NULL
+FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 };
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(start);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(hours - 1);
+        await command.ExecuteNonQueryAsync(ct);
+    }
 
     private static AnalysisContext Context(int serverId, string serverName, DateTime start, DateTime end) => new()
     {
@@ -466,6 +497,7 @@ FROM c", connection) { CommandTimeout = 300 };
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_io_stats WHERE server_id = {serverId}; " +
+            $"DELETE FROM pg_database_stats WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_muted WHERE server_id = {serverId}; " +
             $"DELETE FROM servers WHERE server_id = {serverId};", connection);
@@ -501,6 +533,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 };
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_replication_stats WHERE server_id = {serverId}; " +
+            $"DELETE FROM pg_database_stats WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_muted WHERE server_id = {serverId}; " +
             $"DELETE FROM servers WHERE server_id = {serverId};", connection);
@@ -517,7 +550,7 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 };
         NpgsqlConnection connection, int serverId, string serverName, DateTime start, int minutes, string blockedCountExpr, CancellationToken ct)
     {
         using var logCommand = new NpgsqlCommand(@"
-INSERT INTO collection_log (collection_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, error_message)
+INSERT INTO collection_log (log_id, collection_time, server_id, server_name, collector_name, status, duration_ms, rows_collected, error_message)
 SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, 'pg_blocking', 'SUCCESS', 5, 0, NULL
 FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 };
         logCommand.Parameters.AddWithValue(CollectionIdGenerator.Next());
@@ -534,13 +567,11 @@ WITH minutes AS (
 )
 INSERT INTO pg_blocking_edges
     (collection_id, collection_time, server_id, server_name, database_name,
-     blocked_pid, blocked_application_name, blocked_username, blocked_query_start, blocked_wait_start,
-     blocking_pid, blocking_application_name, blocking_username, blocking_state,
-     blocking_query_start, blocking_xact_start, lock_type, lock_mode, relation_name)
+     blocked_pid, blocked_application_name, blocked_username,
+     blocking_pid, blocking_application_name, blocking_username, blocking_state)
 SELECT $1 + m.n, $2 + (m.n * interval '1 minute'), $3, $4, 'appdb',
-       9000 + k, 'app', 'app', $2, $2,
-       9000, 'app', 'app', 'active',
-       $2, $2, 'relation', 'RowExclusiveLock', 'orders'
+       9000 + k, 'app', 'app',
+       9000, 'app', 'app', 'active'
 FROM minutes AS m
 CROSS JOIN LATERAL generate_series(1, m.blocked_count) AS k
 WHERE m.blocked_count > 0", connection) { CommandTimeout = 300 };
@@ -556,6 +587,7 @@ WHERE m.blocked_count > 0", connection) { CommandTimeout = 300 };
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_blocking_edges WHERE server_id = {serverId}; " +
+            $"DELETE FROM pg_database_stats WHERE server_id = {serverId}; " +
             $"DELETE FROM collection_log WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_muted WHERE server_id = {serverId}; " +
