@@ -219,8 +219,8 @@ public sealed class RdsLogEventIngestorCsvlogTests
         + "\"startup\",2026-09-24 01:54:43 " + zone + ",3/3,0,FATAL,28000,\"" + message + "\","
         + ",,,,,,,,\"\",\"client backend\",,0\n";
 
-    private static RdsLogEventIngestor.CsvPortion Step(RdsLogEventIngestor.CsvCarry carry, string text, bool pending) =>
-        RdsLogEventIngestor.ParseCsvPortion(carry, text, pending);
+    private static RdsCsvlogCarry.CsvPortion Step(RdsCsvlogCarry.CsvCarry carry, string text, bool pending) =>
+        RdsCsvlogCarry.ParseCsvPortion(carry, text, pending);
 
     /// <summary>Portion 1 (pending) ends right after a newline inside a multi-line quoted message; portion 2
     /// finishes that record. The record before the straddle comes out of portion 1, and the straddling record
@@ -235,7 +235,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
 
         Assert.Empty(PgServerLogCsvParser.Parse(portion1, out _));
 
-        var p1 = Step(RdsLogEventIngestor.CsvCarry.Empty, portion1, pending: true);
+        var p1 = Step(RdsCsvlogCarry.CsvCarry.Empty, portion1, pending: true);
         Assert.Equal(new[] { "first" }, p1.Entries.ConvertAll(e => e.UserName ?? ""));
         Assert.Equal(0, p1.RecordsDiscarded);
         Assert.Equal(straddler[..cut], p1.Next.Partial);
@@ -267,7 +267,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
         /* #4053 review round 1, item A: the known start a real file-start read gives (CsvCarry with an
            empty partial and StartKnown true) — not derived from an end-of-file portion's own end, which the
            forward-only design no longer trusts. */
-        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var knownStart = new RdsCsvlogCarry.CsvCarry(string.Empty, true);
 
         var p1 = Step(knownStart, straddler[..cut], pending: true);
         Assert.Empty(p1.Entries);
@@ -284,7 +284,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
     [Fact]
     public void ACarryOverOneMiB_IsDroppedAndCountedOnce()
     {
-        var p1 = Step(RdsLogEventIngestor.CsvCarry.Empty, new string('x', 600_000), pending: true);
+        var p1 = Step(RdsCsvlogCarry.CsvCarry.Empty, new string('x', 600_000), pending: true);
         Assert.Equal(0, p1.RecordsDiscarded);
         Assert.Equal(600_000, p1.Next.Partial.Length);
 
@@ -323,7 +323,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
     [Fact]
     public void ForwardMode_AHalfWrittenLastRecord_IsCarriedThenCompletedOnce()
     {
-        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var knownStart = new RdsCsvlogCarry.CsvCarry(string.Empty, true);
         var full = Record("UTC", "first");
         var half = RecordWithMultiLineMessage("line one\nline two");
         var cut = half.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
@@ -348,7 +348,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
     [Fact]
     public void ForwardMode_TheRaceShape_NeverEmitsALookAlike()
     {
-        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var knownStart = new RdsCsvlogCarry.CsvCarry(string.Empty, true);
         var lookAlikeBody = Record("UTC", "planted").TrimEnd('\n').Replace("\"", "\"\"", StringComparison.Ordinal);
         var straddler = RecordWithMultiLineMessage("line one\n" + lookAlikeBody + "\nline three");
         var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
@@ -369,7 +369,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
     [Fact]
     public void UnknownStartMode_NeverHandsOnAKnownStart_OverSeveralPortions()
     {
-        var carry = RdsLogEventIngestor.CsvCarry.Empty;
+        var carry = RdsCsvlogCarry.CsvCarry.Empty;
 
         for (var i = 0; i < 4; i++)
         {
@@ -391,7 +391,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
            carried whole for the next portion to complete. */
         var body = Record("UTC", "first") + Record("UTC", "second").TrimEnd('\n');
 
-        var step = Step(RdsLogEventIngestor.CsvCarry.Empty, body, pending: false);
+        var step = Step(RdsCsvlogCarry.CsvCarry.Empty, body, pending: false);
 
         var only = Assert.Single(step.Entries);
         Assert.Equal("first", only.UserName);
@@ -405,7 +405,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
     [Fact]
     public void ForwardModeBound_SkipsByParity_NextRecordStartsKnown_CountsOne()
     {
-        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var knownStart = new RdsCsvlogCarry.CsvCarry(string.Empty, true);
 
         /* An oversized "record": an open quote followed by well over 1 MiB of body text with no closing
            quote in this portion — forward mode carries it whole until the bound trips. */
@@ -430,15 +430,15 @@ public sealed class RdsLogEventIngestorCsvlogTests
     /* --- #4053 review round 2: item 1, the RDS truncation notice ------------------------------------------ */
 
     /// <summary>Forward mode: a portion ending with the notice parses its records before the cut as usual,
-    /// then hands on <see cref="RdsLogEventIngestor.CsvCarry.Empty"/> instead of the carried tail — the
+    /// then hands on <see cref="RdsCsvlogCarry.CsvCarry.Empty"/> instead of the carried tail — the
     /// missing bytes past the cut mean the next portion's start is no longer known — and counts the drop
     /// as one discard.</summary>
     [Fact]
     public void ATruncationNoticeAtTheEnd_DropsTheCarry_AndCountsOneDiscard()
     {
-        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var knownStart = new RdsCsvlogCarry.CsvCarry(string.Empty, true);
         var body = Record("UTC", "first") + "2026-09-24 01:54:43.008 UTC,\"second\",\"postgres\",83,"
-            + RdsLogEventIngestor.RdsTruncationNotice;
+            + RdsCsvlogCarry.RdsTruncationNotice;
 
         var step = Step(knownStart, body, pending: true);
 
@@ -456,13 +456,13 @@ public sealed class RdsLogEventIngestorCsvlogTests
     [Fact]
     public void ATruncationNoticeInTheMiddle_DoesNotDowngradeTheCarry()
     {
-        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
-        var body = RecordWithMultiLineMessage(RdsLogEventIngestor.RdsTruncationNotice + "\nmore text");
+        var knownStart = new RdsCsvlogCarry.CsvCarry(string.Empty, true);
+        var body = RecordWithMultiLineMessage(RdsCsvlogCarry.RdsTruncationNotice + "\nmore text");
 
         var step = Step(knownStart, body, pending: false);
 
         var only = Assert.Single(step.Entries);
-        Assert.Equal(RdsLogEventIngestor.RdsTruncationNotice + "\nmore text", only.Message);
+        Assert.Equal(RdsCsvlogCarry.RdsTruncationNotice + "\nmore text", only.Message);
         Assert.Equal(0, step.RecordsDiscarded);
     }
 
@@ -559,7 +559,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
         const string fileA = "error/postgresql.log.2026-09-24-05.csv";
         const string fileB = "error/postgresql.log.2026-09-24-06.csv";
         const string fileC = "error/postgresql.log.2026-09-24-07.csv";
-        var oversized = new string('x', RdsLogEventIngestor.MaxCarryLength + 10);
+        var oversized = new string('x', RdsCsvlogCarry.MaxCarryLength + 10);
 
         var client = new FakeRds
         {
