@@ -2,7 +2,7 @@
 tool analyze_plan_xml 880
 param analyze_plan_xml.plan_xml 25
 
-tool analyze_procedure_plan 912
+tool analyze_procedure_plan 608
 param analyze_procedure_plan.plan_handle 53
 param analyze_procedure_plan.server_name 28
 

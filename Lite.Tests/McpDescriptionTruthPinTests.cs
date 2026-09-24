@@ -131,14 +131,20 @@ public sealed class McpDescriptionTruthPinTests
 
     /* ---------------- plumbing ---------------- */
 
-    /// <summary>The SERVED head (#3898 D3, re-pointed deliberately from the whole description): each fragment
-    /// pinned here is a guardrail a caller needs from tools/list itself (the edition is not consulted; the
-    /// operator cut and its basis; create_statement is corroboration, with its caveat), so it may not move into
-    /// get_tool_guide's tail. Unconverted, the head is the whole description.</summary>
-    private static string Description(Type toolType, string toolName) => PerformanceMonitor.Common.McpToolGuide.Split(toolType
-        .GetMethods(BindingFlags.Public | BindingFlags.Static)
-        .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName)
-        .GetCustomAttribute<DescriptionAttribute>()!.Description).Head;
+    /// <summary>The full text get_tool_guide ultimately makes true (#3898 D3/e2 re-point: head alone, then head
+    /// plus tail once a tool converts): each fragment pinned here must survive somewhere in that text — a
+    /// guardrail-terse restatement in the head, the verbatim original in the tail, or both — so the #3696
+    /// suppression sentence can never quietly come back under either half. Unconverted, the head is the whole
+    /// description, so this is unchanged for a tool this wave has not reached yet.</summary>
+    private static string Description(Type toolType, string toolName)
+    {
+        var raw = toolType
+            .GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == toolName)
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+        var (head, tail) = PerformanceMonitor.Common.McpToolGuide.Split(raw);
+        return tail is null ? head : head + " " + tail;
+    }
 
     private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
 
