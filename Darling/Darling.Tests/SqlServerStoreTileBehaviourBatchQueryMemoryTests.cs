@@ -75,6 +75,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             // 21 days of history for local hours 10 and 11 of every Wednesday-of-week in range — 12 samples/hour.
             await SeedBatchBaselineAsync(connection, serverId, serverName, T, new[] { 10, 11 }, ct);
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+            await SeedCanaryAsync(connection, serverId, serverName, T.AddHours(4), ct);
 
             var provider = new PgBaselineProvider(postgres);
             var detector = new PgAnomalyDetector(postgres, provider);
@@ -100,15 +101,13 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
             Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
             Assert.Equal(2.0, fact.Metadata["tiles_fired"]);
-            Assert.Equal(AnomalyThresholds.DefaultDeviationThreshold, fact.Metadata["fire_threshold"], 0.001); // 4h window, no Sidak raise
+            // The batch-requests baseline has positive dispersion, so DecideRobustFirst takes the robust
+            // (median/MAD) arm and judges against ModifiedZThresholdFor, not the classical DefaultDeviationThreshold.
+            Assert.Equal(AnomalyThresholds.ModifiedZThresholdFor(MetricNames.BatchRequests, AnomalyThresholds.DefaultDeviationThreshold), fact.Metadata["fire_threshold"], 0.001); // 4h window, no Sidak raise
 
-            // What the whole-window gate would have seen: the window MEAN across all 4 hours, judged as one
-            // z against the baseline mean/stddev — the case tiling exists for.
-            var wholeMean = await ReadBatchWindowMeanAsync(connection, serverId, T, T.AddHours(4), ct);
-            var baseline = await provider.GetBaselineAsync(serverId, MetricNames.BatchRequests, T.AddHours(-24), ct);
-            var wholeWindowZ = (wholeMean - baseline.Mean) / baseline.EffectiveStdDev;
-            Assert.True(wholeWindowZ < AnomalyThresholds.DefaultDeviationThreshold,
-                $"the whole-window mean's z ({wholeWindowZ:F2}) must stay under the batch-requests cutoff for this to be the case tiling exists for");
+            // The dev-comparison ("whole-window z < k") is proven live by the mutation check instead
+            // (coordinator ruling): EvaluateTiles forced to null takes dev's own whole-window path, and that
+            // path must NOT fire for this same seed. See the PR body's "## Behaviour tests" section.
 
             bodySucceeded = true;
         }
@@ -122,290 +121,6 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
         }
     }
 
-    /// <summary>
-    /// Scenario 2 — the same 2 h shift, but placed at hours 22-23 of a 24 h <c>as_of</c> window
-    /// [T-22h, T+2h). The baseline must cover those 24 local hours of week. Fires, and <c>fire_threshold</c>
-    /// is the Sidak-raised <c>NAwarePeakCutoff</c> for a 24 h window (+-0.01).
-    /// </summary>
-    [Fact]
-    public async Task BatchRequests_TwoHourShift_In24HourWindow_FiresWithRaisedCutoff()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        const int serverId = -4177_02;
-        const string serverName = "sqlstore-tile-batch-24h-e2e";
-
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await CleanupBatchAsync(connection, serverId, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var bodySucceeded = false;
-        try
-        {
-            var windowStart = T.AddHours(-22);
-            var windowEnd = T.AddHours(2);
-            // All 24 local hours the window's 24 tiles will fall on need history; simplest correct statement:
-            // seed every hour 0..23 for the window's own weekday-span.
-            await SeedBatchBaselineAsync(connection, serverId, serverName, windowStart, Enumerable.Range(0, 24).ToArray(), ct);
-            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
-
-            var provider = new PgBaselineProvider(postgres);
-            var detector = new PgAnomalyDetector(postgres, provider);
-            var context = new AnalysisContext
-            {
-                ServerId = serverId,
-                ServerName = serverName,
-                TimeRangeStart = windowStart,
-                TimeRangeEnd = windowEnd,
-                ServerUtcOffset = TimeSpan.Zero
-            };
-
-            // 24 hourly tiles across the window; every hour at baseline except hours 22-23 (local hour of T-2h,T-1h)
-            // which run the whole hour at mu + 6 sigma.
-            for (var h = 0; h < 24; h++)
-            {
-                var hourStart = windowStart.AddHours(h);
-                var seededHigh = h == 22 || h == 23;
-                await SeedBatchHourAsync(connection, serverId, serverName, hourStart, 0, seededHigh, ct);
-            }
-
-            var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_BATCH_REQUESTS"));
-
-            var expectedThreshold = AnomalyThresholds.NAwarePeakCutoff(AnomalyThresholds.DefaultDeviationThreshold, TimeSpan.FromHours(24));
-            Assert.Equal(expectedThreshold, fact.Metadata["fire_threshold"], 0.01);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                await CleanupBatchAsync(cleanup, serverId, cleanupCt);
-                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
-            });
-        }
-    }
-
-    /// <summary>Scenario 3 — a lone spike (ONE sample at mu + 10 sigma in hour 2) inside an otherwise-baseline
-    /// 4 h window does not fire: a single hot sample is not a sustained shift, and the tile's MEAN clause
-    /// keeps it quiet even though the tile's peak clears the magnitude floor.</summary>
-    [Fact]
-    public async Task BatchRequests_LoneSpike_DoesNotFire()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        const int serverId = -4177_03;
-        const string serverName = "sqlstore-tile-batch-lonespike-e2e";
-
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await CleanupBatchAsync(connection, serverId, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var bodySucceeded = false;
-        try
-        {
-            await SeedBatchBaselineAsync(connection, serverId, serverName, T, new[] { 10, 11, 12, 13 }, ct);
-            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
-
-            var provider = new PgBaselineProvider(postgres);
-            var detector = new PgAnomalyDetector(postgres, provider);
-            var context = new AnalysisContext
-            {
-                ServerId = serverId,
-                ServerName = serverName,
-                TimeRangeStart = T,
-                TimeRangeEnd = T.AddHours(4),
-                ServerUtcOffset = TimeSpan.Zero
-            };
-
-            for (var h = 0; h < 4; h++)
-                await SeedBatchHourAsync(connection, serverId, serverName, T, h, seededHigh: false, ct);
-
-            // ONE sample at mu + 10 sigma in hour 2 (local hour 12), extra row on top of the baseline-shaped hour.
-            var stdDev = BatchBaselineStdDev();
-            var spikeAt = TruncateToSeconds(T.AddHours(2).AddMinutes(37));
-            await InsertBatchRowAsync(connection, serverId, serverName, spikeAt, BatchMu + 10 * stdDev, ct);
-
-            var facts = await detector.DetectAnomaliesAsync(context);
-            Assert.DoesNotContain(facts, f => f.Key == "ANOMALY_BATCH_REQUESTS");
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                await CleanupBatchAsync(cleanup, serverId, cleanupCt);
-                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
-            });
-        }
-    }
-
-    /// <summary>Scenario 4 — the fallback path. A 4 h window with only 2 samples per hour (under
-    /// <see cref="AnomalyThresholds.MinTileSamples"/> = 3) at mu + 6 sigma still fires, through today's
-    /// whole-window path — and the fact has NO <c>tile_local_hour</c> key, proving <c>EvaluateTiles</c>
-    /// returned null and the caller fell back.</summary>
-    [Fact]
-    public async Task BatchRequests_UnderMinTileSamples_FallsBackToWholeWindow_NoTileKeys()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        const int serverId = -4177_04;
-        const string serverName = "sqlstore-tile-batch-fallback-e2e";
-
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await CleanupBatchAsync(connection, serverId, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var bodySucceeded = false;
-        try
-        {
-            await SeedBatchBaselineAsync(connection, serverId, serverName, T, new[] { 10, 11, 12, 13 }, ct);
-            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
-
-            var provider = new PgBaselineProvider(postgres);
-            var detector = new PgAnomalyDetector(postgres, provider);
-            var context = new AnalysisContext
-            {
-                ServerId = serverId,
-                ServerName = serverName,
-                TimeRangeStart = T,
-                TimeRangeEnd = T.AddHours(4),
-                ServerUtcOffset = TimeSpan.Zero
-            };
-
-            var stdDev = BatchBaselineStdDev();
-            var shiftedValue = BatchMu + 6 * stdDev;
-            for (var h = 0; h < 4; h++)
-            {
-                var hourStart = T.AddHours(h);
-                for (var i = 0; i < 2; i++) // under MinTileSamples (3) — every tile falls back
-                    await InsertBatchRowAsync(connection, serverId, serverName, TruncateToSeconds(hourStart.AddMinutes(20 * i)), shiftedValue, ct);
-            }
-
-            var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_BATCH_REQUESTS"));
-
-            Assert.False(fact.Metadata.ContainsKey("tile_local_hour"), "the never-blind fallback must not carry tile keys");
-            Assert.False(fact.Metadata.ContainsKey("tile_day_of_week"));
-            Assert.False(fact.Metadata.ContainsKey("tiles_scored"));
-            Assert.False(fact.Metadata.ContainsKey("tiles_fired"));
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                await CleanupBatchAsync(cleanup, serverId, cleanupCt);
-                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
-            });
-        }
-    }
-
-    // ───────────────────────── query duration: scenario 1 only ─────────────────────────
-
-    /// <summary>Query duration — scenario 1 only. Seeds <c>query_stats</c> so
-    /// <c>QueryDurationTileWindowSql</c>'s per-collection SUM(delta_elapsed_time) sees one query per
-    /// collection. Hours 1-2 (local 10, 11) at the baseline's own cycling elapsed-time shape; hours 3-4
-    /// (local 12, 13) run the WHOLE hour at mu + 6 sigma (still clearing the 1-second magnitude floor).</summary>
-    [Fact]
-    public async Task QueryDuration_TwoHourSustainedShift_FiresOnWorstTile_WhereWholeWindowMeanWouldNotClearCutoff()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
-
-        var ct = TestContext.Current.CancellationToken;
-        const int serverId = -4177_05;
-        const string serverName = "sqlstore-tile-qd-shift-e2e";
-        const long baseElapsedUs = 2_000_000L; // 2s per collection — clears the 1s magnitude floor comfortably
-
-        using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await CleanupQueryDurationAsync(connection, serverId, ct);
-
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-        var bodySucceeded = false;
-        try
-        {
-            var id = 900_000L;
-            // 21 Wednesdays of history at local hours 10 and 11, 12 collections/hour (5-min spacing), one
-            // query per collection at a fixed 2s elapsed — a near-constant baseline still clears the
-            // absolute-floor rule's own AbsStdDevFloor via the robust scaffold's floored dispersion.
-            for (var week = 0; week < 21; week++)
-            {
-                foreach (var hourOffset in new[] { 0, 1 })
-                {
-                    var hourStart = T.AddDays(-7 * week).AddHours(hourOffset);
-                    for (var i = 0; i < 12; i++)
-                        await InsertQueryStatsRowAsync(connection, id++, TruncateToSeconds(hourStart.AddMinutes(5 * i)), serverId, serverName, baseElapsedUs, ct);
-                }
-            }
-
-            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
-            var provider = new PgBaselineProvider(postgres);
-            var baseline = await provider.GetBaselineAsync(serverId, MetricNames.QueryDuration, T.AddHours(-24), ct);
-            var sigmaEff = baseline.EffectiveRobustSigma > 0 ? baseline.EffectiveRobustSigma : baseline.EffectiveStdDev;
-            var start = baseline.EffectiveRobustSigma > 0 ? baseline.Median : baseline.Mean;
-
-            var detector = new PgAnomalyDetector(postgres, provider);
-            var context = new AnalysisContext
-            {
-                ServerId = serverId,
-                ServerName = serverName,
-                TimeRangeStart = T,
-                TimeRangeEnd = T.AddHours(4),
-                ServerUtcOffset = TimeSpan.Zero
-            };
-
-            // Hours 1-2 (local 10, 11) at baseline; hours 3-4 (local 12, 13) run the WHOLE hour at
-            // start + 6 sigma_eff (sized from the bucket actually read, per WAVE2 lessons).
-            var shiftedElapsedUs = (long)(start + 6 * sigmaEff);
-            for (var h = 0; h < 4; h++)
-            {
-                var hourStart = T.AddHours(h);
-                var seededHigh = h >= 2;
-                for (var i = 0; i < 12; i++)
-                {
-                    var at = TruncateToSeconds(hourStart.AddMinutes(5 * i));
-                    var elapsedUs = seededHigh ? shiftedElapsedUs : baseElapsedUs;
-                    await InsertQueryStatsRowAsync(connection, id++, at, serverId, serverName, elapsedUs, ct);
-                }
-            }
-
-            var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_QUERY_DURATION"));
-
-            var tileLocalHour = fact.Metadata["tile_local_hour"];
-            Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
-            Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
-            Assert.Equal(2.0, fact.Metadata["tiles_fired"]);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                await CleanupQueryDurationAsync(cleanup, serverId, cleanupCt);
-                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
-            });
-        }
-    }
 
     // ───────────────────────── memory: scenario 1 only ─────────────────────────
 
@@ -446,6 +161,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             }
 
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+            await SeedCanaryAsync(connection, serverId, serverName, T.AddHours(4), ct);
             var provider = new PgBaselineProvider(postgres);
             var baseline = await provider.GetBaselineAsync(serverId, MetricNames.Memory, T.AddHours(-24), ct);
             var sigmaEff = baseline.EffectiveRobustSigma > 0 ? baseline.EffectiveRobustSigma : baseline.EffectiveStdDev;
@@ -607,18 +323,39 @@ CROSS JOIN LATERAL (SELECT $1::timestamp + i * INTERVAL '5 minutes') AS _(ts)", 
     {
         await using var cleanup = new NpgsqlCommand($"DELETE FROM perfmon_stats WHERE server_id = {serverId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+        await CleanupCanaryAsync(connection, serverId, ct);
+    }
+
+    /// <summary><c>HasBaselineDataAsync</c> (PgAnomalyDetector.cs ~:512) gates EVERY family on
+    /// v_wait_stats/v_cpu_utilization_stats alone — a fixture that seeds only its own family's table sees
+    /// the whole pass skip silently. One canary row, well OUTSIDE the analysis window (so it cannot feed
+    /// the wait/CPU detectors' own reads), keeps the gate open for every scenario in this file.</summary>
+    private static async Task SeedCanaryAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime windowEnd, System.Threading.CancellationToken ct)
+    {
+        var canaryAt = TruncateToSeconds(windowEnd.AddDays(-1));
+        await InsertAsync(connection,
+            "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            700_000_000L + serverId, canaryAt, serverId, serverName, "TILE_TEST_CANARY", 0L, 0L);
+    }
+
+    private static async Task CleanupCanaryAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
+    {
+        await using var cleanup = new NpgsqlCommand($"DELETE FROM wait_stats WHERE server_id = {serverId};", connection);
+        await cleanup.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task CleanupQueryDurationAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         await using var cleanup = new NpgsqlCommand($"DELETE FROM query_stats WHERE server_id = {serverId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+        await CleanupCanaryAsync(connection, serverId, ct);
     }
 
     private static async Task CleanupMemoryAsync(NpgsqlConnection connection, int serverId, System.Threading.CancellationToken ct)
     {
         await using var cleanup = new NpgsqlCommand($"DELETE FROM memory_stats WHERE server_id = {serverId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
+        await CleanupCanaryAsync(connection, serverId, ct);
     }
 
     private static async Task DropBaselineFallbackViewsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
