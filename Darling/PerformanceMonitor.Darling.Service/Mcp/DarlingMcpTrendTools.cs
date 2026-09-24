@@ -381,10 +381,12 @@ public sealed class DarlingMcpTrendTools
                 postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now,
                 hourlyAvailable: rollups.QueryGrainHourly,
                 coverage: coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView),
-                /* #3653 (Q12): the hourly relation for THIS window — the interval-honest successor where it
-                   reaches as far back as the legacy does, the legacy otherwise. The tier above is still decided
-                   over the legacy pair, the deeper of the two. */
-                hourlyRelation: coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, now.AddHours(-hours_back)));
+                /* #3653 A6: the hourly FROM-clause item for THIS window (RollupCoverage.StitchedRelationSql) —
+                   the legacy alone with no successor (byte-identical to "collect.<legacy> AS f", the SAME
+                   text HourlyRelationFor plus the bare-name alias produced), or a stitch splicing in the
+                   successor past its floor. The tier above is still decided over the legacy pair, the deeper
+                   of the two. */
+                hourlyRelation: coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", now.AddHours(-hours_back), RollupCoverage.StitchTier.Hourly));
             var rows = history.Points;
             if (rows.Count == 0)
             {
