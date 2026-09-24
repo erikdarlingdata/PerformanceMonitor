@@ -323,7 +323,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
 
             var latch = await DarlingMcpLatchSpinlockTools.GetLatchStats(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(latch, ServerName, "latches");
-            Assert.Contains("Index/heap access contention", latch, StringComparison.Ordinal);
+            /* #4149: the seeded ACCESS_METHODS_DATASET_PARENT now reads as parallel scan coordination. */
+            Assert.Contains("Index/heap access, or parallel scan coordination", latch, StringComparison.Ordinal);
             var latches = System.Text.Json.JsonDocument.Parse(latch).RootElement.GetProperty("latches").EnumerateArray()
                 .ToDictionary(l => l.GetProperty("latch_class").GetString()!);
             Assert.Equal(3, latches.Count);
