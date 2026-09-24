@@ -732,6 +732,22 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// <paramref name="result"/> with <see cref="PgDeadlocksCollector.RaiseShapedDeadlocksSkippedNote"/> merged
+    /// into its host note when the run's definition recorded
+    /// <see cref="PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement"/> (#4058 item 1), following the
+    /// exact pattern <see cref="WithForgedCaptureNote"/> sets above; otherwise <paramref name="result"/> unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithRaiseShapedDeadlocksSkippedNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgDeadlocksCollector.RaiseShapedDeadlocksSkippedNote) }
+            : result;
+    }
+
+    /// <summary>
     /// <paramref name="result"/> with <see cref="PgReadBinaryFileAdvisory.Sentence"/> merged into its host
     /// note when <paramref name="server"/> is still on the text route AND has not been noted inside
     /// <see cref="PgReadBinaryFileAdvisory.NoteInterval"/> (#4046); otherwise <paramref name="result"/>
@@ -827,7 +843,8 @@ public sealed class DarlingCollectorRunner
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded);
+        var measurements = MeasurementsFor(
+            server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped);
 
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
@@ -914,9 +931,10 @@ public sealed class DarlingCollectorRunner
     /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
     /// self-hosted collectors.</summary>
     private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
-        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0, int forgedCaptures = 0)
+        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
+        int raiseShapedSkipped = 0)
     {
-        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0)
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0 && raiseShapedSkipped <= 0)
         {
             return CollectorContext.NoMeasurements;
         }
@@ -946,6 +964,14 @@ public sealed class DarlingCollectorRunner
         if (forgedCaptures > 0)
         {
             context.Measure(PgPlanCaptureCollector.ForgedCaptureMeasurement, forgedCaptures);
+        }
+
+        /* #4058 item 1: the RDS deadlock ingestor's own RAISE-shaped skip count, same measurement label the
+           self-hosted PgDeadlocksCollector.ReadCsvRow records for its own csvlog route
+           (RaiseShapedDeadlocksSkippedMeasurement), reported only when > 0. */
+        if (raiseShapedSkipped > 0)
+        {
+            context.Measure(PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, raiseShapedSkipped);
         }
 
         return context.Measurements;
