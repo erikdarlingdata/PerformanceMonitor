@@ -561,7 +561,20 @@ public sealed class PgTargetKernelTests
             Assert.InRange(anomaly.Metadata["baseline_ratio"], 4.6, 5.4);
             Assert.InRange(anomaly.Metadata["mean_cores_busy"], 4.9, 5.1);
             Assert.True(anomaly.Metadata["mean_sigma"] > 0);
-            Assert.Equal(240, anomaly.Metadata["window_samples"]);
+            /* #3653 A8 option B: the fact reports the WORST TILE's own sample count, the target-local hour with the
+               largest deviation, not the whole 4-hour window's 240. The whole window's total rides in
+               window_samples_total (design's "worst tile" rule; #4172 commit ee858340f). */
+            var tileStartTicks = (long)anomaly.Metadata["tile_start_ticks"];
+            var tileStart = new DateTime(tileStartTicks, DateTimeKind.Unspecified);
+            var tileSamples = 0;
+            for (var minute = 0; minute <= 4 * 60; minute++)
+            {
+                var collectionTime = windowStart.AddMinutes(minute);
+                if (collectionTime >= tileStart && collectionTime < tileStart.AddHours(1))
+                    tileSamples++;
+            }
+            Assert.Equal(tileSamples, anomaly.Metadata["window_samples"]);
+            Assert.Equal(240.0, anomaly.Metadata["window_samples_total"]);
             Assert.Equal(7001, anomaly.Metadata[PgTargetScorer.KernelTopQueryIdKey]);
 
             /* ── THE EXIT CRITERION, through the real analyze_server, anchored at the planted window's end. */
