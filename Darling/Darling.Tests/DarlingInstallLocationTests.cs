@@ -784,6 +784,11 @@ function Get-CimInstance {
     /// one of the four SIDs the base trusted set already carries (SYSTEM, Administrators, TrustedInstaller,
     /// the running admin) - using TrustedInstaller itself here would pass by accident and prove nothing about
     /// the new parameter.</para>
+    ///
+    /// <para>#4052 moved the service's Modify off the root and onto <c>pg-runtime\</c> and <c>pg-runtime-prev\</c>, so
+    /// the grant this test needs to see now sits one level down. The probe walks the tree with <c>-Recurse</c>, the
+    /// way every real caller of the check does, and also pins that the root itself no longer carries a write grant
+    /// for the service at all.</para>
     /// </summary>
     [Fact]
     public void ThePreLockWritableExtractionCheck_TrustsTheAccountTheLockItselfGranted_OnAnAlreadyLockedTree()
@@ -802,10 +807,11 @@ function Get-CimInstance {
                 $null = Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE'
 
                 $withoutAccount = Get-DarlingPreLockTrustedSids
-                'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount).Count
+                'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount -Recurse).Count
+                'rootOnlyWithoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount).Count
 
                 $withAccount = Get-DarlingPreLockTrustedSids 'NT AUTHORITY\LOCAL SERVICE'
-                'withAccountCount=' + @(Get-UntrustedWriteGrantees $root $withAccount).Count
+                'withAccountCount=' + @(Get-UntrustedWriteGrantees $root $withAccount -Recurse).Count
             }
             finally {
                 if (Test-Path -LiteralPath $root) {
@@ -820,6 +826,8 @@ function Get-CimInstance {
         var without = int.Parse(answers.Find(a => a.StartsWith("withoutAccountCount=", StringComparison.Ordinal))!.Substring("withoutAccountCount=".Length));
         Assert.True(without > 0, "a freshly locked tree must still name the service account as untrusted when the caller does not say who it is - otherwise this test proves nothing about the new parameter: " + string.Join(" | ", answers));
         Assert.Contains("withAccountCount=0", answers);
+        /* #4052: the root itself is RX for the service, so no write grant is left there to trust. */
+        Assert.Contains("rootOnlyWithoutAccountCount=0", answers);
     }
 
     /// <summary>
