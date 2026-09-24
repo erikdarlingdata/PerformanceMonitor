@@ -211,6 +211,7 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             await create.ExecuteNonQueryAsync(ct);
         }
 
+        var bodySucceeded = false;
         try
         {
             var builder = new NpgsqlConnectionStringBuilder(connectionStringRoot) { Database = database, Pooling = false };
@@ -227,12 +228,14 @@ public sealed class PgReadBinaryFileCapabilityLiveTests
             await using var read = new NpgsqlCommand("SELECT pg_catalog.pg_read_binary_file('PG_VERSION')", connection);
             var bytes = (byte[])(await read.ExecuteScalarAsync(ct))!;
             Assert.NotEmpty(PgBinaryTailText.DecodeWhole(bytes, encoding));
+            bodySucceeded = true;
         }
         finally
         {
-            NpgsqlConnection.ClearAllPools();
-            await using var cleanup = new NpgsqlCommand($"DROP DATABASE IF EXISTS {database} WITH (FORCE)", admin);
-            await cleanup.ExecuteNonQueryAsync(ct);
+            await LiveStoreCleanup.RunAsync(connectionStringRoot!, bodySucceeded, async (cleanup, _) =>
+            {
+                await DropScratchDatabaseAsync(cleanup, database);
+            });
         }
     }
 }
