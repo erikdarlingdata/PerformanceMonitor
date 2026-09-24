@@ -46,10 +46,12 @@ namespace PerformanceMonitor.Collectors;
 /// discarded. Inside quotes, the head is certainly a fragment and is excluded.</para>
 ///
 /// <para><b>Trailing partial record.</b> When the body does not end in a newline (a read that raced a write), the
-/// text after the last newline is a partial record whose quote state is unknown. The latest newline whose backward
-/// split validates the record just before it becomes the anchor (bounded tries); the partial is not emitted. Every
-/// complete record is still shape-checked: 26 fields, a <c>log_time</c> that parses, a numeric <c>process_id</c>,
-/// and a <c>session_id</c> shaped <c>hex.hex</c>.</para>
+/// text after the last newline is a partial record whose quote state is unknown. Up to the last 8 candidate
+/// newlines are each walked backward and scored by how many of the records under them parse; the candidate with
+/// the most parseable records wins, latest anchor breaking a tie (#4053 review M1) — accepting the first candidate
+/// that merely validated its ONE preceding record let a forged, unquoted look-alike line win under inverted
+/// parity. The partial is not emitted. Every complete record is still shape-checked: 26 fields, a <c>log_time</c>
+/// that parses, a numeric <c>process_id</c>, and a <c>session_id</c> shaped <c>hex.hex</c>.</para>
 /// </summary>
 public static class PgServerLogCsvParser
 {
@@ -119,66 +121,138 @@ public static class PgServerLogCsvParser
     }
 
     /// <summary>
+    /// The number of trailing candidate anchors <see cref="FindBoundaries"/> evaluates when the body does
+    /// not end on a record boundary (#4053 review M1/M2). A mid-write read normally resyncs within a few
+    /// newlines — one per embedded newline in the trailing partial record — so 8 covers the real case with
+    /// room to spare, without paying the 64-try worst case (roughly 270M character iterations, ~0.3–0.5s of
+    /// CPU per cycle per target) on every non-UTC target (H1) or every body with no parseable record.
+    /// </summary>
+    private const int MaxAnchorCandidates = 8;
+
+    /// <summary>
     /// Positions of the newlines that end records, preceded by -1 when the body starts on a record boundary
     /// (it never does for a tail read, but a whole file would). The cut head before the first boundary is
-    /// excluded. Null when no anchor validates (bounded tries), which the caller counts as one discard.
+    /// excluded. Null when no candidate anchor yields a parseable record, which the caller counts as one
+    /// discard.
     /// </summary>
     private static List<int>? FindBoundaries(string body)
     {
-        const int MaxAnchorTries = 64;
+        if (body.Length == 0)
+        {
+            return null;
+        }
+
+        if (body[^1] == '\n')
+        {
+            /* The body already ends on a record boundary (an ordinary, non-mid-write read): anchor there,
+               as today. No candidate scoring is needed — the true end of the file is never ambiguous, so
+               there is exactly one anchor to consider. */
+            var marks = ComputeMarks(body, body.Length - 1);
+            return HasParseableRecord(body, marks) ? marks : null;
+        }
+
+        /* A read that raced a write: the text after the true last newline is a partial record whose quote
+           state is unknown, so the anchor is chosen by trial (#4053 review M1). Rather than accept the
+           FIRST candidate whose one preceding record validates — which a forged, unquoted look-alike line
+           can satisfy under inverted parity — score every candidate by how many of ITS records parse and
+           keep the best: with inverted parity a candidate yields at most a few planted valid records,
+           while the true parity yields nearly all of them. On a tie, the latest (largest) anchor wins,
+           which the scan order already gives for free by only overwriting on a strictly higher score. */
         var anchor = body.Length - 1;
-        var tries = 0;
-        while (anchor >= 0 && tries < MaxAnchorTries)
+        var candidates = 0;
+        List<int>? bestMarks = null;
+        var bestScore = 0;
+
+        while (anchor >= 0 && candidates < MaxAnchorCandidates)
         {
             anchor = body.LastIndexOf('\n', anchor);
             if (anchor < 0)
             {
-                return null;
+                break;
             }
 
-            tries++;
-            var marks = new List<int> { anchor };
-            var inQuotes = false;
-            for (var i = anchor - 1; i >= 0; i--)
-            {
-                var c = body[i];
-                if (c == '"')
-                {
-                    inQuotes = !inQuotes;
-                }
-                else if (c == '\n' && !inQuotes)
-                {
-                    marks.Add(i);
-                }
-            }
+            candidates++;
+            var marks = ComputeMarks(body, anchor);
+            var score = CountParseableRecords(body, marks);
 
-            /* Parity at offset 0 is now known exactly. Outside quotes, offset 0 may be a real record start (a
-               file under the tail size is read from its first byte), so it is offered as a boundary and the
-               first segment is shape-checked like any other: a cut fragment fails it and is discarded. Inside
-               quotes, the head is certainly a fragment and is excluded. */
-            if (!inQuotes)
+            if (score > bestScore)
             {
-                marks.Add(-1);
-            }
-
-            marks.Reverse();
-            /* The anchor is right when the record that ends at it parses: with inverted parity the
-               "record" before it is a glued fragment that fails the shape check. A body with only one
-               boundary has no complete record to validate against, so it yields nothing this cycle. */
-            if (marks.Count >= 2)
-            {
-                var start = marks[^2] + 1;
-                var last = body.Substring(start, marks[^1] - start).TrimEnd('\r');
-                if (TryParseRecord(last, out _))
-                {
-                    return marks;
-                }
+                bestScore = score;
+                bestMarks = marks;
             }
 
             anchor--;
         }
 
-        return null;
+        return bestScore > 0 ? bestMarks : null;
+    }
+
+    /// <summary>
+    /// Walks backward from <paramref name="anchor"/> (a newline, assumed to be outside quotes) to recover
+    /// every earlier boundary: a newline outside quotes is a true boundary, and no text inside a quoted
+    /// field, planted or not, can fake one.
+    /// </summary>
+    private static List<int> ComputeMarks(string body, int anchor)
+    {
+        var marks = new List<int> { anchor };
+        var inQuotes = false;
+        for (var i = anchor - 1; i >= 0; i--)
+        {
+            var c = body[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (c == '\n' && !inQuotes)
+            {
+                marks.Add(i);
+            }
+        }
+
+        /* Parity at offset 0 is now known exactly. Outside quotes, offset 0 may be a real record start (a
+           file under the tail size is read from its first byte), so it is offered as a boundary and the
+           first segment is shape-checked like any other: a cut fragment fails it and is discarded. Inside
+           quotes, the head is certainly a fragment and is excluded. */
+        if (!inQuotes)
+        {
+            marks.Add(-1);
+        }
+
+        marks.Reverse();
+        return marks;
+    }
+
+    /// <summary>Whether the record ending at the last mark — the one just before the anchor — parses. Used
+    /// only for the already-terminated-body path, where a single anchor is the only candidate.</summary>
+    private static bool HasParseableRecord(string body, List<int> marks)
+    {
+        if (marks.Count < 2)
+        {
+            return false;
+        }
+
+        var start = marks[^2] + 1;
+        var last = body.Substring(start, marks[^1] - start).TrimEnd('\r');
+        return TryParseRecord(last, out _);
+    }
+
+    /// <summary>How many of the records bounded by <paramref name="marks"/> parse (#4053 review M1): the
+    /// scoring signal used to choose among candidate anchors on a mid-write read.</summary>
+    private static int CountParseableRecords(string body, List<int> marks)
+    {
+        var count = 0;
+
+        for (var r = 0; r + 1 < marks.Count; r++)
+        {
+            var start = marks[r] + 1;
+            var text = body.Substring(start, marks[r + 1] - start).TrimEnd('\r');
+            if (TryParseRecord(text, out _))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
 
