@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -48,7 +49,11 @@ public sealed class AnomalyNullWindowLiveTests
     private const int BaseServerId = -365300;
     private const int ServerCount = 6;
     private const int PlantedServerCount = 3; // the first PlantedServerCount of the six carry shifts+spikes
-    private const int HistoryDays = 10;
+    /* lane L5, #4177: 10 days gave every (hour, dow) bucket at most 2 distinct days — below
+       BaselineBucket.FullDayMin = 3 — so SelectBucket's Full tier was never trustworthy and the gate
+       always took the absolute-fallback arm (SessionCountFallback). 22 days gives every weekday
+       floor(22/7) = 3 distinct occurrences, clearing FullDayMin. */
+    private const int HistoryDays = 22;
     private static readonly TimeSpan SampleInterval = TimeSpan.FromMinutes(5);
 
     /* Explicit, not a passing gate: as landed, the planted 2h/+6sigma sustained shift does not fire on
@@ -119,6 +124,25 @@ public sealed class AnomalyNullWindowLiveTests
 
             var provider = new PgBaselineProvider(postgres);
             var detector = new PgAnomalyDetector(postgres, provider);
+
+            /* ---- PRECONDITION: the raised history must actually be trustworthy, or the whole
+               measurement below is the same untrustworthy-fallback illusion the 10-day harness had.
+               Check one planted server (index 0) over its own shifted window — every hour that window
+               touches must resolve to an IsTrustworthy bucket via the SAME For(hour, dow) lookup the
+               real gate uses (BaselineMath.SelectBucket's Full → HourOnly → Flat selection). ---- */
+            {
+                var precheckMap = await provider.GetBucketMapAsync(
+                    serverIds[0], MetricNames.SessionCount, shiftStart, shiftEnd, ct);
+                for (var hourStart = shiftStart.Date.AddHours(shiftStart.Hour);
+                     hourStart <= shiftEnd;
+                     hourStart = hourStart.AddHours(1))
+                {
+                    var bucket = precheckMap.For(hourStart.Hour, (int)hourStart.DayOfWeek);
+                    Assert.True(bucket.IsTrustworthy,
+                        $"PRECONDITION FAILED: server {serverIds[0]} hour {hourStart.Hour} dow {hourStart.DayOfWeek} " +
+                        $"is not trustworthy at HistoryDays={HistoryDays} — raise HistoryDays further before trusting this measurement");
+                }
+            }
 
             /* ---- run 4h passes stepping by 4h, and 24h passes stepping by 24h, over the last 3 days. ---- */
             var lookback = TimeSpan.FromDays(3);
