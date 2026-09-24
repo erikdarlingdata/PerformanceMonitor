@@ -87,12 +87,16 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         for (int i = 0; i < 5; i++)
             await SeedCpuAsync(wednesday.AddMinutes(i * 10), 40 + i);
 
-        // Seed 15 samples on other days at 14:xx (enough for hour-only)
-        for (int dow = 0; dow < 3; dow++) // Sun, Mon, Tue
+        // Seed 2 samples each on 9 OTHER distinct calendar days at 14:xx — enough sample count for
+        // hour-only (23 total, >= CollapseThreshold) AND, since #3653 A8 option B narrowed the tier
+        // walk to walk coarser only on a YOUNG (too-few-distinct-days) bucket, enough distinct days
+        // (10 total, clearing HourOnly's own 10-day floor) that the pooled hour-only tier this test
+        // pins is itself trustworthy — not walked past to Flat.
+        for (int d = 0; d < 9; d++)
         {
-            var day = AnalysisTime.AddDays(-7 - dow - 4); // Different days, same hour
-            for (int i = 0; i < 5; i++)
-                await SeedCpuAsync(day.AddMinutes(i * 10), 60 + i);
+            var day = AnalysisTime.AddDays(-14 - d); // 9 further distinct days, same hour
+            for (int i = 0; i < 2; i++)
+                await SeedCpuAsync(day.AddMinutes(i * 10), 60 + i + d);
         }
 
         _provider.ClearCache();
@@ -148,10 +152,14 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
     [Fact]
     public async Task GetBaseline_HourOnly_SumsDistinctDaysAcrossDowBuckets()
     {
-        // Same hour (14:00) across 4 distinct calendar days of DIFFERENT days-of-week, 4 samples each
-        // (below Full's restore) → collapses to hour-only. Each calendar day lands in exactly one
-        // day-of-week bucket, so summing distinct-days across those buckets is exact (= 4).
-        for (int d = 0; d < 4; d++)
+        // Same hour (14:00) across 10 distinct calendar days of DIFFERENT days-of-week, 4 samples
+        // each (below Full's restore) → collapses to hour-only. Each calendar day lands in exactly
+        // one day-of-week bucket, so summing distinct-days across those buckets is exact (= 10).
+        // 10 distinct days, not 4: since #3653 A8 option B narrowed the tier walk to walk coarser
+        // only on a YOUNG (too-few-distinct-days) bucket, the pooled hour-only tier this test pins
+        // must itself clear HourOnly's own 10-day floor — otherwise it is young and gets walked past
+        // to Flat before this assertion ever sees it.
+        for (int d = 0; d < 10; d++)
         {
             var day = AnalysisTime.AddDays(-7 - d);
             for (int i = 0; i < 4; i++)
@@ -162,7 +170,7 @@ public class BaselineProviderTests : IClassFixture<SharedDuckDbFixture>, IDispos
         var baseline = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, AnalysisTime);
 
         Assert.Equal(BaselineTier.HourOnly, baseline.Tier);
-        Assert.Equal(4, baseline.DistinctDays);   // SUM across the 4 dow buckets
+        Assert.Equal(10, baseline.DistinctDays);   // SUM across the 10 dow buckets
     }
 
     [Fact]
