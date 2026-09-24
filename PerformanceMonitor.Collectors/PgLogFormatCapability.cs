@@ -35,17 +35,31 @@ namespace PerformanceMonitor.Collectors;
 /// as the connection happens to live. An hour bounds that instead, independent of connection lifetime —
 /// <see cref="PgReadBinaryFileCapability.CacheTtl"/>'s own reasoning, restated here rather than shared,
 /// because the two caches answer unrelated questions and must invalidate independently.</para>
+///
+/// <para><b>jsonlog wins over csvlog, which wins over stderr</b> (#4053 part a2). <c>pg_log_events</c>'s
+/// own <c>BuildQuery</c> checks <see cref="CollectorContext.PgLogUsesJsonlog"/> before
+/// <see cref="CollectorContext.PgLogUsesCsvlog"/>: a jsonlog record's fields are JSON-string-escaped, so a
+/// value planted with a raw newline can never forge a record boundary the way an unescaped csvlog or
+/// stderr field can (see <see cref="PgServerLogJsonParser"/>'s own remarks). Both flags can be true at once
+/// when an operator lists both destinations; this cache answers both from the one probe and lets the
+/// collector pick.</para>
 /// </summary>
 public static class PgLogFormatCapability
 {
     /// <summary>
-    /// True exactly when <c>csvlog</c> is one of the target's configured log destinations, spaces stripped
-    /// and compared case-insensitively (PostgreSQL accepts <c>'Stderr, CSVlog'</c>) — the same normalisation
-    /// <see cref="PgServerLogTail.TailCsvCteSql"/>'s own <c>WHERE</c> clause applies, spelled once here so the
-    /// probe and the query can never disagree about what counts.
+    /// True exactly when <c>csvlog</c> is one of the target's configured log destinations, and true (the
+    /// second value) exactly when <c>jsonlog</c> is, spaces stripped and compared case-insensitively
+    /// (PostgreSQL accepts <c>'Stderr, CSVlog'</c>) — the same normalisation <see cref="PgServerLogTail.TailCsvCteSql"/>'s
+    /// and <see cref="PgServerLogTail.TailJsonCteSql"/>'s own <c>WHERE</c> clauses apply, spelled once here so
+    /// the probe and the two queries can never disagree about what counts. Both values ride back as one
+    /// scalar (#4053 part a2, the same shape <see cref="PgReadBinaryFileCapability.ProbeSql"/> uses for its
+    /// own two-part answer), joined with a colon, so a cache miss costs one round trip rather than two —
+    /// <c>IsCsvlogEnabledAsync</c> and <c>IsJsonlogEnabledAsync</c> share the same cached verdict.
     /// </summary>
     public const string ProbeSql =
-        "SELECT 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))";
+        "SELECT ('csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')))::text "
+        + "|| ':' || "
+        + "('jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')))::text";
 
     /// <summary>Cache TTL — a target's verdict is re-checked after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
@@ -65,7 +79,7 @@ public static class PgLogFormatCapability
         "pg_plan_capture",
     };
 
-    private sealed record CacheEntry(bool UsesCsvlog, DateTime CheckedAtUtc);
+    private sealed record CacheEntry(bool UsesCsvlog, bool UsesJsonlog, DateTime CheckedAtUtc);
 
     /* Process-wide and static, like PgReadBinaryFileCapability's own cache: "reset on restart" is simply
        what a fresh process starts with. Reset() below exists for tests, which share this process-wide
@@ -80,25 +94,65 @@ public static class PgLogFormatCapability
     /// </summary>
     public static async ValueTask<bool> IsCsvlogEnabledAsync(DbConnection connection, string targetKey, CancellationToken cancellationToken)
     {
+        var entry = await ProbeAsync(connection, targetKey, cancellationToken);
+        return entry.UsesCsvlog;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="targetKey"/>'s <c>log_destination</c> includes <c>jsonlog</c> (#4053 part a2),
+    /// from the SAME cached probe <see cref="IsCsvlogEnabledAsync"/> reads — one row answers both booleans,
+    /// so calling one after the other on a cache miss still costs one round trip, not two.
+    /// </summary>
+    public static async ValueTask<bool> IsJsonlogEnabledAsync(DbConnection connection, string targetKey, CancellationToken cancellationToken)
+    {
+        var entry = await ProbeAsync(connection, targetKey, cancellationToken);
+        return entry.UsesJsonlog;
+    }
+
+    private static async ValueTask<CacheEntry> ProbeAsync(DbConnection connection, string targetKey, CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(targetKey);
 
         if (s_cache.TryGetValue(targetKey, out var cached) && DateTime.UtcNow - cached.CheckedAtUtc < CacheTtl)
         {
-            return cached.UsesCsvlog;
+            return cached;
         }
 
         using var command = connection.CreateCommand();
         command.CommandText = ProbeSql;
         var result = await command.ExecuteScalarAsync(cancellationToken);
-        var usesCsvlog = result is bool b && b;
 
-        s_cache[targetKey] = new CacheEntry(usesCsvlog, DateTime.UtcNow);
-        return usesCsvlog;
+        var usesCsvlog = false;
+        var usesJsonlog = false;
+
+        if (result is string combined)
+        {
+            var separator = combined.IndexOf(':');
+
+            if (separator >= 0)
+            {
+                _ = bool.TryParse(combined[..separator], out usesCsvlog);
+                _ = bool.TryParse(combined[(separator + 1)..], out usesJsonlog);
+            }
+        }
+
+        var entry = new CacheEntry(usesCsvlog, usesJsonlog, DateTime.UtcNow);
+        s_cache[targetKey] = entry;
+        return entry;
     }
 
     /// <summary>Drops every cached verdict. Tests only — a real restart already starts with an empty cache.</summary>
     public static void Reset() => s_cache.Clear();
+
+    /// <summary>
+    /// Whether the cached verdict for <paramref name="targetKey"/> (fresh or not) says the target writes
+    /// neither csvlog nor jsonlog, the only verdict a missing stderr file contradicts (#4053 a2 review W1).
+    /// On a jsonlog-only target, pg_deadlocks and pg_plan_capture still read stderr and find no file every
+    /// cycle; that fault agrees with a jsonlog verdict and must not clear it. False when nothing is cached.
+    /// </summary>
+    public static bool CachedVerdictIsStderrOnly(string targetKey) =>
+        s_cache.TryGetValue(targetKey, out var cached) && !cached.UsesCsvlog && !cached.UsesJsonlog;
 
     /// <summary>
     /// Drops <paramref name="targetKey"/>'s cached verdict, so the next <see cref="IsCsvlogEnabledAsync"/>

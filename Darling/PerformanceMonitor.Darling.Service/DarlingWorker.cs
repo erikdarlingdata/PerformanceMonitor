@@ -9944,10 +9944,17 @@ LIMIT 1";
                which read only the stderr tail on this branch and never consulted this cache to begin with —
                their own no-stderr-file fault says nothing about whether csvlog is configured, so it must not
                drop pg_log_events' verdict out from under it. Gate on RoutedCollectors, the same set the runner
-               keys the probe itself on, so only a collector this cache actually informs can invalidate it. */
-            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+               keys the probe itself on, so only a collector this cache actually informs can invalidate it.
+
+               #4053 a2 review W1: and only when the cached verdict said stderr-only. A missing stderr file
+               contradicts that verdict and nothing else. On a jsonlog-only target the deadlock and plan
+               collectors (still stderr readers) hit this arm every cycle, and clearing a jsonlog verdict there
+               would re-probe the target on every routed run. */
+            var cacheKey = DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime);
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName)
+                && PgLogFormatCapability.CachedVerdictIsStderrOnly(cacheKey))
             {
-                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+                PgLogFormatCapability.Invalidate(cacheKey);
             }
 
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
@@ -9984,6 +9991,33 @@ LIMIT 1";
             }
 
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no csvlog file has appeared for this target yet",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgNoJsonlogFileException ex)
+        {
+            /* #4053 part a2's own narrow state: pg_log_events is on the jsonlog route (log_destination
+               includes jsonlog), logging_collector is on, but no .json file has appeared under log_directory
+               yet — most likely jsonlog was only just added to the destinations and the syslogger has not
+               rolled a file since the reload. Same disposition as PgNoCsvlogFileException and
+               PgNoStderrLogFileException, and for the same reasons: a setting on the monitored server,
+               satisfiable and re-derived every cycle, not broken on the monitoring side. Only the jsonlog
+               route produces this marker, so the elapsed time is a target query and belongs in sqlMs. */
+
+            /* Same #4053 review L1 reasoning as the csvlog arm above: the cache said jsonlog was one of the
+               destinations, but no .json file exists — drop the verdict so the next cycle re-probes rather
+               than reading no rows for up to an hour, gated on RoutedCollectors so only a collector this
+               cache actually informs can invalidate it. */
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+            {
+                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+            }
+
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no jsonlog file has appeared for this target yet",
                 server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(

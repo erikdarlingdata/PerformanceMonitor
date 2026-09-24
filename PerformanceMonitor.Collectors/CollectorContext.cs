@@ -266,6 +266,20 @@ public sealed class CollectorContext
     public bool PgLogUsesCsvlog { get; set; }
 
     /// <summary>
+    /// Whether this target's <c>log_destination</c> includes <c>jsonlog</c> (#4053 part a2), resolved by the
+    /// host through <see cref="PgLogFormatCapability.IsJsonlogEnabledAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <c>pg_log_events</c> alone — the deadlock and plan-capture collectors never read this. False (the
+    /// default) leaves <see cref="PgLogUsesCsvlog"/> to decide between the csvlog and stderr routes; true
+    /// switches <c>PgLogEventsCollector.BuildQuery</c> to the jsonlog pair built on
+    /// <see cref="PgServerLogTail.TailJsonCteSql"/>/<see cref="PgServerLogTail.TailJsonCteBinarySql"/>, ahead of
+    /// both siblings — jsonlog wins when more than one is configured, for the reason
+    /// <see cref="PgLogFormatCapability"/>'s own remarks give. Settable rather than init-only for the same
+    /// reason <see cref="PgReadBinaryFileGranted"/> is: the host resolves it on the connection it is about to
+    /// hand the definition.
+    /// </summary>
+    public bool PgLogUsesJsonlog { get; set; }
+
+    /// <summary>
     /// The <see cref="Encoding"/> to decode the binary route's bytes with (#4062) — the connected database's own
     /// <c>server_encoding</c>, mapped by <see cref="PgServerEncoding.TryGet"/>. Set alongside
     /// <see cref="PgReadBinaryFileGranted"/> in <c>DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync</c>.

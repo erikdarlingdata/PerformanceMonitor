@@ -561,6 +561,10 @@ public class CollectorMeasurementSeamTests
                    pg_log_events' own ReadAsync on the csvlog route, which is why the const lives in
                    PgLogEventsCollector.cs. */
                 PgLogEventsCollector.CsvRecordsDiscardedMeasurement,
+                /* #4053 part a2: jsonlog records the parser discarded (a cut head, or a bad shape). Measured by
+                   pg_log_events' own ReadAsync on the jsonlog route, which is why the const lives in
+                   PgLogEventsCollector.cs. */
+                PgLogEventsCollector.JsonRecordsDiscardedMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

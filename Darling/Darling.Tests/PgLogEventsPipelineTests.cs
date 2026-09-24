@@ -1418,14 +1418,17 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #4053 part a1b: the probe SQL is PostgreSQL 14+ valid — plain <c>current_setting</c>/
-    /// <c>string_to_array</c>/<c>ANY</c>, nothing gated behind a newer version.
+    /// #4053 part a1b/a2: the probe SQL is PostgreSQL 14+ valid — plain <c>current_setting</c>/
+    /// <c>string_to_array</c>/<c>ANY</c>, nothing gated behind a newer version. One row answers both the
+    /// csvlog and jsonlog booleans (#4053 part a2), so a cache miss costs one round trip, not two.
     /// </summary>
     [Fact]
     public void ThePgLogFormatCapabilityProbe_UsesOnlyPostgreSql14PlusFunctions()
     {
         Assert.Equal(
-            "SELECT 'csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))",
+            "SELECT ('csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')))::text "
+            + "|| ':' || "
+            + "('jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')))::text",
             PgLogFormatCapability.ProbeSql);
         Assert.DoesNotContain("pg_input_is_valid", PgLogFormatCapability.ProbeSql, StringComparison.Ordinal);
     }
@@ -1543,6 +1546,111 @@ public sealed class PgLogEventsPipelineTests
         Assert.Empty(rows);
         var measured = Assert.Single(context.Measurements);
         Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+    }
+
+    /// <summary>
+    /// #4053 part a2: BuildQuery picks the jsonlog pair ahead of both siblings when every flag is set —
+    /// jsonlog wins over csvlog, which wins over stderr. The stderr and csvlog pairs stay byte-unchanged
+    /// (the existing pins above still pass untouched).
+    /// </summary>
+    [Fact]
+    public void WhenPgLogUsesJsonlog_TheStatementOpensWithTheJsonCte_AheadOfCsvlogAndStderr()
+    {
+        var jsonContext = TestContext();
+        jsonContext.PgLogUsesJsonlog = true;
+        var jsonSql = PgLogEventsCollector.Instance.BuildQuery(jsonContext).Text;
+        Assert.Contains("name ~* '\\.json$'", jsonSql, StringComparison.Ordinal);
+        Assert.Contains("'jsonlog' = ANY", jsonSql, StringComparison.Ordinal);
+        Assert.Contains("'" + PgNoJsonlogFileException.Marker + "'", jsonSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + PgNoCsvlogFileException.Marker + "'", jsonSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + PgNoStderrLogFileException.Marker + "'", jsonSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("name ~* '\\.csv$'", jsonSql, StringComparison.Ordinal);
+
+        /* jsonlog wins over csvlog when an operator has configured both. */
+        var bothContext = TestContext();
+        bothContext.PgLogUsesJsonlog = true;
+        bothContext.PgLogUsesCsvlog = true;
+        var bothSql = PgLogEventsCollector.Instance.BuildQuery(bothContext).Text;
+        Assert.Equal(jsonSql, bothSql);
+
+        var jsonBinaryContext = TestContext();
+        jsonBinaryContext.PgLogUsesJsonlog = true;
+        jsonBinaryContext.PgReadBinaryFileGranted = true;
+        var jsonBinarySql = PgLogEventsCollector.Instance.BuildQuery(jsonBinaryContext).Text;
+        Assert.Contains("pg_read_binary_file", jsonBinarySql, StringComparison.Ordinal);
+        Assert.Contains("name ~* '\\.json$'", jsonBinarySql, StringComparison.Ordinal);
+
+        /* The stderr statement is untouched with every flag false, the existing pin's own scenario. */
+        var stderrContext = TestContext();
+        Assert.DoesNotContain("jsonlog", PgLogEventsCollector.Instance.BuildQuery(stderrContext).Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a2: a jsonlog body with a forged newline inside a string field produces exactly one event
+    /// — JSON string escaping means the forged newline can never start a second record (PgServerLogJsonParser's
+    /// own contract, reconfirmed at the wiring seam).
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheJsonRoute_KeepsAForgedNewlineInsideOneField()
+    {
+        /* The JSON-escaped form on the wire (a literal two-character \n) versus what the parser hands back
+           (a real newline byte) — the whole point of #4053 part a2's own remarks: JSON string escaping means
+           this can never split into a second record, unlike an unescaped csvlog or stderr field. */
+        var forgedUserEscaped = "admin\\n" + P + "[9999] FATAL:  a forged stderr line planted through jsonlog";
+        var forgedUserUnescaped = "admin\n" + P + "[9999] FATAL:  a forged stderr line planted through jsonlog";
+        var record = "{\"timestamp\":\"2026-09-24 01:54:43.008 UTC\",\"user\":\"" + forgedUserEscaped
+            + "\",\"dbname\":\"postgres\",\"pid\":83,\"error_severity\":\"FATAL\",\"state_code\":\"28000\","
+            + "\"message\":\"role \\\"x\\\" does not exist\"}";
+
+        var context = TestContext();
+        context.PgLogUsesJsonlog = true;
+
+        var entries = PgServerLogJsonParser.Parse(record + "\n", out var discardedAtParse);
+        var entry = Assert.Single(entries);
+        Assert.Equal(0, discardedAtParse);
+        Assert.Equal(forgedUserUnescaped, entry.UserName);
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record + "\n", "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.DoesNotContain(rows, r => r.Pid == 9999);
+    }
+
+    /// <summary>
+    /// #4053 part a2: the jsonlog route's own no-file-yet marker throws <see cref="PgNoJsonlogFileException"/>,
+    /// never the csvlog or stderr routes' own.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheJsonRoute_ThrowsTheJsonNamedSkip_OnItsOwnMarker()
+    {
+        var context = TestContext();
+        context.PgLogUsesJsonlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { PgNoJsonlogFileException.Marker, null } });
+        await Assert.ThrowsAsync<PgNoJsonlogFileException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+
+        using var offReader = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker, null } });
+        await Assert.ThrowsAsync<PgLoggingCollectorOffException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(offReader, context, CancellationToken.None));
+    }
+
+    /// <summary>#4053 part a2: a record the json parser discarded (a cut head, or a bad shape) is measured.</summary>
+    [Fact]
+    public async Task ReadAsync_OverTheJsonRoute_MeasuresDiscardedRecords()
+    {
+        var context = TestContext();
+        context.PgLogUsesJsonlog = true;
+
+        /* A cut head that never parses as JSON. */
+        using var reader = new FakeReader(new object?[][] { new object?[] { "{not valid json\n", "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgLogEventsCollector.JsonRecordsDiscardedMeasurement, measured.Label);
         Assert.Equal(1, measured.Value);
     }
 
