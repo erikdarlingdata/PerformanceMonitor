@@ -224,10 +224,14 @@ CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 10
             Assert.Equal(0, anomaly.Metadata["is_new"]);
             Assert.True(anomaly.Metadata["modified_z"] >= 3.0 * AnomalyThresholds.HeavyTailModifiedZThreshold, $"modified_z {anomaly.Metadata["modified_z"]} — the escape must be reachable on this planting");
             Assert.True(anomaly.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold);
-            /* #3653 B: under tiles, window_samples is the WORST HOUR TILE's count (one hour at the
-               5-min sampler cadence = 12); the whole window's count moved to window_samples_total. */
+            /* #3653 B: the window is uniformly heavy (peak == mean above), so every hour tile ties on Sigma.
+               EvaluateTiles breaks a tie to the LATER local hour by design, so the worst tile is the newest one.
+               windowStart is anchored on wall-clock now minus 4 h, not hour-aligned, so that newest tile is a
+               PARTIAL hour and its sample count depends on the minute the test runs — never asserted exactly.
+               Every scored hour is uniformly heavy too, so every one fires: tiles_scored == tiles_fired. */
             Assert.Equal(48, anomaly.Metadata["window_samples_total"]);
-            Assert.Equal(12, anomaly.Metadata["window_samples"]); // the worst hour tile (#3653 B)
+            Assert.InRange(anomaly.Metadata["window_samples"], AnomalyThresholds.MinTileSamples, 12);
+            Assert.Equal(anomaly.Metadata["tiles_scored"], anomaly.Metadata["tiles_fired"]);
             Assert.Equal(48 * SampledMs, anomaly.Metadata[PgTargetScorer.WaitSourceObservedMsKey], precision: 3);
             Assert.Equal(48 * CycleMinutes * 60_000, anomaly.Metadata[PgTargetScorer.WaitSourceIntervalMsKey], precision: 3);
             Assert.Equal(1, anomaly.Metadata[PgTargetScorer.WaitSampledMsKnownKey]);
