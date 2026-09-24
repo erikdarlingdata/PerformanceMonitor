@@ -439,7 +439,7 @@ LIMIT 2000";
             var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
 
             /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way,
-               and under verbose logging its Location is exec_simple_query or exec_stmt_raise, never
+               and under verbose logging its Location is exec_simple_query or exec_execute_message, never
                explain_ExecutorEnd — the same shape the provenance guard below would flag as forged. Checked
                FIRST (review round 1 of #4058, round 2 of #4137): it is not a capture, and not forged, so it
                is skipped WITHOUT counting; counting it would grow forged_captures_skipped with every slow

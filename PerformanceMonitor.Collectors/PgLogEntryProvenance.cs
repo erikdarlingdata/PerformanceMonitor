@@ -20,10 +20,11 @@ namespace PerformanceMonitor.Collectors;
 /// WHO wrote it, and PostgreSQL records that in two places this checks.
 ///
 /// <para><b>Two independent signals, because either alone can miss.</b> <see cref="RaisedByPlpgsql"/> reads
-/// <c>Context</c>, which PL/pgSQL always appends when a RAISE fires inside a function — its first line ends
-/// " at RAISE" — but a genuine deadlock raised BY a PL/pgSQL function's own statement also carries a
-/// <c>Context</c> line, ending " SQL statement" instead, never " at RAISE": that is the client's control
-/// surface stopping one frame short of PostgreSQL's own report. <see cref="ReportedByOther"/> reads
+/// <c>Context</c>, which PL/pgSQL always appends when a RAISE fires inside a function: its INNERMOST frame is
+/// the function's frame, ending " line N at RAISE". A genuine deadlock or capture reached through a PL/pgSQL
+/// function has a different innermost frame (an SPI "SQL statement" or "SQL expression" frame, or a lock-wait
+/// frame), never a RAISE frame: that is the client's control surface stopping one frame short of
+/// PostgreSQL's own report. <see cref="ReportedByOther"/> reads
 /// <c>Location</c> — csvlog's <c>location</c> column or jsonlog's <c>func_name</c>, filled only under
 /// <c>log_error_verbosity = verbose</c> — which names the C function that actually wrote the entry:
 /// <c>DeadLockReport</c> for a real deadlock, <c>explain_ExecutorEnd</c> for a real capture, and
@@ -34,11 +35,13 @@ namespace PerformanceMonitor.Collectors;
 /// from PL/Perl, PL/Tcl or a C-language function carries none of PL/pgSQL's own <c>Context</c> line, so
 /// <see cref="RaisedByPlpgsql"/> is blind to it — <see cref="ReportedByOther"/>'s <c>Location</c> check is
 /// what still catches that shape, but only under verbose logging. A client cannot set
-/// <c>log_error_verbosity</c> for the server, but a target running at <c>terse</c> or <c>default</c> gets
-/// no <see cref="ReportedByOther"/> coverage at all: <c>Location</c> is empty on every other verbosity and
-/// on the stderr transport, which carries no such field. And <c>errhidecontext</c> can blank
-/// <c>Context</c> for a message issued at a severity below ERROR, though a forged deadlock or plan capture
-/// has to run at ERROR or LOG respectively to be believed, where <c>errhidecontext</c> does not apply.
+/// <c>log_error_verbosity</c> for the server, but a target running at <c>default</c> gets no
+/// <see cref="ReportedByOther"/> coverage: <c>Location</c> is empty on every other verbosity and on the
+/// stderr transport, which carries no such field. At <c>terse</c>, PostgreSQL also drops <c>Context</c>, so
+/// BOTH signals are gone and a forged record passes. The frame wording is translated under
+/// <c>lc_messages</c>, so on a server with a non-English <c>lc_messages</c> the frame no longer starts
+/// "PL/pgSQL function " and the context check fails open too (a client can't change that setting, and the
+/// deadlock and plan markers already assume English).
 /// Neither signal is a promise that every RAISE-shaped record is caught; together they are the check that
 /// exists rather than none at all.</para>
 /// </summary>
