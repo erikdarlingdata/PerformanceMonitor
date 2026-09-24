@@ -389,12 +389,16 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
                 "INSERT INTO pg_wait_stats (collection_id, collection_time, server_id, server_name, wait_type_id, wait_event_id, wait_type, wait_event, waits, wait_time_us, delta_waits, delta_wait_time_us, sample_interval_seconds) VALUES ($1, $2, $3, $4, 1, 1, 'Lock', 'relation', 10, 1000, 1, 100, 60)",
                 CollectionIdGenerator.Next(), at, PgTargetServerId, PgTargetServerName);
 
-            // pg_io_read_latency baseline arm: LAG within the SAME 15-minute date_bin bucket needs a
-            // predecessor row, else raw_reads is NULL and the history row contributes nothing to the bucket
-            // (baseline.SampleCount stays 0, and DetectIoAnomalies returns before its window read ever runs).
+            // pg_io_read_latency baseline arm: LAG needs a predecessor row in the PRECEDING 15-minute
+            // date_bin bucket, not the same one — two rows 30 seconds apart land in ONE bucket after the
+            // sampled CTE's MAX() aggregation, so LAG(reads) still has no adjacent-bucket predecessor and
+            // raw_reads stays NULL for every week (baseline.SampleCount stays 0, and DetectIoAnomalies
+            // returns before its window read ever runs — the const this guard shipped vacuous for, G1-5).
+            // Fix: seed the pair 15 minutes apart, one bucket earlier and the bucket itself, with a
+            // cumulative-counter increase, so LAG resolves a real predecessor.
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, reads, read_time_ms, writes, write_time_ms, writebacks, writeback_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, fsyncs, fsync_time_ms, stats_reset, read_bytes, write_bytes, extend_bytes) VALUES ($1, $2, $3, $4, 'client backend', 'relation', 'normal', 0, 0.0, 0, 0.0, 0, 0, 0, 0, 8192, 0, 0, 0, 0, 0, NULL, 0, 0, 0)",
-                CollectionIdGenerator.Next(), at.AddSeconds(-30), PgTargetServerId, PgTargetServerName);
+                CollectionIdGenerator.Next(), at.AddMinutes(-15), PgTargetServerId, PgTargetServerName);
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, reads, read_time_ms, writes, write_time_ms, writebacks, writeback_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, fsyncs, fsync_time_ms, stats_reset, read_bytes, write_bytes, extend_bytes) VALUES ($1, $2, $3, $4, 'client backend', 'relation', 'normal', 300, 400.0, 5, 2.0, 0, 0, 0, 0, 8192, 100, 0, 0, 0, 0, NULL, 81920, 40960, 0)",
                 CollectionIdGenerator.Next(), at, PgTargetServerId, PgTargetServerName);
