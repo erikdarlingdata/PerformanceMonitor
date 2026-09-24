@@ -188,7 +188,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             var body = reader.IsDBNull(0)
                 ? null
                 : context.PgReadBinaryFileGranted
-                    ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0))
+                    ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0), context.PgLogEncoding ?? System.Text.Encoding.UTF8)
                     : reader.GetString(0);
 
             /* The marker row (#3410). It cannot collide with a real body: a log tail that is exactly the

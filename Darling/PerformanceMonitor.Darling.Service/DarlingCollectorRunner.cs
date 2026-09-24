@@ -1121,8 +1121,17 @@ public sealed class DarlingCollectorRunner
     {
         if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
         {
+            var targetKey = ReadBinaryFileCacheKey(server);
             context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
-                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+                targetConnection, targetKey, cancellationToken);
+
+            /* #4062: the binary route decodes in the connected database's own server_encoding, never a
+               default, so PgLogEncoding is only ever set alongside a true grant — see the property's own
+               remarks on CollectorContext. */
+            context.PgLogEncoding = context.PgReadBinaryFileGranted
+                && PgReadBinaryFileCapability.TryGetCachedEncoding(targetKey, out var encoding)
+                    ? encoding
+                    : null;
         }
     }
 

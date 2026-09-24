@@ -77,7 +77,7 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
     [Fact]
     public async Task AGrantedTargetNeverNotes()
     {
-        var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = true };
+        var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = "UTF8:true" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", default);
 
         var result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), PgReadBinaryFileCapabilityTests.Runtime("target-a"));
@@ -90,7 +90,7 @@ public sealed class PgReadBinaryFileAdvisoryTests : IDisposable
     [Fact]
     public async Task AnUngrantedTargetNotesOncePerInterval()
     {
-        var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = false };
+        var connection = new PgReadBinaryFileCapabilityTests.FakeScalarConnection { Scalar = "UTF8:false" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", default);
 
         var first = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(PlainResult(), PgReadBinaryFileCapabilityTests.Runtime("target-a"));
