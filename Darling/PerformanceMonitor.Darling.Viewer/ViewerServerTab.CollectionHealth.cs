@@ -61,14 +61,21 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
-        using var readFanOut = ViewerReadFanOut.Of(2);
+        using var readFanOut = ViewerReadFanOut.Of(3);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
-        await Task.WhenAll(healthTask, logTask);
+        var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        await Task.WhenAll(healthTask, logTask, caveatsTask);
 
         _collectionHealthFilterMgr!.UpdateData(healthTask.Result);
         _collectionLogFilterMgr!.UpdateData(logTask.Result);
         RenderCollectorDurationChart(logTask.Result);
+
+        /* #3691 part a2: collapse the section entirely when there is nothing to report — the common case
+           (a healthy analysis pass, or a store below V141) — rather than showing an empty grid. */
+        var caveats = caveatsTask.Result;
+        CollectionCaveatsGrid.ItemsSource = caveats;
+        CollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>

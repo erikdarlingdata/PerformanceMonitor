@@ -3560,6 +3560,7 @@
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <!-- Fleet-wide "Purge Now": runs the daily retention purge on demand via the purge_now
@@ -3572,7 +3573,23 @@
                     <TextBlock x:Name="PurgeNowIndicator" Text="" FontSize="12"
                                Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                 </StackPanel>
-                <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <!-- #3691 part a2: the persisted analysis collection caveats (V141, part a1) — data
+                     families the scheduled analysis pass currently cannot read on this server, and why.
+                     Collapsed (Visibility=Collapsed, set in code-behind) when the list is empty, which is
+                     also what a pre-V141 store reads as (GetCollectionCaveatsAsync returns an empty list
+                     rather than throwing on the missing table). -->
+                <Expander x:Name="CollectionCaveatsExpander" Grid.Row="1" Header="Analysis could not read these data families"
+                          IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
+                    <DataGrid x:Name="CollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="200"/>
+                            <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="160"/>
+                            <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="140"/>
+                            <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="*"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Expander>
+                <TabControl Grid.Row="2" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Health Summary">
                         <DataGrid x:Name="CollectionHealthGrid" Style="{StaticResource DarkGrid}"
                                   MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
