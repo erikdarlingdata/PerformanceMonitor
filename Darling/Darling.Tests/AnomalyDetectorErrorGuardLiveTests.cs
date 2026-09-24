@@ -48,6 +48,12 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
     private const int PgTargetServerId = -365901;
     private const string PgTargetServerName = "a8-guard-pgtarget";
 
+    /* G1-4 (#3653 B): SampledWaitContribWindowSql only runs when pg_wait_stats has NO rows for the server
+       (the "only pg_wait_stats" exclusivity rule in DetectSampledWaitProfileAnomalies's summary) — a distinct
+       fake server id carries pg_wait_sampling rows and nothing else. */
+    private const int PgTargetSampledOnlyServerId = -365902;
+    private const string PgTargetSampledOnlyServerName = "a8-guard-pgtarget-sampled";
+
     [Fact]
     public async Task NoAnomalyDetectorLogsAnErrorOverASeededWindow_SqlServerStore()
     {
@@ -111,14 +117,22 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, PgTargetServerId, PgTargetServerName, "aurora-postgres", 17, ct);
+            await PgTargetFactCollectorTests.RegisterServerAsync(connection, PgTargetSampledOnlyServerId, PgTargetSampledOnlyServerName, "postgres", 18, ct);
             await SeedPgTargetFamilyTablesAsync(connection, ct);
 
             var logger = new CapturingTestLogger();
             var provider = new PgTargetBaselineProvider(postgres);
             var detector = new PgTargetAnomalyDetector(postgres, provider, logger);
 
-            var (_, commands) = await CommandCapture.CaptureAsync(
-                () => RunBothWindowsAsync(detector, PgTargetServerId, PgTargetServerName));
+            var (_, commands) = await CommandCapture.CaptureAsync(async () =>
+            {
+                await RunBothWindowsAsync(detector, PgTargetServerId, PgTargetServerName);
+                /* SampledWaitContribWindowSql only runs for a server with pg_wait_sampling rows and NO
+                   pg_wait_stats rows (class summary of DetectSampledWaitProfileAnomalies) — the sampled-only
+                   fake server above, run in the SAME capture so its command text joins the main assertion. */
+                await RunBothWindowsAsync(detector, PgTargetSampledOnlyServerId, PgTargetSampledOnlyServerName);
+                return true;
+            });
 
             Assert.True(!logger.Joined.Contains("Error:", StringComparison.Ordinal),
                 $"a PostgreSQL-target anomaly detector logged an error over a seeded window: {logger.Joined}");
@@ -218,6 +232,12 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
                 TimeRangeEnd = now,
                 ServerUtcOffset = TimeSpan.Zero
             };
+            /* DetectDeadlockRateAnomalies (and everything downstream of it) divides by ObservedDurationMs,
+               which reads Coverage?.ObservedMs — null (0) until a fact collector stamps it. Without this the
+               deadlock-rate arm returns before its window read ever executes, and DatabaseCounterWindowSql
+               reads as "never ran" no matter how the tables are seeded. Stamp full coverage: this guard is
+               about detector SQL reaching the store, not about the coverage machinery itself. */
+            context.Coverage = new WindowCoverage { NominalMs = window.TotalMilliseconds, ObservedMs = window.TotalMilliseconds, SampleCount = 1 };
             await detector.DetectAnomaliesAsync(context);
         }
 
@@ -404,6 +424,73 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
                 "INSERT INTO pg_database_size_stats (collection_id, collection_time, server_id, server_name, database_name, size_bytes, total_bytes, is_template, allows_connections) VALUES ($1, $2, $3, $4, 'appdb', $5, $5, FALSE, TRUE)",
                 CollectionIdGenerator.Next(), at, PgTargetServerId, PgTargetServerName, 1000100L);
         }
+
+        /* Extra current-window rows so the four consts that a flat per-week series leaves "never ran" actually
+           execute — the same fallback-firing recipe SeedSqlServerFamilyTablesAsync uses for its own wait spike.
+           DatabaseCounterWindowSql: a third pg_database_stats row one minute after t with 2 deadlocks (>=
+           AnomalyThresholds.PgDeadlockRateFloorPerHour and, over the ~4h/24h observed windows, safely under
+           PgDeadlockRateFallbackPerHour's per-hour rate scaled up — the ratio arm fires on ratio alone here since
+           the baseline mean is 0, and DetectDeadlockRateAnomalies reads the SAME window read regardless of which
+           arm fires, so ReadDatabaseCounterWindowAsync (hence DatabaseCounterWindowSql) always executes once
+           deadlockIntervals > 0 and deadlocks > 0. WaitContribWindowSql: an extra wait_stats row with a spiked
+           delta_wait_time_us so the wait-profile fallback bar (PgWaitProfileFallbackMsPerSec) fires exactly as
+           SeedSqlServerFamilyTablesAsync's own wait spike does for the SQL Server store. IoLatencyWindowSql: a
+           second-and-third pg_io_stats 15-minute-bucketed pair (date_bin) with reads deltas >= 250 (the
+           PgTargetScorer.IoBaselineBucketMinimumReads floor IoLatencyWindowSql's own CTE enforces) so a rated
+           sample exists. SampledWaitContribWindowSql: an extra pg_wait_sampling row with a higher sample_count so
+           DetectSampledWaitProfileAnomalies's fallback bar (PgSampledWaitProfileFallbackMsPerSec) fires — note
+           pg_wait_stats already has rows for every history/current time above, so exact_collections > 0 and this
+           detector sits out entirely UNLESS pg_wait_stats is absent for this server; PgTargetAnomalyDetector's own
+           "only pg_wait_stats" exclusivity rule means SampledWaitContribWindowSql can only run when pg_wait_stats
+           has NO rows for this server — so this guard seeds pg_wait_sampling on a SEPARATE fake server id that has
+           no pg_wait_stats rows at all (PgTargetSampledOnlyServerId below), exercised in its own extra pass. */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_database_stats (collection_id, collection_time, server_id, server_name, database_name, xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset) VALUES ($1, $2, $3, $4, 'appdb', $5, 0, 100, 9000, 0, 0, 2, NULL)",
+            CollectionIdGenerator.Next(), t.AddMinutes(1), PgTargetServerId, PgTargetServerName, xact + 200L);
+
+        // WaitContribWindowSql: a much larger spike than the fallback bar (500 ms/sec) — 60,000 ms of
+        // waiting inside a 60-second collection interval, well past PgWaitProfileFallbackMsPerSec.
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_wait_stats (collection_id, collection_time, server_id, server_name, wait_type_id, wait_event_id, wait_type, wait_event, waits, wait_time_us, delta_waits, delta_wait_time_us, sample_interval_seconds) VALUES ($1, $2, $3, $4, 1, 1, 'Lock', 'relation', 10, 60000000, 1, 60000000, 60)",
+            CollectionIdGenerator.Next(), t.AddMinutes(1), PgTargetServerId, PgTargetServerName);
+
+        // IoLatencyWindowSql: a LAG predecessor plus a rated successor, 15 minutes apart (its date_bin grain),
+        // with a reads delta >= the 250 floor and a latency-per-read well past PgIoLatencyFallbackMs (20 ms) —
+        // the per-week history above lands one row per bucket (no adjacent-bucket predecessor), so the baseline
+        // arm here is untrustworthy and the FALLBACK bar, not the floor, is what must clear.
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, reads, read_time_ms, writes, write_time_ms, writebacks, writeback_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, fsyncs, fsync_time_ms, stats_reset, read_bytes, write_bytes, extend_bytes) VALUES ($1, $2, $3, $4, 'client backend', 'relation', 'normal', 0, 0.0, 0, 0.0, 0, 0, 0, 0, 8192, 0, 0, 0, 0, 0, NULL, 0, 0, 0)",
+            CollectionIdGenerator.Next(), t.AddMinutes(1), PgTargetServerId, PgTargetServerName);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_io_stats (collection_id, collection_time, server_id, server_name, backend_type, object_type, context, reads, read_time_ms, writes, write_time_ms, writebacks, writeback_time_ms, extends, extend_time_ms, op_bytes, hits, evictions, reuses, fsyncs, fsync_time_ms, stats_reset, read_bytes, write_bytes, extend_bytes) VALUES ($1, $2, $3, $4, 'client backend', 'relation', 'normal', 300, 12000.0, 0, 0.0, 0, 0, 0, 0, 8192, 0, 0, 0, 0, 0, NULL, 0, 0, 0)",
+            CollectionIdGenerator.Next(), t.AddMinutes(16), PgTargetServerId, PgTargetServerName);
+
+        // SampledWaitContribWindowSql: a separate server with pg_wait_sampling rows and NO pg_wait_stats rows,
+        // so the "only pg_wait_stats" exclusivity rule (DetectSampledWaitProfileAnomalies's summary) lets its
+        // detector run rather than sit out; it needs its OWN pg_database_stats canary row for the whole-pass
+        // HasBaselineDataAsync gate (30-day witness), independent of the sampled family's own baseline.
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_database_stats (collection_id, collection_time, server_id, server_name, database_name, xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset) VALUES ($1, $2, $3, $4, 'appdb', 0, 0, 0, 0, 0, 0, 0, NULL)",
+            CollectionIdGenerator.Next(), t, PgTargetSampledOnlyServerId, PgTargetSampledOnlyServerName);
+
+        var sampledHistoryTimes = Enumerable.Range(1, 12).Select(w => t.AddDays(-7 * w)).ToArray();
+        long sampleCount = 100L;
+        foreach (var at in sampledHistoryTimes)
+        {
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO pg_wait_sampling (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms) VALUES ($1, $2, $3, $4, 'Lock', 'relation', 1, $5, 1000, 1, 60000)",
+                CollectionIdGenerator.Next(), at, PgTargetSampledOnlyServerId, PgTargetSampledOnlyServerName, sampleCount);
+            sampleCount += 100L;
+        }
+        // Two rows INSIDE every tested window (4h and 24h) so LAG has an in-window predecessor: the history
+        // rows above sit weeks outside the window and never pair with anything the SampledWaitRateWindowSql
+        // series reads. A huge count jump between them clears PgSampledWaitProfileFallbackMsPerSec (500 ms/sec).
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_wait_sampling (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms) VALUES ($1, $2, $3, $4, 'Lock', 'relation', 1, $5, 1000, 1, 60000)",
+            CollectionIdGenerator.Next(), t, PgTargetSampledOnlyServerId, PgTargetSampledOnlyServerName, 100L);
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO pg_wait_sampling (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms) VALUES ($1, $2, $3, $4, 'Lock', 'relation', 1, $5, 1000, 1, 60000)",
+            CollectionIdGenerator.Next(), t.AddMinutes(1), PgTargetSampledOnlyServerId, PgTargetSampledOnlyServerName, 100100L);
     }
 
     private static async Task DeletePgTargetRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
@@ -417,6 +504,7 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
         foreach (var table in tables)
         {
             await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", PgTargetServerId);
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"DELETE FROM {table} WHERE server_id = $1", PgTargetSampledOnlyServerId);
         }
     }
 
