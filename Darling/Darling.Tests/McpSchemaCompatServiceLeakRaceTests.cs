@@ -30,7 +30,7 @@ namespace Darling.Tests;
 /// This is a REFLECTION-level race (a fresh <see cref="MethodInfo"/> per emitted method never gets a
 /// primed parameter cache), not the suite's own thread scheduling, so it reproduces deterministically enough
 /// to prove or kill the hypothesis without depending on xUnit's parallelization. Every method is emitted
-/// fresh (<see cref="ModuleBuilder"/>) so its parameter cache starts empty every run.
+/// fresh (<c>ModuleBuilder</c>) so its parameter cache starts empty every run.
 /// </summary>
 public sealed class McpSchemaCompatServiceLeakRaceTests
 {
@@ -154,7 +154,10 @@ public sealed class McpSchemaCompatServiceLeakRaceTests
     /// non-deterministic; if this ever reads 0 on a slow/single-core CI runner, the race window closed for
     /// that run, not the theory.
     /// </summary>
-    [Fact]
+    /* Explicit, because it asserts that a race REPRODUCES: on a slow or lightly loaded runner the window may never
+       open, and a test that fails when a race does not happen is itself the flake #4075 was about. Run it by
+       hand (`-method`) to re-confirm the mechanism; the guarded test above is the one CI relies on. */
+    [Fact(Explicit = true)]
     public void RaceGetParameters_WithoutTheGuard_CanLeakTheServiceIntoTheSchema()
     {
         const int count = 5000;
