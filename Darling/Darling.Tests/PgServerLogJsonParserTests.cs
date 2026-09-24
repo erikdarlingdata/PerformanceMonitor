@@ -156,4 +156,18 @@ public sealed class PgServerLogJsonParserTests
         Assert.Equal(1, recordsDiscarded);
         Assert.All(entries, e => Assert.Equal(103, e.Pid));
     }
+
+    /* --- 7: a non-UTC timestamp is returned, not rejected (#4053 review H1, mirrored for jsonlog) ------ */
+
+    [Fact]
+    public void NonUtcZoneRecordIsReturnedWithItsZoneText()
+    {
+        var record = RealRecord.Replace("03:04:57.241 UTC", "03:04:57.241 PST");
+
+        var entries = PgServerLogJsonParser.Parse(record, out var recordsDiscarded);
+
+        var entry = Assert.Single(entries);
+        Assert.Equal(0, recordsDiscarded);
+        Assert.Equal("PST", entry.ZoneText);
+    }
 }

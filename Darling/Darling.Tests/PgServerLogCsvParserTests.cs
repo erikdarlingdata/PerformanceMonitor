@@ -42,6 +42,14 @@ public sealed class PgServerLogCsvParserTests
         + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"" + message.Replace("\"", "\"\"") + "\","
         + ",,,,,,,,\"\",\"client backend\",,0\n";
 
+    /* Same shape as RealRecord, but log_time carries a non-zero-offset zone (#4053 review H1): the
+       parser must still return this as a record, leaving the zone judgment to the collector's
+       foreign-zone filter. */
+    private static string RecordWithZone(string zone) =>
+        "2026-09-24 01:54:43.008 " + zone + ",\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+        + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\","
+        + ",,,,,,,,\"\",\"client backend\",,0\n";
+
     /* --- 1: forged newline in a quoted field stays inside the record ---------------------------------- */
 
     [Fact]
@@ -244,5 +252,19 @@ public sealed class PgServerLogCsvParserTests
            trailing partial is not emitted and not counted as discarded. */
         Assert.Single(entries);
         Assert.Equal(1, recordsDiscarded);
+    }
+
+    /* --- 8: a non-UTC log_time is returned, not rejected (#4053 review H1) ------------------------------ */
+
+    [Fact]
+    public void NonUtcZoneRecordIsReturnedWithItsZoneText()
+    {
+        var body = CutHead + RecordWithZone("PST");
+
+        var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
+
+        var entry = Assert.Single(entries);
+        Assert.Equal(1, recordsDiscarded);
+        Assert.Equal("PST", entry.ZoneText);
     }
 }

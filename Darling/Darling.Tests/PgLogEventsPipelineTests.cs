@@ -1499,6 +1499,53 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(1, measured.Value);
     }
 
+    /// <summary>
+    /// #4053 review H1: with the target's log_timezone not UTC, a csvlog record in another zone throws
+    /// <see cref="PgLogTimezoneUnsupportedException"/> — the same refusal the stderr route makes — rather
+    /// than the parser silently discarding it and the target reading as quiet.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_UnderANonUtcLogTimezone_ThrowsOnAForeignZoneRecord()
+    {
+        var record =
+            "2026-09-24 01:54:43.008 PST,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "America/New_York" } });
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// #4053 review H1: with the target's log_timezone at UTC, a csvlog record in another zone is skipped and
+    /// counted in <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/>, the same as the stderr route's
+    /// #4046 behaviour — never <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>, which would
+    /// give it the wrong note.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_UnderAUtcLogTimezone_SkipsAndCountsAForeignZoneRecord()
+    {
+        var record =
+            "2026-09-24 01:54:43.008 PST,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+    }
+
     [Fact]
     public async Task TheCollector_ClassifiesTheBody_ThrowsOnTheMarker_AndWritesTheColumnsInOrder()
     {

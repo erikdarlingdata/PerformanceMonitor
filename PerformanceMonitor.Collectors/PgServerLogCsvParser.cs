@@ -252,8 +252,11 @@ public static class PgServerLogCsvParser
 
     /// <summary>
     /// <c>log_time</c> renders as <c>YYYY-MM-DD HH:MM:SS.mmm ZONE</c> — the same stamp-then-zone shape the
-    /// stderr assembler reads, and the same rule applies to what the zone MEANS: only a zero-offset zone is
-    /// trusted as already-UTC, via <see cref="PgDeadlockLogParser.IsZeroOffsetLogZone"/>.
+    /// stderr assembler reads. This check decides only "is this a record" — a stamp that parses — never
+    /// whether the zone is UTC (#4053 review H1): a non-zero-offset zone is still a record, and the zone
+    /// decision belongs to <see cref="PgLogEventsCollector"/>'s foreign-zone filter, which runs after every
+    /// record has been recovered. Rejecting a foreign-zone stamp here starved that filter of the very
+    /// entries it exists to judge, and a non-UTC target read as quiet instead of refused.
     /// </summary>
     private static bool TryParseLogTime(string logTime, out DateTime occurredAtUtc, out string zoneText)
     {
@@ -269,11 +272,6 @@ public static class PgServerLogCsvParser
 
         var stamp = logTime[..spaceIndex];
         zoneText = logTime[(spaceIndex + 1)..];
-
-        if (!PgDeadlockLogParser.IsZeroOffsetLogZone(zoneText))
-        {
-            return false;
-        }
 
         return DateTime.TryParse(
             stamp,
