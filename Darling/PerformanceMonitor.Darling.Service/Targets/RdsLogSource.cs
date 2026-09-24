@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Amazon;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Service.Targets;
 
@@ -56,13 +57,61 @@ public sealed class RdsLogSource
     /// </summary>
     private const int FirstReadLines = 10_000;
 
+    /// <summary>
+    /// #4053 review round 1 (item 4): how much newer the newest stderr file's <c>LastWritten</c> (in ms
+    /// since epoch, the SDK's own unit) has to be than the newest <c>.csv</c>'s before the csvlog route
+    /// treats the <c>.csv</c> listing as stale and throws <see cref="PgNoCsvlogFileException"/> rather than
+    /// reading it.
+    /// </summary>
+    private const long StaleCsvThresholdMs = 5 * 60 * 1000;
+
+    /// <summary>
+    /// Which of an instance's PostgreSQL log files a read is for (#4053 part c1). RDS writes a target's
+    /// <c>csvlog</c> output as the stderr file's own name with <c>.csv</c> appended, so the two share one
+    /// <c>DescribeDBLogFiles</c> listing and differ only in which name <see cref="NewestLogFileAsync"/>
+    /// picks out of it. The resume marker needs no separate design for this: it is already keyed by
+    /// (instance, file name), so the csv file gets its own marker the first time anything asks for it.
+    /// </summary>
+    public enum LogFileKind
+    {
+        /// <summary>The default stderr-format file — today's only caller, and every caller but the
+        /// csvlog-aware log-event ingestor.</summary>
+        Stderr,
+
+        /// <summary>The <c>.csv</c> sibling <c>csvlog</c> writes beside the stderr file, read only when
+        /// the caller already knows the target's <c>log_destination</c> includes it.</summary>
+        Csv,
+    }
+
     private readonly Dictionary<string, string> _markers = new(StringComparer.Ordinal);
+
+    /// <summary>Test-only visibility into which marker keys survive a commit (#4053 review round 2, item 3):
+    /// whether <paramref name="key"/> (an "instance|file" pair) still holds a marker.</summary>
+    internal bool HasMarkerForKey(string key) => _markers.ContainsKey(key);
 
     private readonly Func<string, IAmazonRDS> _clientFactory;
 
-    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null)
-        => _clientFactory = clientFactory
+    private readonly Func<DateTime> _clock;
+
+    /// <summary>#4053 review round 2 (item 2): per-instance, when the stale-csv condition (stderr more than
+    /// <see cref="StaleCsvThresholdMs"/> newer than the newest .csv) was FIRST seen. Cleared the moment the
+    /// condition is gone, so a single wide-but-transient gap between two files rolled by the same syslogger
+    /// — the false positive this debounce exists for — cannot throw on its own; only a gap that HOLDS across
+    /// this many minutes of real time does.</summary>
+    private readonly Dictionary<string, DateTime> _staleSinceUtc = new(StringComparer.Ordinal);
+
+    /// <summary>How long the stale-csv condition has to hold, continuously, before
+    /// <see cref="NewestLogFileAsync"/> throws <see cref="PgNoCsvlogFileException"/> — the same 5 minutes as
+    /// <see cref="StaleCsvThresholdMs"/> itself, but measured in wall-clock cycles rather than the two files'
+    /// own timestamps.</summary>
+    private static readonly TimeSpan StaleCsvDebounce = TimeSpan.FromMinutes(5);
+
+    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null, Func<DateTime>? clock = null)
+    {
+        _clientFactory = clientFactory
             ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
+        _clock = clock ?? (() => DateTime.UtcNow);
+    }
 
     /// <param name="Text">Raw log text, to be handed to <c>PgPlanLogParser.Extract</c> unchanged.</param>
     /// <param name="MoreAvailable">RDS had more than one call's worth. The caller decides whether to keep
@@ -70,7 +119,12 @@ public sealed class RdsLogSource
     /// <param name="Resume">Where the NEXT read should start, once <see cref="Text"/> has actually reached
     /// the store. Handed back rather than recorded on the way out — see
     /// <see cref="CommitResume"/>.</param>
-    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume);
+    /// <param name="StartsAtFileStart">#4053 review round 1: true when this read was requested from offset 0
+    /// of a NEW file — a rotation, where no marker existed for this file's key but one existed for the same
+    /// instance under a different (older) csvlog file name. The forward-only route's only source of a known
+    /// start: <see cref="Text"/> begins at the file's first byte, so parity is exact from it without any
+    /// forward walk having to prove it.</param>
+    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume, bool StartsAtFileStart = false);
 
     /// <summary>
     /// A position this source can resume from, and the file it belongs to. Opaque to the caller: the
@@ -106,6 +160,85 @@ public sealed class RdsLogSource
         /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of resuming a
            new file at an old file's offset. */
         _markers[resume.Key] = resume.Marker;
+
+        /* #4053 review round 2 (item 3): once THIS file's marker has committed, every other key this same
+           instance holds under the same KIND (csv vs non-csv, going by the file name's own ".csv" suffix)
+           is dead weight — a rotation never resumes the old file, so its entry would otherwise sit in this
+           dictionary forever. Pruned here, on the NEW file's first commit, rather than inside
+           <see cref="ReadNewestAsync"/>, because <see cref="HasAnyMarkerForInstance"/> has to still see the
+           previous csv file's key at the moment the rotation is DETECTED — which happens earlier in the same
+           cycle, before this commit ever runs — or the very read this commit belongs to would never have been
+           given <c>StartsAtFileStart</c> in the first place.
+
+           A csv → stderr → csv switch (csvlog toggled off and back on) is the one case this still leaves
+           imperfect: the middle stderr commit prunes only the instance's other STDERR keys, so the original
+           csv key survives it, and the csv route resumes that OLD key rather than starting fresh — accepted,
+           because HasAnyMarkerForInstance then sees a real prior csv key under a name that is no longer the
+           newest, reads the new file from Marker "0", and can duplicate whatever events the stderr route
+           already stored for the same window. */
+        var instanceId = InstanceKey(resume.Key);
+        var isCsv = IsCsvFileName(ResumeFileName(resume.Key));
+
+        if (instanceId is null)
+        {
+            return;
+        }
+
+        var prefix = instanceId + "|";
+        List<string>? toRemove = null;
+
+        foreach (var existingKey in _markers.Keys)
+        {
+            if (string.Equals(existingKey, resume.Key, StringComparison.Ordinal)
+                || !existingKey.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (IsCsvFileName(existingKey[prefix.Length..]) == isCsv)
+            {
+                (toRemove ??= new List<string>()).Add(existingKey);
+            }
+        }
+
+        if (toRemove is not null)
+        {
+            foreach (var key in toRemove)
+            {
+                _markers.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>Whether a log file name is the <c>.csv</c> kind rather than the stderr kind —
+    /// <see cref="CommitResume"/>'s own marker-pruning check (#4053 review round 2, item 3).</summary>
+    private static bool IsCsvFileName(string? fileName)
+        => !string.IsNullOrEmpty(fileName) && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The instance half of a marker key ("instance|file"), or null when the key itself is
+    /// null/empty — <see cref="CommitResume"/>'s own copy of the same split
+    /// <see cref="RdsLogEventIngestor"/> keeps privately for its carry key.</summary>
+    private static string? InstanceKey(string? resumeKey)
+    {
+        if (string.IsNullOrEmpty(resumeKey))
+        {
+            return null;
+        }
+
+        var separator = resumeKey.IndexOf('|');
+        return separator < 0 ? resumeKey : resumeKey[..separator];
+    }
+
+    /// <summary>The file half of a marker key, or null when the key itself is null/empty.</summary>
+    private static string? ResumeFileName(string? resumeKey)
+    {
+        if (string.IsNullOrEmpty(resumeKey))
+        {
+            return null;
+        }
+
+        var separator = resumeKey.IndexOf('|');
+        return separator < 0 ? null : resumeKey[(separator + 1)..];
     }
 
     /// <summary>
@@ -117,7 +250,16 @@ public sealed class RdsLogSource
     /// it is not stable between calls and plans captured through one would be attributed to whichever
     /// replica answered.</para>
     /// </summary>
-    public async Task<LogChunk?> ReadNewestAsync(string host, CancellationToken cancellationToken = default)
+    public Task<LogChunk?> ReadNewestAsync(string host, CancellationToken cancellationToken = default)
+        => ReadNewestAsync(host, LogFileKind.Stderr, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ReadNewestAsync(string, CancellationToken)"/>, but for the csvlog sibling rather than the
+    /// stderr file (#4053 part c1) when <paramref name="kind"/> is <see cref="LogFileKind.Csv"/>. Every other
+    /// behaviour — the writer resolution, the marker discipline, the bounded first read — is unchanged; only
+    /// which file name <see cref="NewestLogFileAsync"/> picks differs.
+    /// </summary>
+    public async Task<LogChunk?> ReadNewestAsync(string host, LogFileKind kind, CancellationToken cancellationToken = default)
     {
         var endpoint = RdsEndpoint.TryParse(host);
 
@@ -143,21 +285,36 @@ public sealed class RdsLogSource
             ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
             : parsed.Identifier;
 
-        var newest = await NewestLogFileAsync(client, instanceId, cancellationToken);
+        var newest = await NewestLogFileAsync(client, instanceId, kind, cancellationToken);
 
         var key = instanceId + "|" + newest;
-        _markers.TryGetValue(key, out var marker);
+        var hasMarkerForThisFile = _markers.TryGetValue(key, out var marker);
+
+        /* #4053 review round 1 (item 2): a csvlog rotation — no marker for THIS file's key, but one exists
+           for the same instance under a DIFFERENT csv file name — requests Marker "0" (from the start)
+           instead of the bounded tail. That is the forward-only route's only honest source of a known start:
+           a first-ever read of an instance still wants the bounded tail (an unbounded "0" read against a
+           rotated multi-GB log is the #2565 cost this type exists to avoid), but a rotation is not a first
+           read — the route was already caught up, and reading the new file's tail instead of its start would
+           silently skip whatever it wrote between the rotation and this cycle. */
+        var startsAtFileStart = false;
+        string? requestedMarker = marker;
+        var requestedLines = hasMarkerForThisFile ? 0 : FirstReadLines;
+
+        if (kind == LogFileKind.Csv && !hasMarkerForThisFile && HasAnyMarkerForInstance(instanceId, newest))
+        {
+            startsAtFileStart = true;
+            requestedMarker = "0";
+            requestedLines = 0;
+        }
 
         var response = await client.DownloadDBLogFilePortionAsync(
             new DownloadDBLogFilePortionRequest
             {
                 DBInstanceIdentifier = instanceId,
                 LogFileName = newest,
-                /* "0" means from the start, which on a rotated multi-GB log is not what anyone wants on a
-                   first read. NumberOfLines with no marker asks RDS for the TAIL, matching the file
-                   route's bounded-tail behaviour. */
-                Marker = marker,
-                NumberOfLines = marker is null ? FirstReadLines : 0,
+                Marker = requestedMarker,
+                NumberOfLines = requestedLines,
             },
             cancellationToken);
 
@@ -170,7 +327,33 @@ public sealed class RdsLogSource
         return new LogChunk(
             response.LogFileData ?? string.Empty,
             response.AdditionalDataPending == true,
-            new ResumeMarker(key, response.Marker));
+            new ResumeMarker(key, response.Marker),
+            startsAtFileStart);
+    }
+
+    /// <summary>Whether ANY marker exists for <paramref name="instanceId"/> under a csv file name other than
+    /// <paramref name="currentFile"/> — the rotation signal for #4053 review round 1's item 2: this instance's
+    /// csvlog route was already caught up on an older file, so the newest name changing means a rotation, not
+    /// a first-ever read.</summary>
+    private bool HasAnyMarkerForInstance(string instanceId, string currentFile)
+    {
+        var prefix = instanceId + "|";
+        foreach (var existingKey in _markers.Keys)
+        {
+            if (!existingKey.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var fileName = existingKey[prefix.Length..];
+            if (!string.Equals(fileName, currentFile, StringComparison.Ordinal)
+                && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /* An AWS SDK response collection is NULL when the service omitted it, not an empty list, so the two
@@ -232,8 +415,8 @@ public sealed class RdsLogSource
     /// carrying no filename are one fact — there is nothing here to open — and a null return would have the
     /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
-    private static async Task<string> NewestLogFileAsync(
-        IAmazonRDS client, string instanceId, CancellationToken cancellationToken)
+    private async Task<string> NewestLogFileAsync(
+        IAmazonRDS client, string instanceId, LogFileKind kind, CancellationToken cancellationToken)
     {
         var files = await client.DescribeDBLogFilesAsync(
             new DescribeDBLogFilesRequest
@@ -249,25 +432,95 @@ public sealed class RdsLogSource
            'source')". It short-circuits the whole chain, so absent and empty both arrive as null and reach
            the one message below.
 
-           The name filter excludes .csv/.json siblings (#3997) — see the method's own remarks. AWS's own
-           docs state that enabling csvlog on RDS for PostgreSQL always writes stderr alongside it, so
-           filtering these out is not expected to ever empty the list on its own; it exists for the same
-           reason the self-hosted tail's exclusion does; a target where it somehow did would fall through to
-           the same "no log file" refusal below, which is the honest answer either way. */
+           The name filter picks the file this READ wants (#4053 part c1): the stderr route excludes the
+           .csv/.json siblings (#3997) — see the method's own remarks — while the csvlog route (LogFileKind.Csv)
+           selects the newest name that ENDS with .csv, its own mirror of that same defect. AWS's own docs state
+           that enabling csvlog on RDS for PostgreSQL always writes stderr alongside it, so the stderr filter is
+           not expected to ever empty the list on its own; a target where it somehow did, on either route, falls
+           through to the same "no log file" refusal below, which is the honest answer either way. */
+        Func<string?, bool> matchesKind = kind == LogFileKind.Csv
+            ? name => !string.IsNullOrEmpty(name) && name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+            : name => !string.IsNullOrEmpty(name)
+                && !name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
+        if (kind == LogFileKind.Csv)
+        {
+            /* #4053 review round 1 (item 4): csvlog turned OFF leaves the cached "csvlog is on" verdict
+               (PgLogFormatCapability, an hour's TTL) reading a .csv file that has gone stale — the syslogger
+               keeps writing the stderr file every cycle but stopped rolling .csv ones, and without this check
+               the route would keep re-reading the same old .csv file's unread tail (nothing, since nothing
+               new ever arrives) rather than surfacing that the format actually in use changed. A newest-stderr
+               timestamp more than 5 minutes ahead of the newest .csv's is that signal: on an instance actually
+               taking write traffic, one round trip's worth of drift between two files rolled by the same
+               syslogger is not this large; a target so idle neither file moves within 5 minutes produces no
+               difference to flag at all, so idleness is not a false-positive path. */
+            var newestStderr = files.DescribeDBLogFiles?
+                .Where(f => !string.IsNullOrEmpty(f.LogFileName)
+                    && !f.LogFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+                    && !f.LogFileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                .Select(f => f.LastWritten)
+                .Where(w => w.HasValue)
+                .Select(w => w!.Value)
+                .OrderByDescending(w => w)
+                .FirstOrDefault();
+
+            var newestCsv = files.DescribeDBLogFiles?
+                .Where(f => !string.IsNullOrEmpty(f.LogFileName)
+                    && f.LogFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                .Select(f => f.LastWritten)
+                .Where(w => w.HasValue)
+                .Select(w => w!.Value)
+                .OrderByDescending(w => w)
+                .FirstOrDefault();
+
+            /* #4053 review round 2 (item 2): the timestamp gap alone was a false positive on a target that
+               merely straddled one slow round trip through DescribeDBLogFiles — a single stale-looking read
+               is not the same fact as csvlog having actually been turned off. staleSinceUtc (per instance)
+               makes the throw wait for the SAME instance to read stale on every call across a real 5-minute
+               window, not just the one call that happened to see the gap; the moment a call sees the gap
+               close, the instance's entry is cleared and the debounce starts over from nothing. */
+            var staleNow = newestStderr.HasValue && newestCsv.HasValue
+                && newestStderr.Value - newestCsv.Value > StaleCsvThresholdMs;
+
+            if (staleNow)
+            {
+                if (!_staleSinceUtc.TryGetValue(instanceId, out var since))
+                {
+                    _staleSinceUtc[instanceId] = _clock();
+                }
+                else if (_clock() - since >= StaleCsvDebounce)
+                {
+                    throw new PgNoCsvlogFileException();
+                }
+            }
+            else
+            {
+                _staleSinceUtc.Remove(instanceId);
+            }
+        }
+
         return files.DescribeDBLogFiles?
             .OrderByDescending(f => f.LastWritten)
             .Select(f => f.LogFileName)
-            .FirstOrDefault(name => !string.IsNullOrEmpty(name)
-                && !name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
-                && !name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault(name => matchesKind(name))
             ?? throw new InvalidOperationException(
-                $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
-                + "filtered on 'postgresql' returned nothing it could name that was not a csvlog/jsonlog "
-                + "sibling (#3997). NO LOG WAS OPENED this cycle, "
-                + "so this is not an empty log — whatever this window held is unread. This records as a "
-                + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
-                + "that is stopped, still being created, or has just rotated its logs answers this way and "
-                + "clears itself on the first cycle that finds a log, while one that keeps answering this "
-                + "way is a target nobody can read and wants a decision rather than silence.");
+                kind == LogFileKind.Csv
+                    ? $"RDS listed no PostgreSQL csvlog file for instance '{instanceId}': DescribeDBLogFiles "
+                        + "filtered on 'postgresql' returned nothing it could name ending '.csv' (#4053 part c1). "
+                        + "NO LOG WAS OPENED this cycle, so this is not an empty log — whatever this window held is "
+                        + "unread. This records as a collection ERROR and not as a permissions skip, because no "
+                        + "grant fixes it: an instance that only just added csvlog to log_destination and has not "
+                        + "rolled a .csv file yet answers this way and clears itself on the first cycle that finds "
+                        + "one, while one that keeps answering this way is a target nobody can read and wants a "
+                        + "decision rather than silence."
+                    : $"RDS listed no PostgreSQL server log file for instance '{instanceId}': DescribeDBLogFiles "
+                        + "filtered on 'postgresql' returned nothing it could name that was not a csvlog/jsonlog "
+                        + "sibling (#3997). NO LOG WAS OPENED this cycle, "
+                        + "so this is not an empty log — whatever this window held is unread. This records as a "
+                        + "collection ERROR and not as a permissions skip, because no grant fixes it: an instance "
+                        + "that is stopped, still being created, or has just rotated its logs answers this way and "
+                        + "clears itself on the first cycle that finds a log, while one that keeps answering this "
+                        + "way is a target nobody can read and wants a decision rather than silence.");
     }
 }

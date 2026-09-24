@@ -414,6 +414,23 @@ public sealed class DarlingCollectorRunner
        LogTimezoneReadFailureLevel. In memory on purpose: a restart that warns once more is the right answer. */
     private readonly ConcurrentDictionary<int, DateTime> _logTimezoneReadWarnedUtc = new();
 
+    /* #4053 part c1: the same throttle as _logTimezoneReadWarnedUtc, for TryReadPgLogUsesCsvlogAsync's own
+       probe — its own dictionary because a target can fail one read and not the other (they run on separate
+       throwaway connections), and LogTimezoneReadFailureLevel already takes the dictionary as a parameter
+       for exactly this reuse (see LogTimezoneReadFailureLevelTests). */
+    private readonly ConcurrentDictionary<int, DateTime> _pgLogUsesCsvlogReadWarnedUtc = new();
+
+    /* #4053 review round 1 (item 5): the last good pgLogUsesCsvlog verdict this runner has seen for a
+       server, kept so a probe failure can return IT rather than false. False is not a neutral fallback
+       here the way it is for a target this route has never successfully read: on a target the route was
+       already reading csvlog for, a transient connection or probe failure flipping the verdict to false
+       would make the ingestor read the STDERR file instead, from that file's own (stale or absent) marker,
+       and re-emit rows the csvlog route already stored under different text — the very duplication
+       CommitResume's discipline exists to avoid. Runner-local and in-memory for the same reason every other
+       per-server cache on this type is: a restart simply re-probes from nothing, which is the existing
+       first-contact behaviour, not a regression. */
+    private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
+
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
     public DateTime? LastQueryStoreItemFailureUtc(int serverId)
@@ -883,9 +900,10 @@ public sealed class DarlingCollectorRunner
     /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
     /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
     /// self-hosted collectors.</summary>
-    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(ServerRuntime server, int foreignZoneLines)
+    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
+        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0)
     {
-        if (foreignZoneLines <= 0)
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0)
         {
             return CollectorContext.NoMeasurements;
         }
@@ -898,6 +916,15 @@ public sealed class DarlingCollectorRunner
             Deltas = _deltas,
         };
         PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+        /* #4053 part c1: the csvlog route's own discard count, same measurement label the self-hosted
+           PgLogEventsCollector.ReadAsync records for its own csvlog route (CsvRecordsDiscardedMeasurement),
+           reported only when > 0, following that method's exact pattern. */
+        if (csvRecordsDiscarded > 0)
+        {
+            context.Measure(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, csvRecordsDiscarded);
+        }
+
         return context.Measurements;
     }
 
@@ -921,17 +948,81 @@ public sealed class DarlingCollectorRunner
            the target fresh each cycle rather than caching it at connect. */
         var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
 
+        /* #4053 part c1: the same target-configuration read the self-hosted pg_read_file route makes through
+           ResolvePgReadBinaryFileGrantAsync, on the managed route's own throwaway connection for the same reason
+           TryReadLogTimezoneIsUtcAsync above needs one — this ingestor reaches the log through the AWS API, not
+           SQL, so it carries no target connection of its own to probe with. Cached the same hour by
+           PgLogFormatCapability itself, keyed the same way as the binary-file grant (ReadBinaryFileCacheKey), so
+           this is a cache hit on every cycle but the first and the one after a switch. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded);
 
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
+    }
+
+    /// <summary>
+    /// #4053 part c1: whether this target's <c>log_destination</c> includes <c>csvlog</c>, read the same way
+    /// <see cref="TryReadLogTimezoneIsUtcAsync"/> reads <c>log_timezone</c> — over a throwaway connection, since
+    /// the RDS ingestors carry none of their own.
+    ///
+    /// <para>#4053 review round 1 (item 5): on a probe failure, this returns the LAST GOOD verdict this
+    /// runner saw for the server (<see cref="_lastPgLogUsesCsvlogVerdict"/>), not a hardcoded false. False
+    /// used to be the fallback unconditionally, which is right for a target this runner has never read
+    /// successfully — today's stderr route, unchanged — but wrong for one it already knows is on csvlog:
+    /// flipping that verdict on a transient connection blip would make the ingestor read the stderr file
+    /// from ITS OWN marker and re-store rows the csvlog route already committed under different text. The
+    /// throttled Warning-then-Debug logging (#4051 round-2 review, L-2) is unchanged: a target whose probe
+    /// fails every cycle still logs once loudly and then quietly, on its own <see cref="_pgLogUsesCsvlogReadWarnedUtc"/>
+    /// throttle.</para>
+    /// </summary>
+    private async Task<bool> TryReadPgLogUsesCsvlogAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                connection, ReadBinaryFileCacheKey(server), cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _pgLogUsesCsvlogReadWarnedUtc.TryRemove(server.ServerId, out _);
+
+            /* #4053 review round 1 (item 5): recorded on every SUCCESSFUL probe, so the catch below always
+               has this cycle's predecessor to fall back to — not just the last time the probe happened to
+               fail. */
+            _lastPgLogUsesCsvlogVerdict[server.ServerId] = usesCsvlog;
+            return usesCsvlog;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Log(LogTimezoneReadFailureLevel(_pgLogUsesCsvlogReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
+                "Could not read log_destination for '{Server}' (#4053 part c1) — the RDS log-event route "
+                + "reads the {Fallback} file this cycle, its last known-good verdict.", server.Config.DisplayName,
+                _lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var lastGood) && lastGood ? "csv" : "stderr");
+
+            /* #4053 review round 1 (item 5): the last good verdict this runner saw for this server, not a
+               hardcoded false. A connection or probe failure flipping a known-csvlog target to false would
+               make the ingestor read the stderr file from ITS marker instead, re-storing rows the csvlog
+               route already committed under different text. A target this runner has never successfully
+               probed has no last-good verdict to fall back to, so false (today's stderr route, unchanged) is
+               still the answer for first contact — the one case this dictionary cannot help with, because
+               there is nothing yet to remember. */
+            if (_lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var fallback))
+            {
+                return fallback;
+            }
+            return false;
+        }
     }
 
     /// <summary>

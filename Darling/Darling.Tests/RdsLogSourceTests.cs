@@ -36,6 +36,7 @@ public class RdsLogSourceTests
         public List<DownloadDBLogFilePortionRequest> Downloads { get; } = new();
         public string? WriterId { get; init; }
         public string LogName { get; init; } = "error/postgresql.log.2026-08-25-18";
+        public string RotatedFromCsv { get; init; } = "error/postgresql.log.2026-08-24-18.csv";
         public string? NextMarker { get; set; } = "MARKER-1";
 
         /* The answers the populated fixtures above cannot produce. The AWS SDK leaves a response collection
@@ -50,7 +51,7 @@ public class RdsLogSourceTests
         /// used to diverge, the first crashing and the other two answering silently (#2996).
         /// <c>unnamed-newest</c> is the opposite case and the positive control: a nameless entry sitting
         /// beside real logs, which must still be read.</summary>
-        public string? LogFileShape { get; init; }
+        public string? LogFileShape { get; set; }
 
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
             DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
@@ -96,6 +97,23 @@ public class RdsLogSourceTests
                         new() { LogFileName = LogName, LastWritten = 9999 },
                         new() { LogFileName = LogName + ".csv", LastWritten = 10000 },
                     },
+                    /* #4053 review round 1 (item 4/6): the stderr file is 10 minutes NEWER than the newest
+                       .csv — csvlog was turned off and the syslogger kept rolling stderr files while no new
+                       .csv ever appeared, the stale-cache shape PgNoCsvlogFileException exists for. */
+                    "stale-csv" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = LogName + ".csv", LastWritten = 10_000 },
+                        new() { LogFileName = LogName, LastWritten = 10_000 + (10 * 60 * 1000) },
+                    },
+                    /* A rotation: an OLDER .csv file this instance's route already caught up on
+                       (RotatedFromCsv), beside a NEWER one (LogName + ".csv") it has never read — the shape
+                       HasAnyMarkerForInstance's rotation signal is checking for. */
+                    "csv-rotation" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = LogName, LastWritten = 20_000 },
+                        new() { LogFileName = RotatedFromCsv, LastWritten = 9_000 },
+                        new() { LogFileName = LogName + ".csv", LastWritten = 20_000 },
+                    },
                     _ => new List<DescribeDBLogFilesDetails>
                     {
                         new() { LogFileName = "error/postgresql.log.2026-08-09-01", LastWritten = 1000 },
@@ -117,10 +135,10 @@ public class RdsLogSourceTests
         }
     }
 
-    private static (RdsLogSource Source, FakeRds Client) Build(FakeRds? client = null)
+    private static (RdsLogSource Source, FakeRds Client) Build(FakeRds? client = null, Func<DateTime>? clock = null)
     {
         var fake = client ?? new FakeRds();
-        return (new RdsLogSource(_ => fake), fake);
+        return (new RdsLogSource(_ => fake, clock), fake);
     }
 
     /// <summary>
@@ -198,6 +216,41 @@ public class RdsLogSourceTests
         await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
 
         Assert.Equal("error/postgresql.log.2026-08-25-18", client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c1: <c>LogFileKind.Csv</c> selects the newest name ENDING <c>.csv</c> — the same fixture
+    /// #3997's stderr-route test uses, read the other way. The default kind (Stderr, the test above) still
+    /// picks the stderr sibling from this exact listing.
+    /// </summary>
+    [Fact]
+    public async Task LogFileKindCsv_SelectsTheNewestCsvFile()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-sibling" });
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.Equal("error/postgresql.log.2026-08-25-18.csv", client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c1: the csv and stderr routes get their OWN resume markers, keyed by file name as the
+    /// existing (instance, file) key already does — no new design, just proof that the two kinds do not
+    /// collide on one target.
+    /// </summary>
+    [Fact]
+    public async Task LogFileKindCsvAndStderr_KeepIndependentMarkers()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-sibling" });
+
+        var stderrChunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com");
+        source.CommitResume(stderrChunk!.Value.Resume);
+        var csvChunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.NotEqual(stderrChunk.Value.Resume.Key, csvChunk!.Value.Resume.Key);
+        /* The csv read is still a FIRST read on its own key — no marker sent — even though the stderr read
+           on the same instance already committed one. */
+        Assert.Null(client.Downloads[1].Marker);
     }
 
     /// <summary>
@@ -386,6 +439,149 @@ public class RdsLogSourceTests
         Assert.Contains("reports no writer", ex.Message, StringComparison.Ordinal);
         Assert.Contains("during a failover", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 review round 2 (item 2): a stale csvlog listing seen only ONCE does not throw — the debounce
+    /// makes the first sighting record when the condition started, and requesting the tail as usual (the
+    /// stale-csv fixture behaves as a plain csv read otherwise, so a download proves it fell through to the
+    /// ordinary path rather than the refusal below).
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListingSeenOnce_DoesNotThrow()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" }, () => now);
+
+        var chunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.NotNull(chunk);
+        Assert.Single(client.Downloads);
+    }
+
+    /// <summary>
+    /// #4053 review round 1 (item 4/6), reworked for review round 2's debounce: a stale csvlog listing — the
+    /// newest stderr file more than 5 minutes newer than the newest .csv — throws
+    /// <see cref="PgNoCsvlogFileException"/> only once the condition has HELD for at least 5 minutes of real
+    /// time on this instance, proven with the injectable clock: the first call at t=0 records the sighting
+    /// and does not throw (asserted above); a second call at t=5min against the SAME still-stale listing
+    /// does.
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListingHeldFor5Minutes_ThenThrowsPgNoCsvlogFileException()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" }, () => now);
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(5);
+
+        await Assert.ThrowsAsync<PgNoCsvlogFileException>(
+            () => source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv));
+
+        /* One download from the first (non-throwing) call, none from the second — the throw is decided
+           before a byte is asked for, the same shape the no-log-file refusal takes. */
+        Assert.Single(client.Downloads);
+    }
+
+    /// <summary>
+    /// #4053 review round 2 (item 2): the condition clearing between two sightings resets the debounce —
+    /// a transient gap must not accumulate credit toward the throw across cycles where the files were briefly
+    /// caught up with each other again.
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListingThatClears_ResetsTheDebounce()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" }, () => now);
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(3);
+        client.LogFileShape = "csv-sibling";
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(5);
+        client.LogFileShape = "stale-csv";
+
+        var chunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.NotNull(chunk);
+    }
+
+    /// <summary>
+    /// #4053 review round 1 (item 2/6): a csv rotation — no marker for the newest .csv file's own key, but
+    /// one exists for the same instance under an OLDER .csv name — requests <c>Marker "0"</c> instead of the
+    /// bounded tail, and the chunk says <see cref="RdsLogSource.LogChunk.StartsAtFileStart"/>.
+    /// </summary>
+    [Fact]
+    public async Task ACsvRotation_RequestsMarkerZeroAndSetsStartsAtFileStart()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-rotation" });
+
+        /* Seed a marker for the OLDER csv file, the same way a real prior cycle would have via CommitResume
+           after reading it while it was still the newest. */
+        var oldChunk = new RdsLogSource.ResumeMarker("solo|error/postgresql.log.2026-08-24-18.csv", "OLD-MARKER");
+        source.CommitResume(oldChunk);
+
+        var chunk = await source.ReadNewestAsync(
+            "solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.True(chunk!.Value.StartsAtFileStart);
+        Assert.Equal("0", client.Downloads[0].Marker);
+        Assert.Equal(0, client.Downloads[0].NumberOfLines);
+        Assert.Equal("error/postgresql.log.2026-08-25-18.csv", client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 review round 2 (item 3): once a rotation's new csv file's first marker commits, the OLD csv
+    /// key for the same instance is gone — the dictionary holds at most one csv key per instance, instead of
+    /// leaking one entry per rotation forever.
+    /// </summary>
+    [Fact]
+    public async Task ARotationsFirstCommit_PrunesTheOldCsvKey()
+    {
+        var (source, _) = Build(new FakeRds { LogFileShape = "csv-rotation" });
+
+        var oldKey = "solo|error/postgresql.log.2026-08-24-18.csv";
+        source.CommitResume(new RdsLogSource.ResumeMarker(oldKey, "OLD-MARKER"));
+        Assert.True(source.HasMarkerForKey(oldKey));
+
+        var chunk = await source.ReadNewestAsync(
+            "solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.True(chunk!.Value.StartsAtFileStart);
+
+        source.CommitResume(chunk.Value.Resume);
+
+        Assert.False(source.HasMarkerForKey(oldKey));
+        Assert.True(source.HasMarkerForKey(chunk.Value.Resume.Key!));
+    }
+
+    /// <summary>
+    /// #4053 review round 2 (item 3): pruning is scoped to the same KIND — a csv commit for one instance
+    /// must not remove that instance's own stderr marker, and vice versa. Both keys survive across a csv
+    /// commit.
+    /// </summary>
+    [Fact]
+    public void ACommitForOneKind_LeavesTheOtherKindsMarkerForTheSameInstanceAlone()
+    {
+        var (source, _) = Build();
+
+        var stderrKey = "solo|error/postgresql.log.2026-08-25-18";
+        var csvKey = "solo|error/postgresql.log.2026-08-25-18.csv";
+
+        source.CommitResume(new RdsLogSource.ResumeMarker(stderrKey, "STDERR-MARKER"));
+        source.CommitResume(new RdsLogSource.ResumeMarker(csvKey, "CSV-MARKER-1"));
+
+        Assert.True(source.HasMarkerForKey(stderrKey));
+        Assert.True(source.HasMarkerForKey(csvKey));
+
+        source.CommitResume(new RdsLogSource.ResumeMarker(csvKey, "CSV-MARKER-2"));
+
+        Assert.True(source.HasMarkerForKey(stderrKey));
+        Assert.True(source.HasMarkerForKey(csvKey));
     }
 
     /// <summary>
