@@ -300,7 +300,7 @@ LIMIT 2000";
             var planJson = reader.IsDBNull(2) ? null : reader.GetString(2);
             if (planJson is not null && context.PgReadBinaryFileGranted)
             {
-                planJson = PgBinaryTailText.UnescapeAndDecode(planJson);
+                planJson = PgBinaryTailText.UnescapeAndDecode(planJson, context.PgLogEncoding ?? System.Text.Encoding.UTF8);
             }
 
             /* #4058 L1: a NULL query id or duration here is the guarded CASE chain's own refusal — a

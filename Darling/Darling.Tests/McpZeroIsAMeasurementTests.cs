@@ -191,9 +191,18 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.Contains("undefined_percents = UndefinedPercentNotes(r)", body, StringComparison.Ordinal);
         Assert.Contains("severity = r.DurationRegressionPercent is null ? null : r.Severity", body, StringComparison.Ordinal);
 
+        /* #3898 D3 re-point: the head (DescriptionOf) now carries this guardrail in its own leaner words -
+           "duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0"
+           and "additional_duration_ms is the ranking key" - because the field-name-level detail below does not
+           fit the 620-char head budget alongside the tool's other guardrails (empty/unavailable/not_collected).
+           The literal field name and phrasing stay in the tail, which get_tool_guide serves in full. */
         var description = DescriptionOf(ReadRepoFile(file.Split('/')), "get_query_store_regressions");
-        Assert.Contains("undefined_percents", description, StringComparison.Ordinal);
-        Assert.Contains("null percent never sorts as 0", description, StringComparison.Ordinal);
+        Assert.Contains("null, not 0%, when their baseline is 0", description, StringComparison.Ordinal);
+        Assert.Contains("additional_duration_ms is the ranking key", description, StringComparison.Ordinal);
+
+        var tail = TailOf(ReadRepoFile(file.Split('/')), "get_query_store_regressions");
+        Assert.Contains("undefined_percents", tail, StringComparison.Ordinal);
+        Assert.Contains("null percent never sorts as 0", tail, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── 3. differenced trends: the first point is unrated ───────────────────────── */
@@ -532,6 +541,16 @@ public sealed class McpZeroIsAMeasurementTests
         var match = Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
         Assert.True(match.Success, $"{toolName} has no Description literal");
         return McpToolGuide.Split(match.Groups[1].Value).Head;
+    }
+
+    /// <summary>The get_tool_guide TAIL of one tool's Description literal - the long-form reading guide,
+    /// for a fact #3898 D3 re-pointed off the 620-char head. Null for an unconverted tool.</summary>
+    private static string? TailOf(string source, string toolName)
+    {
+        var body = ToolBody(source, toolName);
+        var match = Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
+        Assert.True(match.Success, $"{toolName} has no Description literal");
+        return McpToolGuide.Split(match.Groups[1].Value).Tail;
     }
 
     private static string Strip(string source) =>
