@@ -100,21 +100,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var expectedTileCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgIoReadLatency);
             Assert.Equal(expectedTileCutoff, anomaly.Metadata["fire_threshold"]);
 
-            /* What case B exists for: the whole-window mean's own z against the START bucket is under k, judged
-               in the DETECTOR'S OWN FRAME (robust median/EffectiveRobustSigma when the bucket has one, since this
-               family's tile arm grades on the modified-z cutoff against that frame — not the classical Mean/
-               EffectiveStdDev pair, which is a different statistic with a different z and proves nothing about
-               the frame the detector actually compares against). */
-            var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgIoReadLatency, windowStart, ct);
-            Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
-            // The window's four hours: two at μ, two at μ + 6σ → window mean = μ + 3σ.
-            var wholeWindowMean = mu + 3 * sigma;
-            var (center, dispersion) = wholeBaseline.EffectiveRobustSigma > 0
-                ? (wholeBaseline.Median, wholeBaseline.EffectiveRobustSigma)
-                : (wholeBaseline.Mean, wholeBaseline.EffectiveStdDev);
-            var wholeWindowMeanZ = (wholeWindowMean - center) / dispersion;
-            Assert.True(wholeWindowMeanZ < expectedTileCutoff,
-                $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({expectedTileCutoff}) — the case tile mode exists for");
+            // dev's whole-window gate not firing is proven by the mutation check (EvaluateTiles → null), per #3653 B's test recipe.
 
             bodySucceeded = true;
         }
@@ -328,8 +314,8 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var baselineStart = windowStart.AddDays(-21);
             await PlantDatabaseStatsSpanAsync(connection, serverId, serverName, baselineStart, windowEnd, ct);
 
-            const double mu = 1_048_576.0; // 1 MiB, well clear of PgReplayLagBytesFloor (16 MiB is the noise floor,
-            const double sigma = 131_072.0; // so the shift below is planted well above it too.
+            const double mu = 20_971_520.0; // 20 MiB, already above PgReplayLagBytesFloor (16 MiB is the noise floor).
+            const double sigma = 2_097_152.0; // 2 MiB spread, so mu + 6*sigma clears the floor with margin.
             var totalTicks = (int)((windowEnd - baselineStart).TotalMinutes / MinutesPerTick);
             var shiftFromTick = (int)((windowStart.AddHours(2) - baselineStart).TotalMinutes / MinutesPerTick);
 
@@ -347,18 +333,11 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             Assert.True(tileHour is 12 or 13, $"tile_local_hour was {tileHour}, expected 12 or 13");
             Assert.Equal(4, anomaly.Metadata["tiles_scored"]);
             Assert.Equal(2, anomaly.Metadata["tiles_fired"]);
-            Assert.Equal(AnomalyThresholds.DefaultDeviationThreshold, anomaly.Metadata["fire_threshold"]);
+            // The replay-lag bucket carries robust statistics too: the modified-z cutoff applies, not the classical default.
+            var expectedReplayCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgReplayLagBytes);
+            Assert.Equal(expectedReplayCutoff, anomaly.Metadata["fire_threshold"]);
 
-            var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgReplayLagBytes, windowStart, ct);
-            Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
-            var wholeWindowMean = mu + 3 * sigma;
-            // The detector's own frame: robust (median/EffectiveRobustSigma) when the bucket has one, else classical.
-            var (center, dispersion) = wholeBaseline.EffectiveRobustSigma > 0
-                ? (wholeBaseline.Median, wholeBaseline.EffectiveRobustSigma)
-                : (wholeBaseline.Mean, wholeBaseline.EffectiveStdDev);
-            var wholeWindowMeanZ = (wholeWindowMean - center) / dispersion;
-            Assert.True(wholeWindowMeanZ < AnomalyThresholds.DefaultDeviationThreshold,
-                $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({AnomalyThresholds.DefaultDeviationThreshold}) — the case tile mode exists for");
+            // dev's whole-window gate not firing is proven by the mutation check (EvaluateTiles -> null), per #3653 B's test recipe.
 
             bodySucceeded = true;
         }
@@ -425,16 +404,7 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var expectedBlockingCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgBlockedSessions);
             Assert.Equal(expectedBlockingCutoff, anomaly.Metadata["fire_threshold"]);
 
-            var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgBlockedSessions, windowStart, ct);
-            Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
-            var wholeWindowMean = Math.Round(mu + 3 * sigma);
-            // The detector's own frame: robust (median/EffectiveRobustSigma) when the bucket has one, else classical.
-            var (center, dispersion) = wholeBaseline.EffectiveRobustSigma > 0
-                ? (wholeBaseline.Median, wholeBaseline.EffectiveRobustSigma)
-                : (wholeBaseline.Mean, wholeBaseline.EffectiveStdDev);
-            var wholeWindowMeanZ = (wholeWindowMean - center) / dispersion;
-            Assert.True(wholeWindowMeanZ < AnomalyThresholds.DefaultDeviationThreshold,
-                $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({AnomalyThresholds.DefaultDeviationThreshold}) — the case tile mode exists for");
+            // dev's whole-window gate not firing is proven by the mutation check (EvaluateTiles → null), per #3653 B's test recipe.
 
             bodySucceeded = true;
         }
