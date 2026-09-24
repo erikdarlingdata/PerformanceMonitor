@@ -224,7 +224,10 @@ CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 10
             Assert.Equal(0, anomaly.Metadata["is_new"]);
             Assert.True(anomaly.Metadata["modified_z"] >= 3.0 * AnomalyThresholds.HeavyTailModifiedZThreshold, $"modified_z {anomaly.Metadata["modified_z"]} — the escape must be reachable on this planting");
             Assert.True(anomaly.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold);
-            Assert.Equal(48, anomaly.Metadata["window_samples"]);
+            /* #3653 B: under tiles, window_samples is the WORST HOUR TILE's count (one hour at the
+               5-min sampler cadence = 12); the whole window's count moved to window_samples_total. */
+            Assert.Equal(48, anomaly.Metadata["window_samples_total"]);
+            Assert.Equal(12, anomaly.Metadata["window_samples"]); // the worst hour tile (#3653 B)
             Assert.Equal(48 * SampledMs, anomaly.Metadata[PgTargetScorer.WaitSourceObservedMsKey], precision: 3);
             Assert.Equal(48 * CycleMinutes * 60_000, anomaly.Metadata[PgTargetScorer.WaitSourceIntervalMsKey], precision: 3);
             Assert.Equal(1, anomaly.Metadata[PgTargetScorer.WaitSampledMsKnownKey]);
