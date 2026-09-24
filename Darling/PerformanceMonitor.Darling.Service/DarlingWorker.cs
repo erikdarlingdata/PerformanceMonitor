@@ -9143,7 +9143,7 @@ LIMIT 1";
                 + "that this database's encoding cannot pass to this collector, so PostgreSQL refused the whole read."
                 + Planted
                 + " Granting pg_read_binary_file does not help on this database. The binary route decodes the log in "
-                + "the database's own server_encoding, which this database's encoding is not one this collector maps "
+                + "the database's own server_encoding, but this collector does not map this database's encoding "
                 + "(EUC_TW, EUC_JIS_2004, LATIN6, LATIN8, LATIN10, MULE_INTERNAL, or one this runtime cannot resolve). "
                 + "The read fails until the line with the byte leaves the 4 MB tail window.";
         }
