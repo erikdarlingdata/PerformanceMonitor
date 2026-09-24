@@ -227,7 +227,12 @@ public sealed class RdsLogEventIngestorCsvlogTests
         var only = Assert.Single(p2.Entries);
         Assert.Equal("line one\nline two", only.Message);
         Assert.Equal(string.Empty, p2.Next.Partial);
-        Assert.True(p2.Next.StartKnown);
+
+        /* #4053 review round 1, item A: this portion ran with no known start (Step's carry above never
+           passed through a file-start read), so the forward-only route's rule is that an unknown-start
+           mode's next carry NEVER hands on a known start — it stays unknown until the next file's own
+           offset-0 read. */
+        Assert.False(p2.Next.StartKnown);
     }
 
     /// <summary>After a portion that ends at the file's end, the next portion's start is known, so a
@@ -242,11 +247,12 @@ public sealed class RdsLogEventIngestorCsvlogTests
         var straddler = RecordWithMultiLineMessage("line one\n" + lookAlikeBody + "\n" + lookAlikeBody + "\nline four");
         var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
 
-        var p0 = Step(RdsLogEventIngestor.CsvCarry.Empty, Record("UTC", "before"), pending: false);
-        Assert.Single(p0.Entries);
-        Assert.True(p0.Next.StartKnown);
+        /* #4053 review round 1, item A: the known start a real file-start read gives (CsvCarry with an
+           empty partial and StartKnown true) — not derived from an end-of-file portion's own end, which the
+           forward-only design no longer trusts. */
+        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
 
-        var p1 = Step(p0.Next, straddler[..cut], pending: true);
+        var p1 = Step(knownStart, straddler[..cut], pending: true);
         Assert.Empty(p1.Entries);
         Assert.Equal(0, p1.RecordsDiscarded);
         Assert.True(p1.Next.StartKnown);
@@ -254,27 +260,6 @@ public sealed class RdsLogEventIngestorCsvlogTests
         var p2 = Step(p1.Next, straddler[cut..] + Record("UTC", "after"), pending: false);
         Assert.Equal(new[] { "nosuchuser", "after" }, p2.Entries.ConvertAll(e => e.UserName ?? ""));
         Assert.DoesNotContain(p2.Entries, e => e.UserName == "planted");
-    }
-
-    /// <summary>Resync: a carry that wrongly claims a known start (the syslogger multi-write race) puts the
-    /// forward walk out of phase, so it discards more than it keeps. The step re-parses with the start unknown,
-    /// never emits what the out-of-phase walk kept, and hands on an unknown start.</summary>
-    [Fact]
-    public void AWronglyKnownStart_IsReParsedWithTheStartUnknown()
-    {
-        /* A wrong carry: the tail of a record whose open quote is not in it, so a forward walk from here
-           starts on the wrong side of a quote. The garbage lines between keep the out-of-phase walk
-           finding boundaries (and so discarding) rather than none. */
-        var wrong = new RdsLogEventIngestor.CsvCarry("tail of a quoted field\",,,\n", StartKnown: true);
-        var body = "a\"\nb\nc\nd\ne\n" + Record("UTC", "a") + Record("UTC", "b") + Record("UTC", "c");
-
-        var forward = PgServerLogCsvParser.Parse(wrong.Partial + body, PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary, out var fd, out _);
-        Assert.True(forward.Count < fd, $"the out-of-phase walk should discard more than it keeps (kept {forward.Count}, discarded {fd})");
-
-        var step = Step(wrong, body, pending: true);
-        var unknownStart = PgServerLogCsvParser.Parse(wrong.Partial + body, PgServerLogCsvParser.CsvBodyEdges.None, out _, out _);
-        Assert.Equal(unknownStart.ConvertAll(e => e.UserName ?? ""), step.Entries.ConvertAll(e => e.UserName ?? ""));
-        Assert.False(step.Next.StartKnown);
     }
 
     /// <summary>Bound: a pending portion with no boundary carries whole until the carry passes 1 MiB, when it is
