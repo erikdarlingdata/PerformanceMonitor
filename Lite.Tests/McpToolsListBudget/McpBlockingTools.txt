@@ -1,5 +1,5 @@
 # McpBlockingTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_blocked_process_reports 1340
+tool get_blocked_process_reports 483
 param get_blocked_process_reports.as_of 167
 param get_blocked_process_reports.hours_back 29
 param get_blocked_process_reports.limit 133
@@ -27,7 +27,7 @@ param get_deadlock_trend.as_of 167
 param get_deadlock_trend.hours_back 29
 param get_deadlock_trend.server_name 28
 
-tool get_deadlocks 694
+tool get_deadlocks 591
 param get_deadlocks.as_of 167
 param get_deadlocks.hours_back 29
 param get_deadlocks.limit 133
