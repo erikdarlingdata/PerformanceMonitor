@@ -355,19 +355,20 @@ public sealed partial class ViewerDataService
         var tier = DurationTrendRouting.ResolveTier(
             startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable(rollups), coverage.For(hourlyView, dailyView));
 
-        /* #3653 (Q12): the tier is decided over the LEGACY pair's coverage above (the deeper of the two on any
-           upgraded store); the hourly RELATION is then the interval-honest successor where the store has it
-           and it reaches as far back as the legacy for this window, the legacy otherwise
-           (RollupCoverage.HourlyRelationFor). The hourly text is built for that relation with the viewer's $4
-           database filter — the same builder hourlySql came from, over the legacy name; hourlySql is what a
-           store without the successors still runs, and stays byte-equal to the MCP reader's pinned text. */
-        var hourlyRelation = coverage.HourlyRelationFor(hourlyView, startUtc);
+        /* #3653 A6: the tier is decided over the LEGACY pair's coverage above (the deeper of the two on any
+           upgraded store); the hourly FROM-clause item is then RollupCoverage.StitchedRelationSql — either
+           "collect.<legacy> AS f" unchanged (byte-equal to hourlySql, which stays the MCP reader's pinned
+           constant a store without successors still runs), or the stitched form splicing in the successor
+           past its floor. BuildHourlyTrendSql already parameterises its FROM target, so the stitch's aliased
+           relation (bare "f", no schema prefix needed — the stitch already schema-qualifies both sides)
+           slots in exactly where the legacy/successor name used to. */
+        var hourlyFromClause = coverage.StitchedRelationSql(hourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var points = await ReadDurationTrendAsync(
             tier == RetentionTier.Raw
                 ? rawSql
-                : string.Equals(hourlyRelation, hourlyView, StringComparison.Ordinal)
+                : string.Equals(hourlyFromClause, $"collect.{hourlyView} AS f", StringComparison.Ordinal)
                     ? hourlySql
-                    : DurationTrendRouting.BuildHourlyTrendSql(hourlyRelation, withDatabaseFilter: true),
+                    : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true),
             serverId, startUtc, endUtc, databaseNames, cancellationToken);
         var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
         return new QueryTrendSeries(points, tier, effectiveStart, truncated);
