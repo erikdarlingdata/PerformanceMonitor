@@ -1260,7 +1260,7 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
         Assert.True(start > 0 && end > start, "the Aurora wait-profile detector moved");
         var body = code[start..end];
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*meanRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*PgWaitProfileFallbackMsPerSec,\s*PgWaitProfileFallbackMsPerSec,\s*SigmaDisplayCap\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*meanRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*PgWaitProfileFallbackMsPerSec,\s*PgWaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
             body);
         Assert.Contains("if (!decision.Fire) return;", body, StringComparison.Ordinal);
         Assert.DoesNotMatch(@"modifiedZ\s*<\s*HeavyTailModifiedZThreshold", body);
