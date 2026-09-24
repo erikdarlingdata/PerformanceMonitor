@@ -251,7 +251,11 @@ WHERE ios.collection_time =
 )
 ORDER BY
     CASE WHEN ios.total_reads = 0 THEN 0 ELSE 1 END,
-    ios.reserved_mb DESC
+    ios.reserved_mb DESC,
+    ios.database_name,
+    ios.schema_name,
+    ios.table_name,
+    ios.index_name
 OPTION(MAXDOP 1, RECOMPILE);";
 
             using var command = new SqlCommand(query, connection);

@@ -89,7 +89,7 @@ public sealed class IndexUsageTruncationTests : IClassFixture<SharedDuckDbFixtur
         await InsertIndexAsync(capture, Louder, "IX_HotTwo", objectId: 201, indexId: 1, reservedMb: 4000m, seeks: 800_000);
     }
 
-    private async Task InsertIndexAsync(DateTime capture, string db, string indexName, int objectId, int indexId, decimal reservedMb, long seeks)
+    private async Task InsertIndexAsync(DateTime capture, string db, string indexName, int objectId, int indexId, decimal? reservedMb, long seeks)
     {
         using var readLock = _duckDb.AcquireReadLock();
         var conn = await SeedConnectionAsync();
@@ -102,7 +102,7 @@ public sealed class IndexUsageTruncationTests : IClassFixture<SharedDuckDbFixtur
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
         P(_nextId--); P(capture); P(_serverId); P(ServerName); P(_startTime); P(db);
         P(objectId); P("T" + objectId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        P(indexId); P(indexName); P(reservedMb); P(seeks);
+        P(indexId); P(indexName); P((object?)reservedMb ?? DBNull.Value); P(seeks);
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -159,6 +159,25 @@ public sealed class IndexUsageTruncationTests : IClassFixture<SharedDuckDbFixtur
            rather than to whatever the store happened to return first. */
         var capped = await _dataService.GetIndexUsageAsync(_serverId, topN: 1, databaseName: null);
         Assert.Equal("IX_NeverRead", Assert.Single(capped).IndexName);
+    }
+
+    /* ---- ties (#4134): the order, and so what a cap keeps, must not depend on scan order ---- */
+
+    [Fact]
+    public async Task TiedSizesBreakByName_AndAMissingSizeSortsLast_SoACappedPageIsStable()
+    {
+        var capture = DateTime.UtcNow;
+        /* All three are Active (seeks > 0) and inserted out of order: two tie on reserved_mb, one has no size. */
+        await InsertIndexAsync(capture, Louder, "IX_Unsized", objectId: 302, indexId: 4, reservedMb: null, seeks: 10);
+        await InsertIndexAsync(capture, Louder, "IX_TieB", objectId: 300, indexId: 3, reservedMb: 50m, seeks: 10);
+        await InsertIndexAsync(capture, Asked, "IX_TieA", objectId: 301, indexId: 3, reservedMb: 50m, seeks: 10);
+
+        var rows = await _dataService.GetIndexUsageAsync(_serverId, topN: 100, databaseName: null);
+        Assert.Equal(new[] { "IX_TieA", "IX_TieB", "IX_Unsized" }, rows.Select(r => r.IndexName).ToArray());
+
+        /* A cap of 1 keeps the same row on every call: the first by name among the tied sizes. */
+        var capped = await _dataService.GetIndexUsageAsync(_serverId, topN: 1, databaseName: null);
+        Assert.Equal("IX_TieA", Assert.Single(capped).IndexName);
     }
 
     /* ---- the count, taken before the cap ---- */

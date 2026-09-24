@@ -123,6 +123,12 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     public void IndexUsageSql_LatestSnapshot_ClassifiesUnusedWriteOnlyActive()
     {
         var sql = DarlingObjectStatsReader.IndexUsageSql;
+        /* #4134: PostgreSQL sorts NULLs FIRST on DESC, Lite's DuckDB sorts them last. NULLS LAST keeps the two
+           products' order the same, and the names break reserved_mb ties so a capped page is stable. */
+        SqlTextPin.AssertExpresses("reserved_mb DESC NULLS LAST", sql, "an unsized index sorts ahead of sized ones");
+        SqlTextPin.AssertExpresses(
+            "reserved_mb DESC NULLS LAST, database_name, schema_name, table_name, index_name", sql,
+            "reserved_mb ties no longer break by name, so a capped page can change between calls");
         Assert.Contains("FROM v_index_object_stats", sql, StringComparison.Ordinal);
         SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
         /* Case is NOT normalised: these are the values the tool emits and callers compare. */
