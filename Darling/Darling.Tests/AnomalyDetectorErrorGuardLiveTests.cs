@@ -151,9 +151,21 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
     /// </summary>
     private static void AssertEveryWindowSqlRan(Type detectorType, List<string> commands)
     {
+        /* #4171 (the tiled-window recipe, #3653 A8 option B lane L3a) gave PgTargetAnomalyDetector's TPS,
+           session, CPU and wait-rate arms tile twins (*TileWindowSql) that the detector now actually reads;
+           the plain *WindowSql consts stay on the type ONLY so PgTargetAnomalyTests can keep pinning their
+           shape (DatabaseCounterWindowSql still runs directly, for the deadlock-rate arm — not excluded).
+           SCOPED to PgTargetAnomalyDetector only: PgAnomalyDetector's own SessionWindowSql/CpuWindowSql/
+           WaitRateWindowSql (same names, SQL Server family) still run directly and must stay covered there.
+           A NAMED exclusion, not a name-pattern one: each entry is the const superseded by its own tile twin. */
+        var supersededByTile = detectorType == typeof(PgTargetAnomalyDetector)
+            ? new HashSet<string> { "SessionWindowSql", "CpuWindowSql", "WaitRateWindowSql" }
+            : new HashSet<string>();
+
         var windowSqlFields = detectorType
             .GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
             .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("WindowSql", StringComparison.Ordinal))
+            .Where(f => !supersededByTile.Contains(f.Name))
             .ToList();
 
         Assert.NotEmpty(windowSqlFields);
@@ -190,7 +202,7 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
     {
     }
 
-    private static async Task RunBothWindowsAsync(IAnomalyDetector detector, int serverId, string serverName)
+    private static async Task<bool> RunBothWindowsAsync(IAnomalyDetector detector, int serverId, string serverName)
     {
         var now = DateTime.SpecifyKind(
             new DateTime(DateTime.UtcNow.Ticks - (DateTime.UtcNow.Ticks % TimeSpan.TicksPerSecond)),
@@ -208,6 +220,8 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
             };
             await detector.DetectAnomaliesAsync(context);
         }
+
+        return true;
     }
 
     /// <summary>
@@ -265,6 +279,14 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
                 "VALUES ($1, $2, $3, $4, 'testdb', 'testdb.mdf', 'ROWS', 'C:\\testdb.mdf', 100, 10, 5, 8192, 4096, 50, 25, 0, 0, 1, 1, 8192, 4096, 5, 5, 0, 0)",
                 CollectionIdGenerator.Next(), at, SqlServerId, SqlServerName);
         }
+
+        /* An extra current-window wait_stats row, one minute after t, with a spiked delta_wait_time_ms so the
+           wait-profile detector's fallback bar (WaitProfileFallbackMsPerSec, 250 ms/sec) fires and
+           WaitContribWindowSql actually runs — the flat per-week series above never exceeds it and leaves that
+           const "never ran". */
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, waiting_tasks_count, wait_time_ms, signal_wait_time_ms, delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            CollectionIdGenerator.Next(), t.AddMinutes(1), SqlServerId, SqlServerName, "PAGEIOLATCH_SH", 1L, 30000L, 3000L, 1L, 30000L, 3000L);
 
         await DarlingMcpTestData.ExecAsync(connection, ct,
             "INSERT INTO blocked_process_reports (blocked_report_id, collection_time, server_id, server_name, event_time, database_name, blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode, blocked_status, blocked_isolation_level, blocked_log_used, blocked_transaction_count, blocked_client_app, blocked_host_name, blocked_login_name, blocked_sql_text, blocking_status, blocking_isolation_level, blocking_client_app, blocking_host_name, blocking_login_name, blocking_sql_text, blocked_transaction_name, blocking_transaction_name, blocked_last_tran_started, blocking_last_tran_started, blocked_last_batch_started, blocking_last_batch_started, blocked_last_batch_completed, blocking_last_batch_completed, blocked_priority, blocking_priority, blocked_process_report_xml, object_id, database_id, contentious_object, monitor_loop, blocked_query_plan_xml, blocking_query_plan_xml) " +
