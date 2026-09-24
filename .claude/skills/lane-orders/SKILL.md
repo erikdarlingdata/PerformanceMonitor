@@ -208,6 +208,10 @@ Never edit an existing migration.
       [#<PR>]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/<PR>
 
   Plain punctuation, no em dashes. A test-only PR gets none.
+- Check every claim in the entry against your diff, the negative ones too. A removed issue reference is
+  deleted text, so that entry can't say nothing was deleted. A change to a description must not read as a
+  change to behavior. Name every user-visible change the PR makes. Lane entries were wrong in 8 of 42 at
+  the #4080 splice and 6 of 41 at #4143.
 
 ## Final report (the PR body)
 
