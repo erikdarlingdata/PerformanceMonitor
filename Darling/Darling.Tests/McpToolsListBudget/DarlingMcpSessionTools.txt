@@ -1,7 +1,7 @@
 # DarlingMcpSessionTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_active_queries 1406
+tool get_active_queries 616
 param get_active_queries.as_of 167
-param get_active_queries.blocking_only 238
+param get_active_queries.blocking_only 134
 param get_active_queries.database_name 156
 param get_active_queries.hours_back 37
 param get_active_queries.limit 149
