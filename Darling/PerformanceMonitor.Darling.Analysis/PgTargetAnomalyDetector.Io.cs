@@ -123,8 +123,15 @@ ORDER BY " + WindowTiles.LocalHourSql;
             var peakSampleReadsByTile = new List<double>();
             await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             using (var cmd = WindowCommand(IoLatencyWindowSql, connection, context))
-            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
+                /* #3653 A8 option B: the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds $4..$6 from the
+                   ANALYSIS window's clock — WindowCommand only binds $1..$3, so the tile key's clock parameters
+                   ride here, exactly as PgTargetBaselineProvider's keyed/robust arms bind them. */
+                cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
+
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4));
