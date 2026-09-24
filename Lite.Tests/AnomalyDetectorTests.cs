@@ -570,7 +570,14 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.NotNull(cpu);
         Assert.Equal(90.0, cpu!.Value);
         Assert.Equal(90.0, cpu.Metadata["peak_cpu"]);
-        Assert.Equal(71.25, cpu.Metadata["avg_cpu_in_window"], precision: 6);
+        /* #3653 A8 option B: the fact reports the WORST HOUR TILE's mean, not the whole 4 h window's.
+           16 samples at a 15-min step make 4 hour tiles of 4 samples each; the hot sample (index 7) falls
+           in the second tile with 3 base-value neighbors (indices 4-6), so the tile's own mean fires,
+           not (15*70 + 90)/16 = 71.25. */
+        const int cpuHotIndex = 7, cpuSamples = 16, cpuSamplesPerTile = 4;
+        var cpuTileSamples = Enumerable.Range(0, cpuSamples).Count(i => i / cpuSamplesPerTile == cpuHotIndex / cpuSamplesPerTile);
+        var cpuTileMean = ((cpuTileSamples - 1) * 70.0 + 90.0) / cpuTileSamples;
+        Assert.Equal(cpuTileMean, cpu.Metadata["avg_cpu_in_window"], precision: 6);
         Assert.Equal(0.0, cpu.Metadata["baseline_low_quality"]);
         Assert.True(cpu.Metadata["deviation_sigma"] >= cpu.Metadata["mean_deviation_sigma"], "the reported sigma is the peak's; the mean's is the smaller one");
         Assert.True(cpu.Metadata["mean_deviation_sigma"] >= cpu.Metadata["fire_threshold"], "a fired fact's mean cleared the same cutoff");
@@ -605,7 +612,12 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.NotNull(read);
         Assert.Equal(60.0, read!.Value);
         Assert.Equal(60.0, read.Metadata["current_latency_ms"]);
-        Assert.Equal(41.25, read.Metadata["avg_latency_ms"], precision: 6);
+        /* #3653 A8 option B: the worst hour tile's mean (see the CPU test above for the tile-math
+           derivation), not the whole window's (15*40 + 60)/16 = 41.25. */
+        const int ioHotIndex = 7, ioSamples = 16, ioSamplesPerTile = 4;
+        var ioTileSamples = Enumerable.Range(0, ioSamples).Count(i => i / ioSamplesPerTile == ioHotIndex / ioSamplesPerTile);
+        var ioTileMean = ((ioTileSamples - 1) * 40.0 + 60.0) / ioTileSamples;
+        Assert.Equal(ioTileMean, read.Metadata["avg_latency_ms"], precision: 6);
         Assert.True(read.Metadata["deviation_sigma"] >= read.Metadata["mean_deviation_sigma"]);
         Assert.True(read.Metadata["mean_deviation_sigma"] >= read.Metadata["fire_threshold"]);
     }
@@ -693,13 +705,18 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         var profile = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
         Assert.Equal(0.0, profile.Metadata["is_new"]);                              // the trusted robust arm
         Assert.Equal(3200.0, profile.Metadata["current_ms_per_sec"], precision: 6); // the PEAK
-        Assert.Equal(1606.25, profile.Metadata["avg_ms_per_sec"], precision: 6);    // (15 × 1500 + 3200) / 16
+        /* #3653 A8 option B: the worst hour tile's mean (see the CPU test above for the tile-math
+           derivation), not the whole window's (15*1500 + 3200)/16 = 1606.25. */
+        const int waitHotIndex = 7, waitSamples = 16, waitSamplesPerTile = 4;
+        var waitTileSamples = Enumerable.Range(0, waitSamples).Count(i => i / waitSamplesPerTile == waitHotIndex / waitSamplesPerTile);
+        var waitTileMean = ((waitTileSamples - 1) * 1500.0 + 3200.0) / waitTileSamples;
+        Assert.Equal(waitTileMean, profile.Metadata["avg_ms_per_sec"], precision: 6);
         Assert.Equal(3200.0 / 200.0, profile.Metadata["ratio"], precision: 6);       // peak ÷ baseline mean (the mean of 100/200/300 is 200)
         Assert.Equal(15 * 1_350_000.0 + 2_880_000.0, profile.Value);                 // total wait ms in the window
         Assert.True(profile.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
         Assert.True(profile.Metadata["modified_z"] >= profile.Metadata["mean_modified_z"], "the reported deviation is the peak's; the mean's is the smaller one");
         Assert.Equal((3200.0 - 200.0) / (100.0 / 0.6745), profile.Metadata["modified_z"], precision: 3);
-        Assert.Equal((1606.25 - 200.0) / (100.0 / 0.6745), profile.Metadata["mean_modified_z"], precision: 3);
+        Assert.Equal((waitTileMean - 200.0) / (100.0 / 0.6745), profile.Metadata["mean_modified_z"], precision: 3);
     }
 
     [Fact]
