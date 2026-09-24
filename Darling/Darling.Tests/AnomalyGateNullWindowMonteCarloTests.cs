@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using Xunit;
@@ -181,6 +182,115 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
         }
 
         return fires / (double)trials;
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1a): the TILE arm of the same validation, for <c>AnomalyGate.EvaluateTiles</c>'s
+    /// union rule (the window fires when at least 1 of H tiles fires). It covers the tile counts the design runs: 4 tiles at 4 h
+    /// and 24 tiles at 24 h (design §1's table). Each tile draws n = 12 samples (the 5-minute family) and is scored
+    /// against a fixed trustworthy bucket (mean 0, stddev 1).
+    /// <para>INDEPENDENT samples (rho = 0): the pair gate needs the tile MEAN past the cutoff as well as the peak, and
+    /// the mean of 12 independent draws almost never is. So the union rate is near zero at both window lengths. That
+    /// is what the first test pins, and it is why it cannot test the correction's calibration.</para>
+    /// <para>HOUR-CORRELATED samples (rho = 0.95, a shared per-hour level plus noise: the worst case design §5 names):
+    /// the tile mean moves with the hour, so fires are frequent enough to measure. Only there does the per-tile cutoff
+    /// k_W = <c>NAwarePeakCutoff(k, W)</c> have to hold the 4 h and 24 h union rates within 20 %. A mutation guard
+    /// scores the 24 tiles WITHOUT the correction (window = 4 h, so the cutoff stays k) and requires a clearly higher
+    /// rate, so the equality check cannot pass for a reason other than the correction.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(24)]
+    public void EvaluateTiles_IndependentNullTiles_AlmostNeverFire(int tileCount)
+    {
+        var rate = MeasureTileUnionFireRate(tileCount, samplesPerTile: 12, rho: 0.0,
+            window: TimeSpan.FromHours(tileCount), seed: 4058, trials: 20_000);
+        output.WriteLine($"rho=0 tiles={tileCount} window={tileCount}h fire_rate={rate:0.#####}");
+
+        Assert.True(rate < 1e-3, $"independent null tiles fired at {rate:0.#####} (tiles={tileCount}); the pair gate should keep this under 1e-3.");
+    }
+
+    [Fact]
+    public void EvaluateTiles_HourCorrelatedNull_UnionFireRate_4hVs24h_WithinTwentyPercent_AndTheCorrectionIsWhatHoldsIt()
+    {
+        const int trials = 20_000;
+        const double rho = 0.95;
+        var rate4h = MeasureTileUnionFireRate(4, 12, rho, TimeSpan.FromHours(4), seed: 4058, trials: trials);
+        var rate24h = MeasureTileUnionFireRate(24, 12, rho, TimeSpan.FromHours(24), seed: 4059, trials: trials);
+        var uncorrected24h = MeasureTileUnionFireRate(24, 12, rho, TimeSpan.FromHours(4), seed: 4059, trials: trials);
+        output.WriteLine($"rho={rho} tiles=4@4h rate={rate4h:0.#####} | tiles=24@24h rate={rate24h:0.#####} | 24 tiles uncorrected={uncorrected24h:0.#####}");
+
+        // Large enough to measure (derived about 0.08 at 4 h for the classical k = 2.0 this bucket falls to), so the gap
+        // below is not two zeros compared.
+        Assert.True(rate4h > 0.02 && rate24h > 0.02, $"rates too small to compare: 4h={rate4h:0.#####}, 24h={rate24h:0.#####}");
+
+        var relativeGap = Math.Abs(rate4h - rate24h) / Math.Max(rate4h, rate24h);
+        Assert.True(relativeGap <= 0.20,
+            $"tiles=4@4h rate={rate4h:0.#####} vs tiles=24@24h rate={rate24h:0.#####}: relative gap {relativeGap:0.###} exceeds 20% ({trials} trials each, seeds 4058/4059).");
+
+        // Mutation guard: the same 24 tiles at the uncorrected cutoff fire far more often (derived about 0.39).
+        Assert.True(uncorrected24h > 2 * rate24h,
+            $"24 tiles uncorrected={uncorrected24h:0.#####} vs corrected={rate24h:0.#####}: the correction is not what holds the rates equal.");
+    }
+
+    private static double MeasureTileUnionFireRate(int tileCount, int samplesPerTile, double rho, TimeSpan window, int seed, int trials)
+    {
+        var rng = new Random(seed);
+        var map = TrustworthySingleBucketMap();
+        var fires = 0;
+        for (var i = 0; i < trials; i++)
+        {
+            var tiles = BuildNullTiles(rng, tileCount, samplesPerTile, rho);
+            var verdict = AnomalyGate.EvaluateTiles(
+                tiles, map, Threshold, AnomalyThresholds.ModifiedZThreshold, MagnitudeFloor,
+                AbsoluteFallbackBar, SigmaCap, window);
+            if (verdict is { Decision.Fire: true }) fires++;
+        }
+
+        return fires / (double)trials;
+    }
+
+    /// <summary>One null bucket (mean 0, stddev 1) that answers EVERY (hour, dow) key the same way. The question
+    /// here is the union rule across tiles, not bucket selection, so every tile in a trial is scored against the
+    /// same trustworthy baseline.</summary>
+    private static BaselineBucketMap TrustworthySingleBucketMap()
+    {
+        var dict = new Dictionary<(int, int), BaselineBucket>();
+        for (var h = 0; h < 24; h++)
+        for (var d = 0; d < 7; d++)
+            dict[(h, d)] = new BaselineBucket
+            {
+                HourOfDay = h, DayOfWeek = d, Tier = BaselineTier.Full,
+                Mean = 0, StdDev = 1, SampleCount = 100, DistinctDays = 10, AbsStdDevFloor = 0,
+            };
+        return new BaselineBucketMap(dict, LocalClockWindow.Utc(new DateTime(2026, 9, 24)));
+    }
+
+    /// <summary>Null tiles: each sample is sqrt(rho)·u + sqrt(1 − rho)·e, where u is the tile's shared per-hour level
+    /// and e is per-sample noise, both standard normal. So every sample is N(0, 1) whatever rho is, and rho is
+    /// the within-hour correlation.</summary>
+    private static WindowTile[] BuildNullTiles(Random rng, int tileCount, int samplesPerTile, double rho)
+    {
+        var tiles = new WindowTile[tileCount];
+        var shared = Math.Sqrt(rho);
+        var own = Math.Sqrt(1 - rho);
+        for (var t = 0; t < tileCount; t++)
+        {
+            var hourLevel = NextStandardNormal(rng);
+            var peak = double.NegativeInfinity;
+            var sum = 0.0;
+            for (var s = 0; s < samplesPerTile; s++)
+            {
+                var z = shared * hourLevel + own * NextStandardNormal(rng);
+                if (z > peak) peak = z;
+                sum += z;
+            }
+
+            var localHour = new DateTime(2026, 9, 24, t % 24, 0, 0, DateTimeKind.Unspecified);
+            tiles[t] = new WindowTile(localHour, peak, sum / samplesPerTile, samplesPerTile);
+        }
+
+        return tiles;
     }
 
     /// <summary>Box-Muller, one sample per call (discards the paired second sample — trial counts here
