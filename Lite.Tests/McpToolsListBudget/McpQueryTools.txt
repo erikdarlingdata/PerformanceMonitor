@@ -20,7 +20,7 @@ param get_query_heatmap.limit 195
 param get_query_heatmap.metric 123
 param get_query_heatmap.server_name 28
 
-tool get_query_store_duration_trend 1276
+tool get_query_store_duration_trend 616
 param get_query_store_duration_trend.as_of 167
 param get_query_store_duration_trend.hours_back 29
 param get_query_store_duration_trend.server_name 28
