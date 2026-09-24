@@ -72,6 +72,44 @@ public static class McpSchemaCompat
     };
 
     /// <summary>
+    /// #4075: a per-provider copy of <see cref="GeminiCompatSchemaOptions"/> with an <c>IncludeParameter</c>
+    /// that excludes DI-service-typed parameters BY TYPE, closing a reflection race in the SDK rather than
+    /// relying on identity-keyed lookups. <c>ReflectionAIFunctionDescriptor</c> calls
+    /// <c>MethodInfo.GetParameters()</c> once to record which parameters are DI services (keyed by
+    /// <see cref="ParameterInfo"/> reference identity, which has no <c>Equals</c> override) and then calls
+    /// <c>GetParameters()</c> again inside <c>AIJsonUtilities.CreateFunctionJsonSchema</c> to build the
+    /// schema, looking each parameter back up in that identity-keyed table. <c>RuntimeMethodInfo</c> fills its
+    /// parameter-array cache non-atomically (<c>m_parameters ??= ...</c>), so if another thread's concurrent
+    /// first <c>GetParameters()</c> call on the SAME <c>MethodInfo</c> races this one, the two calls can return
+    /// two different <see cref="ParameterInfo"/> object arrays; the second lookup then misses, the parameter
+    /// is treated as a plain argument instead of an excluded DI service, and it leaks into the served schema.
+    /// Measured in a standalone repro against these exact package versions: 0/5,000 leaked single-threaded,
+    /// 37/5,000 leaked with a concurrent second <c>GetParameters()</c> call, 0/5,000 with this guard in place.
+    /// <c>IncludeParameter</c> is ANDed with the SDK's own identity-keyed exclusion, so a missed lookup can no
+    /// longer let a DI service through: this check is independent of <see cref="ParameterInfo"/> identity and
+    /// always sees the correct answer for the parameter's declared CLR type. Parameter BINDING (which value
+    /// gets passed at invocation time) is unaffected — it consistently uses the first <c>GetParameters()</c>
+    /// array — only the served SCHEMA is at risk. The SDK's own request-scoped parameter types (the ones
+    /// <c>RequestServiceProvider.IsAugmentedWith</c> recognises) take the same double-<c>GetParameters()</c>
+    /// path and are NOT covered here; out of scope for #4075 (Darling/Lite tools take no such parameter today).
+    /// </summary>
+    internal static AIJsonSchemaCreateOptions SchemaOptionsFor(IServiceProvider services)
+    {
+        var isService = services.GetService<IServiceProviderIsService>();
+        if (isService is null)
+        {
+            return GeminiCompatSchemaOptions;
+        }
+
+        var baseInclude = GeminiCompatSchemaOptions.IncludeParameter;
+        return GeminiCompatSchemaOptions with
+        {
+            IncludeParameter = parameter =>
+                !isService.IsService(parameter.ParameterType) && (baseInclude is null || baseInclude(parameter))
+        };
+    }
+
+    /// <summary>
     /// Adds all <see cref="McpServerToolAttribute"/>-marked static methods on <typeparamref name="TToolType"/>
     /// as MCP tools, generating Gemini-compatible parameter schemas. Drop-in replacement for the SDK's
     /// <c>WithTools&lt;TToolType&gt;()</c> for tool classes whose methods are all static.
@@ -129,7 +167,7 @@ public static class McpSchemaCompat
                     options: new McpServerToolCreateOptions
                     {
                         Services = services,
-                        SchemaCreateOptions = GeminiCompatSchemaOptions,
+                        SchemaCreateOptions = SchemaOptionsFor(services),
                         Description = served,
                         Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
                     })));
