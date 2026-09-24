@@ -826,67 +826,79 @@ LIMIT 6";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-
-            double peakRate, meanRate, totalWaitMs;
-            long sampleCount, collectionCount;
-            using (var rateCmd = WindowCommand(WaitRateWindowSql, connection, context))
-            {
-                using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
-                if (!await rateReader.ReadAsync(context.CancellationToken)) return;
-                peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
-                meanRate = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
-                totalWaitMs = rateReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rateReader.GetValue(2));
-                sampleCount = rateReader.IsDBNull(3) ? 0L : Convert.ToInt64(rateReader.GetValue(3));
-                collectionCount = rateReader.IsDBNull(4) ? 0L : Convert.ToInt64(rateReader.GetValue(4));
-            }
-
+            /* WaitRateTileWindowSql's ordinals: local_hour(0), peak(1), mean(2), total(3), sample count(4),
+               collection count(5), peak_time(6) — WindowTiles.ReadTile reads 0/1/2/4/6; the extra collection-count
+               and total scalars ride beside the tile, keyed by LocalHour, exactly as the CPU detector's raw
+               cpu_percent does. */
+            var (tiles, totalWaitMsByTile, collectionCountByTile) = await ReadWaitRateTilesAsync(context);
+            var whole = WindowTiles.WholeWindow(tiles);
+            var totalCollectionCount = collectionCountByTile.Values.Sum();
             /* No rows: this flavour does not write pg_wait_stats (stock) — sit out. Rows but no rated collection:
                every collection a restart — nothing to judge. */
-            if (collectionCount == 0 || sampleCount == 0) return;
-            if (baseline.SampleCount == 0) return;
+            if (totalCollectionCount == 0 || whole.Samples == 0) return;
 
-            bool isNew;
-            double ratio, meanRatio, fallbackExceedance;
-            var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
-            var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, meanRate);
-            if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
+            /* #3653 A8 option B (lane L3a): this family's own three-armed trust rule (robust pair / classical
+               ratio pair / absolute fallback) does not map onto AnomalyGate.EvaluateTiles's z-only model, so each
+               tile is decided through the SAME three arms below, and the worst FIRING tile (largest peak-vs-
+               baseline reading; ties to the later local hour) is reported — the design's own "fire rule and worst
+               tile" (§1), applied by hand for this one family. When no tile scores (every tile under
+               MinTileSamples, or every tile's bucket empty), the never-blind fallback below runs today's
+               whole-window logic unchanged. */
+            WaitProfileTileDecision? worst = null;
+            var tilesScored = 0;
+            var tilesFired = 0;
+            foreach (var tile in tiles)
             {
-                isNew = false;
-                ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
-                meanRatio = baseline.Mean > 0 ? meanRate / baseline.Mean : 0;
-                fallbackExceedance = 0;
-                /* The shared PAIR gate (#3773's call, verbatim but for this family's bar): peak AND mean at the
-                   heavy-tail cutoff by reference, the (measured) magnitude bar on the peak alone. See the summary
-                   for why the same cutoff is passed twice and the same bar as floor and fallback. */
-                var decision = AnomalyGate.EvaluateZScore(
-                    baseline, peakRate, meanRate,
-                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap,
-                    window: context.TimeRangeEnd - context.TimeRangeStart);
-                if (!decision.Fire) return;
+                if (tile.Samples < AnomalyThresholds.MinTileSamples)
+                    continue;
+
+                var tileBaseline = map.For(tile.LocalHour.Hour, (int)tile.LocalHour.DayOfWeek);
+                if (tileBaseline.SampleCount == 0)
+                    continue;
+
+                tilesScored++;
+                var tileDecision = DecideWaitProfileTile(tileBaseline, tile, window);
+                if (tileDecision.Fire)
+                    tilesFired++;
+
+                if (tileDecision.Fire && (worst is null || tileDecision.CompareSigma > worst.Value.CompareSigma ||
+                    (tileDecision.CompareSigma == worst.Value.CompareSigma && tile.LocalHour >= worst.Value.Tile.LocalHour)))
+                {
+                    worst = tileDecision;
+                }
             }
-            else if (baseline.IsTrustworthy && baseline.Mean > 0)
+
+            WaitProfileTileDecision result;
+            BaselineBucket baseline;
+            bool isTiled;
+
+            if (tilesScored == 0)
             {
-                isNew = false;
-                ratio = peakRate / baseline.Mean;
-                meanRatio = meanRate / baseline.Mean;
-                fallbackExceedance = 0;
-                /* measured: PgRatioAnomalyThreshold on both statistics (routine alone for the wait rate, 2026-09-20),
-                   PgWaitProfileFallbackMsPerSec on the peak (the bar that decides, 2026-09-19). */
-                if (ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgWaitProfileFallbackMsPerSec) return;
+                /* Never-blind fallback (design §1): whole-window logic, unchanged from before this lane. */
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                result = DecideWaitProfileTile(baseline, whole, window);
+                if (!result.Fire) return;
+                isTiled = false;
             }
             else
             {
-                isNew = true;
-                ratio = 0;
-                meanRatio = 0;
-                fallbackExceedance = peakRate / PgWaitProfileFallbackMsPerSec;
-                /* The peak's bar alone, by #3741's ruling (summary): no z to trust on either statistic here. */
-                if (fallbackExceedance < 1.0) return;
+                if (worst is null) return; // scored, but none fired
+                result = worst.Value;
+                baseline = result.Baseline;
+                isTiled = true;
             }
+
+            var peakRate = result.Tile.Peak;
+            var meanRate = result.Tile.Mean;
+            var sampleCount = result.Tile.Samples;
+            var totalWaitMs = isTiled && totalWaitMsByTile.TryGetValue(result.Tile.LocalHour, out var tw) ? tw : totalWaitMsByTile.Values.Sum();
 
             var metadata = new Dictionary<string, double>
             {
@@ -896,13 +908,13 @@ LIMIT 6";
                 ["baseline_samples"] = baseline.SampleCount,
                 ["total_wait_ms"] = totalWaitMs,
                 ["window_samples"] = sampleCount,
-                ["ratio"] = ratio,
-                ["mean_ratio"] = meanRatio,
-                ["modified_z"] = modifiedZ,
-                ["mean_modified_z"] = meanModifiedZ,
-                ["is_new"] = isNew ? 1 : 0,
-                ["fallback_exceedance"] = fallbackExceedance,
-                ["fire_threshold"] = isNew ? 0 : (baseline.EffectiveRobustSigma > 0 ? HeavyTailModifiedZThreshold : PgRatioAnomalyThreshold),
+                ["ratio"] = result.Ratio,
+                ["mean_ratio"] = result.MeanRatio,
+                ["modified_z"] = result.ModifiedZ,
+                ["mean_modified_z"] = result.MeanModifiedZ,
+                ["is_new"] = result.IsNew ? 1 : 0,
+                ["fallback_exceedance"] = result.FallbackExceedance,
+                ["fire_threshold"] = result.FireThreshold,
                 /* 0, not 1: the magnitude bar is measured (2026-09-19) and the ratio multiple was read (2026-09-20:
                    routine ALONE at 3.0 — ≈ p93 of wait-rate ratios, 7.1 % of samples at or above it — so the floor
                    and the peak-AND-mean gate are what decide, not the multiple), but the heavy-tail cutoff is the SQL
@@ -911,7 +923,18 @@ LIMIT 6";
                 ["threshold_lineage"] = 0,
             };
             AddBaselineContext(metadata, baseline);
+            if (isTiled)
+            {
+                metadata["tile_local_hour"] = result.Tile.LocalHour.Hour;
+                metadata["tile_day_of_week"] = (int)result.Tile.LocalHour.DayOfWeek;
+                metadata["tile_start_ticks"] = WindowTiles.LocalHourToUtc(result.Tile.LocalHour, map.WindowClock).Ticks;
+                metadata["tiles_scored"] = tilesScored;
+                metadata["tiles_fired"] = tilesFired;
+                metadata["window_peak"] = whole.Peak;
+                metadata["window_samples_total"] = whole.Samples;
+            }
 
+            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
             using (var contribCmd = WindowCommand(WaitContribWindowSql, connection, context))
             {
                 using var contribReader = await contribCmd.ExecuteReaderAsync(context.CancellationToken);
@@ -937,6 +960,69 @@ LIMIT 6";
         {
             _logger?.LogError("[PgTargetAnomalyDetector] Wait-profile anomaly detection failed: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>One tile's (or the whole-window fallback's) verdict from <see cref="DecideWaitProfileTile"/> —
+    /// enough of the source statistic and the decision for <see cref="DetectWaitProfileAnomalies"/> to pick the
+    /// worst firing tile and build the fired fact's metadata. <see cref="CompareSigma"/> is what the worst-tile
+    /// pick orders on: the modified z on the robust/ratio arms, the fallback exceedance on the absolute arm — the
+    /// same statistic each arm already reports as its "how far out" figure.</summary>
+    private readonly record struct WaitProfileTileDecision(
+        bool Fire, WindowTile Tile, BaselineBucket Baseline, bool IsNew, double Ratio, double MeanRatio,
+        double ModifiedZ, double MeanModifiedZ, double FallbackExceedance, double FireThreshold, double CompareSigma);
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): the wait-profile family's own three-armed trust rule
+    /// (<see cref="DetectWaitProfileAnomalies"/>'s pre-tile body, verbatim), run against ONE tile's peak/mean and
+    /// its own bucket instead of the whole window's — every cutoff, floor and bar unchanged; only the source
+    /// statistic (tile vs. whole window) and bucket (per-tile vs. start-of-window) move.
+    /// </summary>
+    private static WaitProfileTileDecision DecideWaitProfileTile(BaselineBucket baseline, WindowTile tile, TimeSpan window)
+    {
+        var peakRate = tile.Peak;
+        var meanRate = tile.Mean;
+        var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
+        var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, meanRate);
+
+        bool isNew, fire;
+        double ratio, meanRatio, fallbackExceedance, fireThreshold, compareSigma;
+
+        if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
+        {
+            isNew = false;
+            ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
+            meanRatio = baseline.Mean > 0 ? meanRate / baseline.Mean : 0;
+            fallbackExceedance = 0;
+            fireThreshold = HeavyTailModifiedZThreshold;
+            var decision = AnomalyGate.EvaluateZScore(
+                baseline, peakRate, meanRate,
+                HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                window: window);
+            fire = decision.Fire;
+            compareSigma = modifiedZ;
+        }
+        else if (baseline.IsTrustworthy && baseline.Mean > 0)
+        {
+            isNew = false;
+            ratio = peakRate / baseline.Mean;
+            meanRatio = meanRate / baseline.Mean;
+            fallbackExceedance = 0;
+            fireThreshold = PgRatioAnomalyThreshold;
+            fire = ratio >= PgRatioAnomalyThreshold && meanRatio >= PgRatioAnomalyThreshold && peakRate >= PgWaitProfileFallbackMsPerSec;
+            compareSigma = ratio;
+        }
+        else
+        {
+            isNew = true;
+            ratio = 0;
+            meanRatio = 0;
+            fallbackExceedance = peakRate / PgWaitProfileFallbackMsPerSec;
+            fireThreshold = 0;
+            fire = fallbackExceedance >= 1.0;
+            compareSigma = fallbackExceedance;
+        }
+
+        return new WaitProfileTileDecision(fire, tile, baseline, isNew, ratio, meanRatio, modifiedZ, meanModifiedZ, fallbackExceedance, fireThreshold, compareSigma);
     }
 
     /* ── Shared pieces. ── */
@@ -1019,6 +1105,30 @@ LIMIT 6";
         }
 
         return (tiles, peakCpuPercentByTile);
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): <see cref="WaitRateTileWindowSql"/>'s own reader — two extra window scalars
+    /// per tile (<c>total_wait_ms</c> ordinal 3, <c>collection_count</c> ordinal 5) that <see cref="WindowTiles.ReadTile"/>'s
+    /// fixed shape has no slot for, keyed by the tile's own <c>LocalHour</c> for the caller.
+    /// </summary>
+    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> TotalWaitMsByTile, Dictionary<DateTime, long> CollectionCountByTile)> ReadWaitRateTilesAsync(AnalysisContext context)
+    {
+        var tiles = new List<WindowTile>();
+        var totalWaitMsByTile = new Dictionary<DateTime, double>();
+        var collectionCountByTile = new Dictionary<DateTime, long>();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        using var cmd = WindowCommand(WaitRateTileWindowSql, connection, context);
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var tile = WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, peakTimeOrdinal: 6);
+            tiles.Add(tile);
+            totalWaitMsByTile[tile.LocalHour] = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
+            collectionCountByTile[tile.LocalHour] = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
+        }
+
+        return (tiles, totalWaitMsByTile, collectionCountByTile);
     }
 
     /// <summary>The z-family metadata the shared scorer grades from (<c>FactScorer.ScoreAnomalyFact</c> /
