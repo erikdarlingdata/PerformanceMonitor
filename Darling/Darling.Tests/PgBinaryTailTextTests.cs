@@ -173,4 +173,46 @@ public sealed class PgBinaryTailTextTests
 
         Assert.Equal(text, PgBinaryTailText.UnescapeAndDecode(escaped, eucJp));
     }
+
+    /// <summary>
+    /// Security review round 1, Medium: a planted DBCS lead byte (0xA4 is unmapped on its own in EUC_JP,
+    /// EUC_CN and EUC_KR) must not eat the newline that follows it. Decoding the whole tail in one call
+    /// would pair 0xA4 with the 0x0A byte after it and lose the line break; splitting on 0x0A first and
+    /// decoding each segment keeps the newline and the next line's text intact.
+    /// </summary>
+    [Theory]
+    [InlineData("EUC_JP")]
+    [InlineData("EUC_CN")]
+    [InlineData("EUC_KR")]
+    public void DecodeWhole_PlantedEucLeadByteBeforeNewline_DoesNotSwallowTheLineBreak(string serverEncoding)
+    {
+        Assert.True(PgServerEncoding.TryGet(serverEncoding, out var encoding));
+        var bytes = new byte[] { 0xA4, (byte)'\n', (byte)'x' };
+
+        var decoded = PgBinaryTailText.DecodeWhole(bytes, encoding);
+
+        Assert.Contains('\n', decoded);
+        var lines = decoded.Split('\n');
+        Assert.Equal(2, lines.Length);
+        Assert.Equal("x", lines[1]);
+    }
+
+    /// <summary>Same planted-byte-before-newline case, through the escape()-reversal route: the byte
+    /// arrives as an octal escape (<c>\244</c> is octal for 0xA4), and the newline arrives as a literal
+    /// byte (escape() never octal-escapes 0x0A).</summary>
+    [Theory]
+    [InlineData("EUC_JP")]
+    [InlineData("EUC_CN")]
+    [InlineData("EUC_KR")]
+    public void UnescapeAndDecode_PlantedEucLeadByteBeforeNewline_DoesNotSwallowTheLineBreak(string serverEncoding)
+    {
+        Assert.True(PgServerEncoding.TryGet(serverEncoding, out var encoding));
+
+        var decoded = PgBinaryTailText.UnescapeAndDecode("\\244\nx", encoding);
+
+        Assert.Contains('\n', decoded);
+        var lines = decoded.Split('\n');
+        Assert.Equal(2, lines.Length);
+        Assert.Equal("x", lines[1]);
+    }
 }
