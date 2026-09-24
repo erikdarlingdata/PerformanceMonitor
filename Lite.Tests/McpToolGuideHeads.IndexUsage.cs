@@ -25,8 +25,8 @@ public sealed class McpToolGuideHeadsIndexUsageTests
         "Per-index usage (seeks, scans, lookups, updates) from the latest daily snapshot, classed Unused, "
         + "Write-only, or Active. Unused/write-only sort first as drop candidates: on a server with many, "
         + "results can be one database's unused indexes, hiding Active ones elsewhere. Counters reset at the "
-        + "last restart or index rebuild. last_user_access is UTC, de-skewed from local clock: compare "
-        + "directly against get_collection_log and list_servers.";
+        + "last restart or index rebuild, so Write-only means no reads since then. last_user_access is UTC "
+        + "(de-skewed): compare directly with get_collection_log and list_servers.";
 
     [Fact]
     public void Head_CarriesTheOrderingTrap_TheRestartFloor_AndTheUtcDeSkew_AndStaysAtOrUnder493Served()
@@ -46,11 +46,11 @@ public sealed class McpToolGuideHeadsIndexUsageTests
             StringComparison.Ordinal);
 
         /* D9: a low or zero counter can mean "reset by a restart or a rebuild", not "never used". */
-        Assert.Contains("Counters reset at the last restart or index rebuild.", served.Served, StringComparison.Ordinal);
+        Assert.Contains("Counters reset at the last restart or index rebuild, so Write-only means no reads since then.", served.Served, StringComparison.Ordinal);
 
         /* D9: last_user_access is the one field on this payload with no UTC neighbour to cross-check against. */
         Assert.Contains(
-            "last_user_access is UTC, de-skewed from local clock: compare directly against get_collection_log and list_servers.",
+            "last_user_access is UTC (de-skewed): compare directly with get_collection_log and list_servers.",
             served.Served,
             StringComparison.Ordinal);
 
