@@ -66,6 +66,13 @@ public sealed class SuccessorDailyLiveTests
         /* ── FIRST ensure: fresh store. ── */
         var log = new CapturingTestLogger();
         var readyFirst = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, log, ct);
+        /* #3653 A6 lane LB-3: the sweep is per-statement failure-isolated (a CREATE or policy that fails
+           against one aggregate logs a WARNING and moves on, so the count alone reads as a partial success
+           with zero evidence of which statement failed or why). PR #4181's CI run on TimescaleDB 2.30.1 hit
+           exactly that: 26/27 with no test-visible error. Assert NOW, before the count check, so a future
+           swallowed failure fails HERE with the verbatim Postgres/Timescale error in the message, rather than
+           surfacing three call frames downstream as a bare "relation does not exist". */
+        Assert.DoesNotContain("Warning", log.Joined, StringComparison.Ordinal);
         Assert.Equal(
             TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
                 + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
