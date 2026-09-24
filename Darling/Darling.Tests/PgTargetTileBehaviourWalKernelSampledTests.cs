@@ -114,7 +114,6 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
                     countCmd.Parameters.AddWithValue(WalShiftServerId);
                     using var rdr = await countCmd.ExecuteReaderAsync(ct);
                     await rdr.ReadAsync(ct);
-                    Console.WriteLine($"[DIAG] history+window rows for server: count={rdr.GetInt64(0)} count(wal_bytes)={rdr.GetInt64(1)}");
                 }
                 using (var windowCountCmd = new NpgsqlCommand("SELECT count(*), count(wal_bytes) FROM pg_write_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3", diagConn))
                 {
@@ -123,14 +122,12 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
                     windowCountCmd.Parameters.AddWithValue(WindowStartT.AddHours(4));
                     using var rdr = await windowCountCmd.ExecuteReaderAsync(ct);
                     await rdr.ReadAsync(ct);
-                    Console.WriteLine($"[DIAG] window rows: count={rdr.GetInt64(0)} count(wal_bytes)={rdr.GetInt64(1)}");
                 }
 
                 for (var h = 0; h < 4; h++)
                 {
                     var hourStart = WindowStartT.AddHours(h);
                     var bucket = map.For(hourStart.Hour, (int)hourStart.DayOfWeek);
-                    Console.WriteLine($"[DIAG] hour={hourStart:HH:mm} dow={hourStart.DayOfWeek} tier={bucket.Tier} SampleCount={bucket.SampleCount} DistinctDays={bucket.DistinctDays} IsTrustworthy={bucket.IsTrustworthy} Median={bucket.Median} EffectiveRobustSigma={bucket.EffectiveRobustSigma}");
                 }
 
                 using (var tileCmd = new NpgsqlCommand(PgTargetAnomalyDetector.WalVolumeTileWindowSql, diagConn))
@@ -144,7 +141,6 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
                     using var rdr = await tileCmd.ExecuteReaderAsync(ct);
                     while (await rdr.ReadAsync(ct))
                     {
-                        Console.WriteLine($"[DIAG] tile local_hour={rdr.GetDateTime(0):HH:mm} peak={(rdr.IsDBNull(1) ? "null" : rdr.GetValue(1).ToString())} avg={(rdr.IsDBNull(2) ? "null" : rdr.GetValue(2).ToString())} rated_samples={(rdr.IsDBNull(3) ? "null" : rdr.GetValue(3).ToString())} wal_bytes={(rdr.IsDBNull(4) ? "null" : rdr.GetValue(4).ToString())} wal_records={(rdr.IsDBNull(5) ? "null" : rdr.GetValue(5).ToString())} wal_reset_count={(rdr.IsDBNull(6) ? "null" : rdr.GetValue(6).ToString())} wal_tracked={(rdr.IsDBNull(7) ? "null" : rdr.GetValue(7).ToString())}");
                     }
                 }
             }
@@ -152,7 +148,6 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
 
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(FourHourContext(WalShiftServerId, WalShiftServerName));
-            Console.WriteLine($"[DIAG] facts returned: {facts.Count} keys=[{string.Join(',', facts.Select(f => f.Key))}]");
             var fact = Assert.Single(facts, f => f.Key == PgTargetFactKeys.AnomalyWalVolume);
 
             Assert.True(fact.Metadata.ContainsKey("tile_local_hour"), "the sustained two-hour WAL shift should have scored through the tile path");
@@ -369,7 +364,6 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var startBucket = await baselines.GetBaselineAsync(CpuShiftServerId, MetricNames.PgCpuBurnCores, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour CPU-burn bucket must be trustworthy");
-            Console.WriteLine($"[DIAG cpu] Median={startBucket.Median} EffectiveRobustSigma={startBucket.EffectiveRobustSigma} Mean={startBucket.Mean} EffectiveStdDev={startBucket.EffectiveStdDev}");
 
             // What dev did (the whole-window path) is proved by the mutation check, not an in-test z-score
             // assertion here (coordinator ruling, T4178-2) — see the WAL 4h scenario's comment.
@@ -438,7 +432,6 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             var startBucket = await baselines.GetBaselineAsync(SampledWaitShiftServerId, MetricNames.PgSampledWaitMsPerSec, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour sampled-wait bucket must be trustworthy");
             Assert.True(startBucket.EffectiveRobustSigma > 0, "the start-hour bucket must carry a robust sigma so the robust arm — the only one this lane tiles — runs");
-            Console.WriteLine($"[DIAG sampled] Median={startBucket.Median} EffectiveRobustSigma={startBucket.EffectiveRobustSigma} Mean={startBucket.Mean} EffectiveStdDev={startBucket.EffectiveStdDev}");
 
             // What dev did (the whole-window path) is proved by the mutation check, not an in-test z-score
             // assertion here (coordinator ruling, T4178-2) — see the WAL 4h scenario's comment.
