@@ -100,13 +100,10 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             var startBucket = await baselines.GetBaselineAsync(WalShiftServerId, MetricNames.PgWalBytesPerSec, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour WAL bucket must be trustworthy");
 
-            // What dev did: the whole window's own mean rate (two quiet hours + two shifted hours), judged against
-            // the START hour's bucket alone — below the cutoff, because the quiet half of the window drags the
-            // window average toward the routine rate. This is the dilution the tile path exists to undo.
-            var wholeWindowMean = (WalBaseBytesPerMinute / 60.0 + WalShiftBytesPerMinute / 60.0) / 2.0;
-            var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
-            Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgWalBytesPerSec),
-                $"the whole-window mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own — the shift was not actually diluted by construction (median={startBucket.Median}, sigma={startBucket.EffectiveRobustSigma})");
+            // What dev did (the whole-window path) is proved by the mutation check instead of an in-test
+            // z-score assertion here (coordinator ruling, T4178-2): forcing AnomalyGate.EvaluateTiles to return
+            // null makes DetectWalVolumeAnomalies fall back to EvaluateZScore against the START bucket alone,
+            // and that must NOT fire for this shift to be a real "tile catches it, whole-window doesn't" case.
 
             // ─── DIAGNOSTIC (T4178-2, temporary): printed evidence before the detector call ───
             var map = await baselines.GetBucketMapAsync(WalShiftServerId, MetricNames.PgWalBytesPerSec, WindowStartT, WindowStartT.AddHours(4), ct);
@@ -374,10 +371,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             Assert.True(startBucket.IsTrustworthy, "the start-hour CPU-burn bucket must be trustworthy");
             Console.WriteLine($"[DIAG cpu] Median={startBucket.Median} EffectiveRobustSigma={startBucket.EffectiveRobustSigma} Mean={startBucket.Mean} EffectiveStdDev={startBucket.EffectiveStdDev}");
 
-            var wholeWindowMean = (CpuBaseCores + CpuShiftCores) / 2.0;
-            var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
-            Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgCpuBurnCores),
-                $"the whole-window mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own");
+            // What dev did (the whole-window path) is proved by the mutation check, not an in-test z-score
+            // assertion here (coordinator ruling, T4178-2) — see the WAL 4h scenario's comment.
 
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(FourHourContext(CpuShiftServerId, CpuShiftServerName));
@@ -445,12 +440,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             Assert.True(startBucket.EffectiveRobustSigma > 0, "the start-hour bucket must carry a robust sigma so the robust arm — the only one this lane tiles — runs");
             Console.WriteLine($"[DIAG sampled] Median={startBucket.Median} EffectiveRobustSigma={startBucket.EffectiveRobustSigma} Mean={startBucket.Mean} EffectiveStdDev={startBucket.EffectiveStdDev}");
 
-            var baseRatePerSec = SampledBaseRelation * SampledPeriodMs / (SampledMs / 1000.0);
-            var shiftRatePerSec = SampledShiftRelation * SampledPeriodMs / (SampledMs / 1000.0);
-            var wholeWindowMean = (baseRatePerSec + shiftRatePerSec) / 2.0;
-            var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
-            Assert.True(wholeWindowMeanZ < AnomalyThresholds.HeavyTailModifiedZThreshold,
-                $"the whole-window mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own");
+            // What dev did (the whole-window path) is proved by the mutation check, not an in-test z-score
+            // assertion here (coordinator ruling, T4178-2) — see the WAL 4h scenario's comment.
 
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(FourHourContext(SampledWaitShiftServerId, SampledWaitShiftServerName));
