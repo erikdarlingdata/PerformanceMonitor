@@ -611,13 +611,13 @@ WITH s AS (
     CROSS JOIN generate_series(0, 11) AS i
 ),
 running AS (
-    SELECT d, h, i, SUM(incr) OVER (PARTITION BY d, h ORDER BY i) * 60 AS cum_xacts
+    SELECT d, h, i, SUM(incr) OVER (PARTITION BY d, h ORDER BY i) * 300 AS cum_xacts
     FROM s
 )
 INSERT INTO pg_database_stats
     (collection_id, collection_time, server_id, server_name, database_name,
      xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
-SELECT 200000000 + (d * 10000 + h * 100 + i), $2 - (d * interval '1 day') + (h * interval '1 hour') + (i * interval '1 minute'), $1, $5, 'appdb',
+SELECT 200000000 + (d * 10000 + h * 100 + i), $2 - (d * interval '1 day') + (h * interval '1 hour') + (i * interval '5 minutes'), $1, $5, 'appdb',
        ROUND(cum_xacts)::bigint, 0, 100, 9000, 0, 0, 0, NULL
 FROM running";
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 180 };
@@ -638,13 +638,13 @@ WITH s AS (
     CROSS JOIN generate_series(0, 11) AS i
 ),
 running AS (
-    SELECT h, i, SUM(incr) OVER (ORDER BY h, i) * 60 AS cum_xacts
+    SELECT h, i, SUM(incr) OVER (ORDER BY h, i) * 300 AS cum_xacts
     FROM s
 )
 INSERT INTO pg_database_stats
     (collection_id, collection_time, server_id, server_name, database_name,
      xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
-SELECT 300000000 + (h * 100 + i), $2 + (h * interval '1 hour') + (i * interval '1 minute'), $1, $6, 'appdb',
+SELECT 300000000 + (h * 100 + i), $2 + (h * interval '1 hour') + (i * interval '5 minutes'), $1, $6, 'appdb',
        ROUND(cum_xacts)::bigint, 0, 100, 9000, 0, 0, 0, NULL
 FROM running";
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
