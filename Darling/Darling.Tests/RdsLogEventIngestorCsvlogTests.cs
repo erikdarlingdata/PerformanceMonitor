@@ -62,19 +62,24 @@ public sealed class RdsLogEventIngestorCsvlogTests
     {
         public FakeRds() : base(new Amazon.Runtime.BasicAWSCredentials("a", "b"), Amazon.RegionEndpoint.USEast1) { }
 
-        public string CsvBody { get; init; } = string.Empty;
-        public string? NextMarker { get; init; } = "MARKER-1";
+        public string CsvBody { get; set; } = string.Empty;
+        public string? NextMarker { get; set; } = "MARKER-1";
         public List<DownloadDBLogFilePortionRequest> Downloads { get; } = new();
 
         /* Portion queue for the carry tests: each IngestAsync call pulls the next (body, additionalDataPending)
            pair, one call to DownloadDBLogFilePortion per portion, matching how RdsLogSource actually reads. */
         public Queue<(string Body, bool AdditionalDataPending)>? Portions { get; set; }
 
+        /* Review round 2's rotation tests: a settable file listing, and a script of (body, pending, marker)
+           answers served first, whatever csv file is asked for. */
+        public List<DescribeDBLogFilesDetails>? Files { get; set; }
+        public Queue<(string Body, bool AdditionalDataPending, string? Marker)>? Script { get; set; }
+
         public override Task<DescribeDBLogFilesResponse> DescribeDBLogFilesAsync(
             DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBLogFilesResponse
             {
-                DescribeDBLogFiles = new List<DescribeDBLogFilesDetails>
+                DescribeDBLogFiles = Files ?? new List<DescribeDBLogFilesDetails>
                 {
                     new() { LogFileName = StderrFile, LastWritten = 9999 },
                     new() { LogFileName = CsvFile, LastWritten = 10000 },
@@ -85,6 +90,17 @@ public sealed class RdsLogEventIngestorCsvlogTests
             DownloadDBLogFilePortionRequest request, CancellationToken cancellationToken = default)
         {
             Downloads.Add(request);
+
+            if (Script is { Count: > 0 } && request.LogFileName.EndsWith(".csv", StringComparison.Ordinal))
+            {
+                var (scriptedBody, scriptedPending, scriptedMarker) = Script.Dequeue();
+                return Task.FromResult(new DownloadDBLogFilePortionResponse
+                {
+                    LogFileData = scriptedBody,
+                    Marker = scriptedMarker,
+                    AdditionalDataPending = scriptedPending,
+                });
+            }
 
             if (request.LogFileName != CsvFile)
             {
@@ -459,23 +475,115 @@ public sealed class RdsLogEventIngestorCsvlogTests
     {
         await using var store = NpgsqlDataSource.Create(DeadStore);
 
-        /* NextMarker null: RDS sends back no resume token (the replay shape CommittingAChunkWithNoServiceMarkerDoesNothing
-           already pins on the source side), so CommitResume is a no-op and this portion's carry must not be
-           recorded either. One complete record, so both attempts below reach the write for the same reason
-           — the test is about the marker/carry bookkeeping, not straddling. */
-        var client = new FakeRds { CsvBody = Record("UTC", "first"), NextMarker = null };
-        var logs = new RdsLogSource(_ => client);
-        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+        /* Review round 2: the old form of this test was vacuous, since both calls threw on the dead store
+           before CommitResume and never reached the empty-marker path. Here, neither portion reaches a write
+           unless the carry is WRONGLY updated:
+           1. The first read has no marker (null NextMarker: the replay shape) and holds only a straddling
+              record's head, so it has no events, no write, and reaches the carry bookkeeping. With an empty
+              marker the carry must NOT be recorded.
+           2. The second read holds only the straddler's tail. Without a carry, it is a cut head in
+              unknown-start mode: no events, no write, no throw. Had the first read's carry been recorded,
+              the two would glue into one complete record, reach the write, and throw on the dead store. */
+        var straddler = RecordWithMultiLineMessage("line one\nline two");
+        var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
 
-        var failure = await Assert.ThrowsAnyAsync<Exception>(
-            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
-        Assert.IsNotType<RdsLogUnavailableException>(failure);
+        var client = new FakeRds { CsvBody = straddler[..cut], NextMarker = null };
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => client));
+        var outcome1 = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, outcome1.Rows);
 
-        /* A second cycle against the SAME body (a real replay, since no marker moved) must reach the store
-           for the SAME one complete record again — not zero, which is what a carry wrongly recorded from
-           the first attempt (now believing that record already consumed) would produce. */
-        var replay = await Assert.ThrowsAnyAsync<Exception>(
+        client.CsvBody = straddler[cut..];
+        client.NextMarker = "MARKER-2";
+        var outcome2 = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, outcome2.Rows);
+        Assert.Equal(2, client.Downloads.Count);
+    }
+
+    private static List<DescribeDBLogFilesDetails> Listing(params string[] csvFiles)
+    {
+        /* The stderr file is always the OLDEST entry, so the stale-csv check never fires in these tests. */
+        var files = new List<DescribeDBLogFilesDetails> { new() { LogFileName = StderrFile, LastWritten = 1000 } };
+        for (var i = 0; i < csvFiles.Length; i++)
+        {
+            files.Add(new() { LogFileName = csvFiles[i], LastWritten = 2000 + i });
+        }
+
+        return files;
+    }
+
+    /// <summary>Review round 2: a rotation through the whole ingestor. The first contact with file A reads its tail
+    /// (a cut head, no events). File B then appears, so B is read from Marker "0", with a known start. B's first
+    /// portion holds only a straddling record's head, and its second the tail. Walked forward, the two glue into
+    /// one complete record, which reaches the write (and throws on the dead store).</summary>
+    [Fact]
+    public async Task ARotation_ReadsTheNewFileFromItsStart_AndWalksItForward()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        const string fileA = "error/postgresql.log.2026-09-24-05.csv";
+        const string fileB = "error/postgresql.log.2026-09-24-06.csv";
+        var straddler = RecordWithMultiLineMessage("line one\nline two");
+        var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
+
+        var client = new FakeRds
+        {
+            Files = Listing(fileA),
+            Script = new Queue<(string, bool, string?)>(new (string, bool, string?)[]
+            {
+                (CutHead, false, "A-1"),
+                (straddler[..cut], true, "B-1"),
+                (straddler[cut..], false, "B-2"),
+            }),
+        };
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => client));
+
+        var first = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, first.Rows);
+
+        client.Files = Listing(fileA, fileB);
+        var second = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, second.Rows);
+        Assert.Equal(fileB, client.Downloads[^1].LogFileName);
+        Assert.Equal("0", client.Downloads[^1].Marker);
+
+        var third = await Assert.ThrowsAnyAsync<Exception>(
             () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
-        Assert.IsNotType<RdsLogUnavailableException>(replay);
+        Assert.IsNotType<RdsLogUnavailableException>(third);
+    }
+
+    /// <summary>Review round 2 (item 4): a rotation that drops a record being skipped over the 1 MiB bound counts
+    /// it as one discard.</summary>
+    [Fact]
+    public async Task ARotationMidSkip_CountsTheDroppedRecordOnce()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        const string fileA = "error/postgresql.log.2026-09-24-05.csv";
+        const string fileB = "error/postgresql.log.2026-09-24-06.csv";
+        const string fileC = "error/postgresql.log.2026-09-24-07.csv";
+        var oversized = new string('x', RdsLogEventIngestor.MaxCarryLength + 10);
+
+        var client = new FakeRds
+        {
+            Files = Listing(fileA),
+            Script = new Queue<(string, bool, string?)>(new (string, bool, string?)[]
+            {
+                /* An empty first read: A gets a committed marker and no carry at all, so the only record a later
+                   rotation can drop is B's skipped one. */
+                (string.Empty, false, "A-1"),
+                (oversized, true, "B-1"),
+                ("no newline here", true, "C-1"),
+            }),
+        };
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => client));
+
+        await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+
+        client.Files = Listing(fileA, fileB);
+        var intoSkip = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, intoSkip.CsvRecordsDiscarded);
+
+        client.Files = Listing(fileA, fileB, fileC);
+        var rotated = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal("0", client.Downloads[^1].Marker);
+        Assert.Equal(1, rotated.CsvRecordsDiscarded);
     }
 }

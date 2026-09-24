@@ -153,6 +153,7 @@ public sealed class RdsLogEventIngestor
 
         string? carryKey = null;
         var carry = CsvCarry.Empty;
+        var droppedByRotation = 0;
         var currentFileName = ResumeFileName(chunk.Value.Resume.Key);
 
         if (pgLogUsesCsvlog)
@@ -164,11 +165,19 @@ public sealed class RdsLogEventIngestor
                forever, since nothing ever removed it once its file stopped being the newest. */
             carryKey = InstanceKey(chunk.Value.Resume.Key);
 
-            if (!string.IsNullOrEmpty(carryKey)
-                && _csvCarry.TryGetValue(carryKey, out var held)
-                && string.Equals(held.FileName, currentFileName, StringComparison.Ordinal))
+            if (!string.IsNullOrEmpty(carryKey) && _csvCarry.TryGetValue(carryKey, out var held))
             {
-                carry = held;
+                if (string.Equals(held.FileName, currentFileName, StringComparison.Ordinal))
+                {
+                    carry = held;
+                }
+                else if (held.Skipping || !string.IsNullOrEmpty(held.Partial))
+                {
+                    /* #4053 review round 2 (item 4): a rotation drops the old file's unfinished record, a
+                       carried partial or a record being skipped over the bound. Count it as the one discard
+                       it is, and only once the carry update below commits. */
+                    droppedByRotation = 1;
+                }
             }
 
             if (chunk.Value.StartsAtFileStart)
@@ -207,6 +216,8 @@ public sealed class RdsLogEventIngestor
             {
                 _csvCarry[carryKey] = nextCarryWithFile;
             }
+
+            csvRecordsDiscarded += droppedByRotation;
         }
 
         return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
@@ -418,9 +429,9 @@ public sealed class RdsLogEventIngestor
         }
 
         /* The record's true end was found: everything up to and including it is the rest of the skipped
-           record, counted as exactly one discard (matching the single discard already counted when the
-           record was first dropped over the bound). Text after it resumes forward parsing with a known
-           start. */
+           record, counted here as its one discard. None was counted when it was dropped over the bound
+           (StepForward), so the total for the record is exactly one. Text after it resumes forward parsing
+           with a known start. */
         var rest = text[(boundary + 1)..];
         var resumed = StepForward(null, rest);
         return new CsvPortion(resumed.Entries, resumed.RecordsDiscarded + 1, resumed.Next);
