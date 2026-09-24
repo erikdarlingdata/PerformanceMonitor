@@ -87,6 +87,7 @@ public sealed class PgTargetTileBehaviourTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, SessionsShiftServerId, SessionsShiftServerName, MonitoredEngineKind.AuroraPostgres, 17, ct);
+            await PlantCanaryDatabaseStatsRowAsync(connection, SessionsShiftServerId, SessionsShiftServerName, WindowStartT, ct);
 
             // 21 days of history for hours 10-13 of this weekday, ~12 samples/hour, deterministic pseudo-noise.
             await PlantSessionHistoryAsync(connection, SessionsShiftServerId, SessionsShiftServerName, WindowStartT, 4, SessionMu, SessionSigma, ct);
@@ -96,13 +97,15 @@ public sealed class PgTargetTileBehaviourTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var context = FourHourContext(SessionsShiftServerId, SessionsShiftServerName);
 
-            // What dev did: the whole window's own peak, judged against the START hour's bucket alone — below
-            // the cutoff, because two of the four hours are quiet and drag the window average toward baseline.
+            // What dev did: the whole window's own MEAN (two quiet hours + two shifted hours), judged against
+            // the START hour's bucket alone — below the cutoff, because the quiet half of the window drags the
+            // window average toward baseline. This is the dilution the tile path exists to undo.
             var startBucket = await baselines.GetBaselineAsync(SessionsShiftServerId, MetricNames.PgSessionCount, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour session bucket must be trustworthy");
-            var wholeWindowPeakZ = BaselineMath.ModifiedZScore(startBucket, SessionShift);
-            Assert.True(wholeWindowPeakZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgSessionCount),
-                $"the whole-window peak z ({wholeWindowPeakZ}) unexpectedly cleared the cutoff on its own — the shift was not actually diluted by construction");
+            var wholeWindowMean = (SessionMu + SessionShift) / 2.0; // two hours at baseline, two hours at the shift
+            var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
+            Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgSessionCount),
+                $"the whole-window mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own — the shift was not actually diluted by construction (median={startBucket.Median}, sigma={startBucket.EffectiveRobustSigma})");
 
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(context);
@@ -148,6 +151,7 @@ public sealed class PgTargetTileBehaviourTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, Sessions24hServerId, Sessions24hServerName, MonitoredEngineKind.AuroraPostgres, 17, ct);
+            await PlantCanaryDatabaseStatsRowAsync(connection, Sessions24hServerId, Sessions24hServerName, WindowStartT, ct);
 
             var windowStart = WindowStartT.AddHours(-22);
             var windowEnd = WindowStartT.AddHours(2);
@@ -209,6 +213,7 @@ public sealed class PgTargetTileBehaviourTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, SessionsSpikeServerId, SessionsSpikeServerName, MonitoredEngineKind.AuroraPostgres, 17, ct);
+            await PlantCanaryDatabaseStatsRowAsync(connection, SessionsSpikeServerId, SessionsSpikeServerName, WindowStartT, ct);
             const double spike = SessionMu + 10 * SessionSigma;
 
             await PlantSessionHistoryAsync(connection, SessionsSpikeServerId, SessionsSpikeServerName, WindowStartT, 4, SessionMu, SessionSigma, ct);
@@ -257,6 +262,7 @@ public sealed class PgTargetTileBehaviourTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, SessionsFallbackServerId, SessionsFallbackServerName, MonitoredEngineKind.AuroraPostgres, 17, ct);
+            await PlantCanaryDatabaseStatsRowAsync(connection, SessionsFallbackServerId, SessionsFallbackServerName, WindowStartT, ct);
 
             await PlantSessionHistoryAsync(connection, SessionsFallbackServerId, SessionsFallbackServerName, WindowStartT, 4, SessionMu, SessionSigma, ct);
             // Only 2 samples per hour, all at the shift: every tile is under MinTileSamples (3).
@@ -316,9 +322,10 @@ public sealed class PgTargetTileBehaviourTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var startBucket = await baselines.GetBaselineAsync(TpsShiftServerId, MetricNames.PgTps, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour TPS bucket must be trustworthy");
-            var wholeWindowPeakZ = BaselineMath.ModifiedZScore(startBucket, shiftedTps);
-            Assert.True(wholeWindowPeakZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgTps),
-                $"the whole-window TPS peak z ({wholeWindowPeakZ}) unexpectedly cleared the cutoff on its own");
+            var wholeWindowMean = (baseMu + shiftedTps) / 2.0; // two hours at baseline, two hours at the shift
+            var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
+            Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgTps),
+                $"the whole-window TPS mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own");
 
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(FourHourContext(TpsShiftServerId, TpsShiftServerName));
@@ -363,6 +370,7 @@ public sealed class PgTargetTileBehaviourTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, CpuShiftServerId, CpuShiftServerName, MonitoredEngineKind.AuroraPostgres, 17, ct);
+            await PlantCanaryDatabaseStatsRowAsync(connection, CpuShiftServerId, CpuShiftServerName, WindowStartT, ct);
 
             const double cpuMu = 30.0;
             const double cpuSigma = 2.0;
@@ -374,9 +382,10 @@ public sealed class PgTargetTileBehaviourTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var startBucket = await baselines.GetBaselineAsync(CpuShiftServerId, MetricNames.PgCpu, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour CPU bucket must be trustworthy");
-            var wholeWindowPeakZ = BaselineMath.ModifiedZScore(startBucket, cpuShift);
-            Assert.True(wholeWindowPeakZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgCpu),
-                $"the whole-window CPU peak z ({wholeWindowPeakZ}) unexpectedly cleared the cutoff on its own");
+            var wholeWindowMean = (cpuMu + cpuShift) / 2.0; // two hours at baseline, two hours at the shift
+            var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
+            Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgCpu),
+                $"the whole-window CPU mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own");
 
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(FourHourContext(CpuShiftServerId, CpuShiftServerName));
@@ -456,6 +465,24 @@ public sealed class PgTargetTileBehaviourTests
     }
 
     /* ───────────────────────── planting: sessions ───────────────────────── */
+
+    /// <summary><see cref="PgTargetAnomalyDetector.HasBaselineDataAsync"/>'s canary reads <c>pg_database_stats</c>
+    /// alone; a scenario whose own family lives in a different table (sessions, CPU) must still plant one row
+    /// there inside the 30-day lookback or <c>DetectAnomaliesAsync</c> returns empty before any detector runs.</summary>
+    private static async Task PlantCanaryDatabaseStatsRowAsync(NpgsqlConnection connection, int serverId, string serverName, DateTime windowStart, CancellationToken ct)
+    {
+        const string sql = @"
+INSERT INTO pg_database_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     xact_commit, xact_rollback, blks_read, blks_hit, temp_files, temp_bytes, deadlocks, stats_reset)
+VALUES ($1, $2, $3, $4, 'appdb', 1000, 0, 100, 9000, 0, 0, 0, NULL)";
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 60 };
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next() + 9_000_000L);
+        command.Parameters.AddWithValue(windowStart.AddDays(-1));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        await command.ExecuteNonQueryAsync(ct);
+    }
 
     /// <summary>21 days of history at deterministic pseudo-noise, one row per (day, hour, i) covering
     /// <paramref name="hours"/> hours starting at <paramref name="windowStart"/>'s hour-of-day, going back one day
@@ -554,6 +581,7 @@ CROSS JOIN generate_series(0, 1) AS i";
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_session_states WHERE server_id = {serverId}; " +
+            $"DELETE FROM pg_database_stats WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_muted WHERE server_id = {serverId}; " +
             $"DELETE FROM servers WHERE server_id = {serverId};", connection);
@@ -682,6 +710,7 @@ FROM s";
     {
         using var cleanup = new NpgsqlCommand(
             $"DELETE FROM pg_cpu_utilization WHERE server_id = {serverId}; " +
+            $"DELETE FROM pg_database_stats WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_findings WHERE server_id = {serverId}; " +
             $"DELETE FROM analysis_muted WHERE server_id = {serverId}; " +
             $"DELETE FROM servers WHERE server_id = {serverId};", connection);
