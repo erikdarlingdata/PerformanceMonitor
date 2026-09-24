@@ -143,10 +143,9 @@ public sealed class HostHeaderGuardTests
 
         var source = File.ReadAllText(path);
         /* Guard the guard: if the host were renamed or restructured past recognition, the assertions below
-           could pass vacuously on an empty/mismatched parse. Pin the anchors they all key off. "app.Use("
-           (not "_app.Use(") matches both hosts: the MCP host still calls the field directly (_app.Use), while
-           the web host's gates were extracted (#4128) into ConfigurePipeline(WebApplication app, ...), which
-           calls app.Use — "app.Use(" is a substring of "_app.Use(" too, so this anchor covers both shapes. */
+           could pass vacuously on an empty/mismatched parse. Pin the anchors they all key off. Both hosts'
+           gates are extracted (#4128 parts a and b) into a ConfigurePipeline(WebApplication app, ...) method
+           that calls app.Use, not _app.Use — "app.Use(" covers both shapes. */
         Assert.Contains("_app = builder.Build();", source, StringComparison.Ordinal);
         Assert.Contains("app.Use(", source, StringComparison.Ordinal);
         return source;
@@ -213,7 +212,7 @@ public sealed class HostHeaderGuardTests
     {
         var source = ReadHostSource("DarlingMcpHostService.cs");
         var guard = source.IndexOf("IsAllowedHost(context.Request.Host.Host", StringComparison.Ordinal);
-        var mapMcp = source.IndexOf("_app.MapMcp();", StringComparison.Ordinal);
+        var mapMcp = source.IndexOf("app.MapMcp();", StringComparison.Ordinal);
 
         Assert.True(mapMcp >= 0, "MapMcp is no longer called — this guard needs rewriting");
         Assert.True(guard >= 0 && guard < mapMcp, "the Host-header guard must run before MapMcp registers the MCP endpoints");
@@ -226,7 +225,7 @@ public sealed class HostHeaderGuardTests
     {
         var source = ReadHostSource("DarlingMcpHostService.cs");
         var guard = source.IndexOf("IsAllowedHost(context.Request.Host.Host", StringComparison.Ordinal);
-        var mapMcpCore = source.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+        var mapMcpCore = source.IndexOf("app.MapMcp(\"/core\");", StringComparison.Ordinal);
 
         Assert.True(mapMcpCore >= 0, "/core is no longer mapped — this test needs rewriting");
         Assert.True(guard >= 0 && guard < mapMcpCore, "the Host-header guard must run before MapMcp(\"/core\") registers the /core endpoint");
@@ -246,8 +245,8 @@ public sealed class HostHeaderGuardTests
         var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
 
         var networkGate = afterBuild.IndexOf("if (networkMode)", StringComparison.Ordinal);
-        var mapMcpRoot = afterBuild.IndexOf("_app.MapMcp();", StringComparison.Ordinal);
-        var mapMcpCore = afterBuild.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+        var mapMcpRoot = afterBuild.IndexOf("app.MapMcp();", StringComparison.Ordinal);
+        var mapMcpCore = afterBuild.IndexOf("app.MapMcp(\"/core\");", StringComparison.Ordinal);
 
         Assert.True(networkGate >= 0, "expected a network-mode-only middleware block (bearer token, CIDR) to exist after Build()");
         Assert.True(mapMcpRoot >= 0, "MapMcp() is no longer called — this test needs rewriting");
@@ -268,11 +267,23 @@ public sealed class HostHeaderGuardTests
     public void McpHost_HasNoPathConditionalMiddlewareBeforeTheMcpMappings()
     {
         var source = ReadHostSource("DarlingMcpHostService.cs");
-        var build = source.IndexOf("_app = builder.Build();", StringComparison.Ordinal);
-        var mapMcpCore = source.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
-        Assert.True(build >= 0 && mapMcpCore > build, "expected Build() before MapMcp(\"/core\") — this test needs rewriting");
 
-        var pipeline = source[build..mapMcpCore];
+        /* #4128 part (b): the pipeline wiring (guards through both MapMcp calls) is extracted into
+           ConfigurePipeline(WebApplication app, ...), a method the file now defines textually AFTER
+           TryStartServerAsync — so the file's ConfigureMcpServices method (with its own, unrelated
+           context.Request.Path check inside ConfigureSessionOptions) sits, in raw text order, between
+           TryStartServerAsync's "_app = builder.Build();" and ConfigurePipeline's MapMcp("/core") call. A
+           whole-file text slice from the first Build() to the first MapMcp("/core") would therefore catch
+           an unrelated Request.Path check that is never in the actual request pipeline. Scope the search to
+           ConfigurePipeline's OWN body instead — that is the real, in-order pipeline this claim is about. */
+        var pipelineMethodStart = source.IndexOf("internal void ConfigurePipeline(", StringComparison.Ordinal);
+        Assert.True(pipelineMethodStart >= 0, "ConfigurePipeline is gone — this test needs rewriting");
+
+        var build = source.IndexOf("_app = builder.Build();", StringComparison.Ordinal);
+        var mapMcpCore = source.IndexOf("app.MapMcp(\"/core\");", pipelineMethodStart, StringComparison.Ordinal);
+        Assert.True(build >= 0 && mapMcpCore > pipelineMethodStart, "expected Build() before MapMcp(\"/core\") — this test needs rewriting");
+
+        var pipeline = source[pipelineMethodStart..mapMcpCore];
         foreach (var branch in new[] { "Request.Path", "UseWhen(", "MapWhen(", ".Map(", "UsePathBase(" })
         {
             Assert.False(
@@ -291,7 +302,7 @@ public sealed class HostHeaderGuardTests
     public void McpHost_KeepsTheTransportStatelessWhileCoreIsMapped()
     {
         var source = ReadHostSource("DarlingMcpHostService.cs");
-        Assert.True(source.Contains("_app.MapMcp(\"/core\");", StringComparison.Ordinal), "/core is no longer mapped — this test needs rewriting");
+        Assert.True(source.Contains("app.MapMcp(\"/core\");", StringComparison.Ordinal), "/core is no longer mapped — this test needs rewriting");
 
         var transport = source.IndexOf(".WithHttpTransport(options =>", StringComparison.Ordinal);
         var stateless = source.IndexOf("options.Stateless = true;", StringComparison.Ordinal);
