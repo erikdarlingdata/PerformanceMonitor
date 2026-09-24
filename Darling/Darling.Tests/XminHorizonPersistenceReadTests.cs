@@ -75,25 +75,26 @@ public sealed class XminHorizonPersistenceReadTests
                50M evaluator threshold, so it is a holder-bearing observation that must NOT count as an
                above-threshold one. The t-10 loser row shares its winner's collection_time, pinning that
                extra rows per collection inflate nothing. */
-            await SeedHolderAsync(connection, ct, MinutesAgo(10), "session", 60_000_000, "101", "state=idle in transaction", isWinner: true);
-            await SeedHolderAsync(connection, ct, MinutesAgo(10), "replication_slot", 10_000_000, "slot_a", null, isWinner: false);
-            await SeedHolderAsync(connection, ct, MinutesAgo(8), "session", 70_000_000, "102", null, isWinner: true);
-            await SeedHolderAsync(connection, ct, MinutesAgo(6), "session", 30_000_000, "103", null, isWinner: true);
-            await SeedHolderAsync(connection, ct, MinutesAgo(4), "session", 80_000_000, "104", "state=idle in transaction", isWinner: true);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            await SeedHolderAsync(connection, ct, MinutesAgo(now, 10), "session", 60_000_000, "101", "state=idle in transaction", isWinner: true);
+            await SeedHolderAsync(connection, ct, MinutesAgo(now, 10), "replication_slot", 10_000_000, "slot_a", null, isWinner: false);
+            await SeedHolderAsync(connection, ct, MinutesAgo(now, 8), "session", 70_000_000, "102", null, isWinner: true);
+            await SeedHolderAsync(connection, ct, MinutesAgo(now, 6), "session", 30_000_000, "103", null, isWinner: true);
+            await SeedHolderAsync(connection, ct, MinutesAgo(now, 4), "session", 80_000_000, "104", "state=idle in transaction", isWinner: true);
 
             /* The capture denominator: the four holder-bearing runs, two QUIET (zero-row, healthy) runs
                the holder table cannot see — the whole reason the denominator lives in collection_log —
                and three rows that must stay out of it: a run that failed, another collector's run, and
                another server's. */
-            await SeedLogAsync(connection, ct, MinutesAgo(10), ServerId, Collector, "SUCCESS", 2);
-            await SeedLogAsync(connection, ct, MinutesAgo(8), ServerId, Collector, "SUCCESS", 1);
-            await SeedLogAsync(connection, ct, MinutesAgo(6), ServerId, Collector, "SUCCESS", 1);
-            await SeedLogAsync(connection, ct, MinutesAgo(4), ServerId, Collector, "SUCCESS", 1);
-            await SeedLogAsync(connection, ct, MinutesAgo(2), ServerId, Collector, "SUCCESS", 0);
-            await SeedLogAsync(connection, ct, MinutesAgo(1), ServerId, Collector, "SUCCESS", 0);
-            await SeedLogAsync(connection, ct, MinutesAgo(3), ServerId, Collector, "ERROR", 0);
-            await SeedLogAsync(connection, ct, MinutesAgo(5), ServerId, "pg_database_stats", "SUCCESS", 4);
-            await SeedLogAsync(connection, ct, MinutesAgo(7), OtherServerId, Collector, "SUCCESS", 1);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 10), ServerId, Collector, "SUCCESS", 2);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 8), ServerId, Collector, "SUCCESS", 1);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 6), ServerId, Collector, "SUCCESS", 1);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 4), ServerId, Collector, "SUCCESS", 1);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 2), ServerId, Collector, "SUCCESS", 0);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 1), ServerId, Collector, "SUCCESS", 0);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 3), ServerId, Collector, "ERROR", 0);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 5), ServerId, "pg_database_stats", "SUCCESS", 4);
+            await SeedLogAsync(connection, ct, MinutesAgo(now, 7), OtherServerId, Collector, "SUCCESS", 1);
 
             var info = await adapter.GetXminHorizonAsync(ServerId, ct);
 
@@ -123,8 +124,8 @@ public sealed class XminHorizonPersistenceReadTests
 
     /* ── helpers ── */
 
-    private static DateTime MinutesAgo(int minutes) =>
-        DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddMinutes(-minutes));
+    private static DateTime MinutesAgo(DateTime now, int minutes) =>
+        now.AddMinutes(-minutes);
 
     private static Task SeedHolderAsync(
         NpgsqlConnection connection, CancellationToken ct,
