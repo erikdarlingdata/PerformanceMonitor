@@ -662,6 +662,43 @@ public sealed class RdsDeadlockIngestorTests
     }
 
     /// <summary>
+    /// #4058 r3: a RAISE-shaped deadlock record — its CONTEXT ends " at RAISE" — reaches
+    /// <see cref="RdsDeadlockIngestor"/>'s csvlog branch and is counted into
+    /// <see cref="RdsIngestOutcome.RaiseShapedSkipped"/> rather than reaching the write. Zero rows, no store
+    /// write attempted: the dead store is never opened.
+    /// </summary>
+    [Fact]
+    public async Task ARaiseShapedDeadlock_IsCountedAndSkipped_WithNoStoreWriteAttempted()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+
+        /* Same 26-column shape CsvDeadlockRecord builds, its CONTEXT column (index 18) filled with the
+           PL/pgSQL frame a RAISE always appends instead of being empty. */
+        var raiseShaped =
+            "2026-09-24 01:54:43.008 UTC,\"app_rw\",\"app_db\",5099,\"10.0.0.5:41000\",6ab482e3.61,1,"
+            + "\"client backend\",2026-09-24 01:54:40 UTC,3/9,0,ERROR,40P01,\"deadlock detected\","
+            + "\"" + CsvDeadlockDetail.Replace("\"", "\"\"") + "\",\"See server log for query details.\",,,"
+            + "\"PL/pgSQL function forge_deadlock() line 3 at RAISE\",,,,\"client backend\",,,0\n";
+
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvBody = raiseShaped,
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        var outcome = await ingestor.IngestAsync(
+            1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Equal(1, outcome.RaiseShapedSkipped);
+    }
+
+    /// <summary>
     /// #4053 part c2, case 3: csvlog off requests the stderr file, as before — unchanged from every other test
     /// in this file that omits <c>pgLogUsesCsvlog</c>, asserted directly against a listing that ALSO carries a
     /// <c>.csv</c> sibling so the choice is a real one rather than the sibling being absent.
