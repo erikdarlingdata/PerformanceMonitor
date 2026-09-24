@@ -553,6 +553,10 @@ public class CollectorMeasurementSeamTests
                    write them. Measured through PgServerLogTail on behalf of pg_log_events and pg_deadlocks, which
                    is why the const lives in PgServerLogTail.cs beside its one .Measure( call. */
                 PgServerLogTail.ForeignZoneLinesMeasurement,
+                /* #4058 item 3: plan captures whose query id or duration failed the guarded casts. A real auto_explain
+                   line never does, so each one is a forgery, skipped rather than stored under query id 0. Measured by
+                   plan capture's own ReadAsync, which is why the const lives in PgPlanCaptureCollector.cs. */
+                PgPlanCaptureCollector.ForgedCaptureMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
