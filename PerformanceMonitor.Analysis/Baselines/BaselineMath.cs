@@ -54,12 +54,16 @@ public static class BaselineMath
     /// tier routes every z-score detector to the much higher absolute-threshold bar for that whole
     /// window, so a newly monitored server's z-path is dark for weeks it doesn't need to be.
     /// <para>
-    /// The fix walks ONLY coarser tiers than the one selected by sample count, and only when that
-    /// selection is neither trustworthy nor zero-history: a mature target (whose chosen tier is
-    /// trustworthy) and the zero-history arm (#3849, measured by #3691 D8) are returned unchanged, byte
-    /// -identical to today. Each coarser tier is built exactly as today — the provider's exact
-    /// (GROUPING SETS) sentinel when present, else the pooled synthesis, gated by the same
-    /// CollapseThreshold / 3 sample floors — and the first one that clears <see
+    /// The fix (narrowed after Lite CI, #3653 A8 option B) walks ONLY coarser tiers than the one
+    /// selected by sample count, and only when that selection is <see cref="BaselineBucket.IsYoung"/>:
+    /// real dispersion and enough samples, but too few distinct days for THIS tier's claim. A
+    /// trustworthy bucket, a zero-history bucket, a zero-dispersion bucket (constant-valued fixtures,
+    /// idle metrics) and a thin bucket (too few samples) are never young, so all four are returned
+    /// unchanged, byte-identical to today — walking a zero-dispersion or thin bucket away from its
+    /// tier was the original bug: three Lite tier-selection tests pinned a coarser tier for fixtures
+    /// that were untrustworthy for those reasons, not for youth. Each coarser tier is built exactly as
+    /// today — the provider's exact (GROUPING SETS) sentinel when present, else the pooled synthesis,
+    /// gated by the same CollapseThreshold / 3 sample floors — and the first one that clears <see
     /// cref="BaselineBucket.IsTrustworthy"/> is returned. If none is, the original chosen bucket comes
     /// back unchanged: the absolute-fallback path, and today's low-quality metadata.
     /// </para>
@@ -71,7 +75,7 @@ public static class BaselineMath
     {
         var chosen = SelectBucketBySampleCount(baselines, hourOfDay, dayOfWeek, out var chosenTier);
 
-        if (chosen.IsTrustworthy || chosen.IsZeroHistory)
+        if (!chosen.IsYoung)
             return chosen;
 
         if (chosenTier == BaselineTier.Full)

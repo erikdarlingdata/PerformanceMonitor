@@ -245,6 +245,24 @@ public class BaselineBucket
             return ClearsTierFloors;
         }
     }
+
+    /// <summary>
+    /// #3653 A8 option B (narrowed after Lite CI): true ONLY for the YOUNG-target case the tier walk
+    /// in <see cref="BaselineMath.SelectBucket"/> exists for — real dispersion and enough samples, but
+    /// too few DISTINCT days for this tier's claim to be about a trend. Never true for a trustworthy
+    /// bucket (dispersion and both floors already clear), a zero-dispersion bucket (constant-valued
+    /// fixtures and idle metrics — walking those away from zero would manufacture a z-score, not fix
+    /// one), or a thin bucket (too few SAMPLES, not too few days — that is a genuinely young store
+    /// with nothing yet to walk to).
+    /// </summary>
+    public bool IsYoung
+    {
+        get
+        {
+            var (sampleMin, dayMin) = TrustFloors;
+            return EffectiveStdDev > 0 && SampleCount >= sampleMin && DistinctDays < dayMin;
+        }
+    }
 }
 
 public enum BaselineTier

@@ -666,6 +666,53 @@ public sealed class RobustBaselineTests
         Assert.True(selected.IsTrustworthy);
     }
 
+    [Fact]
+    public void SelectBucket_ChosenFullZeroDispersion_TrustworthyCoarserTierPresent_NotWalked_ReturnsFull()
+    {
+        /* Zero dispersion (EffectiveStdDev <= 0) is NOT youth: #4180's original walk moved coarser
+           whenever the chosen bucket was merely !IsTrustworthy, which also fires on zero-dispersion
+           hand-built fixtures (common: constant-valued test data) with plenty of samples and days.
+           Mean = 0 and StdDev = 0 drive EffectiveStdDev to 0 via its zero-activity branch, but
+           Median/Mad are set non-zero here so this is deliberately NOT the zero-history arm — it is
+           the exact "IsTrustworthy fails on zero dispersion" flaw the ruling calls out. The narrowed
+           IsYoung requires EffectiveStdDev > 0, so this bucket is not young and must be returned
+           unchanged even though a trustworthy HourOnly tier is sitting right there. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 0, StdDev = 0, Median = 5, Mad = 2, SampleCount = 20, DistinctDays = 5, AbsStdDevFloor = 0 },
+            [(5, -1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = -1, Tier = BaselineTier.HourOnly, Mean = 90, StdDev = 10, SampleCount = 15, DistinctDays = 12 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.Full, selected.Tier);
+        Assert.Equal(0, selected.Mean);
+        Assert.False(selected.IsZeroHistory); // Median/Mad non-zero — deliberately NOT the zero-history arm
+    }
+
+    [Fact]
+    public void SelectBucket_ThinFullBelowSampleFloor_NotReachableViaHysteresis_BoundaryIsYoungOnDaysOnly()
+    {
+        /* (h) as specified asks for a THIN Full bucket — SampleCount below the trust sample floor —
+           reachable via the 10-14 hysteresis band. It is NOT reachable: CollapseThreshold (10) is
+           IDENTICAL to Full's trust sample floor, so the lowest SampleCount
+           SelectBucketBySampleCount will ever hand back as Full (the floor of the hysteresis band)
+           already clears the sample half of the trust gate. A genuinely thin (sub-floor-sample) Full
+           bucket is never selected as Full at all — SelectBucketBySampleCount falls straight through
+           to HourOnly/Flat before the walk ever sees it as "chosen" — so IsYoung's
+           SampleCount >= sampleMin guard can never observe a thin fixture from the chosen-Full arm.
+           This test pins that boundary instead: a Full bucket sitting exactly at the sample floor
+           (SampleCount = 10) with too few distinct days is walked purely on DAYS, never on a sample
+           deficit a thin fixture could introduce. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 100, StdDev = 5, SampleCount = 10, DistinctDays = 2 },
+            [(5, -1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = -1, Tier = BaselineTier.HourOnly, Mean = 90, StdDev = 10, SampleCount = 15, DistinctDays = 12 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.HourOnly, selected.Tier); // walked: young on DAYS, never on a thin sample count
+    }
+
     /* ── honest confidence ── */
 
     [Fact]
