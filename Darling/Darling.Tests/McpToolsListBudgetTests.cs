@@ -76,9 +76,11 @@ public sealed class McpToolsListBudgetTests
     /// <item>#4048 D9 round: the nine pilot heads' empty-answer sentence now ties to each tool's own gate (or
     /// floors, or the absence of one) instead of repeating one identical sentence, so a reader given only the
     /// head is not left to guess which of the four empty-window rungs applies. Raised deliberately.</item>
+    /// <item>#3898 close-out: every content PR and both feature PRs have merged. Lowered once, to the measured
+    /// total, banking the accumulated saving; a future PR only raises it again.</item>
     /// </list>
     /// </summary>
-    private const int TotalCeilingBytes = 329_494;
+    private const int TotalCeilingBytes = 170_798;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

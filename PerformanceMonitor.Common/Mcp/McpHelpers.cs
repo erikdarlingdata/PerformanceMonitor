@@ -347,7 +347,7 @@ internal static class McpHelpers
     public const string WindowTruncatedDescription =
         " window_truncated is true when the store did not hold the start of the window; effective_start / " +
         "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
-        "changes it. WIRE CHANGE: spelled truncated before #3653.";
+        "changes it. WIRE CHANGE: spelled truncated before.";
 
     /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.

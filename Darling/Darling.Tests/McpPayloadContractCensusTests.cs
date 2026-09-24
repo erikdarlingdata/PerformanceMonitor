@@ -1947,7 +1947,7 @@ public sealed class McpPayloadContractCensusTests
         Assert.Contains(WindowFloorKey, clause, StringComparison.Ordinal);
         Assert.Contains("effective_start / effective_hours_back", clause, StringComparison.Ordinal);
         Assert.Contains("not a page cut", clause, StringComparison.Ordinal);
-        Assert.Contains("spelled truncated before #3653", clause, StringComparison.Ordinal);
+        Assert.Contains("spelled truncated before.", clause, StringComparison.Ordinal);
 
         /* And by reflection on the SKU this project can load: the Darling five really do publish the clause in
            the attribute an MCP client reads, ahead of the discontinuities sentence they end with. */
@@ -1960,7 +1960,7 @@ public sealed class McpPayloadContractCensusTests
         {
             Assert.True(darling.TryGetValue(tool, out var description), $"{tool} ({file}) is not a Darling MCP tool");
             /* #3898 D3/D4, re-pointed deliberately: the whole clause may span head and guide, because its
-               "spelled truncated before #3653" WIRE CHANGE notice leaves the wire for the guide tail (D4). What
+               "spelled truncated before." WIRE CHANGE notice leaves the wire for the guide tail (D4). What
                a caller needs to read the payload (the key, and that it is a retention floor, not a page cut)
                is a guardrail and must be served in the head. Unconverted, the head is the whole description. */
             Assert.Contains(clause, description!, StringComparison.Ordinal);
