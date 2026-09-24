@@ -128,8 +128,11 @@ public static class PgServerLogCsvParser
     /// partial record, because nothing about it was rejected — it was never complete enough to judge.</param>
     /// <param name="consumedLength">The index in <c>body</c> just past the last TRUE record boundary found.
     /// A tail reader carries <c>body[consumedLength..]</c> into its next read, along with
-    /// <see cref="CsvBodyEdges.StartsOnRecordBoundary"/> for that next call, since <c>consumedLength</c> is by
-    /// construction a record boundary. Zero when no boundary was found at all.</param>
+    /// <see cref="CsvBodyEdges.StartsOnRecordBoundary"/> for that next call. That is sound only when THIS call
+    /// stated an edge (a forward walk or the fast path), because then <c>consumedLength</c> is a record boundary
+    /// by construction. Under <see cref="CsvBodyEdges.None"/> it is the winning hypothesis's last boundary, a
+    /// guess: a caller must not claim a known start from it, since a wrong start inverts parity for every
+    /// later forward walk. Zero when no boundary was found at all.</param>
     public static List<PgLogEntry> Parse(string body, CsvBodyEdges edges, out int recordsDiscarded, out int consumedLength)
     {
         var entries = new List<PgLogEntry>();
