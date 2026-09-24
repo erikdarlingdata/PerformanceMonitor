@@ -1017,7 +1017,8 @@ jobs:
 
           Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-csvlog" "$env:RUNNER_TEMP\darling-pg-csvlog.log" 5542 @(
             "logging_collector = on",
-            "log_destination = 'csvlog'"
+            "log_destination = 'csvlog'",
+            "log_timezone = 'UTC'"
           )
           Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-jsonlog" "$env:RUNNER_TEMP\darling-pg-jsonlog.log" 5543 @(
             "logging_collector = on",
@@ -1047,6 +1048,8 @@ jobs:
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
           DARLING_TEST_PG_CSVLOG: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
           DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          # csvlog-only from its first start, with log_timezone = 'UTC': PgLogTailStderrSiblingLiveTests' #4019 case.
+          DARLING_TEST_PG_CSVLOG_ONLY: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
           DARLING_TEST_PG_JSONLOG: "Host=127.0.0.1;Port=5543;Username=darling;Database=darling"
           DARLING_TEST_PG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
           DARLING_TEST_PG_CSVLOG_SIBLING: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
