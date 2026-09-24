@@ -71,16 +71,21 @@ per_sample AS (
     GROUP BY sample_start
 ),
 rated AS (
-    SELECT sample_start, reads, read_ms / reads AS ms_per_read
+    /* #3653 A8 option B: sample_start rides as collection_time so the shared per-hour tile key
+       (WindowTiles.LocalHourSql / BaselineLocalClock.LocalCollectionTimeSql, binding $4..$6) applies. */
+    SELECT sample_start AS collection_time, reads, read_ms / reads AS ms_per_read
     FROM per_sample
     WHERE reads >= 250 /* PgTargetScorer.IoBaselineBucketMinimumReads — the per-sample reads floor */
 )
-SELECT MAX(ms_per_read) AS peak_ms_per_read,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(ms_per_read) AS peak_ms_per_read,
        AVG(ms_per_read) AS avg_ms_per_read,
        COUNT(*)         AS rated_samples,
-       (SELECT sample_start FROM rated ORDER BY ms_per_read DESC, sample_start DESC LIMIT 1) AS peak_sample,
-       (SELECT reads        FROM rated ORDER BY ms_per_read DESC, sample_start DESC LIMIT 1) AS peak_sample_reads
-FROM rated";
+       (array_agg(collection_time ORDER BY ms_per_read DESC))[1] AS peak_sample,
+       (array_agg(reads ORDER BY ms_per_read DESC))[1]           AS peak_sample_reads
+FROM rated
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>
     /// <c>ANOMALY_PG_IO_LATENCY</c>: the window's peak quarter-hour read latency (ms per read, from <c>pg_io_stats</c>) against the <c>pg_io_read_latency</c> bucket — the z-score shape <c>DetectSessionAnomalies</c> takes, graded by the shared deviation ramp (registered in <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c>).
@@ -107,28 +112,81 @@ FROM rated";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgIoReadLatency, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            /* #3653 A8 option B: per-hour tiles against the tile's own (hour, dow) bucket, never-blind fallback to
+               today's window-peak path when no tile scores. */
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgIoReadLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            using var cmd = WindowCommand(IoLatencyWindowSql, connection, context);
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var tiles = new List<WindowTile>();
+            /* peak_sample_reads has no home in WindowTile (a family-specific extra scalar, design §2's “worst tile”
+               rule), so it rides beside the tile list keyed by the SAME row — one entry per tile, in read order. */
+            var peakSampleReadsByTile = new List<double>();
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            using (var cmd = WindowCommand(IoLatencyWindowSql, connection, context))
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4));
+                    peakSampleReadsByTile.Add(reader.IsDBNull(5) ? 0.0 : Convert.ToDouble(reader.GetValue(5)));
+                }
+            }
 
-            var ratedSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            if (ratedSamples == 0) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var peakMsPerRead = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgMsPerRead = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var peakSample = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-            var peakSampleReads = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
+            /* The whole-window fallback's own peak-sample-reads: whichever tile's peak is the window peak (the
+               later tile on a tie, matching WholeWindow's own tie rule). */
+            var wholePeakSampleReads = 0.0;
+            for (var i = 0; i < tiles.Count; i++)
+                if (tiles[i].Peak >= whole.Peak)
+                    wholePeakSampleReads = peakSampleReadsByTile[i];
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakMsPerRead, avgMsPerRead,
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgIoReadLatency), PgIoLatencyFloorMs, PgIoLatencyFallbackMs, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakMsPerRead;
+            double avgMsPerRead;
+            DateTime? peakSample;
+            double peakSampleReads;
+            long ratedSamples;
+
+            if (tv is null)
+            {
+                /* Never-blind fallback: today's whole-window path against the start bucket. */
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgIoReadLatency, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, whole.Peak, whole.Mean,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgIoReadLatency), PgIoLatencyFloorMs, PgIoLatencyFallbackMs, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+
+                peakMsPerRead = whole.Peak;
+                avgMsPerRead = whole.Mean;
+                ratedSamples = whole.Samples;
+                peakSample = whole.PeakTimeUtc;
+                peakSampleReads = wholePeakSampleReads;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakMsPerRead = tv.Value.Tile.Peak;
+                avgMsPerRead = tv.Value.Tile.Mean;
+                ratedSamples = tv.Value.Tile.Samples;
+                peakSample = tv.Value.Tile.PeakTimeUtc;
+                var worstIndex = tiles.FindIndex(t => t.LocalHour == tv.Value.Tile.LocalHour);
+                peakSampleReads = worstIndex >= 0 ? peakSampleReadsByTile[worstIndex] : 0.0;
+                if (!decision.Fire) return;
+            }
 
             var metadata = ZScoreMetadata(baseline, decision, ratedSamples);
             /* measured (§B1): the two bars above were read off the fleet — see the summary. */
@@ -142,6 +200,8 @@ FROM rated";
             metadata["peak_sample_reads"] = peakSampleReads;
             metadata["peak_sample_ticks"] = peakSample?.Ticks ?? 0;
             metadata["bucket_reads_floor"] = PgTargetScorer.IoBaselineBucketMinimumReads;
+            if (tv is { } verdict)
+                WindowTiles.AddTileMetadata(metadata, verdict, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {

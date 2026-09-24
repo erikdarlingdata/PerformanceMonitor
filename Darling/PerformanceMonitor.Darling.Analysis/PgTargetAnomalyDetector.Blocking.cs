@@ -44,16 +44,21 @@ blocked AS (
     GROUP BY date_bin('1 minute', collection_time, TIMESTAMP '2000-01-01')
 ),
 per_capture AS (
-    SELECT coalesce(b.minute, l.minute)     AS minute,
+    /* #3653 A8 option B: the minute rides as collection_time so the shared per-hour tile key
+       (WindowTiles.LocalHourSql / BaselineLocalClock.LocalCollectionTimeSql, binding $4..$6) applies. */
+    SELECT coalesce(b.minute, l.minute)     AS collection_time,
            coalesce(b.blocked_sessions, 0)  AS blocked_sessions
     FROM looked AS l
     FULL OUTER JOIN blocked AS b ON b.minute = l.minute
 )
-SELECT MAX(blocked_sessions) AS peak_blocked_sessions,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(blocked_sessions) AS peak_blocked_sessions,
        AVG(blocked_sessions) AS avg_blocked_sessions,
        COUNT(*)              AS sample_count,
-       (SELECT minute FROM per_capture ORDER BY blocked_sessions DESC, minute DESC LIMIT 1) AS peak_minute
-FROM per_capture";
+       (array_agg(collection_time ORDER BY blocked_sessions DESC, collection_time DESC))[1] AS peak_minute
+FROM per_capture
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>
     /// <c>ANOMALY_PG_BLOCKING</c>: the window's peak blocked-session count per capture (<c>pg_blocking_edges</c> waiters per <c>collection_time</c>, zero for a logged capture with none) against the <c>pg_blocked_sessions</c> bucket — the z-score shape, graded by the shared deviation ramp (registered in <c>PgTargetScorer.IsDeviationScoredAnomalyKey</c> by the between-waves batch). Folds onto <c>PG_BLOCKING_CHAIN</c>.
@@ -85,27 +90,68 @@ FROM per_capture";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgBlockedSessions, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            /* #3653 A8 option B: per-hour tiles against the tile's own (hour, dow) bucket, never-blind fallback to
+               today's window-peak path when no tile scores. */
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgBlockedSessions, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            using var cmd = WindowCommand(BlockedSessionsWindowSql, connection, context);
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var tiles = new List<WindowTile>();
+            var peakMinuteByTile = new List<DateTime?>();
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            using (var cmd = WindowCommand(BlockedSessionsWindowSql, connection, context))
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3));
+                    peakMinuteByTile.Add(reader.IsDBNull(4) ? (DateTime?)null : reader.GetDateTime(4));
+                }
+            }
 
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            if (windowSamples == 0) return;
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var peakBlocked = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgBlocked = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var peakMinute = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakBlocked, avgBlocked,
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgBlockedSessions), PgBlockedSessionsFloor, PgBlockedSessionsFallback, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakBlocked;
+            double avgBlocked;
+            long windowSamples;
+            DateTime? peakMinute;
+
+            if (tv is null)
+            {
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgBlockedSessions, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, whole.Peak, whole.Mean,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgBlockedSessions), PgBlockedSessionsFloor, PgBlockedSessionsFallback, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+
+                peakBlocked = whole.Peak;
+                avgBlocked = whole.Mean;
+                windowSamples = whole.Samples;
+                peakMinute = whole.PeakTimeUtc;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakBlocked = tv.Value.Tile.Peak;
+                avgBlocked = tv.Value.Tile.Mean;
+                windowSamples = tv.Value.Tile.Samples;
+                var worstIndex = tiles.FindIndex(t => t.LocalHour == tv.Value.Tile.LocalHour);
+                peakMinute = worstIndex >= 0 ? peakMinuteByTile[worstIndex] : null;
+                if (!decision.Fire) return;
+            }
 
             /* unmeasured: both bars (see AnomalyThresholds) — the helper's default stamp, threshold_lineage = 0. */
             var metadata = ZScoreMetadata(baseline, decision, windowSamples);
@@ -114,6 +160,8 @@ FROM per_capture";
             metadata["mean_sigma"] = decision.MeanSigma ?? 0.0;
             if (peakMinute is { } at)
                 metadata["peak_age_s"] = Math.Max(0, (AsNaive(context.TimeRangeEnd) - AsNaive(at)).TotalSeconds);
+            if (tv is { } verdict)
+                WindowTiles.AddTileMetadata(metadata, verdict, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {
