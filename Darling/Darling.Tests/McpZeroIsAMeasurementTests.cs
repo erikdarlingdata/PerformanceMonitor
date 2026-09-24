@@ -405,7 +405,9 @@ public sealed class McpZeroIsAMeasurementTests
         var lite = ToolDescription(ToolBody(ReadRepoFile(LiteMcp.Split('/').Append("McpPvsTools.cs").ToArray()), "get_pvs_stats"));
         Assert.False(string.IsNullOrEmpty(darling), "could not locate Darling's get_pvs_stats description");
         Assert.Equal(darling, lite);
-        Assert.Contains("pvs_measured says whether the DMV reported a size", darling, StringComparison.Ordinal);
+        /* #3898 wave E: the head teaches the flag inside the pct_of_database rule; the tail keeps the original
+           "pvs_measured says whether the DMV reported a size" sentence. */
+        Assert.Contains("PVS size is unmeasured (pvs_measured false)", darling, StringComparison.Ordinal);
     }
 
     /// <summary>The string literal of a tool body's <c>Description("…")</c> attribute; the PVS tools spell it

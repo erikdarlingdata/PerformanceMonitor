@@ -143,9 +143,12 @@ public sealed class HostHeaderGuardTests
 
         var source = File.ReadAllText(path);
         /* Guard the guard: if the host were renamed or restructured past recognition, the assertions below
-           could pass vacuously on an empty/mismatched parse. Pin the anchors they all key off. */
+           could pass vacuously on an empty/mismatched parse. Pin the anchors they all key off. "app.Use("
+           (not "_app.Use(") matches both hosts: the MCP host still calls the field directly (_app.Use), while
+           the web host's gates were extracted (#4128) into ConfigurePipeline(WebApplication app, ...), which
+           calls app.Use — "app.Use(" is a substring of "_app.Use(" too, so this anchor covers both shapes. */
         Assert.Contains("_app = builder.Build();", source, StringComparison.Ordinal);
-        Assert.Contains("_app.Use(", source, StringComparison.Ordinal);
+        Assert.Contains("app.Use(", source, StringComparison.Ordinal);
         return source;
     }
 
@@ -153,13 +156,13 @@ public sealed class HostHeaderGuardTests
     private static string FirstMiddlewareAfterBuild(string source)
     {
         var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
-        var firstUse = afterBuild.IndexOf("_app.Use(", StringComparison.Ordinal);
+        var firstUse = afterBuild.IndexOf("app.Use(", StringComparison.Ordinal);
         Assert.True(firstUse >= 0, "no middleware is registered after builder.Build()");
 
         /* The first Use's lambda body — long enough to cover the guard's if/return, short enough that a
            SECOND Use's body cannot bleed in and satisfy the assertion by accident. */
         var body = afterBuild[firstUse..];
-        var nextUse = body.IndexOf("_app.Use(", 1, StringComparison.Ordinal);
+        var nextUse = body.IndexOf("app.Use(", 1, StringComparison.Ordinal);
         return nextUse > 0 ? body[..nextUse] : body;
     }
 
@@ -188,10 +191,16 @@ public sealed class HostHeaderGuardTests
         var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
 
         var guard = afterBuild.IndexOf("IsAllowedHost(context.Request.Host.Host", StringComparison.Ordinal);
-        var networkOnly = afterBuild.IndexOf("if (networkMode)", StringComparison.Ordinal);
-
         Assert.True(guard >= 0, "the Host-header guard middleware is missing");
-        Assert.True(networkOnly >= 0, "expected a network-mode-only middleware block to exist after Build()");
+
+        /* #4128: the web host's gates were extracted into ConfigurePipeline, a method the file defines
+           AFTER TryStartServerAsync's own unrelated "if (networkMode)" (its post-start logging branch) —
+           so the FIRST "if (networkMode)" after Build() is no longer necessarily the one that gates the
+           auth middleware. Searching from the guard's own position finds the auth-gating conditional that
+           actually follows it in the same method, which is the invariant this test claims either way. */
+        var networkOnly = afterBuild.IndexOf("if (networkMode)", guard, StringComparison.Ordinal);
+
+        Assert.True(networkOnly >= 0, "expected a network-mode-only middleware block to exist after the guard");
         Assert.True(
             guard < networkOnly,
             "the Host-header guard must be registered BEFORE the network-mode-only block — inside it, the " +
@@ -208,5 +217,90 @@ public sealed class HostHeaderGuardTests
 
         Assert.True(mapMcp >= 0, "MapMcp is no longer called — this guard needs rewriting");
         Assert.True(guard >= 0 && guard < mapMcp, "the Host-header guard must run before MapMcp registers the MCP endpoints");
+    }
+
+    /// <summary>#3898 D7: <c>/core</c> must be guarded exactly like <c>/</c> — the Host-header guard precedes
+    /// it too, not only the unqualified mapping.</summary>
+    [Fact]
+    public void McpHost_RunsTheGuardBeforeMapMcpCore()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        var guard = source.IndexOf("IsAllowedHost(context.Request.Host.Host", StringComparison.Ordinal);
+        var mapMcpCore = source.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+
+        Assert.True(mapMcpCore >= 0, "/core is no longer mapped — this test needs rewriting");
+        Assert.True(guard >= 0 && guard < mapMcpCore, "the Host-header guard must run before MapMcp(\"/core\") registers the /core endpoint");
+    }
+
+    /// <summary>
+    /// #3898 D7's security claim in full: <c>/core</c> is not a separate, lighter-weight endpoint — it is
+    /// mapped on the SAME <c>_app</c>, after the SAME network-mode gate (the unconditional bearer token, then
+    /// the loopback-exempt CIDR check) as <c>/</c>. A request to <c>/core</c> without a token is refused there,
+    /// before either <c>MapMcp</c> call — and therefore before the <c>/core</c> tool filter in
+    /// <c>ConfigureSessionOptions</c> ever runs — exactly as a token-less request to <c>/</c> is.
+    /// </summary>
+    [Fact]
+    public void McpHost_RunsTheNetworkModeGateBeforeBothMapMcpCalls()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
+
+        var networkGate = afterBuild.IndexOf("if (networkMode)", StringComparison.Ordinal);
+        var mapMcpRoot = afterBuild.IndexOf("_app.MapMcp();", StringComparison.Ordinal);
+        var mapMcpCore = afterBuild.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+
+        Assert.True(networkGate >= 0, "expected a network-mode-only middleware block (bearer token, CIDR) to exist after Build()");
+        Assert.True(mapMcpRoot >= 0, "MapMcp() is no longer called — this test needs rewriting");
+        Assert.True(mapMcpCore >= 0, "/core is no longer mapped — this test needs rewriting");
+        Assert.True(
+            networkGate < mapMcpRoot && networkGate < mapMcpCore,
+            "the network-mode gate (bearer token + CIDR) must be registered before BOTH MapMcp calls, or a " +
+            "request to /core could reach a tool handler the token/CIDR check would have refused on /.");
+    }
+
+    /// <summary>
+    /// The order checks above only mean something if no middleware branches on the path. Endpoints run at the
+    /// end of the pipeline wherever <c>MapMcp</c> sits in the source, so a gate that skipped <c>/core</c> by path
+    /// would still pass them. This pins that nothing between <c>Build()</c> and the <c>/core</c> mapping reads the
+    /// path or maps a branch.
+    /// </summary>
+    [Fact]
+    public void McpHost_HasNoPathConditionalMiddlewareBeforeTheMcpMappings()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        var build = source.IndexOf("_app = builder.Build();", StringComparison.Ordinal);
+        var mapMcpCore = source.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+        Assert.True(build >= 0 && mapMcpCore > build, "expected Build() before MapMcp(\"/core\") — this test needs rewriting");
+
+        var pipeline = source[build..mapMcpCore];
+        foreach (var branch in new[] { "Request.Path", "UseWhen(", "MapWhen(", ".Map(", "UsePathBase(" })
+        {
+            Assert.False(
+                pipeline.Contains(branch, StringComparison.Ordinal),
+                $"'{branch}' appears between Build() and MapMcp(\"/core\"). A path-conditional gate can skip /core " +
+                "while every order check above still passes.");
+        }
+    }
+
+    /// <summary>
+    /// #3898 D7: /core is a real subset only in Stateless mode, where <c>ConfigureSessionOptions</c> runs on every
+    /// request. A stateful session is found by its id alone, not by route, so a session opened on / could call
+    /// any tool on /core. While /core is mapped, the transport stays stateless.
+    /// </summary>
+    [Fact]
+    public void McpHost_KeepsTheTransportStatelessWhileCoreIsMapped()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        Assert.True(source.Contains("_app.MapMcp(\"/core\");", StringComparison.Ordinal), "/core is no longer mapped — this test needs rewriting");
+
+        var transport = source.IndexOf(".WithHttpTransport(options =>", StringComparison.Ordinal);
+        var stateless = source.IndexOf("options.Stateless = true;", StringComparison.Ordinal);
+        var configure = source.IndexOf("options.ConfigureSessionOptions =", StringComparison.Ordinal);
+
+        Assert.True(transport >= 0, "WithHttpTransport(options => ...) is gone — this test needs rewriting");
+        Assert.True(
+            stateless > transport && configure > stateless,
+            "options.Stateless = true must be set in the same WithHttpTransport block as ConfigureSessionOptions");
+        Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core is mapped");
     }
 }

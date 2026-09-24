@@ -432,7 +432,11 @@ public sealed class McpToolsListBudgetTests
             + $"Measure() built on managed thread {_measureBuildThreadId}, build count = {_measureBuildCount}.";
     }
 
-    private static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
+    /// <summary>Internal, not private (#3898 D7): <c>DarlingCoreToolProfileTests</c> reuses this to filter the
+    /// REAL served tool set through <c>DarlingCoreToolProfile.FilterToolCollection</c> rather than fabricating
+    /// its own <see cref="McpServerTool"/> instances, so that test exercises the same tools the host actually
+    /// registers.</summary>
+    internal static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
     {
         var registered = Regex
             .Matches(File.ReadAllText(RepoPath("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs")),

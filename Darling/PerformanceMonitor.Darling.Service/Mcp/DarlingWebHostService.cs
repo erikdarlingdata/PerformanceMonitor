@@ -771,179 +771,7 @@ public sealed class DarlingWebHostService : BackgroundService
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
 
             _app = builder.Build();
-
-            /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
-               because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
-               started server so a rebind starts with a clean budget. */
-            var refusals = new DarlingHttpRefusalLog();
-
-            /* Pipeline order: the Host-allowlist middleware runs FIRST on EVERY request (both modes) as the
-               DNS-rebinding guard, then (network mode only) the auth middleware, then DarlingWebEndpoints.MapAll
-               -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
-               UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
-               for non-API paths. */
-
-            /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
-               leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
-               surface is tokenless, so a browser ON the host that loads attacker content could be rebound to
-               127.0.0.1:5153 and read/write the whole surface same-origin. Require the Host header to name an
-               address we actually bind — a loopback name/IP (localhost / 127.0.0.1 / [::1]) or, in network mode,
-               the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass
-               there; a rebound foreign hostname pointed at 127.0.0.1:5153 is rejected 400 before any auth
-               decision, route handler, or static file. */
-            _app.Use(async (context, next) =>
-            {
-                if (!IsAllowedHost(context.Request.Host.Host, networkListenIp))
-                {
-                    refusals.Report(
-                        _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
-                        context.Connection.RemoteIpAddress,
-                        $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
-                        + " (a loopback name/IP, or web.network.listen when LAN-exposed)",
-                        DateTime.UtcNow);
-                    context.Response.StatusCode = StatusCodes.Status400BadRequest;
-                    return;
-                }
-
-                await next(context);
-            });
-
-            if (networkMode)
-            {
-                var cidr = allowedCidr;
-                var token = accessToken;
-                /* Per-process signing key: a restart regenerates it and thereby invalidates every session
-                   cookie (acceptable — the operator re-presents the token once). The OIDC transaction key is
-                   DERIVED from it rather than shared — see DeriveTransactionKey for why sharing the raw key
-                   across the two cookie shapes would let a pre-auth transaction cookie impersonate a session. */
-                var signingKey = RandomNumberGenerator.GetBytes(SigningKeyBytes);
-                var transactionKey = DarlingWebOidc.DeriveTransactionKey(signingKey);
-
-                _app.Use(async (context, next) =>
-                {
-                    /* The Host-allowlist / DNS-rebinding guard already ran above (both modes); this gate owns
-                       the network auth decision (session cookie / ?token= / in-CIDR / the sign-in flow). */
-                    var remote = context.Connection.RemoteIpAddress;
-                    var hasValidCookie = TryValidateSessionCookie(
-                        context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
-
-                    /* Resolve WHO holds the cookie (#2550). A cryptographically valid cookie whose subject
-                       slot encodes a seat we do not recognize is treated as NO cookie: refusing is
-                       recoverable (re-login), serving an unresolvable identity is not. */
-                    var seat = DarlingWebSeat.SharedToken;
-                    if (hasValidCookie && !DarlingWebSeat.TryResolveSeat(cookieSubject, out seat))
-                    {
-                        hasValidCookie = false;
-                        seat = DarlingWebSeat.SharedToken;
-                    }
-
-                    var presentedToken = context.Request.Query["token"].ToString();
-                    var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
-                    var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
-
-                    switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken))
-                    {
-                        case WebRequestAction.Allow:
-                            /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
-                               the updated_by stamps, endpoints added on any parallel branch — resolves the
-                               same identity without per-endpoint wiring. */
-                            context.Items[DarlingWebSeat.HttpContextItemKey] = seat;
-
-                            /* The group-level write gate (#2550): a read-only seat is refused every
-                               mutating request HERE, before routing, so a write endpoint added tomorrow is
-                               born gated instead of born exposed. */
-                            if (!DarlingWebSeat.IsRequestAllowed(seat, context.Request.Method, context.Request.Path.Value ?? "/"))
-                            {
-                                refusals.Report(
-                                    _logger, "Web dashboard", DarlingRefusalGate.ReadOnlySeat, StatusCodes.Status403Forbidden,
-                                    remote,
-                                    $"the signed-in seat is read-only (viewer role) and {context.Request.Method} is a mutation",
-                                    DateTime.UtcNow);
-                                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                                context.Response.ContentType = "application/json; charset=utf-8";
-                                await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
-                                return;
-                            }
-
-                            await next(context);
-                            return;
-
-                        case WebRequestAction.HandleAuthFlow:
-                            /* The flow endpoints are reachable WITHOUT a credential by design (a sign-in has
-                               to start somewhere), and this pipeline registers no exception-handling
-                               middleware — so anything that throws in here would answer an anonymous caller
-                               with an unhandled 500 and a stack-shaped failure instead of a refusal. The
-                               #2744 review found one such throw for real (an out-of-range exp reaching
-                               DateTimeOffset); that root cause is fixed in DarlingWebOidc, and this boundary
-                               exists so the NEXT one is also a clean refusal rather than a 500. A client
-                               abort still propagates — that is not a failure to report. */
-                            try
-                            {
-                                await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
-                            }
-                            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
-                            {
-                                throw;
-                            }
-                            catch (Exception ex)
-                            {
-                                ReportSignInRefusal(refusals, remote, StatusCodes.Status500InternalServerError,
-                                    $"the sign-in flow failed unexpectedly: {DarlingHttpRefusalLog.Sanitize(ex.Message, 128)}");
-                                if (!context.Response.HasStarted)
-                                {
-                                    await WriteSignInErrorAsync(context, StatusCodes.Status500InternalServerError,
-                                        "The sign-in could not be completed. The service log names what failed.");
-                                }
-                            }
-
-                            return;
-
-                        case WebRequestAction.SetCookieAndRedirect:
-                            AppendSessionCookie(context, signingKey);
-                            /* 302 (default) to the same path with ?token= stripped, so the token never lingers
-                               in browser history, bookmarks, or a Referer header. */
-                            context.Response.Redirect(BuildPathWithoutToken(context.Request));
-                            return;
-
-                        case WebRequestAction.Forbid:
-                            /* An out-of-CIDR remote, or one whose address ASP.NET Core could not report
-                               (which fails closed). A wrong credential from inside the CIDR is ShowLogin,
-                               not this - see below. The CIDR stays OUTERMOST: it wins over a valid cookie,
-                               a valid token, AND the OIDC endpoints (#2550). */
-                            refusals.Report(
-                                _logger, "Web dashboard", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
-                                remote,
-                                remote is null
-                                    ? "its source address could not be determined, which fails closed"
-                                    : $"its address is outside web.network.allowFrom ({cidr})",
-                                DateTime.UtcNow);
-                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                            return;
-
-                        default: /* ShowLogin */
-                            /* A 200 rather than a 401, so this is not a "rejected request" by status - and
-                               it is exactly the state an operator asks about when a ?token= they pasted did
-                               not work. Logged ONLY when a token was actually presented and did not match:
-                               a first visit with no token is the normal path to the login page and logging
-                               it would make every bookmark a warning. */
-                            if (!string.IsNullOrEmpty(presentedToken))
-                            {
-                                refusals.Report(
-                                    _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK,
-                                    remote,
-                                    "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
-                                    DateTime.UtcNow);
-                            }
-
-                            await WriteLoginPageAsync(context, oidcClient is not null);
-                            return;
-                    }
-                });
-            }
-
-            DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger, _baselineCache);
-            _app.UseDefaultFiles();
-            _app.UseStaticFiles();
+            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1072,6 +900,199 @@ public sealed class DarlingWebHostService : BackgroundService
        DecideWebRequest composes AROUND it rather than growing it, so the token path cannot regress by
        construction.
        --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
+    /// network-mode auth middleware, then <see cref="DarlingWebEndpoints.MapAll"/> -> <c>UseDefaultFiles</c>
+    /// -> <c>UseStaticFiles</c>. Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a
+    /// <c>TestServer</c> instead of a second, hand-copied one that could silently drift from production. The
+    /// production call site passes exactly these values, in exactly this order — see <c>TryStartServerAsync</c>.
+    /// Instance method, not static: the gates call back into <see cref="HandleAuthFlowAsync"/> and
+    /// <see cref="ReportSignInRefusal"/>, and read <c>_logger</c>/<c>_collectorState</c>/<c>_baselineCache</c>,
+    /// exactly as before the extraction — only the receiver (this vs. a test-constructed instance) changes.
+    /// </summary>
+    internal void ConfigurePipeline(
+        WebApplication app,
+        NpgsqlDataSource postgres,
+        bool networkMode,
+        IPAddress? networkListenIp,
+        IPNetwork allowedCidr,
+        string accessToken,
+        DarlingWebOidcClient? oidcClient)
+    {
+        /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
+           because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
+           started server so a rebind starts with a clean budget. */
+        var refusals = new DarlingHttpRefusalLog();
+
+        /* Pipeline order: the Host-allowlist middleware runs FIRST on EVERY request (both modes) as the
+           DNS-rebinding guard, then (network mode only) the auth middleware, then DarlingWebEndpoints.MapAll
+           -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
+           UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
+           for non-API paths. */
+
+        /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
+           leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
+           surface is tokenless, so a browser ON the host that loads attacker content could be rebound to
+           127.0.0.1:5153 and read/write the whole surface same-origin. Require the Host header to name an
+           address we actually bind — a loopback name/IP (localhost / 127.0.0.1 / [::1]) or, in network mode,
+           the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass
+           there; a rebound foreign hostname pointed at 127.0.0.1:5153 is rejected 400 before any auth
+           decision, route handler, or static file. */
+        app.Use(async (context, next) =>
+        {
+            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp))
+            {
+                refusals.Report(
+                    _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
+                    context.Connection.RemoteIpAddress,
+                    $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
+                    + " (a loopback name/IP, or web.network.listen when LAN-exposed)",
+                    DateTime.UtcNow);
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            await next(context);
+        });
+
+        if (networkMode)
+        {
+            var cidr = allowedCidr;
+            var token = accessToken;
+            /* Per-process signing key: a restart regenerates it and thereby invalidates every session
+               cookie (acceptable — the operator re-presents the token once). The OIDC transaction key is
+               DERIVED from it rather than shared — see DeriveTransactionKey for why sharing the raw key
+               across the two cookie shapes would let a pre-auth transaction cookie impersonate a session. */
+            var signingKey = RandomNumberGenerator.GetBytes(SigningKeyBytes);
+            var transactionKey = DarlingWebOidc.DeriveTransactionKey(signingKey);
+
+            app.Use(async (context, next) =>
+            {
+                /* The Host-allowlist / DNS-rebinding guard already ran above (both modes); this gate owns
+                   the network auth decision (session cookie / ?token= / in-CIDR / the sign-in flow). */
+                var remote = context.Connection.RemoteIpAddress;
+                var hasValidCookie = TryValidateSessionCookie(
+                    context.Request.Cookies[SessionCookieName], signingKey, DateTimeOffset.UtcNow, out var cookieSubject);
+
+                /* Resolve WHO holds the cookie (#2550). A cryptographically valid cookie whose subject
+                   slot encodes a seat we do not recognize is treated as NO cookie: refusing is
+                   recoverable (re-login), serving an unresolvable identity is not. */
+                var seat = DarlingWebSeat.SharedToken;
+                if (hasValidCookie && !DarlingWebSeat.TryResolveSeat(cookieSubject, out seat))
+                {
+                    hasValidCookie = false;
+                    seat = DarlingWebSeat.SharedToken;
+                }
+
+                var presentedToken = context.Request.Query["token"].ToString();
+                var hasValidToken = DarlingHostBinding.FixedTimeTokenEquals(presentedToken, token);
+                var isAuthFlowRoute = IsAuthFlowPath(context.Request.Path.Value ?? "/", oidcClient is not null);
+
+                switch (DecideWebRequest(remote, cidr, isAuthFlowRoute, hasValidCookie, hasValidToken))
+                {
+                    case WebRequestAction.Allow:
+                        /* The seat rides HttpContext.Items so EVERY downstream consumer — /api/session,
+                           the updated_by stamps, endpoints added on any parallel branch — resolves the
+                           same identity without per-endpoint wiring. */
+                        context.Items[DarlingWebSeat.HttpContextItemKey] = seat;
+
+                        /* The group-level write gate (#2550): a read-only seat is refused every
+                           mutating request HERE, before routing, so a write endpoint added tomorrow is
+                           born gated instead of born exposed. */
+                        if (!DarlingWebSeat.IsRequestAllowed(seat, context.Request.Method, context.Request.Path.Value ?? "/"))
+                        {
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.ReadOnlySeat, StatusCodes.Status403Forbidden,
+                                remote,
+                                $"the signed-in seat is read-only (viewer role) and {context.Request.Method} is a mutation",
+                                DateTime.UtcNow);
+                            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                            context.Response.ContentType = "application/json; charset=utf-8";
+                            await context.Response.WriteAsync("{\"error\": \"This account has read-only access.\"}");
+                            return;
+                        }
+
+                        await next(context);
+                        return;
+
+                    case WebRequestAction.HandleAuthFlow:
+                        /* The flow endpoints are reachable WITHOUT a credential by design (a sign-in has
+                           to start somewhere), and this pipeline registers no exception-handling
+                           middleware — so anything that throws in here would answer an anonymous caller
+                           with an unhandled 500 and a stack-shaped failure instead of a refusal. The
+                           #2744 review found one such throw for real (an out-of-range exp reaching
+                           DateTimeOffset); that root cause is fixed in DarlingWebOidc, and this boundary
+                           exists so the NEXT one is also a clean refusal rather than a 500. A client
+                           abort still propagates — that is not a failure to report. */
+                        try
+                        {
+                            await HandleAuthFlowAsync(context, oidcClient, signingKey, transactionKey, seat, refusals);
+                        }
+                        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            ReportSignInRefusal(refusals, remote, StatusCodes.Status500InternalServerError,
+                                $"the sign-in flow failed unexpectedly: {DarlingHttpRefusalLog.Sanitize(ex.Message, 128)}");
+                            if (!context.Response.HasStarted)
+                            {
+                                await WriteSignInErrorAsync(context, StatusCodes.Status500InternalServerError,
+                                    "The sign-in could not be completed. The service log names what failed.");
+                            }
+                        }
+
+                        return;
+
+                    case WebRequestAction.SetCookieAndRedirect:
+                        AppendSessionCookie(context, signingKey);
+                        /* 302 (default) to the same path with ?token= stripped, so the token never lingers
+                           in browser history, bookmarks, or a Referer header. */
+                        context.Response.Redirect(BuildPathWithoutToken(context.Request));
+                        return;
+
+                    case WebRequestAction.Forbid:
+                        /* An out-of-CIDR remote, or one whose address ASP.NET Core could not report
+                           (which fails closed). A wrong credential from inside the CIDR is ShowLogin,
+                           not this - see below. The CIDR stays OUTERMOST: it wins over a valid cookie,
+                           a valid token, AND the OIDC endpoints (#2550). */
+                        refusals.Report(
+                            _logger, "Web dashboard", DarlingRefusalGate.SourceCidr, StatusCodes.Status403Forbidden,
+                            remote,
+                            remote is null
+                                ? "its source address could not be determined, which fails closed"
+                                : $"its address is outside web.network.allowFrom ({cidr})",
+                            DateTime.UtcNow);
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        return;
+
+                    default: /* ShowLogin */
+                        /* A 200 rather than a 401, so this is not a "rejected request" by status - and
+                           it is exactly the state an operator asks about when a ?token= they pasted did
+                           not work. Logged ONLY when a token was actually presented and did not match:
+                           a first visit with no token is the normal path to the login page and logging
+                           it would make every bookmark a warning. */
+                        if (!string.IsNullOrEmpty(presentedToken))
+                        {
+                            refusals.Report(
+                                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK,
+                                remote,
+                                "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
+                                DateTime.UtcNow);
+                        }
+
+                        await WriteLoginPageAsync(context, oidcClient is not null);
+                        return;
+                }
+            });
+        }
+
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache);
+        app.UseDefaultFiles();
+        app.UseStaticFiles();
+    }
 
     /// <summary>The verdict for one network-mode request, with the sign-in flow added (#2550). The first four
     /// members are <see cref="WebAuthAction"/>'s, mapped one-to-one.</summary>

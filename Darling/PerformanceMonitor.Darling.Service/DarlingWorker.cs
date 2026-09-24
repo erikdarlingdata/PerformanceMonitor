@@ -786,6 +786,14 @@ public sealed class DarlingWorker : BackgroundService
        a best-effort errand and there is nothing in it that a later hour cannot do. */
     private Task? _oversizedPlanSweep;
 
+    /* #4130: the in-flight daily retention purge, fire-and-tracked like the per-server sweeps and the
+       oversized-plan backlog above rather than awaited inline. Measured at 346-400s deleting ~839k rows;
+       awaited on this loop, that is 346-400s in which NO server's sweep body launches and the whole fleet
+       reads stale — the same shape as the oversized-plan backlog's field incident, one maintenance step
+       over. Tracked (not fire-and-forget) so the launch loop can see it is still running and skip a second
+       launch, and so shutdown can drain it instead of abandoning a live DELETE. */
+    private Task? _purgeTask;
+
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval, pinned to :30 past the minute by TimescaleSupport.NextCompressionCheckUtc
        (#3575) so no steady-state sample lands on the :MM:00 instant the compression policies fire on. The
@@ -2553,40 +2561,13 @@ public sealed class DarlingWorker : BackgroundService
                     server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
             }
 
-            if (DateTime.UtcNow >= _nextPurgeUtc)
-            {
-                _nextPurgeUtc = DateTime.UtcNow.AddHours(24);
-                /* Honor fleet-wide retention overrides (config_collector_schedules, server_id NULL) layered
-                   on CollectorScheduleDefaults; a per-server override can't apply to a shared-table purge.
-                   Empty overrides (Stage 1 seeds none) resolve to the defaults — identical behavior. */
-                var overrides = _scheduleOverrides;
-                await DarlingRetention.PurgeAsync(
-                    postgres, _timescaleAvailable, _logger, stoppingToken,
-                    name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
-                    config.PlanContentRetentionDays);
-
-                /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
-                   app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
-                   service must actually invoke it or analysis_findings grows unbounded. Rides the
-                   daily purge; never throws (logs + degrades). The horizon is the shared base window
-                   rather than a literal of the same value, so findings stay worth exactly as long as
-                   the metric data they are correlated against instead of holding at 30 on their own
-                   if that window ever moves. */
-                await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(
-                    retentionDays: DarlingRetention.DataRetentionBaseDays);
-
-                /* #1652: sweep the service's own rolling log files. The provider swept only in its
-                   constructor, so a service up for months — the normal case — swept once at startup and
-                   never again while writing a file a day. Rides the daily purge like every other
-                   maintenance chore; static + best-effort, so the worker needs no reference to the
-                   provider the host owns and a locked file can never break the tick. */
-                DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
-
-                /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
-                   CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
-                await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
-                await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
-            }
+            /* #4130: fire-and-track, exactly like the per-server sweeps just above and the oversized-plan
+               backlog just below — see TryStartScheduledPurge's doc for why the inline await was the
+               defect. */
+            TryStartScheduledPurge(
+                DateTime.UtcNow,
+                token => RunScheduledPurgeAsync(postgres, config, token),
+                stoppingToken);
 
             /* #3392: drain the oversized-plan backlog. Its own low-frequency cadence off this loop, beside
                the purge, and deliberately NOT inside the per-server collector rotation: fetching a plan the
@@ -2953,6 +2934,15 @@ public sealed class DarlingWorker : BackgroundService
             await Task.WhenAny(
                 Task.WhenAll(inFlightSweeps),
                 Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
+        }
+
+        /* #4130: drain the in-flight daily purge the same way as the per-server sweeps above, rather than
+           abandoning it mid-DELETE. RunTrackedAsync's own try/catch swallows the OperationCanceledException
+           that stoppingToken's cancellation raises inside PurgeAsync, so this await completes cleanly
+           without throwing — same shape as the sweeps' catch-all. */
+        if (_purgeTask is { IsCompleted: false })
+        {
+            await Task.WhenAny(_purgeTask, Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
         }
 
         /* Drain the concurrent command loop on shutdown (it observes the same token). */
@@ -7610,6 +7600,108 @@ LIMIT 1";
 
     /// <summary>A failure result_json body: <c>{ "success": false, "error": ... }</c>.</summary>
     private static string JsonError(string error) => JsonSerializer.Serialize(new { success = false, error });
+
+    /// <summary>
+    /// #4130: the launch-loop decision for the daily retention purge, extracted so it is testable without
+    /// driving the whole fleet loop. Fires and tracks <paramref name="startPurge"/> in <see cref="_purgeTask"/>
+    /// exactly like the per-server sweeps (<see cref="ServerLoopState.InFlightSweep"/>) and the oversized-plan
+    /// backlog (<see cref="_oversizedPlanSweep"/>) — never awaited here, so this returns immediately whether
+    /// or not it launched anything.
+    ///
+    /// <para>The purge was measured at 346-400s deleting ~839k rows. Awaited inline on this loop (the pre-4130
+    /// shape), that is 346-400s in which the loop launches NO server sweeps and the whole fleet reads
+    /// stale — the same shape as the oversized-plan backlog's own field incident, one maintenance step
+    /// over.</para>
+    ///
+    /// <para>Owns <c>_nextPurgeUtc</c>'s update too, rather than leaving it to the caller: on a launch it
+    /// advances the stamp by the full 24h cadence, and when the due time arrived but the previous purge is
+    /// still running it leaves the stamp untouched, so the next launch-loop tick tries again rather than
+    /// silently pushing the purge out by a whole day. A slow purge that overruns one 24h cycle simply gets
+    /// its next attempt on the very next tick once it completes, rather than piling up a second instance on
+    /// top of the first. Returns whether it launched.</para>
+    /// </summary>
+    internal bool TryStartScheduledPurge(
+        DateTime nowUtc, Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
+    {
+        if (nowUtc < _nextPurgeUtc)
+        {
+            return false;
+        }
+
+        if (_purgeTask is { IsCompleted: false })
+        {
+            _logger.LogInformation(
+                "daily retention purge was still running at its next scheduled time — skipping this launch; "
+                + "it will be retried on the next tick once the current run completes");
+            return false;
+        }
+
+        _nextPurgeUtc = nowUtc.AddHours(24);
+        _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// Wraps a purge delegate so <see cref="_purgeTask"/> can never fault unobserved (the launch loop never
+    /// awaits it, so an unhandled fault here would otherwise surface only as an UnobservedTaskException at
+    /// GC time). <see cref="OperationCanceledException"/> is swallowed too — that is the normal shutdown-drain
+    /// outcome once <c>stoppingToken</c> is cancelled, not a failure to log as one.
+    /// </summary>
+    private async Task RunTrackedAsync(Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await startPurge(stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown drain. */
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "daily retention purge failed");
+        }
+    }
+
+    /// <summary>
+    /// The daily retention purge's actual work — <see cref="DarlingRetention.PurgeAsync"/>, then the AN3
+    /// findings cleanup, the #1652 log-file sweep, and the module-map refresh — moved out of the launch loop
+    /// body so <see cref="TryStartScheduledPurge"/> can fire-and-track it as one delegate. Order and behavior
+    /// are unchanged from the pre-4130 inline sequence.
+    /// </summary>
+    private async Task RunScheduledPurgeAsync(NpgsqlDataSource postgres, DarlingConfig config, CancellationToken stoppingToken)
+    {
+        /* Honor fleet-wide retention overrides (config_collector_schedules, server_id NULL) layered
+           on CollectorScheduleDefaults; a per-server override can't apply to a shared-table purge.
+           Empty overrides (Stage 1 seeds none) resolve to the defaults — identical behavior. */
+        var overrides = _scheduleOverrides;
+        await DarlingRetention.PurgeAsync(
+            postgres, _timescaleAvailable, _logger, stoppingToken,
+            name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
+            config.PlanContentRetentionDays);
+
+        /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
+           app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
+           service must actually invoke it or analysis_findings grows unbounded. Rides the
+           daily purge; never throws (logs + degrades). The horizon is the shared base window
+           rather than a literal of the same value, so findings stay worth exactly as long as
+           the metric data they are correlated against instead of holding at 30 on their own
+           if that window ever moves. */
+        await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(
+            retentionDays: DarlingRetention.DataRetentionBaseDays);
+
+        /* #1652: sweep the service's own rolling log files. The provider swept only in its
+           constructor, so a service up for months — the normal case — swept once at startup and
+           never again while writing a file a day. Rides the daily purge like every other
+           maintenance chore; static + best-effort, so the worker needs no reference to the
+           provider the host owns and a locked file can never break the tick. */
+        DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
+
+        /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
+           CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
+        await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
+        await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+    }
 
     /// <summary>
     /// The <c>purge_now</c> command handler (the daily retention purge on demand): runs
