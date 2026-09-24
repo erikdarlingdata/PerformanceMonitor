@@ -736,7 +736,7 @@ function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
     }
     if ($open.Count -eq 0) {
         if ($account) {
-            Write-Host "Locked the install folder: only SYSTEM, Administrators and $account can change what runs from $root." -ForegroundColor Green
+            Write-Host "Locked the install folder: only SYSTEM and Administrators can change what runs from $root; $account can write only its runtime folders." -ForegroundColor Green
         }
         else {
             Write-Host "Locked the install folder against ordinary users before running anything from it: $root" -ForegroundColor Green
