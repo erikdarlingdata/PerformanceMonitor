@@ -849,12 +849,32 @@ internal static class DarlingTrendReader
     /// </summary>
     public sealed record DurationTrendRoute(
         RetentionTier Tier, string RawTable, string HourlyView, bool HourlyAvailable, TierCoverage Coverage,
-        bool RawRetentionApplies, DateTime ResolvedAtUtc)
+        bool RawRetentionApplies, DateTime ResolvedAtUtc, string? HourlyFromClause = null,
+        string? ProbeHourlyView = null)
     {
         /// <summary>The payload's <c>source</c> word: <c>raw</c> or <c>hourly</c>, get_query_trend's vocabulary
         /// — <see cref="DurationTrendRouting.SourceWord"/>, the one spelling the viewer's chart title also
         /// leads with (#3653), so a user reading the chart and an agent reading the payload get one word.</summary>
         public string Source => DurationTrendRouting.SourceWord(Tier);
+
+        /// <summary>
+        /// The hourly FROM-clause item to splice into the bucketed and keyed builders (#3653 A6, decision 1):
+        /// <see cref="HourlyView"/> stays a bare NAME for probes/logs/messages, and this is the
+        /// <see cref="RollupCoverage.StitchedRelationSql"/> output — <c>collect.&lt;HourlyView&gt; AS h</c>
+        /// unchanged when there is no successor, or the stitched UNION ALL past the successor's floor.
+        /// Null on a route that never resolved a from-clause (a test-only route built by the record
+        /// constructor directly); callers fall back to <c>collect.{HourlyView} AS h</c>, the same text.
+        /// </summary>
+        public string HourlyFromClauseOrDefault => HourlyFromClause ?? $"collect.{HourlyView} AS h";
+
+        /// <summary>
+        /// The NAME <see cref="HasAnySampleOnRouteAsync"/> probes (#3653 A6, decision 4): the successor when
+        /// the stitch applies (the successor exists AND its floor is at or before the window's end — the
+        /// frozen legacy will empty over time, so probing it would eventually answer "never sampled" on a
+        /// store that is still being written to), otherwise <see cref="HourlyView"/> as today. Null on a
+        /// route built without resolving the stitch; callers fall back to <see cref="HourlyView"/>.
+        /// </summary>
+        public string ProbeHourlyViewOrDefault => ProbeHourlyView ?? HourlyView;
 
         /// <summary>The relation the read actually walks.</summary>
         public string Relation => Tier == RetentionTier.Raw ? RawTable : HourlyView;
@@ -912,7 +932,11 @@ internal static class DarlingTrendReader
             rawTable, coverage.HourlyRelationFor(hourlyView, startUtc), hourlyAvailable, tierCoverage,
             /* Grain-scoped, not rollups != None — see the record's remarks: the arming gate is per table. */
             RawRetentionApplies: hourlyAvailable,
-            ResolvedAtUtc: nowUtc);
+            ResolvedAtUtc: nowUtc,
+            /* #3653 A6: the FROM-clause item for the bucketed/keyed builders — decision 1 keeps HourlyView a
+               bare name for probes/logs, and this is StitchedRelationSql's splice-ready answer for the same
+               window the tier above was decided over. */
+            HourlyFromClause: coverage.StitchedRelationSql(hourlyView, "h", startUtc, RollupCoverage.StitchTier.Hourly));
     }
 
     /// <summary>
