@@ -18,7 +18,7 @@
 
 **Free, open-source monitoring that replaces the tools charging you thousands per server per year.** Specialized collectors, real-time alerts, and a built-in MCP server for AI analysis. Nothing phones home. Your data stays on your server and your machine.
 
-**Supported:** SQL Server 2016–2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling)
+**Supported:** SQL Server 2016–2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling) | PostgreSQL, including AWS RDS and Aurora (Darling)
 
 ![Fleet overview: nine servers at a glance, one flagged Critical with live blocking and deadlocks](Screenshots/fleet-overview.jpg)
 
@@ -30,17 +30,17 @@ Pick by how you want collection to run — the monitoring brain (collectors, ale
 
 | | **[Lite](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** — flagship | **[Darling](Darling/README.md)** — headless | **[Dashboard](deprecated/Dashboard/README.md)** — *deprecated* |
 |---|---|---|---|
-| **How it runs** | Single desktop app monitors remotely, on demand | Windows service collects 24/7 into a central store; detached viewer reads it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
+| **How it runs** | Single desktop app monitors remotely, on demand | Service on Windows or Linux collects 24/7 into a central store. The Windows viewer and the web dashboard read it from any seat | SQL-Server-installed database + Agent collectors, separate viewer app |
 | **Installs on your server?** | No | No | Yes (a `PerformanceMonitor` database) |
-| **Stores data** | Local DuckDB + Parquet | Bundled PostgreSQL + TimescaleDB | In the target SQL Server |
-| **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
-| **Requires** | `VIEW SERVER STATE` ([permissions](#permissions)) | `VIEW SERVER STATE` + a place to run the service | SQL Agent ([Dashboard docs](deprecated/Dashboard/README.md)) |
+| **Stores data** | Local DuckDB + Parquet | PostgreSQL + TimescaleDB (bundled on Windows) | In the target SQL Server |
+| **Best for** | Quick triage, Azure SQL DB, locked-down servers, consultants, firefighting | Always-on monitoring of many SQL Server and PostgreSQL servers from one service | *Existing installs only — new deployments should use Lite or Darling* |
+| **Requires** | `VIEW SERVER STATE` ([permissions](#permissions)) | `VIEW SERVER STATE` (SQL Server) or [these grants](Darling/README.md#permissions-on-a-postgresql-target) (PostgreSQL), plus a place to run the service | SQL Agent ([Dashboard docs](deprecated/Dashboard/README.md)) |
 
 > **⚠️ The "Full" Dashboard edition is deprecated.** Existing installs keep working and remain on bug-fix support, but it is no longer the recommended path and — as of v3.3.0 — the Dashboard and its CLI installer are **no longer included in release assets**. The last shipped builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0), and both remain buildable from the repo. New deployments should use **Lite** or **Darling**. Its docs live with the code: **[deprecated/Dashboard/README.md](deprecated/Dashboard/README.md)** (the app, tabs, permissions) and **[deprecated/Installer/README.md](deprecated/Installer/README.md)** (the CLI database installer).
 
 **👉 Not sure? [Start with Lite.](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest)** One download, nothing installed on your server, data flowing in under 5 minutes.
 
-All editions include real-time alerts (system tray + email + webhooks), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
+All editions include real-time alerts (email + webhooks), charts and graphs, dark and light themes, CSV export, and a built-in MCP server for AI-powered analysis with tools like Claude. Lite and Dashboard also show alerts in the system tray. All release binaries are digitally signed via [SignPath](https://signpath.io) — no more Windows SmartScreen warnings.
 
 ---
 
@@ -197,13 +197,15 @@ When a second Windows user on the same machine launches Lite, they see the share
 
 ## Quick Start — Darling (headless)
 
-**Darling** is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a Windows service collects from your servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request. An optional built-in **web dashboard** (off by default, its own port 5153) serves the fleet overview, per-server drill-down, the scheduled fleet sweep reports, and alert history to any browser — read-only over the collected data, plus seat-gated config writes (saved views, custom alert rules, and the mute-rule API) — so operators can watch the fleet without installing the viewer.
+**Darling** is the always-on edition for teams that want 24/7 collection without a desktop app driving it: a service on Windows or Linux collects from your SQL Server and PostgreSQL servers around the clock into a central PostgreSQL store (TimescaleDB is detected and adopted automatically for compression and chunk-based retention), and a detached WPF viewer reads that store from any Windows seat. It runs the same monitoring brain as Lite — collectors, alert engine, and analysis pipeline shared at the library level — with alerts over email and webhooks (Teams, Slack, PagerDuty, and generic HTTP POST) and the same MCP tool surface available on request. An optional built-in **web dashboard** (off by default, its own port 5153) serves the fleet overview, per-server drill-down, the scheduled fleet sweep reports, and alert history to any browser — read-only over the collected data, plus seat-gated config writes (saved views, custom alert rules, and the mute-rule API) — so operators can watch the fleet without installing the viewer.
 
 1. Download **`PerformanceMonitorDarling-<version>.zip`** from the [latest release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest) — the signed service and viewer with the bundled PostgreSQL + TimescaleDB runtime beside the service exe, so a from-zero install needs no database provisioning.
-2. Copy `darling.sample.json` to `darling.json` and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up.
+2. Copy `darling.sample.json` to `darling.json` and add your servers (and optional SMTP / webhook delivery). In managed mode the service unpacks and runs its own PostgreSQL — no external database to set up. For a PostgreSQL server, set `"engine": "postgres"` on its entry (see [PostgreSQL Targets](Darling/README.md#postgresql-targets)).
 3. Run the service (console for a trial, or install it as a Windows service). It seeds the store and begins collecting on the same default cadences and retention horizons as a fresh Lite install.
 4. Start the **Darling Viewer**. It is in the same zip, under `viewer\`, and `install-darling.ps1` leaves a Desktop shortcut. On the service host there is nothing to point at anything: it finds the same `darling.json`, derives the store connection, and opens on the fleet. For a seat on another machine, run `--export-viewer-config` on the service host and copy the folder it writes.
 5. Optionally turn on the two off-by-default surfaces: `--enable-web` serves the browser dashboard on port 5153, `--enable-mcp` serves the MCP endpoint on 5152. Both take effect live, no restart.
+
+These steps are for Windows. On Linux, run the service under Docker Compose with the official TimescaleDB image. You can also run it under systemd with a PostgreSQL server that you already run. The bundled store is Windows-only. See [Run on Linux](Darling/README.md#run-on-linux-docker-compose-or-systemd-1804) in the operator guide.
 
 **Never done this before?** [**docs/uat-onboarding.md**](docs/uat-onboarding.md) is the ordered path from a downloaded zip to all three surfaces — the WPF viewer, the web dashboard, and MCP — with the log line, HTTP response, or screen that proves each step worked, and the handful of things that reliably catch people out.
 
@@ -216,16 +218,17 @@ Configuration is a single JSON file with no schedule knobs. See the **[Darling o
 | Capability | Lite | Darling | Dashboard *(deprecated)* |
 |---|---|---|---|
 | Target server installation | None | None | Required |
-| Runs collection | On-demand desktop app | 24/7 Windows service | SQL Agent on the target |
+| Runs collection | On-demand desktop app | 24/7 service (Windows or Linux) | SQL Agent on the target |
 | Multi-server from one seat | Built-in | Built-in (central store) | Per-server install |
-| Data storage | DuckDB + Parquet (local) | PostgreSQL + TimescaleDB (bundled) | SQL Server (on target) |
+| Data storage | DuckDB + Parquet (local) | PostgreSQL + TimescaleDB (bundled on Windows) | SQL Server (on target) |
 | Azure SQL Database | Supported | Supported | Not supported |
 | Azure SQL MI / AWS RDS | Supported | Supported | Supported |
+| PostgreSQL (self-hosted, AWS RDS, Aurora) | Not supported | Supported | Not supported |
 | Graphical plan viewer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer | Built-in, 30-rule PlanAnalyzer |
 | Standalone plan viewer | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` | Open/paste/drag `.sqlplan` |
 | Alerts (tray + email + webhooks) | Yes | Email + webhooks (headless) | Yes |
 | Themes | Dark and light | Dark and light | Dark and light |
-| Portability | Single executable | Portable service + viewer zip | Server-bound |
+| Portability | Single executable | Portable service + viewer zip (Windows), service tarball (Linux) | Server-bound |
 | MCP server (LLM integration) | Built-in (89 tools) | On request (159 tools) | Built into Dashboard (66 tools) |
 
 ---
@@ -250,7 +253,7 @@ The **Lite** app and the **Darling** viewer share the same tab layout (the viewe
 | **FinOps** | Utilization & provisioning analysis, database resource breakdown, storage growth (7d/30d), idle database detection, index analysis via sp_IndexCleanup, per-object table/index size, growth, usage, and locking/contention analysis, application connections, server inventory, cost optimization recommendations, column-level filtering on all grids |
 | **Recommendations** | Prioritized findings drawn from collected metrics, grouped into incidents, each card showing the affected database, the recommendation, the reasoning behind it, and a copyable MCP investigation prompt |
 
-Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see [Themes and colors](Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs; see [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
+Both feature auto-refresh, configurable time ranges, chart drill-down to Active Queries, right-click CSV export, system tray integration, dark and light themes with user-adjustable palette colors (see [Themes and colors](Lite/README.md#themes-and-colors)), and timezone display options (server time, local time, or UTC). The Darling viewer adds a fleet sidebar and per-server tabs, and it shows a PostgreSQL target on its own set of tabs. See [Darling/README.md](Darling/README.md). The deprecated Dashboard's six-tab-group layout is documented in [deprecated/Dashboard/README.md](deprecated/Dashboard/README.md).
 
 ---
 
