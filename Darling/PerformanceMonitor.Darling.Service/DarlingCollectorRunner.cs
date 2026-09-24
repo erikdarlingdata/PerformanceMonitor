@@ -775,17 +775,25 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4053 part c3: the same target-configuration read IngestRdsDeadlocksAsync and IngestRdsLogEventsAsync
+           make, for the same reason — this ingestor reaches the log through the AWS API, not SQL, so it
+           carries no target connection of its own to probe with. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsPlans.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        var measurements = MeasurementsFor(server, foreignZoneLines: 0, outcome.CsvRecordsDiscarded,
+            outcome.ForgedCaptures);
 
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
            different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
     }
 
@@ -906,9 +914,9 @@ public sealed class DarlingCollectorRunner
     /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
     /// self-hosted collectors.</summary>
     private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
-        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0)
+        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0, int forgedCaptures = 0)
     {
-        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0)
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0)
         {
             return CollectorContext.NoMeasurements;
         }
@@ -928,6 +936,16 @@ public sealed class DarlingCollectorRunner
         if (csvRecordsDiscarded > 0)
         {
             context.Measure(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, csvRecordsDiscarded);
+        }
+
+        /* #4053 part c3: the RDS plan ingestor's own forged-capture count, same measurement label the
+           self-hosted PgPlanCaptureCollector.ReadCsvAsync/ReadAsync record for their own forged skips
+           (ForgedCaptureMeasurement), reported only when > 0. DarlingWorker's WithForgedCaptureNote reads
+           this label off any collector's measurements, so this alone is what attaches the sentence to the
+           managed route's row. */
+        if (forgedCaptures > 0)
+        {
+            context.Measure(PgPlanCaptureCollector.ForgedCaptureMeasurement, forgedCaptures);
         }
 
         return context.Measurements;
@@ -1011,8 +1029,8 @@ public sealed class DarlingCollectorRunner
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.Log(LogTimezoneReadFailureLevel(_pgLogUsesCsvlogReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
-                "Could not read log_destination for '{Server}' (#4053 part c1) — the RDS log-event route "
-                + "reads the {Fallback} file this cycle, its last known-good verdict.", server.Config.DisplayName,
+                "Could not read log_destination for '{Server}' (#4053 part c1) — every RDS csvlog-aware "
+                + "route reads the {Fallback} file this cycle, its last known-good verdict.", server.Config.DisplayName,
                 _lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var lastGood) && lastGood ? "csv" : "stderr");
 
             /* #4053 review round 1 (item 5): the last good verdict this runner saw for this server, not a

@@ -371,76 +371,8 @@ LIMIT 2000";
             var entries = PgServerLogCsvParser.Parse(body ?? string.Empty, out var recordsDiscarded);
             totalRecordsDiscarded += recordsDiscarded;
 
-            foreach (var entry in entries)
-            {
-                /* csvlog carries severity in its own field ("error_severity"), never glued onto Message the
-                   way the stderr line's log_line_prefix glues "LOG:  " on — verified on the rig: the
-                   captured record's message field is "duration: N ms  plan:\n{json}", not
-                   "LOG:  duration: ...". PlanMarkerCsvLiteral is that literal minus the stderr-only
-                   "LOG:  " head. A record whose Message does not start with it is not an auto_explain
-                   capture and is not this collector's concern — PgLogEventsCollector's own classifier
-                   reads the same tail for every OTHER family. */
-                if (entry.Message is null || !entry.Message.StartsWith(PlanMarkerCsvLiteral, StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                /* auto_explain writes at LOG. The stderr route's regex requires the LOG label, so the csv route
-                   does too (review round 1): without it, a client's RAISE NOTICE or WARNING whose message
-                   starts with the marker would reach the parse, which the stderr route never allows. */
-                if (!string.Equals(entry.Severity, "LOG", StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                var rest = entry.Message[PlanMarkerCsvLiteral.Length..];
-                var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
-
-                /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way.
-                   It is not a capture, and not forged, so it is skipped WITHOUT counting (review round 1);
-                   counting it would grow forged_captures_skipped with every slow statement. */
-                if (msIndex < 0)
-                {
-                    continue;
-                }
-
-                var durationText = rest[..msIndex];
-                var planJson = rest[(msIndex + " ms  plan:".Length)..].TrimStart('\r', '\n');
-
-                /* The query_id column (PG14+, 0-based index 25) — preferred over any prefix text, because
-                   csvlog carries no %Q-rendered prefix at all: the identity is PostgreSQL's own column. A
-                   query id that is not a real value — %Q renders 0 when compute_query_id is off, never an
-                   unparseable string — marks this record as one this collector cannot attribute. */
-                if (!long.TryParse(
-                        entry.RawText.Length > 0 ? QueryIdFromRawText(entry.RawText) : null,
-                        NumberStyles.Integer | NumberStyles.AllowLeadingSign,
-                        CultureInfo.InvariantCulture,
-                        out var queryId))
-                {
-                    forgedCaptures++;
-                    continue;
-                }
-
-                if (!s_csvDurationShape.IsMatch(durationText)
-                    || !double.TryParse(durationText, NumberStyles.Float, CultureInfo.InvariantCulture, out var durationMs))
-                {
-                    forgedCaptures++;
-                    continue;
-                }
-
-                var parsed = PgPlanLogParser.FromBlock(queryId, durationMs, planJson);
-
-                if (parsed is not null)
-                {
-                    rows.Add(new Row(
-                        QueryId: parsed.Value.QueryId,
-                        PlanHash: parsed.Value.PlanHash,
-                        DurationMs: parsed.Value.DurationMs,
-                        NodeCount: parsed.Value.NodeCount,
-                        TopNodeType: parsed.Value.TopNodeType,
-                        PlanJson: parsed.Value.PlanJson));
-                }
-            }
+            rows.AddRange(PlanRowsFromCsvEntries(entries, out var forgedInThisBatch));
+            forgedCaptures += forgedInThisBatch;
         }
 
         if (forgedCaptures > 0)
@@ -451,6 +383,104 @@ LIMIT 2000";
         if (totalRecordsDiscarded > 0)
         {
             context.Measure(CsvRecordsDiscardedMeasurement, totalRecordsDiscarded);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The per-entry half of <see cref="ReadCsvAsync"/> (#4053 part c3): classify csvlog entries into plan
+    /// rows, with no reader and no context — a shared step the RDS/Aurora plan ingestor can call over
+    /// entries the RDS log API handed it, rather than a second copy of the marker check, the LOG-severity
+    /// gate, the query-id and duration guards and <see cref="PgPlanLogParser.FromBlock"/>. Internal, visible
+    /// to the Darling service (that caller's assembly) and nothing else (#4053 c3 review).
+    /// <para><b>Precondition: csv-parser entries only.</b> The query id is read from the text after the LAST
+    /// comma of <see cref="PgLogEntry.RawText"/>. That is the unquoted <c>query_id</c> column only because
+    /// <see cref="PgServerLogCsvParser"/> admits a record only with exactly 26 fields. An entry from the stderr
+    /// assembler or the jsonlog parser carries raw line text, whose last comma can sit in client-written
+    /// message text, so a client could choose the query id. Never pass those entries here.</para>
+    /// <para>No foreign-zone filter, on either route: plan rows are stamped with the collection time, never a
+    /// log timestamp, and the stderr plan routes never filtered either.</para>
+    /// </summary>
+    /// <param name="forgedCaptures">The count this batch of entries added to
+    /// <see cref="ForgedCaptureMeasurement"/> — a query id or duration that did not match the guarded shape
+    /// a real capture always has (#4058 L1).</param>
+    internal static List<Row> PlanRowsFromCsvEntries(IEnumerable<PgLogEntry> entries, out int forgedCaptures)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+
+        var rows = new List<Row>();
+        forgedCaptures = 0;
+
+        foreach (var entry in entries)
+        {
+            /* csvlog carries severity in its own field ("error_severity"), never glued onto Message the
+               way the stderr line's log_line_prefix glues "LOG:  " on — verified on the rig: the
+               captured record's message field is "duration: N ms  plan:\n{json}", not
+               "LOG:  duration: ...". PlanMarkerCsvLiteral is that literal minus the stderr-only
+               "LOG:  " head. A record whose Message does not start with it is not an auto_explain
+               capture and is not this collector's concern — PgLogEventsCollector's own classifier
+               reads the same tail for every OTHER family. */
+            if (entry.Message is null || !entry.Message.StartsWith(PlanMarkerCsvLiteral, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            /* auto_explain writes at LOG. The stderr route's regex requires the LOG label, so the csv route
+               does too (review round 1): without it, a client's RAISE NOTICE or WARNING whose message
+               starts with the marker would reach the parse, which the stderr route never allows. */
+            if (!string.Equals(entry.Severity, "LOG", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var rest = entry.Message[PlanMarkerCsvLiteral.Length..];
+            var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
+
+            /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way.
+               It is not a capture, and not forged, so it is skipped WITHOUT counting (review round 1);
+               counting it would grow forged_captures_skipped with every slow statement. */
+            if (msIndex < 0)
+            {
+                continue;
+            }
+
+            var durationText = rest[..msIndex];
+            var planJson = rest[(msIndex + " ms  plan:".Length)..].TrimStart('\r', '\n');
+
+            /* The query_id column (PG14+, 0-based index 25) — preferred over any prefix text, because
+               csvlog carries no %Q-rendered prefix at all: the identity is PostgreSQL's own column. A
+               query id that is not a real value — %Q renders 0 when compute_query_id is off, never an
+               unparseable string — marks this record as one this collector cannot attribute. */
+            if (!long.TryParse(
+                    entry.RawText.Length > 0 ? QueryIdFromRawText(entry.RawText) : null,
+                    NumberStyles.Integer | NumberStyles.AllowLeadingSign,
+                    CultureInfo.InvariantCulture,
+                    out var queryId))
+            {
+                forgedCaptures++;
+                continue;
+            }
+
+            if (!s_csvDurationShape.IsMatch(durationText)
+                || !double.TryParse(durationText, NumberStyles.Float, CultureInfo.InvariantCulture, out var durationMs))
+            {
+                forgedCaptures++;
+                continue;
+            }
+
+            var parsed = PgPlanLogParser.FromBlock(queryId, durationMs, planJson);
+
+            if (parsed is not null)
+            {
+                rows.Add(new Row(
+                    QueryId: parsed.Value.QueryId,
+                    PlanHash: parsed.Value.PlanHash,
+                    DurationMs: parsed.Value.DurationMs,
+                    NodeCount: parsed.Value.NodeCount,
+                    TopNodeType: parsed.Value.TopNodeType,
+                    PlanJson: parsed.Value.PlanJson));
+            }
         }
 
         return rows;

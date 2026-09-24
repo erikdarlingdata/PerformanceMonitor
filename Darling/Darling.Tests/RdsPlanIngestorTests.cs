@@ -153,7 +153,7 @@ public sealed class RdsPlanIngestorTests
         await cancelled.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => ingestor.IngestAsync(1, "target-a", Host, cancelled.Token));
+            () => ingestor.IngestAsync(1, "target-a", Host, cancellationToken: cancelled.Token));
 
         Assert.Single(client.Downloads);
 
@@ -205,5 +205,231 @@ public sealed class RdsPlanIngestorTests
         Assert.False(outcome.SourceReached);
         Assert.NotEqual(RdsIngestOutcome.Read(0), outcome);
         Assert.Empty(client.Downloads);
+    }
+
+    /* --- #4053 part c3: this ingestor's own csvlog route, mirroring RdsDeadlockIngestorTests' own -------- */
+
+    private const string StderrFile = "error/postgresql.log.2026-08-26-15";
+    private const string CsvFile = StderrFile + ".csv";
+
+    /* One real auto_explain csvlog record, the same shape PgPlanCaptureCsvUnitTests' own RealPlanRecord is
+       built on — verbatim what a live pg18 rig wrote, only the Relation Name and query id are this test's
+       own choice. */
+    private const string CsvPlanRecord =
+        "2026-09-24 04:29:03.817 UTC,\"postgres\",\"postgres\",352,\"[local]\",6ab4a70f.160,1,\"SELECT\","
+        + "2026-09-24 04:29:03 UTC,6/2,781,LOG,00000,\"duration: 0.020 ms  plan:\n"
+        + "{\n"
+        + "  \"\"Plan\"\": {\n"
+        + "    \"\"Node Type\"\": \"\"Seq Scan\"\",\n"
+        + "    \"\"Relation Name\"\": \"\"plan_capture_c3\"\",\n"
+        + "    \"\"Filter\"\": \"\"(id > 5)\"\"\n"
+        + "  }\n"
+        + "}\",,,,,,,,,\"psql\",\"client backend\",,-3560200806914842915\n";
+
+    /* A plan-shaped look-alike inside another record's quoted field — PgPlanCaptureCsvUnitTests' own
+       RecordWithForgedPlanInUserName shape: the forged newline plus fake plan line stay inside the ONE
+       quoted user_name field of a FATAL-severity record, never becoming a second plan record of their
+       own. */
+    private static readonly string CsvRecordWithForgedPlanLookAlike =
+        "2026-09-24 04:29:03.008 UTC,\"nosuchuser\n"
+        + "2026-09-24 04:29:03.000 UTC,,,1,,1.1,1,,2026-09-24 04:29:03 UTC,,0,LOG,00000,"
+        + "\"\"duration: 1.0 ms  plan:\n{\"\"Plan\"\": {\"\"Relation Name\"\": \"\"FORGED\"\"}}\"\"\","
+        + "\"postgres\",83,\"[local]\",6ab482e3.53,1,\"startup\",2026-09-24 04:29:03 UTC,3/3,0,FATAL,28000,"
+        + "\"role \"\"nosuchuser\"\" does not exist\",,,,,,,,,\"\",\"client backend\",,0\n";
+
+    /* The same record at NOTICE severity — auto_explain writes at LOG only, and the csv route requires the
+       LOG label exactly as the stderr route's regex does. */
+    private static readonly string CsvPlanRecordAtNotice =
+        CsvPlanRecord.Replace(",6/2,781,LOG,00000,", ",6/2,781,NOTICE,00000,", StringComparison.Ordinal);
+
+    private static List<DescribeDBLogFilesDetails> PlanFileListing() => new()
+    {
+        new() { LogFileName = StderrFile, LastWritten = 9999 },
+        new() { LogFileName = CsvFile, LastWritten = 10000 },
+    };
+
+    private sealed class CsvFakeRds : AmazonRDSClient
+    {
+        public CsvFakeRds() : base(new Amazon.Runtime.BasicAWSCredentials("a", "b"), Amazon.RegionEndpoint.USEast1) { }
+
+        public List<DownloadDBLogFilePortionRequest> Downloads { get; } = new();
+        public List<DescribeDBLogFilesDetails> Files { get; set; } = PlanFileListing();
+        public string CsvBody { get; set; } = string.Empty;
+        public string? NextCsvMarker { get; set; } = "MARKER-1";
+
+        /// <summary>#4053 part c3, case 5: one queued <c>.csv</c> download per entry, a fresh marker per
+        /// call, mirroring RdsDeadlockIngestorTests' own CsvPortions.</summary>
+        public Queue<(string Body, bool AdditionalDataPending)>? CsvPortions { get; set; }
+
+        public override Task<DescribeDBLogFilesResponse> DescribeDBLogFilesAsync(
+            DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
+            => Task.FromResult(new DescribeDBLogFilesResponse { DescribeDBLogFiles = Files });
+
+        public override Task<DownloadDBLogFilePortionResponse> DownloadDBLogFilePortionAsync(
+            DownloadDBLogFilePortionRequest request, CancellationToken cancellationToken = default)
+        {
+            Downloads.Add(request);
+
+            if (!request.LogFileName.EndsWith(".csv", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new DownloadDBLogFilePortionResponse
+                {
+                    LogFileData = "stderr body",
+                    Marker = "MARKER-1",
+                    AdditionalDataPending = false,
+                });
+            }
+
+            if (CsvPortions is { Count: > 0 })
+            {
+                var (body, pending) = CsvPortions.Dequeue();
+
+                return Task.FromResult(new DownloadDBLogFilePortionResponse
+                {
+                    LogFileData = body,
+                    Marker = "MARKER-" + Downloads.Count,
+                    AdditionalDataPending = pending,
+                });
+            }
+
+            return Task.FromResult(new DownloadDBLogFilePortionResponse
+            {
+                LogFileData = CsvBody,
+                Marker = NextCsvMarker,
+                AdditionalDataPending = false,
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4053 part c3, case 1: csvlog on names the <c>.csv</c> file, and a portion holding one real
+    /// auto_explain record reaches the write — proven the way every other test in this file proves it: the
+    /// dead store turns a non-empty batch into a throw that is not <see cref="RdsLogUnavailableException"/>.
+    /// </summary>
+    [Fact]
+    public async Task CsvlogOn_NamesTheCsvFile_AndAPortionHoldingOnePlanReachesTheWrite()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new CsvFakeRds { CsvBody = CsvPlanRecord };
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsPlanIngestor(store, logs);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+        Assert.Single(client.Downloads);
+        Assert.Equal(CsvFile, client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c3, case 2: a plan-shaped look-alike inside another record's quoted field must not be read
+    /// as its own capture. No write, zero rows: the dead store is never opened.
+    /// </summary>
+    [Fact]
+    public async Task ALookAlikeInsideAQuotedField_ProducesNoWrite_AndZeroRows()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new CsvFakeRds { CsvBody = CsvRecordWithForgedPlanLookAlike };
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsPlanIngestor(store, logs);
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+        /* Not dropped as forged: the look-alike never became a plan record at all (review round 1). */
+        Assert.Equal(0, outcome.ForgedCaptures);
+    }
+
+    /// <summary>
+    /// #4053 c3 review: the RDS csv route counts a forged capture the way the self-hosted route does. A
+    /// LOG-severity plan record whose duration has the wrong shape is skipped and counted, and nothing is
+    /// written, so no store is opened.
+    /// </summary>
+    [Fact]
+    public async Task APlanRecordWithAMalformedDuration_IsCountedAsForged_AndNotWritten()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var forged = CsvPlanRecord.Replace("duration: 0.020 ms  plan:", "duration: 1.2.3 ms  plan:", StringComparison.Ordinal);
+        Assert.NotEqual(CsvPlanRecord, forged);
+        var client = new CsvFakeRds { CsvBody = forged };
+        var ingestor = new RdsPlanIngestor(store, new RdsLogSource(_ => client));
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Equal(1, outcome.ForgedCaptures);
+    }
+
+    /// <summary>
+    /// #4053 part c3, case 3: a plan record at NOTICE severity is not a capture — auto_explain writes at LOG
+    /// only, and the csv route requires the LOG label exactly as the stderr route's regex does. No write.
+    /// </summary>
+    [Fact]
+    public async Task APlanShapedRecordAtNoticeSeverity_ProducesNoWrite()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new CsvFakeRds { CsvBody = CsvPlanRecordAtNotice };
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsPlanIngestor(store, logs);
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+    }
+
+    /// <summary>
+    /// #4053 part c3, case 4: csvlog off requests the stderr file, as before — asserted against a listing
+    /// that also carries a <c>.csv</c> sibling so the choice is a real one rather than the sibling being
+    /// absent.
+    /// </summary>
+    [Fact]
+    public async Task CsvlogOff_StillRequestsTheStderrFile()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new CsvFakeRds();
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsPlanIngestor(store, logs);
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: false);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Single(client.Downloads);
+        Assert.Equal(StderrFile, client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c3, case 5: a plan record split across two portions comes out once, from the second — the
+    /// zero-event-first-portion shape RdsDeadlockIngestorTests' own split test uses. Portion 1 is pending and
+    /// holds only the record's head (no events, no write); portion 2 holds the tail and reaches the write.
+    /// </summary>
+    [Fact]
+    public async Task APlanRecordSplitAcrossTwoPortions_ComesOutOnce_FromTheSecondPortion()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var full = CsvPlanRecord;
+        var cut = full.IndexOf("duration: 0.020", StringComparison.Ordinal);
+        var client = new CsvFakeRds
+        {
+            CsvPortions = new Queue<(string, bool)>(new[]
+            {
+                (full[..cut], true),
+            }),
+        };
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsPlanIngestor(store, logs);
+
+        /* Portion 1: pending, holds only the record's head. No events, so no write and no throw. */
+        var first = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+        Assert.Equal(0, first.Rows);
+
+        /* Portion 2: the tail, queued as the single-shot CsvBody/NextCsvMarker so this read resumes with the
+           carry the first call recorded. Reaches the write — the dead store turns that into a throw. */
+        client.CsvBody = full[cut..];
+        client.NextCsvMarker = "MARKER-2";
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
     }
 }

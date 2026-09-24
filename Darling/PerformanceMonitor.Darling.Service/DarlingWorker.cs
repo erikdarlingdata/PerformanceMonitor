@@ -9940,10 +9940,10 @@ LIMIT 1";
                log_destination emptied entirely. Drop the verdict so the next cycle re-probes instead of
                reading no stderr file (and, on the csvlog route, no rows) for up to an hour.
 
-               #4053 review L1 (round 2): this marker is also thrown by pg_deadlocks and pg_plan_capture,
-               which read only the stderr tail on this branch and never consulted this cache to begin with —
-               their own no-stderr-file fault says nothing about whether csvlog is configured, so it must not
-               drop pg_log_events' verdict out from under it. Gate on RoutedCollectors, the same set the runner
+               #4053 review L1 (round 2): this marker is also thrown by pg_deadlocks and pg_plan_capture when
+               they read the stderr tail (csvlog off, or a jsonlog-only target, which they don't read yet).
+               Their no-stderr-file fault says nothing about a csvlog or jsonlog verdict, so it must not drop
+               one. Gate on RoutedCollectors, the same set the runner
                keys the probe itself on, so only a collector this cache actually informs can invalidate it.
 
                #4053 a2 review W1: and only when the cached verdict said stderr-only. A missing stderr file
@@ -9982,9 +9982,10 @@ LIMIT 1";
                stale cache needs. Drop the verdict so the next cycle re-probes; a genuinely fresh csvlog
                addition simply gets the same true verdict back next time.
 
-               #4053 review L1 (round 2): only pg_log_events can throw this marker today (see
-               PgLogEventsCollector), but the RoutedCollectors gate is applied here too, for the same reason
-               as the sibling arm above — one guard the cache trusts, not two that must agree by accident. */
+               #4053: every csvlog reader throws this marker (pg_log_events, pg_deadlocks and pg_plan_capture on
+               the self-hosted route; the RDS ingestors on a stale csv listing). The RoutedCollectors gate is
+               applied here too, for the same reason as the sibling arm above: one guard the cache trusts, not
+               two that must agree by accident. */
             if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
             {
                 PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
