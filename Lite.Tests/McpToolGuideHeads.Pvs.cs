@@ -24,14 +24,17 @@ public sealed class McpToolGuideHeadsPvsTests
         "get_pvs_stats",
     ];
 
+    /// <summary>The guardrail phrases the head must state. The pct_of_database rule names both null
+    /// causes and the zero denominator, because <c>PctReason</c> returns a reason for a missing OR zero database
+    /// size, and a measured 0 MB only reads 0.00 against a known size.</summary>
     private static readonly (string Tool, string Fact)[] HeadFacts =
     [
-        ("get_pvs_stats", "pvs_measured says whether the DMV reported a size at all"),
-        ("get_pvs_stats", "measured 0 MB = pct_of_database 0.00, never null"),
-        ("get_pvs_stats", "null = pvs size unmeasured or database size missing"),
-        ("get_pvs_stats", "no end time = still running"),
-        ("get_pvs_stats", "not from as_of"),
-        ("get_pvs_stats", "over the top-5 databases by current size"),
+        ("get_pvs_stats", "cleaner times (a start with no end = mid-run)"),
+        ("get_pvs_stats", "LATEST IS A TIME: the newest snapshot, not a window; as_of is when it was taken."),
+        ("get_pvs_stats", "looks back from now, not from as_of, over the top-5 databases by current size"),
+        ("get_pvs_stats", "Cleaner times are de-skewed to UTC, like as_of."),
+        ("get_pvs_stats", "pct_of_database is null only if PVS size is unmeasured (pvs_measured false) or database size is missing or 0"),
+        ("get_pvs_stats", "else measured 0 MB = 0.00"),
         ("get_pvs_stats", "No rows: not_collected if this engine can't collect PVS, else empty"),
     ];
 
@@ -64,5 +67,7 @@ public sealed class McpToolGuideHeadsPvsTests
         Assert.Contains("online-index version store size", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("oldest active/aborted transaction ids", served.Tail!, StringComparison.Ordinal);
         Assert.Contains("Use when a database's size is growing without table growth", served.Tail!, StringComparison.Ordinal);
+        /* Coordinator correction: PctReason also nulls the share for a zero denominator, so the tail names it. */
+        Assert.Contains("or the denominator is absent or zero, with pct_of_database_reason saying which", served.Tail!, StringComparison.Ordinal);
     }
 }
