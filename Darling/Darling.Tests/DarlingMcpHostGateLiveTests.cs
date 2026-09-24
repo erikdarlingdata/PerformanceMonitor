@@ -40,7 +40,7 @@ namespace Darling.Tests;
 /// <para>The gates read <c>context.Connection.RemoteIpAddress</c>, so requests go through
 /// <see cref="TestServer.SendAsync"/> where that is needed (the Host-header cases); the MCP conversation
 /// itself (initialize / tools/list / tools/call) is spoken as plain JSON-RPC HTTP POSTs over
-/// <see cref="TestServer.CreateClient"/>, since the SDK's transport reads the body, not the connection.</para>
+/// <c>TestServer.CreateClient</c>, since the SDK's transport reads the body, not the connection.</para>
 /// </summary>
 public sealed class DarlingMcpHostGateLiveTests
 {
