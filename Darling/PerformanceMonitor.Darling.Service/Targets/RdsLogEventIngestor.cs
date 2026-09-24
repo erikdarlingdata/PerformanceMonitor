@@ -46,6 +46,14 @@ public sealed class RdsLogEventIngestor
     /// </summary>
     internal const int MaxCarryLength = 1_048_576;
 
+    /// <summary>
+    /// The notice AWS's own <c>DownloadDBLogFilePortion</c> appends when a 1 MB portion cap cuts a line
+    /// mid-write (#4053 review round 2, item 1; public reports aws/aws-sdk#20, aws/aws-cli#2268): bytes are
+    /// missing after this point, so forward mode's byte-for-byte parity assumption no longer holds for the
+    /// rest of this portion.
+    /// </summary>
+    internal const string RdsTruncationNotice = "[Your log message was truncated]";
+
     /// <summary>A carried partial csvlog record and what's known about resuming it (#4053 part c1, review round 1).
     /// <see cref="StartKnown"/> is true ONLY when the partial starts on a record boundary this route actually
     /// walked forward from — never inferred from a file's end, which the multi-write race can lie about.
@@ -318,9 +326,27 @@ public sealed class RdsLogEventIngestor
     /// newline outside quotes — the true end of the record being skipped — drops up to it, counts exactly one
     /// discard, and resumes with a known start from there; a portion with no such newline in it keeps
     /// skipping. The unknown-start mode's own bound is unchanged: drop, count one, carry empty.</para>
+    ///
+    /// <para><b>An RDS truncation notice</b> (#4053 review round 2, item 1): checked only at this text's own
+    /// end, after trimming trailing '\r'/'\n' — never in the middle, where a client's own field content
+    /// could plant the notice text to force a downgrade it doesn't own. When it is found, the portion is
+    /// parsed as usual first (parity is exact up to the cut, in either mode), then the carry is dropped —
+    /// not kept — because the missing bytes past the cut mean the next portion's start is no longer known in
+    /// either mode; <see cref="CsvCarry.Empty"/> is handed on and the drop counts one discard.</para>
     /// </summary>
     internal static CsvPortion ParseCsvPortion(CsvCarry carry, string? text, bool additionalDataPending)
     {
+        if (IsTruncatedByRds(text))
+        {
+            var parsed = carry.Skipping
+                ? StepSkipping(carry, text ?? string.Empty)
+                : carry.StartKnown
+                    ? StepForward(carry.Partial, text)
+                    : StepUnknownStart(carry.Partial, text, additionalDataPending);
+
+            return new CsvPortion(parsed.Entries, parsed.RecordsDiscarded + 1, CsvCarry.Empty);
+        }
+
         if (carry.Skipping)
         {
             return StepSkipping(carry, text ?? string.Empty);
@@ -449,6 +475,19 @@ public sealed class RdsLogEventIngestor
         }
 
         return new CsvPortion(entries, discarded, new CsvCarry(partial, false));
+    }
+
+    /// <summary>Whether <paramref name="text"/> ends with the RDS truncation notice (#4053 review round 2,
+    /// item 1), trailing '\r'/'\n' trimmed first. Checked only at the end — a client's own field content
+    /// planting this text in the middle of a portion must not be able to force the downgrade.</summary>
+    private static bool IsTruncatedByRds(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        return text.AsSpan().TrimEnd("\r\n".AsSpan()).EndsWith(RdsTruncationNotice, StringComparison.Ordinal);
     }
 
     /// <summary>Whether <paramref name="text"/> leaves an open quote by its end — used only to seed

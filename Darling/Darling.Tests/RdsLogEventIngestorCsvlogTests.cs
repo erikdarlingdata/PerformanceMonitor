@@ -411,6 +411,45 @@ public sealed class RdsLogEventIngestorCsvlogTests
         Assert.Equal("after", only.UserName);
     }
 
+    /* --- #4053 review round 2: item 1, the RDS truncation notice ------------------------------------------ */
+
+    /// <summary>Forward mode: a portion ending with the notice parses its records before the cut as usual,
+    /// then hands on <see cref="RdsLogEventIngestor.CsvCarry.Empty"/> instead of the carried tail — the
+    /// missing bytes past the cut mean the next portion's start is no longer known — and counts the drop
+    /// as one discard.</summary>
+    [Fact]
+    public void ATruncationNoticeAtTheEnd_DropsTheCarry_AndCountsOneDiscard()
+    {
+        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var body = Record("UTC", "first") + "2026-09-24 01:54:43.008 UTC,\"second\",\"postgres\",83,"
+            + RdsLogEventIngestor.RdsTruncationNotice;
+
+        var step = Step(knownStart, body, pending: true);
+
+        var only = Assert.Single(step.Entries);
+        Assert.Equal("first", only.UserName);
+        Assert.Equal(1, step.RecordsDiscarded);
+        Assert.Equal(string.Empty, step.Next.Partial);
+        Assert.False(step.Next.StartKnown);
+        Assert.False(step.Next.Skipping);
+    }
+
+    /// <summary>The notice text planted inside a quoted field (not at the portion's own end) must not force
+    /// the downgrade: the carry keeps its known start and nothing is discarded for it, because a client's
+    /// own field content, not AWS's own cut, put the text there.</summary>
+    [Fact]
+    public void ATruncationNoticeInTheMiddle_DoesNotDowngradeTheCarry()
+    {
+        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var body = RecordWithMultiLineMessage(RdsLogEventIngestor.RdsTruncationNotice + "\nmore text");
+
+        var step = Step(knownStart, body, pending: false);
+
+        var only = Assert.Single(step.Entries);
+        Assert.Equal(RdsLogEventIngestor.RdsTruncationNotice + "\nmore text", only.Message);
+        Assert.Equal(0, step.RecordsDiscarded);
+    }
+
     /// <summary>A replay (empty <c>Resume.Marker</c>) doesn't touch the carry: the ingestor updates its
     /// carry dictionary only when <c>CommitResume</c> actually advances, so a chunk RDS sent no token with
     /// must not glue this portion's tail onto itself and must not consume the marker/carry pair a later
