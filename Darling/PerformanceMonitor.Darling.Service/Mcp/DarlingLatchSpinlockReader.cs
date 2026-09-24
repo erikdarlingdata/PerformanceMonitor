@@ -279,6 +279,7 @@ internal static class DarlingLatchSpinlockReader
         if (latchClass.StartsWith("PAGEIOLATCH", StringComparison.Ordinal)) return "I/O bottleneck - check disk latency, add memory";
         if (latchClass.StartsWith("PAGELATCH", StringComparison.Ordinal)) return "Page contention - check for hot pages, tempdb issues";
         if (latchClass == "BUFFER") return "Buffer pool contention - check for memory pressure";
+        if (latchClass.StartsWith("ACCESS_METHODS_DATASET_PARENT", StringComparison.Ordinal) || latchClass.StartsWith("ACCESS_METHODS_SCAN_RANGE_GENERATOR", StringComparison.Ordinal)) return "Index/heap access, or parallel scan coordination (DATASET_PARENT, SCAN_RANGE_GENERATOR)";
         if (latchClass.StartsWith("ACCESS_METHODS", StringComparison.Ordinal)) return "Index/heap access contention";
         if (latchClass.StartsWith("ALLOC", StringComparison.Ordinal)) return "Allocation contention - consider pre-sizing files";
         if (latchClass is "LOG_MANAGER" or "LOGCACHE_ACCESS") return "Log contention - check log disk";

@@ -172,6 +172,7 @@ public sealed class DarlingCoreToolProfileTests
         "get_file_io_stats",
         "get_file_io_trend",
         "get_fleet_overview",
+        "get_latch_stats",
         "get_memory_clerks",
         "get_memory_grants",
         "get_memory_pressure_events",

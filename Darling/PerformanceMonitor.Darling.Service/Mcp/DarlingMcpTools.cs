@@ -1457,15 +1457,18 @@ internal static class ToolRecommendations
             new("get_query_trend", "Confirm the regression timing and that the new plan is consistently worse"),
             new("get_query_store_top", "Pull the full Query Store entry including plan_id and forced-plan history before considering a force")
         ],
+        // #4149: LATCH_EX/LATCH_SH are non-buffer latches; the class from get_latch_stats decides the
+        // cause, so it leads. get_tempdb_trend dropped — it was pointed at tempdb allocation, which is
+        // PAGELATCH_UP's territory, not LATCH_EX/LATCH_SH's.
         ["LATCH_EX"] =
         [
-            new("get_tempdb_trend", "Check TempDB for allocation contention"),
+            new("get_latch_stats", "Find the latch class driving the wait"),
             new("get_top_queries_by_cpu", "Find queries causing latch contention"),
             new("get_wait_trend", "Track latch contention trend", new() { ["wait_type"] = "LATCH_EX" })
         ],
         ["LATCH_SH"] =
         [
-            new("get_tempdb_trend", "Check TempDB for allocation contention"),
+            new("get_latch_stats", "Find the latch class driving the wait"),
             new("get_wait_trend", "Track latch contention trend", new() { ["wait_type"] = "LATCH_SH" })
         ],
         ["DB_CONFIG"] =

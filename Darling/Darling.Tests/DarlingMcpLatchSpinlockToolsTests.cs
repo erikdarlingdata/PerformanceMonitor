@@ -213,7 +213,10 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
     [InlineData("PAGEIOLATCH_SH", "I/O bottleneck - check disk latency, add memory")]
     [InlineData("PAGELATCH_EX", "Page contention - check for hot pages, tempdb issues")]
     [InlineData("BUFFER", "Buffer pool contention - check for memory pressure")]
-    [InlineData("ACCESS_METHODS_DATASET_PARENT", "Index/heap access contention")]
+    // #4149: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR name parallel scans.
+    [InlineData("ACCESS_METHODS_DATASET_PARENT", "Index/heap access, or parallel scan coordination (DATASET_PARENT, SCAN_RANGE_GENERATOR)")]
+    [InlineData("ACCESS_METHODS_SCAN_RANGE_GENERATOR", "Index/heap access, or parallel scan coordination (DATASET_PARENT, SCAN_RANGE_GENERATOR)")]
+    [InlineData("ACCESS_METHODS_HOBT_VIRTUAL_ROOT", "Index/heap access contention")]
     [InlineData("ALLOC_FREESPACE_CACHE", "Allocation contention - consider pre-sizing files")]
     [InlineData("LOG_MANAGER", "Log contention - check log disk")]
     [InlineData("WHATEVER", "Review latch class documentation")]
