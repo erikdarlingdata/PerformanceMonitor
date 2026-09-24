@@ -264,6 +264,57 @@ public sealed class IndexUsageTruncationLivePostgresTests
     }
 
     /// <summary>
+    /// #4134: a capped page has to come back the SAME two rows on every call when every sort key the
+    /// statement had (unused-first, then <c>reserved_mb DESC</c>) ties across all three candidates. Without
+    /// a further tiebreaker, PostgreSQL is free to return any two of the three, and which two can change
+    /// call to call.
+    /// </summary>
+    [Fact]
+    public async Task ATiedCappedPageIsStableAcrossRepeatedCalls()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live index-usage tiebreak test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Three indexes, all Unused, all the SAME reserved_mb, so the only thing left to break the tie
+               is the (database, schema, table, index) key added by #4134. Named so ordinal order is
+               unambiguous. */
+            var capture = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+            var collectionId = CollectionIdGenerator.Next();
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await PlantIndexAsync(connection, ct, collectionId, capture, "DbA", "IX_1", objectId: 300, indexId: 2, reservedMb: 10m, seeks: 0);
+            await PlantIndexAsync(connection, ct, collectionId, capture, "DbA", "IX_2", objectId: 300, indexId: 3, reservedMb: 10m, seeks: 0);
+            await PlantIndexAsync(connection, ct, collectionId, capture, "DbB", "IX_1", objectId: 400, indexId: 2, reservedMb: 10m, seeks: 0);
+
+            var expected = new (string, string?)[] { ("DbA", "IX_1"), ("DbA", "IX_2") };
+
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                var page = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, ServerId, top: 2, databaseName: null);
+                Assert.Equal(
+                    expected,
+                    page.Select(r => (r.DatabaseName, r.IndexName)).ToArray());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
     /// One capture, two databases, three indexes: a never-read index in the alphabetically-first database
     /// (the smallest, so size cannot be what puts it first), and two actively-read ones in the other.
     /// </summary>

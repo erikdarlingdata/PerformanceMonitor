@@ -143,6 +143,34 @@ public class IndexObjectStatsTests : IClassFixture<SharedDuckDbFixture>, IDispos
         Assert.Equal(500, unused.UserUpdates);
     }
 
+    /// <summary>
+    /// #4134: a capped page has to come back the SAME rows on every call when every sort key the query had
+    /// (unused-first, then <c>reserved_mb DESC</c>) ties across candidates. Without a further tiebreaker,
+    /// DuckDB is free to return any subset, and which rows can change call to call.
+    /// </summary>
+    [Fact]
+    public async Task IndexUsage_TiedRows_PageIsStableAcrossRepeatedCalls()
+    {
+        // Three Unused indexes, same reserved_mb, all zero reads/updates: nothing but
+        // (database, schema, table, index) breaks the tie.
+        await InsertObjectStat(_latest, "AppDb", 500, 2, "dbo", "T500", "IX_Tie1", 10m, 1_000, 0, 0, 0, 0, 0, 0);
+        await InsertObjectStat(_latest, "AppDb", 500, 3, "dbo", "T500", "IX_Tie2", 10m, 1_000, 0, 0, 0, 0, 0, 0);
+        await InsertObjectStat(_latest, "AppDb", 600, 2, "dbo", "T600", "IX_Tie1", 10m, 1_000, 0, 0, 0, 0, 0, 0);
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var rows = await _dataService.GetIndexUsageAsync(ServerId);
+            var tied = rows
+                .Where(r => r.TableName == "T500" || r.TableName == "T600")
+                .Select(r => (r.TableName, r.IndexName))
+                .ToArray();
+
+            Assert.Equal(
+                new[] { ("T500", "IX_Tie1"), ("T500", "IX_Tie2"), ("T600", "IX_Tie1") },
+                tied);
+        }
+    }
+
     [Fact]
     public async Task IndexLocking_ReturnsContendedObjects()
     {

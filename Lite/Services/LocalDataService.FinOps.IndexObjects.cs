@@ -174,7 +174,11 @@ WHERE server_id = $1
 AND   collection_time = (SELECT MAX(collection_time) FROM v_index_object_stats WHERE server_id = $1)
 ORDER BY
     CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
-    reserved_mb DESC
+    reserved_mb DESC,
+    database_name,
+    schema_name,
+    table_name,
+    index_id
 LIMIT {topN}";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
