@@ -817,107 +817,187 @@ SELECT
                 context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
-            var effectiveStdDev = baseline.EffectiveStdDev;
+
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var ioThreshold = GetDeviationThreshold(MetricNames.IoLatency);
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
-            /* #3653 (A8): the I/O window read hands the gate the PEAK and the MEAN per-file-row latency, like
-               every sibling family. Until this slice it read AVG ALONE — the one z-score detector judging a
-               window average against cutoffs its siblings met with a window MAX, so a single file's stall
-               burst that would have fired on CPU or batch requests was diluted here, and an averaged window
-               carried none of the per-sample peak the ReadLatencyFloorMs / IoLatencyFallbackMs bars were
-               sized for. The baseline is the per-file-row read ratio at this same grain (BaselineProvider's
-               io_latency arm), so MAX over the same rows is the statistic the other families test. */
+            /* #3653 A8 option B (lane L4a-2): one row per target-local hour tile, read latency and write
+               latency both carried per tile — arg_max replaces the old PEAK's implicit "whichever row" tie
+               (there was no peak-time column here before; none is added now, since no existing metadata key
+               reads one). $4..$6 bind map.WindowClock, never the cached baseline clock. Until #3653's earlier
+               slice this read AVG ALONE for read/write; MAX was added THEN so a single file's stall burst
+               fires the way CPU or batch requests would — this slice keeps that PEAK/MEAN pair, per tile. */
             cmd.CommandText = @"
-SELECT MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
+       COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
        MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
-       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat
+       AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
+       COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   (delta_reads > 0 OR delta_writes > 0)";
+AND   (delta_reads > 0 OR delta_writes > 0)
+GROUP BY local_hour
+ORDER BY local_hour";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.TransitionAtUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetBeforeMinutes });
+            cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
-
-            var peakReadLat = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgReadLat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var peakWriteLat = reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2));
-            var avgWriteLat = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
-
-            var ioThreshold = GetDeviationThreshold(MetricNames.IoLatency);
-
-            // Read latency anomaly — the reported value and sigma are the PEAK's, the pair decides (#3653).
-            var readDecision = AnomalyGate.EvaluateZScore(
-                baseline, peakReadLat, avgReadLat,
-                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (readDecision.Fire)
+            var readTiles = new List<WindowTile>();
+            var writeTiles = new List<WindowTile>();
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
             {
-                var metadata = new Dictionary<string, double>
+                while (await reader.ReadAsync(context.CancellationToken))
                 {
-                    ["current_latency_ms"] = peakReadLat,
-                    ["avg_latency_ms"] = avgReadLat,
-                    ["baseline_mean_ms"] = baseline.Mean,
-                    ["baseline_stddev_ms"] = effectiveStdDev,
-                    ["deviation_sigma"] = readDecision.Sigma,
-                    ["mean_deviation_sigma"] = readDecision.MeanSigma ?? 0,
-                    ["fire_threshold"] = readDecision.ThresholdUsed,
-                    ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
-                    ["fallback_exceedance"] = readDecision.FallbackExceedance,
-                    ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
-                    ["baseline_samples"] = baseline.SampleCount
-                };
-                AddBaselineContext(metadata, baseline);
+                    readTiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3));
+                    writeTiles.Add(WindowTiles.ReadTile(reader, 0, 4, 5, 6));
+                }
+            }
 
-                anomalies.Add(new Fact
+            var wholeRead = WindowTiles.WholeWindow(readTiles);
+            var wholeWrite = WindowTiles.WholeWindow(writeTiles);
+            if (wholeRead.Samples == 0 && wholeWrite.Samples == 0) return;
+
+            // Read latency anomaly — the reported value and sigma are the worst tile's PEAK, the pair decides.
+            if (wholeRead.Samples > 0)
+            {
+                var readTv = AnomalyGate.EvaluateTiles(
+                    readTiles, map,
+                    ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    window);
+
+                AnomalyGate.ZDecision readDecision;
+                BaselineBucket readBucketUsed;
+                double peakReadLat;
+                double avgReadLat;
+
+                if (readTv is null)
                 {
-                    Source = "anomaly",
-                    Key = "ANOMALY_READ_LATENCY",
-                    Value = peakReadLat,
-                    ServerId = context.ServerId,
-                    Metadata = metadata
-                });
+                    // Never-blind fallback: no tile cleared MinTileSamples or had a non-empty bucket —
+                    // score today's single-window path against the start bucket, unchanged.
+                    readDecision = AnomalyGate.EvaluateZScore(
+                        baseline, wholeRead.Peak, wholeRead.Mean,
+                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                        window: window);
+                    readBucketUsed = baseline;
+                    peakReadLat = wholeRead.Peak;
+                    avgReadLat = wholeRead.Mean;
+                }
+                else
+                {
+                    readDecision = readTv.Value.Decision;
+                    readBucketUsed = readTv.Value.Bucket;
+                    peakReadLat = readTv.Value.Tile.Peak;
+                    avgReadLat = readTv.Value.Tile.Mean;
+                }
+
+                if (readDecision.Fire)
+                {
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["current_latency_ms"] = peakReadLat,
+                        ["avg_latency_ms"] = avgReadLat,
+                        ["baseline_mean_ms"] = readBucketUsed.Mean,
+                        ["baseline_stddev_ms"] = readBucketUsed.EffectiveStdDev,
+                        ["deviation_sigma"] = readDecision.Sigma,
+                        ["mean_deviation_sigma"] = readDecision.MeanSigma ?? 0,
+                        ["fire_threshold"] = readDecision.ThresholdUsed,
+                        ["baseline_low_quality"] = readDecision.LowQualityBaseline ? 1 : 0,
+                        ["fallback_exceedance"] = readDecision.FallbackExceedance,
+                        ["baseline_zero_history"] = readDecision.ZeroHistory ? 1 : 0,
+                        ["baseline_samples"] = readBucketUsed.SampleCount
+                    };
+                    AddBaselineContext(metadata, readBucketUsed);
+                    if (readTv is not null)
+                    {
+                        WindowTiles.AddTileMetadata(metadata, readTv.Value, readTiles, map.WindowClock);
+                    }
+
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_READ_LATENCY",
+                        Value = peakReadLat,
+                        ServerId = context.ServerId,
+                        Metadata = metadata
+                    });
+                }
             }
 
             // Write latency anomaly
-            var writeDecision = AnomalyGate.EvaluateZScore(
-                baseline, peakWriteLat, avgWriteLat,
-                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (writeDecision.Fire)
+            if (wholeWrite.Samples > 0)
             {
-                var metadata = new Dictionary<string, double>
-                {
-                    ["current_latency_ms"] = peakWriteLat,
-                    ["avg_latency_ms"] = avgWriteLat,
-                    ["baseline_mean_ms"] = baseline.Mean,
-                    ["baseline_stddev_ms"] = effectiveStdDev,
-                    ["deviation_sigma"] = writeDecision.Sigma,
-                    ["mean_deviation_sigma"] = writeDecision.MeanSigma ?? 0,
-                    ["fire_threshold"] = writeDecision.ThresholdUsed,
-                    ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
-                    ["fallback_exceedance"] = writeDecision.FallbackExceedance,
-                    ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
-                    ["baseline_samples"] = baseline.SampleCount
-                };
-                AddBaselineContext(metadata, baseline);
+                var writeTv = AnomalyGate.EvaluateTiles(
+                    writeTiles, map,
+                    ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                    window);
 
-                anomalies.Add(new Fact
+                AnomalyGate.ZDecision writeDecision;
+                BaselineBucket writeBucketUsed;
+                double peakWriteLat;
+                double avgWriteLat;
+
+                if (writeTv is null)
                 {
-                    Source = "anomaly",
-                    Key = "ANOMALY_WRITE_LATENCY",
-                    Value = peakWriteLat,
-                    ServerId = context.ServerId,
-                    Metadata = metadata
-                });
+                    writeDecision = AnomalyGate.EvaluateZScore(
+                        baseline, wholeWrite.Peak, wholeWrite.Mean,
+                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                        window: window);
+                    writeBucketUsed = baseline;
+                    peakWriteLat = wholeWrite.Peak;
+                    avgWriteLat = wholeWrite.Mean;
+                }
+                else
+                {
+                    writeDecision = writeTv.Value.Decision;
+                    writeBucketUsed = writeTv.Value.Bucket;
+                    peakWriteLat = writeTv.Value.Tile.Peak;
+                    avgWriteLat = writeTv.Value.Tile.Mean;
+                }
+
+                if (writeDecision.Fire)
+                {
+                    var metadata = new Dictionary<string, double>
+                    {
+                        ["current_latency_ms"] = peakWriteLat,
+                        ["avg_latency_ms"] = avgWriteLat,
+                        ["baseline_mean_ms"] = writeBucketUsed.Mean,
+                        ["baseline_stddev_ms"] = writeBucketUsed.EffectiveStdDev,
+                        ["deviation_sigma"] = writeDecision.Sigma,
+                        ["mean_deviation_sigma"] = writeDecision.MeanSigma ?? 0,
+                        ["fire_threshold"] = writeDecision.ThresholdUsed,
+                        ["baseline_low_quality"] = writeDecision.LowQualityBaseline ? 1 : 0,
+                        ["fallback_exceedance"] = writeDecision.FallbackExceedance,
+                        ["baseline_zero_history"] = writeDecision.ZeroHistory ? 1 : 0,
+                        ["baseline_samples"] = writeBucketUsed.SampleCount
+                    };
+                    AddBaselineContext(metadata, writeBucketUsed);
+                    if (writeTv is not null)
+                    {
+                        WindowTiles.AddTileMetadata(metadata, writeTv.Value, writeTiles, map.WindowClock);
+                    }
+
+                    anomalies.Add(new Fact
+                    {
+                        Source = "anomaly",
+                        Key = "ANOMALY_WRITE_LATENCY",
+                        Value = peakWriteLat,
+                        ServerId = context.ServerId,
+                        Metadata = metadata
+                    });
+                }
             }
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
