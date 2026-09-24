@@ -550,8 +550,18 @@ public sealed class TimescaleAggregateCompressionTests
             await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
-               targets (no compression band slot) — so the created count is the targets plus those. */
-            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count + TimescaleSupport.OffGridAggregates.Length, created);
+               targets (no compression band slot) — so the created count is the targets plus those.
+               #3653 A6 lane LB-2 (live-measured): the three interval-honest successor DAILIES are ALSO created by
+               this sweep but held OUT of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane
+               LC frees their band slots — so "created" is HourlyAggregates + DailyAggregates + BaselineAggregates
+               + OffGridAggregates (every registered aggregate), not AggregateCompressionTargets + OffGridAggregates
+               (only the ones with a compression policy). The two counts were equal before lane LB added a
+               registered-but-deferred daily tier; this assertion still read the old, now-coincidentally-wrong,
+               formula. */
+            Assert.Equal(
+                TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
+                    + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
+                created);
 
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
                every one reads ten raw chunks (hierarchical ones take their parent's, which is already ten). Read

@@ -6628,19 +6628,6 @@ AND   j.hypertable_name = '{relation}'";
     public const string AggregateCompressionSegmentBy = "server_id";
 
     /// <summary>
-    /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
-    /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
-    /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
-    ///
-    /// <para>Derived from <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/> and
-    /// <see cref="BaselineAggregates"/> — the same three lists the ensure sweep creates from, in the same order
-    /// — rather than hand-listed, so an aggregate registered for creation is compression-registered the same
-    /// moment, with its tier decided by which list it came from. There is no fourth list to forget.</para>
-    ///
-    /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
-    /// order, and this one reads all three.</para>
-    /// </summary>
-    /// <summary>
     /// The three interval-honest successor DAILIES (#3653, A6), held OUT of
     /// <see cref="AggregateCompressionTargets"/> so the daily compression band — full at 23 members — does not
     /// overflow to 26. They are still created (registered in <see cref="DailyAggregates"/>), refreshed, and
@@ -6658,6 +6645,20 @@ AND   j.hypertable_name = '{relation}'";
         ProcedureStatsIntervalDailyView,
         QueryStatsDbIntervalDailyView,
     };
+
+    /// <summary>
+    /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
+    /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
+    /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
+    ///
+    /// <para>Derived from <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/> and
+    /// <see cref="BaselineAggregates"/> — the same three lists the ensure sweep creates from, in the same order
+    /// — rather than hand-listed, so an aggregate registered for creation is compression-registered the same
+    /// moment, with its tier decided by which list it came from. There is no fourth list to forget.</para>
+    ///
+    /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
+    /// order, and this one reads all three.</para>
+    /// </summary>
 
     public static readonly IReadOnlyList<(string CreateSql, string View, bool Hourly)> AggregateCompressionTargets =
         HourlyAggregates.Select(a => (a.CreateSql, a.View, Hourly: true))
