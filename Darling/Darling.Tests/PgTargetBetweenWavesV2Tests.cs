@@ -76,7 +76,11 @@ public sealed class PgTargetBetweenWavesV2Tests
         Assert.Equal(2, Regex.Matches(baseline, Regex.Escape(bucket)).Count);   /* SELECT and GROUP BY */
         Assert.Equal(2, Regex.Matches(window, Regex.Escape(bucket)).Count);
         Assert.DoesNotContain("date_trunc('hour'", baseline, StringComparison.Ordinal);
-        Assert.DoesNotContain("date_trunc('hour'", window, StringComparison.Ordinal);
+        /* #3653 A8 option B: the window read now groups into per-hour tiles via WindowTiles.LocalHourSql, which is
+           itself a date_trunc('hour', …) over the quarter-hour collection_time — the tile key, not a regression to
+           the pre-#3691 hourly grain. The quarter-hour bucket assertions above still hold: the *quantity* is a
+           15-minute quotient, only its GROUP BY key is now the local hour for the tile gate. */
+        Assert.Contains("date_trunc('hour'", window, StringComparison.Ordinal);
         Assert.Equal(250.0, PgTargetScorer.IoBaselineBucketMinimumReads);
         Assert.Equal(PgTargetScorer.IoMinimumOps / 4.0, PgTargetScorer.IoBaselineBucketMinimumReads);
         Assert.Single(Regex.Matches(baseline, @"reads >= 250 /\* PgTargetScorer\.IoBaselineBucketMinimumReads"));
