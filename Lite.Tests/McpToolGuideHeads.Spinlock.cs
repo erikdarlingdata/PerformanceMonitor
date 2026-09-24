@@ -35,7 +35,7 @@ public sealed class McpToolGuideHeadsSpinlockTests
         foreach (var fact in new[]
         {
             "Darling sums every collection in hours_back, top N by total collisions",
-            "Lite returns only the latest snapshot within hours_back",
+            "Lite: LATEST IS A TIME, only the newest snapshot within hours_back",
             "bounded by limit (truncated flags more)",
             "null - never 0 - when unknowable (restart/first sample); totals/counters still stand.",
             "No rows: unavailable (or not_collected first).",
