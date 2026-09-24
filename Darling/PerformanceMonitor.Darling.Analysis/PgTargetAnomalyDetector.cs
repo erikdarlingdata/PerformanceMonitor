@@ -344,8 +344,9 @@ LIMIT 6";
             var (peakTps, avgTps, tpsSamples, _, _, _, _) = window.Value;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakTps,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgTps), PgTpsFloor, PgTpsFallback, SigmaDisplayCap);
+                baseline, peakTps, avgTps,
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgTps), PgTpsFloor, PgTpsFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             /* measured: PgTpsFloor / PgTpsFallback carry the 2026-09-19 fleet lineage (AnomalyThresholds). */
@@ -397,8 +398,9 @@ LIMIT 6";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakSessions,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgSessionCount), PgSessionCountFloor, PgSessionCountFallback, SigmaDisplayCap);
+                baseline, peakSessions, avgSessions,
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgSessionCount), PgSessionCountFloor, PgSessionCountFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = ZScoreMetadata(baseline, decision, windowSamples);
@@ -448,8 +450,9 @@ LIMIT 6";
             if (windowSamples == 0) return;
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakCapacity,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpu), PgCpuFloorPct, PgCpuFallbackPct, SigmaDisplayCap);
+                baseline, peakCapacity, avgCapacity,
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpu), PgCpuFloorPct, PgCpuFallbackPct, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             /* measured: PgCpuFloorPct / PgCpuFallbackPct carry the 2026-09-19 fleet lineage (AnomalyThresholds). */

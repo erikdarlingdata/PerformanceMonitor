@@ -446,6 +446,34 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("PgTargetFactCollector.TopStatementCount", queriesDetector, StringComparison.Ordinal);
         Assert.DoesNotContain("=> Task.CompletedTask;", queriesDetector, StringComparison.Ordinal);
 
+        /* #3653 A8 slice 2: the six remaining peak-only PostgreSQL families moved onto the pair gate (peak AND
+           window mean, with the N-aware peak cutoff window: argument) — pinned per family so a later edit back to
+           the transitional overload is a visible decision, not a silent regression. */
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakTps,\s*avgTps,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            code);
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakSessions,\s*avgSessions,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            code);
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakCapacity,\s*avgCapacity,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            code);
+
+        var ioDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Io.cs"));
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakMsPerRead,\s*avgMsPerRead,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            ioDetector);
+
+        var replicationDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Replication.cs"));
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakBytes,\s*avgBytes,[\s\S]{0,300}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            replicationDetector);
+
+        var walDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Wal.cs"));
+        Assert.Matches(
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peak,\s*avg,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            walDetector);
+
         /* #3538 A7: the deadlock rate is per OBSERVED hour, never per nominal window. */
         var deadlock = code[code.IndexOf("DetectDeadlockRateAnomalies(AnalysisContext", StringComparison.Ordinal)..];
         Assert.Contains("context.ObservedDurationMs / 3_600_000.0", deadlock, StringComparison.Ordinal);
@@ -464,6 +492,51 @@ public sealed class PgTargetAnomalyTests
         /* The known, deferred peak-vs-per-sample residue is stated, not silently inherited. */
         Assert.Contains("#3538 A8", source, StringComparison.Ordinal);
         Assert.Contains("threshold_lineage", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 A8 slice 2: TPS, sessions and CPU are three of the six families moved onto the PAIR gate. For each,
+    /// a window whose PEAK alone clears the bar but whose MEAN sits inside the baseline must NOT fire (it fired
+    /// before this change, on the peak-only overload); a window where both the peak and the mean clear DOES fire.
+    /// </summary>
+    [Fact]
+    public void ThePairGate_TpsSessionsAndCpu_DoNotFireOnAPeakAloneWindow_ButFireWhenTheMeanAlsoClears()
+    {
+        var tpsBucket = new BaselineBucket { HourOfDay = 3, DayOfWeek = 2, Mean = 100, StdDev = 10, Median = 100, Mad = 6.745, SampleCount = 120, DistinctDays = 28, Tier = BaselineTier.Full };
+        var peakOnlyTps = AnomalyGate.EvaluateZScore(
+            tpsBucket, AnomalyThresholds.PgTpsFloor + 1_000, windowMean: 105,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgTps), AnomalyThresholds.PgTpsFloor, AnomalyThresholds.PgTpsFallback, AnomalyThresholds.SigmaDisplayCap,
+            window: TimeSpan.FromHours(4));
+        Assert.False(peakOnlyTps.Fire, "a one-sample TPS spike over a flat window mean must not fire on the pair gate");
+        var sustainedTps = AnomalyGate.EvaluateZScore(
+            tpsBucket, AnomalyThresholds.PgTpsFloor + 1_000, windowMean: AnomalyThresholds.PgTpsFloor + 900,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgTps), AnomalyThresholds.PgTpsFloor, AnomalyThresholds.PgTpsFallback, AnomalyThresholds.SigmaDisplayCap,
+            window: TimeSpan.FromHours(4));
+        Assert.True(sustainedTps.Fire, "a sustained TPS shift, both peak and mean clearing, fires");
+
+        var sessionsBucket = new BaselineBucket { HourOfDay = 3, DayOfWeek = 2, Mean = 30, StdDev = 4, Median = 30, Mad = 2.698, SampleCount = 120, DistinctDays = 28, Tier = BaselineTier.Full };
+        var peakOnlySessions = AnomalyGate.EvaluateZScore(
+            sessionsBucket, AnomalyThresholds.PgSessionCountFloor + 400, windowMean: 32,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgSessionCount), AnomalyThresholds.PgSessionCountFloor, AnomalyThresholds.PgSessionCountFallback, AnomalyThresholds.SigmaDisplayCap,
+            window: TimeSpan.FromHours(4));
+        Assert.False(peakOnlySessions.Fire, "a one-sample session spike over a flat window mean must not fire on the pair gate");
+        var sustainedSessions = AnomalyGate.EvaluateZScore(
+            sessionsBucket, AnomalyThresholds.PgSessionCountFloor + 400, windowMean: AnomalyThresholds.PgSessionCountFloor + 350,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgSessionCount), AnomalyThresholds.PgSessionCountFloor, AnomalyThresholds.PgSessionCountFallback, AnomalyThresholds.SigmaDisplayCap,
+            window: TimeSpan.FromHours(4));
+        Assert.True(sustainedSessions.Fire, "a sustained session-count shift, both peak and mean clearing, fires");
+
+        var cpuBucket = new BaselineBucket { HourOfDay = 3, DayOfWeek = 2, Mean = 20, StdDev = 3, Median = 20, Mad = 2.0235, SampleCount = 120, DistinctDays = 28, Tier = BaselineTier.Full };
+        var peakOnlyCpu = AnomalyGate.EvaluateZScore(
+            cpuBucket, AnomalyThresholds.PgCpuFloorPct + 30, windowMean: 25,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgCpu), AnomalyThresholds.PgCpuFloorPct, AnomalyThresholds.PgCpuFallbackPct, AnomalyThresholds.SigmaDisplayCap,
+            window: TimeSpan.FromHours(4));
+        Assert.False(peakOnlyCpu.Fire, "a one-sample CPU-capacity spike over a flat window mean must not fire on the pair gate");
+        var sustainedCpu = AnomalyGate.EvaluateZScore(
+            cpuBucket, AnomalyThresholds.PgCpuFloorPct + 30, windowMean: AnomalyThresholds.PgCpuFloorPct + 25,
+            AnomalyThresholds.DefaultDeviationThreshold, AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgCpu), AnomalyThresholds.PgCpuFloorPct, AnomalyThresholds.PgCpuFallbackPct, AnomalyThresholds.SigmaDisplayCap,
+            window: TimeSpan.FromHours(4));
+        Assert.True(sustainedCpu.Fire, "a sustained CPU-capacity shift, both peak and mean clearing, fires");
     }
 
     /* ───────────────────────── membership and the ratio ramp ───────────────────────── */

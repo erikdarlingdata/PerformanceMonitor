@@ -125,8 +125,9 @@ FROM rated";
             var peakSampleReads = reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4));
 
             var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakMsPerRead,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgIoReadLatency), PgIoLatencyFloorMs, PgIoLatencyFallbackMs, SigmaDisplayCap);
+                baseline, peakMsPerRead, avgMsPerRead,
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgIoReadLatency), PgIoLatencyFloorMs, PgIoLatencyFallbackMs, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = ZScoreMetadata(baseline, decision, ratedSamples);
