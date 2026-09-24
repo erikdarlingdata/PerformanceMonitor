@@ -289,8 +289,13 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     /// server's own and is dropped and counted in <paramref name="foreignZoneLines"/>; otherwise a foreign zone
     /// throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole batch, the same #2993 trade the
     /// stderr assembler makes.
+    ///
+    /// <para>Public (#4053 part c1) so <c>RdsLogEventIngestor</c>, in the Darling assembly, can share it instead of
+    /// keeping its own byte-identical copy — the AWS-log transport applies the exact same rule to the exact same
+    /// <see cref="PgLogEntry"/> shape, just without a <c>CollectorContext</c> of its own to route the measurement
+    /// through until after its caller returns.</para>
     /// </summary>
-    private static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
+    public static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
     {
         foreignZoneLines = 0;
 

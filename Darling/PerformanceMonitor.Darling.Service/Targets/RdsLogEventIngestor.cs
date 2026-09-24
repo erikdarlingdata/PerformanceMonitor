@@ -38,10 +38,27 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// </summary>
 public sealed class RdsLogEventIngestor
 {
+    /// <summary>
+    /// The bound on a carried partial record (#4053 part c1): a single record straddling more than this
+    /// many chars across a portion boundary is dropped rather than grown without limit across cycles — one
+    /// oversized record must not turn into unbounded memory growth if the file never gives it a closing
+    /// boundary.
+    /// </summary>
+    private const int MaxCarryLength = 1_048_576;
+
     private readonly NpgsqlDataSource _postgres;
     private readonly PgLogEventClassifier _classifier;
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
+
+    /// <summary>
+    /// The csvlog partial-record carry (#4053 part c1), keyed exactly like <see cref="RdsLogSource.ResumeMarker.Key"/>
+    /// (instance + file name) so a rotation to a new file starts fresh rather than resuming a new file's
+    /// bytes as a continuation of the old one's tail. In memory, for the same reason the resume marker is:
+    /// <c>DownloadDBLogFilePortion</c> is consume-once, so the carry can only be updated alongside the
+    /// marker's own commit — see <see cref="IngestAsync"/>.
+    /// </summary>
+    private readonly Dictionary<string, (string Partial, bool StartKnown)> _csvCarry = new(StringComparer.Ordinal);
 
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
@@ -100,49 +117,128 @@ public sealed class RdsLogEventIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var (written, foreignZoneLines, csvRecordsDiscarded) = await StoreAsync(
-            serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
+        string? carryKey = null;
+        (string Partial, bool StartKnown) carry = (string.Empty, false);
 
-        /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008). Everything the chunk held is in the store or was
-           nothing to store; anything else threw out of StoreAsync and left the marker where it was. */
+        if (pgLogUsesCsvlog)
+        {
+            /* Keyed exactly like the resume marker (instance + file name), so a rotation to a new file starts
+               the carry fresh instead of gluing a new file's bytes onto an old file's tail. */
+            carryKey = chunk.Value.Resume.Key;
+
+            if (!string.IsNullOrEmpty(carryKey))
+            {
+                _csvCarry.TryGetValue(carryKey, out carry);
+            }
+        }
+
+        var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry) = await StoreAsync(
+            serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
+            carry, chunk.Value.MoreAvailable, cancellationToken);
+
+        /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008), and the csvlog carry moves alongside it for the
+           same reason: DownloadDBLogFilePortion is consume-once, so a store failure must leave both the
+           marker AND the partial record exactly where they were, not just the marker. A process restart
+           between here and the next read loses at most the one record this carry holds. */
         _logs.CommitResume(chunk.Value.Resume);
+
+        if (carryKey is not null)
+        {
+            if (nextCarry.Partial.Length == 0 && !nextCarry.StartKnown)
+            {
+                _csvCarry.Remove(carryKey);
+            }
+            else
+            {
+                _csvCarry[carryKey] = nextCarry;
+            }
+        }
 
         return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
     }
 
-    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, (string Partial, bool StartKnown) NextCarry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
         bool logTimezoneIsUtc,
         bool pgLogUsesCsvlog,
+        (string Partial, bool StartKnown) carry,
+        bool additionalDataPending,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(text))
-        {
-            return (0, 0, 0);
-        }
-
         List<PgLogEvent> events;
         int foreignZoneLines;
         var csvRecordsDiscarded = 0;
+        var nextCarry = (Partial: string.Empty, StartKnown: false);
 
         if (pgLogUsesCsvlog)
         {
-            /* #4053 part c1: DownloadDBLogFilePortion text may start mid-record — the csv parser's own
-               resync walk handles that, the same shape the self-hosted csv route (PgLogEventsCollector.ReadAsync)
-               already relies on, so the chunk is handed to it unchanged; no pre-trim. */
-            var entries = PgServerLogCsvParser.Parse(text, out csvRecordsDiscarded);
+            if (string.IsNullOrEmpty(text) && carry.Partial.Length == 0)
+            {
+                return (0, 0, 0, nextCarry);
+            }
+
+            /* #4053 part c1: DownloadDBLogFilePortion cuts a portion on a PHYSICAL line, which can land
+               inside a multi-line quoted field, so the portion's own edges are not honest boundaries — the
+               carry from the previous portion, plus what this portion already knows about ITS edges, is
+               what PgServerLogCsvParser is told instead of letting it infer a boundary from a trailing
+               newline that might be inside quotes. */
+            var body = carry.Partial + text;
+
+            var edges = (carry.StartKnown ? PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary : PgServerLogCsvParser.CsvBodyEdges.None)
+                | (additionalDataPending ? PgServerLogCsvParser.CsvBodyEdges.None : PgServerLogCsvParser.CsvBodyEdges.EndsOnRecordBoundary);
+
+            var entries = PgServerLogCsvParser.Parse(body, edges, out csvRecordsDiscarded, out var consumedLength);
+
+            /* Resync guard (#4053 part c1): a StartsOnRecordBoundary call that kept fewer records than it
+               discarded, having seen at least 3 record boundaries, means the carried start was wrong — a
+               wrong StartKnown inverts parity for every later portion and never self-corrects. Drop the
+               carry's trust rather than let that ride forward; csv_records_discarded is still measured for
+               this call as usual. */
+            var sawEnoughBoundaries = entries.Count + csvRecordsDiscarded >= 3;
+            var resyncGuardTripped = edges.HasFlag(PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary)
+                && entries.Count < csvRecordsDiscarded
+                && sawEnoughBoundaries;
+
+            if (resyncGuardTripped)
+            {
+                nextCarry = (string.Empty, false);
+            }
+            else
+            {
+                var partial = body[consumedLength..];
+
+                /* consumedLength is a true boundary only when THIS call stated an edge — under None it is
+                   the winning scored hypothesis's last boundary, a guess, and claiming StartKnown from a
+                   guess inverts parity for every later forward walk (see the parser's own param doc). */
+                var startKnown = edges != PgServerLogCsvParser.CsvBodyEdges.None;
+
+                if (partial.Length > MaxCarryLength)
+                {
+                    /* One oversized record must not grow memory across portions without bound. */
+                    partial = string.Empty;
+                    startKnown = false;
+                    csvRecordsDiscarded++;
+                }
+
+                nextCarry = (partial, startKnown);
+            }
 
             /* The SAME foreign-zone rule the stderr path applies below, via PgLogEventClassifier's own
                assembler-backed overload — restated here because the csv parser accepts every zone and leaves
                the decision to this filter (its own #4053 fix), the same trade PgLogEventsCollector.ReadAsync's
                csvlog arm makes on the self-hosted route. */
-            var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
+            var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
             events = _classifier.Classify(kept);
         }
         else
         {
+            if (string.IsNullOrEmpty(text))
+            {
+                return (0, 0, 0, nextCarry);
+            }
+
             /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
                about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
                logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
@@ -152,53 +248,10 @@ public sealed class RdsLogEventIngestor
 
         if (events.Count == 0)
         {
-            return (0, foreignZoneLines, csvRecordsDiscarded);
+            return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry);
         }
 
-        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded);
-    }
-
-    /// <summary>
-    /// #4053 part c1: the same filter <see cref="PgLogEventsCollector"/>'s private method of the same name
-    /// applies on the self-hosted csvlog route — under a UTC <c>log_timezone</c> a record in another zone is
-    /// not the server's own and is dropped and counted in <paramref name="foreignZoneLines"/>; otherwise a
-    /// foreign zone throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole batch, the
-    /// same #2993 trade the stderr path makes. Restated here rather than shared because the collector's method
-    /// is private and this ingestor has no CollectorContext of its own to route the measurement through until
-    /// after this call returns.
-    /// </summary>
-    private static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
-    {
-        foreignZoneLines = 0;
-
-        if (!logTimezoneIsUtc)
-        {
-            foreach (var entry in entries)
-            {
-                if (!PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
-                {
-                    throw new PgLogTimezoneUnsupportedException(entry.ZoneText);
-                }
-            }
-
-            return entries;
-        }
-
-        var kept = new List<PgLogEntry>(entries.Count);
-
-        foreach (var entry in entries)
-        {
-            if (PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
-            {
-                kept.Add(entry);
-            }
-            else
-            {
-                foreignZoneLines++;
-            }
-        }
-
-        return kept;
+        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry);
     }
 
     /// <summary>
