@@ -803,8 +803,10 @@ function Get-CimInstance {
             $ErrorActionPreference = 'Stop'
             $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4043-r1-lock-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             try {
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
                 New-Item -ItemType Directory -Path $root -Force | Out-Null
-                $null = Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE'
+                $open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE')
+                $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
 
                 $withoutAccount = Get-DarlingPreLockTrustedSids
                 'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount -Recurse).Count
@@ -824,10 +826,29 @@ function Get-CimInstance {
         var answers = RunWindowsPowerShell(probe.ToString());
 
         var without = int.Parse(answers.Find(a => a.StartsWith("withoutAccountCount=", StringComparison.Ordinal))!.Substring("withoutAccountCount=".Length));
-        Assert.True(without > 0, "a freshly locked tree must still name the service account as untrusted when the caller does not say who it is - otherwise this test proves nothing about the new parameter: " + string.Join(" | ", answers));
         Assert.Contains("withAccountCount=0", answers);
         /* #4052: the root itself is RX for the service, so no write grant is left there to trust. */
         Assert.Contains("rootOnlyWithoutAccountCount=0", answers);
+
+        if (answers.Contains("elevated=True"))
+        {
+            /* Elevated (CI): Administrators keeps Full Control on $root, so the lock creates BOTH pg-runtime\
+               and pg-runtime-prev\ on this fresh tree and grants the service account Modify on each - an
+               explicit grant Get-UntrustedWriteGrantees must still flag as untrusted when the caller does not
+               name the account. */
+            Assert.True(without > 0, "a freshly locked tree must still name the service account as untrusted when the caller does not say who it is - otherwise this test proves nothing about the new parameter: " + string.Join(" | ", answers));
+        }
+        else
+        {
+            /* Not elevated: a filtered admin token cannot use the Administrators grant on $root, so the lock
+               cannot create pg-runtime\ or pg-runtime-prev\ on this fresh tree at all (#4052) - it reports both
+               instead of granting anything, so there is nothing anywhere in the tree left for the walk to name
+               as untrusted. */
+            Assert.Equal(0, without);
+            var open = answers.FindAll(a => a.StartsWith("open:", StringComparison.Ordinal));
+            Assert.Contains(open, o => o.StartsWith(@"open:\pg-runtime (could not create this directory to grant the service Modify on it:", StringComparison.Ordinal));
+            Assert.Contains(open, o => o.StartsWith(@"open:\pg-runtime-prev (could not create this directory to grant the service Modify on it:", StringComparison.Ordinal));
+        }
     }
 
     /// <summary>
@@ -1367,7 +1388,12 @@ function Get-CimInstance {
                 # explicit ACE there, not inherited from root, since root only grants RX), and NOTHING on the
                 # svc.exe / planted paths above - those are a stranger's grant even though the SID is the same.
                 'pgRuntimeServiceRights=' + ((Rules "$root\pg-runtime" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
-                'pgRuntimePrevServiceRights=' + ((Rules "$root\pg-runtime-prev" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                # Not elevated, pg-runtime-prev\ never gets made (#4052: a filtered admin token cannot use the
+                # Administrators grant left on $root, so the best-effort New-Item fails and the lock reports it
+                # in $open instead) - so there is no ACL to read here, only the 'open:' line above to check.
+                if (Test-Path -LiteralPath "$root\pg-runtime-prev") {
+                    'pgRuntimePrevServiceRights=' + ((Rules "$root\pg-runtime-prev" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                }
                 'jsonProtected=' + (Get-Acl -LiteralPath "$root\darling.json").AreAccessRulesProtected
                 'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'jsonOwnerIsService=' + ((Get-Acl -LiteralPath "$root\darling.json").GetOwner($sidType) -eq $service)
@@ -1428,7 +1454,13 @@ function Get-CimInstance {
         else
         {
             var me = answers.Find(a => a.StartsWith("me=", StringComparison.Ordinal))!.Substring(3);
-            var owned = open.FindAll(o => !o.Contains("junction or link", StringComparison.Ordinal) && !o.Contains("could not make", StringComparison.Ordinal));
+            /* #4052, not elevated: a filtered admin token cannot use the Administrators grant left on $root, so
+               the best-effort New-Item for pg-runtime-prev\ (already made by this test's own setup, so pg-runtime\
+               never hits this) fails, and the lock reports it here rather than granting anything. That report is
+               neither a junction, a "could not make owner" line, nor an "(owned by...)" line, so it is checked on
+               its own, separately from the ownership invariant below. */
+            Assert.Contains(open, o => o.StartsWith(@"open:\pg-runtime-prev (could not create this directory to grant the service Modify on it:", StringComparison.Ordinal));
+            var owned = open.FindAll(o => !o.Contains("junction or link", StringComparison.Ordinal) && !o.Contains("could not make", StringComparison.Ordinal) && !o.Contains("could not create this directory", StringComparison.Ordinal));
             Assert.Contains(owned, o => o.Equals($"open: (owned by {me})", StringComparison.Ordinal));
             Assert.All(owned, o => Assert.EndsWith($"(owned by {me})", o, StringComparison.Ordinal));
         }
@@ -1446,7 +1478,18 @@ function Get-CimInstance {
         Assert.Contains("serviceRights=ReadAndExecute, Synchronize", answers);
         Assert.Contains("postgresServiceInherited=1", answers);
         Assert.Contains("pgRuntimeServiceRights=Modify, Synchronize", answers);
-        Assert.Contains("pgRuntimePrevServiceRights=Modify, Synchronize", answers);
+        if (answers.Contains("elevated=True"))
+        {
+            /* Elevated (CI): Administrators keeps Full Control on $root as an explicit ACE, so the lock can
+               create pg-runtime-prev\ too and grants the service the same explicit Modify there as pg-runtime\. */
+            Assert.Contains("pgRuntimePrevServiceRights=Modify, Synchronize", answers);
+        }
+        else
+        {
+            /* Not elevated: pg-runtime-prev\ was never created (asserted above via the 'open:' report), so
+               there is no ACL to read and this probe never emits the line at all. */
+            Assert.DoesNotContain(answers, a => a.StartsWith("pgRuntimePrevServiceRights=", StringComparison.Ordinal));
+        }
         Assert.Contains("jsonProtected=True", answers);
         Assert.Contains("jsonInteractive=Read, Synchronize", answers);
     }
