@@ -38,6 +38,10 @@ At dispatch:
   fixes what the review found.
 - Give each lane its own rig port.
 - Set a wall-clock check at each lane's deadline; don't wait on notifications.
+- Size each lane to finish under 200k. In wave B (2026-09-23), a lane's context grew about 1.9k tokens per call
+  from a 40k base, so 200k is about 80 calls. A #3898 lane that converted three tools used 100-117 calls.
+- Paste into the brief the few lines a lane needs (an example, a ruling) instead of pointing it at a PR or file.
+  In wave B, every lane read an 8-10k-character PR section to see one example.
 - Label each issue the lane takes `in-progress` (`gh issue edit <n> --add-label in-progress`), so the board shows
   it as taken; remove the label when the issue closes or the work stops.
 
@@ -56,6 +60,9 @@ At each wave boundary, backtrack every issue number the wave filed or touched:
 - fix the `in-progress` labels.
 A wave that files follow-ups faster than it closes them hides its own backlog. On 2026-09-23 a backtrack of
 #3898-#4043 found 22 stale `in-progress` labels and three worked issues missing one.
+
+After each wave, measure it with `lane-audit.py`, as the guardrails' "Measure every wave" section says. Record the
+WAVE line, and the defects you fixed in each PR, in the handoff.
 
 When a PR's required check fails on a test it doesn't touch, don't just re-run it. Take a census of the last two
 days' failed first attempts: `gh run list --workflow Build`, each run's attempts through the REST
@@ -80,7 +87,8 @@ census, one of them introduced by that night's own wave).
 - Run targeted test classes while iterating. Run the FULL suite ONCE, at the end.
 - Cap command output: pipe through `head`, `tail -n` or `grep`. Never dump full CI logs, full JSON, or whole
   issue/PR bodies.
-- Stop and write a handoff note when your context passes about 150k.
+- Plan to finish before your watchdog's first warning, at 200k. Past about 150k, start no new item: finish the
+  one in hand, then the finish phase. On 2026-09-23, 40% of lane cost came after that warning.
 - Never end your turn to wait for a background notification. Run the full suite in the foreground (about 10
   minutes), or poll your own output file.
 - Put your full report in the PR body (see "Final report"). Your last message is 400 words or fewer and links the
@@ -174,6 +182,8 @@ Never edit an existing migration.
 - Open the PR against `dev` **as a draft** (`gh pr create --draft`). Title: the outcome in plain language, plus
   `(#<issue>)`. The body starts with `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan`
   (checkboxes, measured numbers). List anything you did not run (a live test, the full suite) as an unchecked box.
+- Write the PR body in one Write. Run the plain-English checker on it once, fix the real hits in one pass, and
+  stop. The coordinator polishes the prose; a lane that re-runs the checker does it at its largest context.
 - **Don't mark it ready, don't merge, and don't enable auto-merge.** The coordinator does all three after
   verifying.
 - A user-visible change gets a CHANGELOG entry in `<CHANGELOG_BUFFER_DIR>/<PR>-reported.txt`, in this form:

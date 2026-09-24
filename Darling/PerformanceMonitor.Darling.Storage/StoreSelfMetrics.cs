@@ -510,11 +510,18 @@ AND   m.toast_bytes IS NOT NULL";
     /// its own write and sync phases are in the other two counters. That skips one hourly interval per restart; the
     /// next interval is judged normally.</para>
     ///
+    /// <para><b>And how many checkpoints were timed (V140, #4037).</b> <c>num_timed</c> rides beside the other
+    /// four so the reader can judge the interval's AVERAGE sync milliseconds per checkpoint
+    /// (<c>SyncMs / (timed + requested)</c>) rather than the interval's summed sync milliseconds against the
+    /// same bar — a healthy store running twelve five-second checkpoints an hour breached the old sum rule
+    /// every interval even though no single checkpoint came near it. A row from before this rung carries a
+    /// NULL timed count, which the average arm reads as unmeasured, never as zero.</para>
+    ///
     /// <para>Single-row view, so no join and no filter. $1 metric_time.</para>
     /// </summary>
     public const string CheckpointerInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)
 SELECT
     $1,
     '{CheckpointerObjectName}',
@@ -522,7 +529,8 @@ SELECT
     round(c.write_time)::bigint,
     round(c.sync_time)::bigint,
     c.num_requested,
-    pg_postmaster_start_time() AT TIME ZONE 'UTC'
+    pg_postmaster_start_time() AT TIME ZONE 'UTC',
+    c.num_timed
 FROM pg_stat_checkpointer AS c";
 
     /// <summary>
@@ -535,7 +543,7 @@ FROM pg_stat_checkpointer AS c";
     /// </summary>
     public const string CheckpointerBgwriterInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)
 SELECT
     $1,
     '{CheckpointerObjectName}',
@@ -543,7 +551,8 @@ SELECT
     round(b.checkpoint_write_time)::bigint,
     round(b.checkpoint_sync_time)::bigint,
     b.checkpoints_req,
-    pg_postmaster_start_time() AT TIME ZONE 'UTC'
+    pg_postmaster_start_time() AT TIME ZONE 'UTC',
+    b.checkpoints_timed
 FROM pg_stat_bgwriter AS b";
 
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See

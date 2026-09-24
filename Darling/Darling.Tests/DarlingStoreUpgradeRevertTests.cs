@@ -687,7 +687,13 @@ public sealed class DarlingStoreUpgradeRevertTests
             Assert.Equal(OldRuntime, host.RuntimeInPlace());
             Assert.Equal(PackageHash, File.ReadAllText(host.BlockedMarker));
             Assert.False(File.Exists(host.StampFile));
-            Assert.False(Directory.Exists(DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot)));
+
+            /* #4052: the cleanup now EMPTIES pg-runtime-prev rather than deleting and recreating it, so the
+               folder itself survives (it is not the service's to remove under the narrowed install-root
+               grant), but nothing is left inside it. */
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            Assert.True(Directory.Exists(previousRoot));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(previousRoot));
         }
         finally
         {

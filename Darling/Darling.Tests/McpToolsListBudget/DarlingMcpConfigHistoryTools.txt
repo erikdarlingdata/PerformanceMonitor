@@ -8,7 +8,7 @@ tool get_database_scoped_config 288
 param get_database_scoped_config.database_name 54
 param get_database_scoped_config.server_name 28
 
-tool get_query_store_health 2587
+tool get_query_store_health 615
 param get_query_store_health.database_name 54
 param get_query_store_health.server_name 28
 

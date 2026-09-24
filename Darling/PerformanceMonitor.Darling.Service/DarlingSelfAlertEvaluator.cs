@@ -922,9 +922,8 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>The #3783 checkpointer metric name. A WEBHOOK AUTOMATION KEY like its siblings. Fired with NO
     /// severity override so the declared INFO arm styles it, for <see cref="ToastSlackMetric"/>'s reason: the
-    /// levers (#3802's WAL sizing, landed as the v12 managed-conf block; #3745's refresh slicing) are
-    /// configuration the maintainer weighs, not a page. The value it carries is the interval's sync-phase
-    /// milliseconds.</summary>
+    /// two levers are configuration the maintainer weighs, not a page. The value it carries is the interval's
+    /// average sync milliseconds PER CHECKPOINT (#4037), not the interval's summed sync milliseconds.</summary>
     internal const string CheckpointerPressureMetric = "Store Checkpointer Pressure";
 
     /// <summary>The resolution title when an interval reads clean again. "Recovered" for the classifier.</summary>
@@ -935,18 +934,21 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string CheckpointerKey = "checkpointer";
 
     /// <summary>
-    /// Sync-phase milliseconds inside one sweep interval past which the checkpointer is PRESSURE (#3783):
-    /// 10,000. The MCP host's read deadline is the bound this is derived from — a checkpoint whose fsync phase
-    /// runs past ten seconds is one whose I/O stall can outlast a read the deadline kills, which is exactly
-    /// what happened: three unattributed read kills on a production store in one day all sat inside sync
-    /// phases of 25.2 s and 14.0 s. Judged on the interval's TOTAL sync milliseconds rather than a single
-    /// checkpoint's, because the series stores the cumulative counter and not per-checkpoint durations; on
-    /// the hourly cadence with the default five-minute <c>checkpoint_timeout</c> that is at most twelve timed
-    /// checkpoints' sync phases summed, so a total over ten seconds means at least one of them was long or
-    /// all of them were slow, and either is the finding. The second arm, <c>checkpoints_requested &gt; 0</c>,
+    /// Milliseconds PER CHECKPOINT (#4037; originally #3783) past which the checkpointer's sync (fsync) phase
+    /// is PRESSURE: 10,000. The MCP host's read deadline is the bound this is derived from — a checkpoint
+    /// whose fsync phase runs past ten seconds is one whose I/O stall can outlast a read the deadline kills,
+    /// which is exactly what happened: three unattributed read kills on a production store in one day all sat
+    /// inside sync phases of 25.2 s and 14.0 s. Judged on <c>SyncMs / (timed + requested)</c> — the interval's
+    /// AVERAGE sync milliseconds per checkpoint — rather than the interval's summed sync milliseconds: the
+    /// series stores the cumulative counter and an hourly interval on the default five-minute
+    /// <c>checkpoint_timeout</c> covers about twelve timed checkpoints, so judging the sum against a
+    /// per-checkpoint bar breached on a healthy store whose checkpoints each synced five to eight seconds and
+    /// never recovered (#4037's own measured population). The second arm, <c>checkpoints_requested &gt; 0</c>,
     /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>.
     /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
-    /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955).
+    /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955); and the
+    /// average arm needs a TIMED count on both samples of the pair (V140), so a row from before that rung
+    /// leaves the average unmeasured rather than falling back to the old sum.
     /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
     /// </summary>
     internal const long CheckpointSyncBarMs = 10_000;
@@ -5492,8 +5494,11 @@ internal sealed class DarlingSelfAlertEvaluator
         var syncMs = reading.SyncMs ?? 0;
         var writeMs = reading.WriteMs ?? 0;
         var requested = reading.Requested ?? 0;
+        var checkpointCount = reading.CheckpointCount;
+        var averageSyncMs = reading.AverageSyncMsPerCheckpoint;
         var intervalSeconds = reading.IntervalSeconds ?? 0;
         var intervalMinutes = (intervalSeconds / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
+        var barSeconds = (CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture);
 
         if (reading.IsPressure)
         {
@@ -5501,51 +5506,54 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))
             {
                 _lastCheckpointerPressureAlert[CheckpointerKey] = now;
-                var syncSeconds = (syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
                 var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
-                var arms = (syncMs > CheckpointSyncBarMs, requested > 0) switch
+                var averageOverBar = averageSyncMs is double avg && avg > CheckpointSyncBarMs;
+                var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
+                var arms = (averageOverBar, requested > 0) switch
                 {
-                    (true, true) => $"sync {syncSeconds}s and {requested} WAL-forced checkpoint(s)",
-                    (true, false) => $"sync {syncSeconds}s",
+                    (true, true) => $"average sync {averageSecondsText}s per checkpoint and {requested} WAL-forced checkpoint(s)",
+                    (true, false) => $"average sync {averageSecondsText}s per checkpoint",
                     _ => $"{requested} WAL-forced checkpoint(s)",
                 };
                 await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
-                    $"{arms} in {intervalMinutes} min",
-                    $"sync > {(CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture)}s or any requested checkpoint",
-                    detail: $"The store's own checkpointer spent {syncSeconds}s in its sync (fsync) phase and {writeSeconds}s in its write " +
-                        $"phase over the {intervalMinutes} minutes between the last two self-metrics sweeps, and {requested} of its " +
-                        "checkpoints in that interval were REQUESTED — forced by WAL volume reaching max_wal_size rather than " +
-                        "by checkpoint_timeout. " +
-                        (syncMs > CheckpointSyncBarMs
-                            ? "A sync phase that long is an I/O stall every reader on the store shares: on one production store, " +
-                              "three read kills in a day that nothing else explained all sat inside 25.2 s and 14.0 s sync " +
-                              "phases, and the MCP host's read deadline is the 10 s this line is drawn at. "
+                    $"{arms} over {checkpointCount} checkpoint(s) in {intervalMinutes} min",
+                    $"average sync > {barSeconds}s per checkpoint, or any requested checkpoint",
+                    detail: $"The store's own checkpointer ran {checkpointCount} checkpoint(s) over the {intervalMinutes} minutes " +
+                        $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
+                        $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
+                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — forced by WAL volume reaching " +
+                        "max_wal_size rather than by checkpoint_timeout. " +
+                        (averageOverBar
+                            ? $"A per-checkpoint sync average past {barSeconds}s means at least some of this interval's checkpoints ran " +
+                              "an I/O stall every reader on the store shares: on one production store, three read kills in a day that " +
+                              "nothing else explained all sat inside 25.2 s and 14.0 s sync phases, and the MCP host's read deadline is " +
+                              $"the {barSeconds}s this line is drawn at. "
                             : "A requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size " +
                               "allows, so the checkpointer ran early and the next one is closer — checkpoint pressure compounds. ") +
-                        "The levers are configuration, not code: WAL sizing (#3802 — max_wal_size and " +
-                        "checkpoint_completion_target; the managed store gained them as the v12 postgresql.conf block, a " +
-                        "bring-your-own store sets them itself) and refresh slicing (#3745 — smaller continuous-aggregate " +
-                        "refreshes write less WAL per tick). The interval series is collect.store_metrics (object_kind = " +
-                        "'checkpointer'; the stored columns are the server's cumulative counters, and get_store_metrics' " +
-                        "checkpointer block publishes the per-interval differences). This alert re-fires on the alert " +
-                        "cooldown while each new interval breaches and recovers when one reads clean.",
+                        "The interval series is collect.store_metrics (object_kind = 'checkpointer'; the stored columns are the " +
+                        "server's cumulative counters, and get_store_metrics' checkpointer block publishes the per-interval " +
+                        "differences and the same per-checkpoint average). This alert re-fires on the alert cooldown while each " +
+                        "new interval breaches and recovers when one reads clean.",
                     /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
                     severity: null,
-                    shortMessage: $"store checkpointer: {arms} in the last {intervalMinutes} min — WAL sizing (#3802) and refresh slicing (#3745) are the levers",
-                    numericCurrentValue: syncMs,
+                    shortMessage: $"store checkpointer: {arms} over {checkpointCount} checkpoint(s) in the last {intervalMinutes} min",
+                    numericCurrentValue: averageSyncMs is double current ? (long)Math.Round(current) : syncMs,
                     numericThresholdValue: CheckpointSyncBarMs,
                     cancellationToken);
             }
         }
         else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
         {
+            var recoveredAverageText = averageSyncMs is double recoveredAvg
+                ? (recoveredAvg / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "s average sync per checkpoint"
+                : "an unmeasured average sync per checkpoint";
             await RecordResolutionAsync(new AlertResolution(
                 StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
                 CheckpointerPressureRecoveredMetric,
                 /* Label rather than the constant for the #3500 reason the cadence recovery gives. */
-                $"{_storeLabel}: checkpointer sync phase {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s and " +
-                $"{requested} requested checkpoint(s) in the last {intervalMinutes} min — under the line again"), cancellationToken);
+                $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested checkpoint(s) over {checkpointCount} " +
+                $"checkpoint(s) in the last {intervalMinutes} min — under the line again"), cancellationToken);
         }
     }
 

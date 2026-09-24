@@ -1,6 +1,6 @@
 # DarlingMcpPgKernelStatsTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_kernel_stats 1298
+tool get_pg_kernel_stats 613
 param get_pg_kernel_stats.as_of 167
 param get_pg_kernel_stats.hours_back 40
-param get_pg_kernel_stats.limit 204
+param get_pg_kernel_stats.limit 180
 param get_pg_kernel_stats.server_name 28
