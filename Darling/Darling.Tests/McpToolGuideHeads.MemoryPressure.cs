@@ -30,7 +30,7 @@ public sealed class McpToolGuideHeadsMemoryPressureTests
         "0-1 normal, 2 medium (Resource Monitor trims caches, cuts grants), 3+ severe (aggressive eviction)",
         "process is this instance, system is the whole box",
         "Empty: none in the window.",
-        "not_collected: Azure SQL DB has no ring buffer.",
+        "not_collected: Azure SQL DB (no ring buffer) or a non-SQL Server target.",
     ];
 
     [Fact]
@@ -48,7 +48,7 @@ public sealed class McpToolGuideHeadsMemoryPressureTests
         }
     }
 
-    /// <summary>D9: this tool's zero-rows path only ever answers <c>not_collected</c> (Azure SQL DB) or
+    /// <summary>D9: this tool's zero-rows path only ever answers <c>not_collected</c> (Azure SQL DB, or a non-SQL Server target on Darling) or
     /// <c>empty</c> — never <c>unavailable</c>, the word its memory-grant siblings in the same source file
     /// (<c>get_resource_semaphore</c>, <c>get_memory_grants</c>) use on their own zero-rows path. A head that
     /// borrowed that word here would promise a status this tool never returns.</summary>
