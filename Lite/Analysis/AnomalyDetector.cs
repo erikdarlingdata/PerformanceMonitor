@@ -569,6 +569,7 @@ ORDER BY local_hour";
             double meanModifiedZ;
             BaselineBucket bucketUsed;
             AnomalyGate.TileVerdict? tv = null;
+            double fireThreshold;
 
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
@@ -590,6 +591,7 @@ ORDER BY local_hour";
                     bucketUsed = baseline;
                     reportPeak = whole.Peak;
                     reportAvg = whole.Mean;
+                    fireThreshold = decision.ThresholdUsed;
                 }
                 else
                 {
@@ -597,6 +599,7 @@ ORDER BY local_hour";
                     bucketUsed = tv.Value.Bucket;
                     reportPeak = tv.Value.Tile.Peak;
                     reportAvg = tv.Value.Tile.Mean;
+                    fireThreshold = tv.Value.Decision.ThresholdUsed;
                 }
 
                 ratio = bucketUsed.Mean > 0 ? reportPeak / bucketUsed.Mean : 0;
@@ -614,6 +617,7 @@ ORDER BY local_hour";
                 if (ratio < DefaultRatioThreshold || meanRatio < DefaultRatioThreshold) return;
                 modifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportPeak);
                 meanModifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportAvg);
+                fireThreshold = DefaultRatioThreshold;
             }
             else
             {
@@ -625,6 +629,7 @@ ORDER BY local_hour";
                 if (ratio < DefaultRatioThreshold) return;
                 modifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportPeak);
                 meanModifiedZ = BaselineMath.ModifiedZScore(bucketUsed, reportAvg);
+                fireThreshold = 0;
             }
 
             /* current_ms_per_sec stays the PEAK (the value the story leads with and the ratio is taken
@@ -642,6 +647,7 @@ ORDER BY local_hour";
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0,
+                ["fire_threshold"] = fireThreshold,
                 /* #3871 rider: the DefaultRatioThreshold this detector gates on is measured now (its own
                    distribution, 3,655 windows / 14 d / p99 3.14), and the stamp is how a reader tells a
                    measured bar from an inherited one without opening the source. */
