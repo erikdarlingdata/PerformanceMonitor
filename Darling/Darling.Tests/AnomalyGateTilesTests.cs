@@ -108,8 +108,11 @@ public class AnomalyGateTilesTests
             meanJustUnder, map, ClassicalThreshold, ModifiedZThreshold, MagnitudeFloor, AbsoluteFallbackBar, SigmaCap, window);
         Assert.False(verdictMeanUnder!.Value.Decision.Fire);
 
-        // Mean at (or just over) the corrected cutoff, with peak clearing, fires.
-        var meanAt = new[] { Tile(10, 3, peak: classicalExpected + 5, mean: classicalExpected + 0.01) };
+        // Mean at (or over) the corrected cutoff, with peak clearing, fires. #3653 A8 option B (lane L1d): the
+        // mean clause is judged on the tile's mean WITHOUT its own peak sample (the lone-spike guard), so with
+        // 100 samples the margin over the cutoff must clear the ~0.05 the peak's removal costs the rest-mean —
+        // 0.5 clears it with headroom, unlike the original 0.01 fixture.
+        var meanAt = new[] { Tile(10, 3, peak: classicalExpected + 5, mean: classicalExpected + 0.5) };
         var verdictMeanAt = AnomalyGate.EvaluateTiles(
             meanAt, map, ClassicalThreshold, ModifiedZThreshold, MagnitudeFloor, AbsoluteFallbackBar, SigmaCap, window);
         Assert.True(verdictMeanAt!.Value.Decision.Fire);
@@ -360,5 +363,125 @@ public class AnomalyGateTilesTests
 
         Assert.NotNull(verdict);
         Assert.Equal(23, verdict!.Value.Tile.LocalHour.Hour);
+    }
+
+    // ── #3653 A8 option B (lane L1d): the lone-spike guard — the mean clause is judged on the tile's mean
+    // WITHOUT its own peak sample, so a single hot sample can never fire on its own. ────────────────────────
+
+    [Fact]
+    public void FourSampleTile_OneHotSampleAtFortySigma_DoesNotFire()
+    {
+        // Design's own regression example, generalised: 3 samples at baseline (0.0), one at +40 sigma. The full
+        // tile mean is (40 + 0 + 0 + 0) / 4 = 10 sigma — well past the peak clause's 2.0 cutoff — but the
+        // rest-mean (the tile's mean WITHOUT the peak sample) is exactly 0.0, so the mean clause never clears.
+        var bucket = TrustworthyBucket(10, 3);
+        var map = MapFrom(bucket);
+
+        var tiles = new[] { Tile(10, 3, peak: 40.0, mean: 10.0, samples: 4) };
+
+        var verdict = AnomalyGate.EvaluateTiles(
+            tiles, map, ClassicalThreshold, ModifiedZThreshold, MagnitudeFloor, AbsoluteFallbackBar, SigmaCap,
+            window: TimeSpan.FromHours(4));
+
+        Assert.NotNull(verdict);
+        Assert.False(verdict!.Value.Decision.Fire);
+        Assert.Equal(0, verdict.Value.TilesFired);
+    }
+
+    [Fact]
+    public void TwelveSampleTile_OneHotSampleAtTwoHundredSigma_DoesNotFire()
+    {
+        // 11 samples at baseline, one at +200 sigma: rest-mean is exactly 0.0 regardless of the peak's
+        // magnitude — the guard holds at any cadence and any Sigma, not just the design's own 4-sample example.
+        var bucket = TrustworthyBucket(10, 3);
+        var map = MapFrom(bucket);
+
+        var fullMean = 200.0 / 12.0;
+        var tiles = new[] { Tile(10, 3, peak: 200.0, mean: fullMean, samples: 12) };
+
+        var verdict = AnomalyGate.EvaluateTiles(
+            tiles, map, ClassicalThreshold, ModifiedZThreshold, MagnitudeFloor, AbsoluteFallbackBar, SigmaCap,
+            window: TimeSpan.FromHours(4));
+
+        Assert.NotNull(verdict);
+        Assert.False(verdict!.Value.Decision.Fire);
+        Assert.Equal(0, verdict.Value.TilesFired);
+    }
+
+    [Fact]
+    public void FourSampleTile_SustainedSixSigmaShift_Fires_AndMeanSigmaIsTheFullTileMeans()
+    {
+        // Every sample in the tile sits at +6 sigma, so peak == mean == 6.0 both before and after removing
+        // the peak sample (removing one of four EQUAL elevated samples leaves the rest at the same value) —
+        // a sustained shift barely moves and still fires. MeanSigma must report the FULL tile mean's deviation
+        // (~6 sigma, capped at SigmaCap if lower), not the rest-mean's, per the design's "reported mean stays
+        // the full tile mean" rule.
+        var bucket = TrustworthyBucket(10, 3);
+        var map = MapFrom(bucket);
+
+        var tiles = new[] { Tile(10, 3, peak: 6.0, mean: 6.0, samples: 4) };
+
+        var verdict = AnomalyGate.EvaluateTiles(
+            tiles, map, ClassicalThreshold, ModifiedZThreshold, MagnitudeFloor, AbsoluteFallbackBar, SigmaCap,
+            window: TimeSpan.FromHours(4));
+
+        Assert.NotNull(verdict);
+        Assert.True(verdict!.Value.Decision.Fire);
+        Assert.NotNull(verdict.Value.Decision.MeanSigma);
+        Assert.Equal(6.0, verdict.Value.Decision.MeanSigma!.Value, 6);
+    }
+
+    [Fact]
+    public void FourSampleTile_HalfHotAtTwelveSigma_RestMeanFires_PartOfTheHourRanHot()
+    {
+        // 2 of 4 samples at +12 sigma, 2 at baseline (0.0): full mean = 6.0, rest-mean (removing the peak
+        // sample) = (12 + 0 + 0) / 3 = 4.0. At a 4h window (k = classicalThreshold = 2.0, no N-aware raise),
+        // 4.0 clears the mean clause — "part of the hour ran hot" is exactly what the lone-spike guard is
+        // meant to let through, distinct from the single-sample case above.
+        var bucket = TrustworthyBucket(10, 3);
+        var map = MapFrom(bucket);
+
+        var tiles = new[] { Tile(10, 3, peak: 12.0, mean: 6.0, samples: 4) };
+
+        var verdict = AnomalyGate.EvaluateTiles(
+            tiles, map, ClassicalThreshold, ModifiedZThreshold, MagnitudeFloor, AbsoluteFallbackBar, SigmaCap,
+            window: TimeSpan.FromHours(4));
+
+        Assert.NotNull(verdict);
+        Assert.True(verdict!.Value.Decision.Fire);
+        Assert.Equal(1, verdict.Value.TilesFired);
+        // The reported mean deviation is still the FULL tile mean's (6.0), not the rest-mean's (4.0).
+        Assert.NotNull(verdict.Value.Decision.MeanSigma);
+        Assert.Equal(6.0, verdict.Value.Decision.MeanSigma!.Value, 6);
+    }
+
+    [Fact]
+    public void UntrustworthyTile_LoneSpikeOverAbsoluteBar_RestUnderFloor_DoesNotFire()
+    {
+        // Untrustworthy path: the peak alone clears the absolute fallback bar, but with the peak sample
+        // removed the rest of the tile sits UNDER the magnitude floor — the guard applies to the
+        // untrustworthy path's floor comparison exactly as it does to the trustworthy path's threshold.
+        var untrustworthy = new BaselineBucket
+        {
+            HourOfDay = 10, DayOfWeek = 3, Tier = BaselineTier.Flat,
+            Mean = 0, StdDev = 0, SampleCount = 5, DistinctDays = 1, AbsStdDevFloor = 0,
+        };
+        Assert.False(untrustworthy.IsTrustworthy);
+        var map = MapFrom(untrustworthy);
+
+        const double floor = 50.0;
+        const double fallbackBar = 500.0;
+
+        // 4 samples: one lone spike at 600 (clears the 500 bar), the other 3 at 10 (under the 50 floor).
+        // Full mean = (600 + 10 + 10 + 10) / 4 = 157.5 (would clear the floor on the OLD, uncorrected clause).
+        // Rest-mean (peak removed) = (10 + 10 + 10) / 3 = 10.0, under the floor — does not fire.
+        var tiles = new[] { Tile(10, 3, peak: 600.0, mean: 157.5, samples: 4) };
+
+        var verdict = AnomalyGate.EvaluateTiles(
+            tiles, map, ClassicalThreshold, ModifiedZThreshold, floor, fallbackBar, SigmaCap,
+            window: TimeSpan.FromHours(4));
+
+        Assert.NotNull(verdict);
+        Assert.False(verdict!.Value.Decision.Fire);
     }
 }
