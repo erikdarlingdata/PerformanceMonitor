@@ -377,15 +377,15 @@ ORDER BY local_hour";
             {
                 // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
                 // bucket — score today's single-window path against the start bucket, unchanged.
-                decision = AnomalyGate.EvaluateZScore(
-                    baseline, whole.Peak, whole.Mean,
-                    cpuThreshold, ModifiedZThresholdFor(MetricNames.Cpu, cpuThreshold), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
-                    window: window);
                 bucketUsed = baseline;
                 peakCpu = whole.Peak;
                 avgCpu = whole.Mean;
                 windowSamples = whole.Samples;
                 peakTime = whole.PeakTimeUtc;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakCpu, avgCpu,
+                    cpuThreshold, ModifiedZThresholdFor(MetricNames.Cpu, cpuThreshold), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
+                    window: window);
             }
             else
             {
@@ -584,7 +584,7 @@ ORDER BY local_hour";
                     // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
                     // bucket — score today's single-window path against the start bucket, unchanged.
                     var decision = AnomalyGate.EvaluateZScore(
-                        baseline, whole.Peak, whole.Mean,
+                        baseline, peakRate, avgRate,
                         HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, WaitProfileFallbackMsPerSec, WaitProfileFallbackMsPerSec, SigmaDisplayCap,
                         window: window);
                     if (!decision.Fire) return;
@@ -893,13 +893,13 @@ ORDER BY local_hour";
                 {
                     // Never-blind fallback: no tile cleared MinTileSamples or had a non-empty bucket —
                     // score today's single-window path against the start bucket, unchanged.
-                    readDecision = AnomalyGate.EvaluateZScore(
-                        baseline, wholeRead.Peak, wholeRead.Mean,
-                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
-                        window: window);
                     readBucketUsed = baseline;
                     peakReadLat = wholeRead.Peak;
                     avgReadLat = wholeRead.Mean;
+                    readDecision = AnomalyGate.EvaluateZScore(
+                        baseline, peakReadLat, avgReadLat,
+                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                        window: window);
                 }
                 else
                 {
@@ -957,13 +957,13 @@ ORDER BY local_hour";
 
                 if (writeTv is null)
                 {
-                    writeDecision = AnomalyGate.EvaluateZScore(
-                        baseline, wholeWrite.Peak, wholeWrite.Mean,
-                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
-                        window: window);
                     writeBucketUsed = baseline;
                     peakWriteLat = wholeWrite.Peak;
                     avgWriteLat = wholeWrite.Mean;
+                    writeDecision = AnomalyGate.EvaluateZScore(
+                        baseline, peakWriteLat, avgWriteLat,
+                        ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                        window: window);
                 }
                 else
                 {

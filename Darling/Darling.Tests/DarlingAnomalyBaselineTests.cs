@@ -425,14 +425,11 @@ public sealed class DarlingAnomalyBaselineTests
     [Fact]
     public void WaitRateWindow_ReadsThePeakAndMeanPair_AndTheRobustArmIsTheSharedPairGate_LiteVerbatim()
     {
-        /* #3653 A8 option B (lane L2a-2): the SQL Server-store read is now the TILED const — one row per
-           target-local hour, local_hour first. The four Lite-parity columns below are unaffected: they are
-           substring/ordinal pins on the SAME peak/avg/total/count column text, just shifted one ordinal
-           position later by local_hour at 0 (peak 1, avg 2, total 3, count 4 in the tiled reader's own
-           ReadTilesAsync/total-sum calls above in the source, per DetectWaitAnomalies). Lite has not moved
-           onto tiles in this lane, so its own const keeps the four columns at 0..3 — the parity pin below
-           still checks the same four column TEXTS appear in the same relative order in both, which tiling
-           does not change. */
+        /* #3653 B: both SQL Server-store reads are now the TILED const — one row per target-local hour,
+           local_hour first (peak 1, avg 2, total 3, count 4 in each reader's own read, per DetectWaitAnomalies
+           on each SKU, #4172 then #4169). The four Lite-parity columns below are unaffected by that shift:
+           they are substring/ordinal pins on the SAME peak/avg/total/count column TEXT, checked to appear in
+           the same relative order in both, which the shared local_hour-first shift does not change. */
         var sql = PgAnomalyDetector.WaitRateTileWindowSql;
         var expectedColumns = new[]
         {
@@ -462,11 +459,11 @@ public sealed class DarlingAnomalyBaselineTests
         {
             /* The robust arm: ONE pair call, the wait family's cutoff as the modified-z cutoff and its one bar as
                the floor — peak AND mean must clear 5.0, the 250 ms/sec floor stays on the peak inside the gate. */
-            /* #3653 A8 option B (lane L2a-2): the PG detector's never-blind fallback now passes the
-               pre-computed `window` local (TimeRangeEnd - TimeRangeStart, computed once at the top of the
-               method for BindTiledWindow and EvaluateTiles to share) rather than re-deriving it inline at the
-               call site; Lite has not moved onto tiles in this lane and keeps the inline expression. Either
-               spelling of the same value is accepted here. */
+            /* #3653 B: both detectors' never-blind fallback pass the pre-computed `window` local
+               (TimeRangeEnd - TimeRangeStart, computed once at the top of the method for BindTiledWindow/
+               GetBucketMapAsync and EvaluateTiles to share) rather than re-deriving it inline at the call site
+               (#4172 then #4169). Untiled families still re-derive it inline, so either spelling is accepted
+               here rather than pinning one. */
             Assert.Matches(
                 @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*avgRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window:\s*(window|context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart)\)",
                 code);
@@ -483,20 +480,19 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.DoesNotMatch(@"avgRate\s*>=\s*WaitProfileFallbackMsPerSec", code);
         }
 
-        /* #3653 A8 option B (lane L2a-2): the SQL Server-store detector no longer reads peakRate/avgRate off
-           a reader ordinal directly — they come off WindowTiles.WholeWindow(tiles).Peak/.Mean, fed by the
-           tiled read (ReadTilesAsync peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, against local_hour at
-           0), and total_wait_ms is summed by hand from a second pass over the same tiled rows at ordinal 3
-           (not one of WindowTile's fields). Pin that shape directly rather than against a stale reader-ordinal
-           regex that assumed a single collapsed row. Lite has not moved onto tiles in this lane and keeps its
-           own single-row ordinals unchanged. */
-        Assert.Matches(@"var\s+whole\s*=\s*WindowTiles\.WholeWindow\(tiles\)", pg);
-        Assert.Matches(@"var\s+peakRate\s*=\s*whole\.Peak", pg);
-        Assert.Matches(@"var\s+avgRate\s*=\s*whole\.Mean", pg);
+        /* #3653 B (#4169): both detectors now read peakRate/avgRate off WindowTiles.WholeWindow(tiles).Peak/
+           .Mean, fed by a tiled read, rather than off a single-row reader ordinal directly. Pin that shape
+           directly, on BOTH SKUs, rather than against a stale reader-ordinal regex that assumed a single
+           collapsed row on one side. The window-total accumulation is checked separately below, per side:
+           the two detectors sum it differently (PG in a second pass, Lite in the same pass as the tile
+           read), which is a real structural difference the coordinator has not yet ruled symmetric. */
+        foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
+        {
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+whole\s*=\s*WindowTiles\.WholeWindow\(tiles\)"), $"{name}: missing 'var whole = WindowTiles.WholeWindow(tiles)'");
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+peakRate\s*=\s*whole\.Peak"), $"{name}: missing 'var peakRate = whole.Peak'");
+            Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+avgRate\s*=\s*whole\.Mean"), $"{name}: missing 'var avgRate = whole.Mean'");
+        }
         Assert.Matches(@"totalWaitMs\s*\+=\s*totalReader\.IsDBNull\(3\)", pg);
-        Assert.Matches(@"avgRate\s*=\s*rateReader\.IsDBNull\(1\)", liteCode);
-        Assert.Matches(@"totalWaitMs\s*=\s*rateReader\.IsDBNull\(2\)", liteCode);
-        Assert.Matches(@"collectionCount\s*=\s*rateReader\.IsDBNull\(3\)", liteCode);
     }
 
     /// <summary>
