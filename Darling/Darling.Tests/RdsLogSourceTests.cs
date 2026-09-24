@@ -51,7 +51,7 @@ public class RdsLogSourceTests
         /// used to diverge, the first crashing and the other two answering silently (#2996).
         /// <c>unnamed-newest</c> is the opposite case and the positive control: a nameless entry sitting
         /// beside real logs, which must still be read.</summary>
-        public string? LogFileShape { get; init; }
+        public string? LogFileShape { get; set; }
 
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
             DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
@@ -135,10 +135,10 @@ public class RdsLogSourceTests
         }
     }
 
-    private static (RdsLogSource Source, FakeRds Client) Build(FakeRds? client = null)
+    private static (RdsLogSource Source, FakeRds Client) Build(FakeRds? client = null, Func<DateTime>? clock = null)
     {
         var fake = client ?? new FakeRds();
-        return (new RdsLogSource(_ => fake), fake);
+        return (new RdsLogSource(_ => fake, clock), fake);
     }
 
     /// <summary>
@@ -442,20 +442,72 @@ public class RdsLogSourceTests
     }
 
     /// <summary>
-    /// #4053 review round 1 (item 4/6): a stale csvlog listing — the newest stderr file more than 5 minutes
-    /// newer than the newest .csv — throws <see cref="PgNoCsvlogFileException"/> rather than reading the
-    /// dead .csv listing. Nothing is downloaded: the branch is decided before a byte is asked for, the same
-    /// shape the no-log-file refusal above takes.
+    /// #4053 review round 2 (item 2): a stale csvlog listing seen only ONCE does not throw — the debounce
+    /// makes the first sighting record when the condition started, and requesting the tail as usual (the
+    /// stale-csv fixture behaves as a plain csv read otherwise, so a download proves it fell through to the
+    /// ordinary path rather than the refusal below).
     /// </summary>
     [Fact]
-    public async Task AStaleCsvListing_ThrowsPgNoCsvlogFileException()
+    public async Task AStaleCsvListingSeenOnce_DoesNotThrow()
     {
-        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" });
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" }, () => now);
+
+        var chunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.NotNull(chunk);
+        Assert.Single(client.Downloads);
+    }
+
+    /// <summary>
+    /// #4053 review round 1 (item 4/6), reworked for review round 2's debounce: a stale csvlog listing — the
+    /// newest stderr file more than 5 minutes newer than the newest .csv — throws
+    /// <see cref="PgNoCsvlogFileException"/> only once the condition has HELD for at least 5 minutes of real
+    /// time on this instance, proven with the injectable clock: the first call at t=0 records the sighting
+    /// and does not throw (asserted above); a second call at t=5min against the SAME still-stale listing
+    /// does.
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListingHeldFor5Minutes_ThenThrowsPgNoCsvlogFileException()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" }, () => now);
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(5);
 
         await Assert.ThrowsAsync<PgNoCsvlogFileException>(
             () => source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv));
 
-        Assert.Empty(client.Downloads);
+        /* One download from the first (non-throwing) call, none from the second — the throw is decided
+           before a byte is asked for, the same shape the no-log-file refusal takes. */
+        Assert.Single(client.Downloads);
+    }
+
+    /// <summary>
+    /// #4053 review round 2 (item 2): the condition clearing between two sightings resets the debounce —
+    /// a transient gap must not accumulate credit toward the throw across cycles where the files were briefly
+    /// caught up with each other again.
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListingThatClears_ResetsTheDebounce()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" }, () => now);
+
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(3);
+        client.LogFileShape = "csv-sibling";
+        await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(5);
+        client.LogFileShape = "stale-csv";
+
+        var chunk = await source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.NotNull(chunk);
     }
 
     /// <summary>

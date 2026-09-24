@@ -87,9 +87,27 @@ public sealed class RdsLogSource
 
     private readonly Func<string, IAmazonRDS> _clientFactory;
 
-    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null)
-        => _clientFactory = clientFactory
+    private readonly Func<DateTime> _clock;
+
+    /// <summary>#4053 review round 2 (item 2): per-instance, when the stale-csv condition (stderr more than
+    /// <see cref="StaleCsvThresholdMs"/> newer than the newest .csv) was FIRST seen. Cleared the moment the
+    /// condition is gone, so a single wide-but-transient gap between two files rolled by the same syslogger
+    /// — the false positive this debounce exists for — cannot throw on its own; only a gap that HOLDS across
+    /// this many minutes of real time does.</summary>
+    private readonly Dictionary<string, DateTime> _staleSinceUtc = new(StringComparer.Ordinal);
+
+    /// <summary>How long the stale-csv condition has to hold, continuously, before
+    /// <see cref="NewestLogFileAsync"/> throws <see cref="PgNoCsvlogFileException"/> — the same 5 minutes as
+    /// <see cref="StaleCsvThresholdMs"/> itself, but measured in wall-clock cycles rather than the two files'
+    /// own timestamps.</summary>
+    private static readonly TimeSpan StaleCsvDebounce = TimeSpan.FromMinutes(5);
+
+    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null, Func<DateTime>? clock = null)
+    {
+        _clientFactory = clientFactory
             ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
+        _clock = clock ?? (() => DateTime.UtcNow);
+    }
 
     /// <param name="Text">Raw log text, to be handed to <c>PgPlanLogParser.Extract</c> unchanged.</param>
     /// <param name="MoreAvailable">RDS had more than one call's worth. The caller decides whether to keep
@@ -314,7 +332,7 @@ public sealed class RdsLogSource
     /// carrying no filename are one fact — there is nothing here to open — and a null return would have the
     /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
-    private static async Task<string> NewestLogFileAsync(
+    private async Task<string> NewestLogFileAsync(
         IAmazonRDS client, string instanceId, LogFileKind kind, CancellationToken cancellationToken)
     {
         var files = await client.DescribeDBLogFilesAsync(
@@ -373,10 +391,29 @@ public sealed class RdsLogSource
                 .OrderByDescending(w => w)
                 .FirstOrDefault();
 
-            if (newestStderr.HasValue && newestCsv.HasValue
-                && newestStderr.Value - newestCsv.Value > StaleCsvThresholdMs)
+            /* #4053 review round 2 (item 2): the timestamp gap alone was a false positive on a target that
+               merely straddled one slow round trip through DescribeDBLogFiles — a single stale-looking read
+               is not the same fact as csvlog having actually been turned off. staleSinceUtc (per instance)
+               makes the throw wait for the SAME instance to read stale on every call across a real 5-minute
+               window, not just the one call that happened to see the gap; the moment a call sees the gap
+               close, the instance's entry is cleared and the debounce starts over from nothing. */
+            var staleNow = newestStderr.HasValue && newestCsv.HasValue
+                && newestStderr.Value - newestCsv.Value > StaleCsvThresholdMs;
+
+            if (staleNow)
             {
-                throw new PgNoCsvlogFileException();
+                if (!_staleSinceUtc.TryGetValue(instanceId, out var since))
+                {
+                    _staleSinceUtc[instanceId] = _clock();
+                }
+                else if (_clock() - since >= StaleCsvDebounce)
+                {
+                    throw new PgNoCsvlogFileException();
+                }
+            }
+            else
+            {
+                _staleSinceUtc.Remove(instanceId);
             }
         }
 
