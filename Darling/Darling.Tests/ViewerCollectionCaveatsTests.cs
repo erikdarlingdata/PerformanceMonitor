@@ -66,8 +66,10 @@ public sealed class ViewerCollectionCaveatsLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            var firstSeen = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
-            var lastSeen = DateTime.SpecifyKind(DateTime.UtcNow.AddHours(-1), DateTimeKind.Unspecified);
+            /* Whole seconds: timestamptz keeps microseconds, and Windows' DateTime.UtcNow carries 100 ns ticks,
+               so an unrounded value comes back one digit short and the exact-equality asserts below fail. */
+            var firstSeen = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddDays(-2));
+            var lastSeen = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow.AddHours(-1));
 
             /* Two families for the target server, deliberately inserted out of alphabetical order, plus one
                row for a different server that must NOT come back. */
