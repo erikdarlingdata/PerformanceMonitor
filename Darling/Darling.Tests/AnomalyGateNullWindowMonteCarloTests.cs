@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using Xunit;
@@ -181,6 +182,119 @@ public class AnomalyGateNullWindowMonteCarloTests(ITestOutputHelper output)
         }
 
         return fires / (double)trials;
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1a): the TILE arm of the same validation — does <c>AnomalyGate.EvaluateTiles</c>'s
+    /// union-fire rule (≥ 1 of H tiles fires) hold the 4h-vs-24h null-window rate within the design's 20%
+    /// tolerance, for the tile-count families the design actually runs (4 tiles at 4h, 24 tiles at 24h;
+    /// design §1's table)? Each tile draws its OWN n = 12 per-tile samples (the 5-minute family: 12 draws/hour)
+    /// and is scored against a fixed trustworthy bucket (mean 0, stddev 1) through <c>EvaluateTiles</c> with the
+    /// SAME window length every tile in the pass shares — the window's own k_W applies to every tile (design §1).
+    /// The window mean per tile is fixed comfortably above threshold, for the same peak-clause-isolation reason
+    /// the whole-window arm above gives.
+    /// </summary>
+    [Theory]
+    [InlineData(4, 12)]   // 4 tiles × 12 samples/tile at the 4h reference window
+    [InlineData(24, 12)]  // 24 tiles × 12 samples/tile at 24h
+    public void EvaluateTiles_NullWindow_FireRate_AtEachTileCount_IsMeasuredAndReported(int tileCount, int samplesPerTile)
+    {
+        const int trials = 20_000;
+        var rng = new Random(4058);
+        var window = TimeSpan.FromHours(tileCount); // one tile per hour, so tileCount hours == tileCount tiles
+
+        var fires = 0;
+        for (var i = 0; i < trials; i++)
+        {
+            var tiles = BuildNullTiles(rng, tileCount, samplesPerTile);
+            var map = TrustworthySingleBucketMap();
+            var verdict = AnomalyGate.EvaluateTiles(
+                tiles, map, Threshold, AnomalyThresholds.ModifiedZThreshold, MagnitudeFloor,
+                AbsoluteFallbackBar, SigmaCap, window);
+            if (verdict is { Decision.Fire: true }) fires++;
+        }
+
+        var rate = fires / (double)trials;
+        output.WriteLine($"tiles={tileCount} window={tileCount}h fire_rate={rate:0.#####} ({fires}/{trials})");
+        Assert.InRange(rate, 0.0, 1.0);
+    }
+
+    [Fact]
+    public void EvaluateTiles_NullWindow_UnionFireRate_4hVs24h_WithinDesignTolerance()
+    {
+        const int trials = 20_000;
+        var rate4h = MeasureTileUnionFireRate(tileCount: 4, samplesPerTile: 12, window: TimeSpan.FromHours(4), seed: 4058, trials: trials);
+        var rate24h = MeasureTileUnionFireRate(tileCount: 24, samplesPerTile: 12, window: TimeSpan.FromHours(24), seed: 4059, trials: trials);
+        output.WriteLine($"tiles=4@4h rate={rate4h:0.#####} vs tiles=24@24h rate={rate24h:0.#####}");
+
+        if (rate4h < 1e-3 && rate24h < 1e-3)
+        {
+            Assert.True(true, $"both union rates below 1e-3: 4h={rate4h:0.#####}, 24h={rate24h:0.#####} — trivially equalized");
+            return;
+        }
+
+        var larger = Math.Max(rate4h, rate24h);
+        var smaller = Math.Min(rate4h, rate24h);
+        var relativeGap = larger > 0 ? (larger - smaller) / larger : 0.0;
+
+        Assert.True(relativeGap <= 0.20,
+            $"tiles=4@4h rate={rate4h:0.#####} vs tiles=24@24h rate={rate24h:0.#####} — relative gap "
+            + $"{relativeGap:0.###} exceeds the design's 20% tolerance ({trials} trials/window, seeds 4058/4059).");
+    }
+
+    private static double MeasureTileUnionFireRate(int tileCount, int samplesPerTile, TimeSpan window, int seed, int trials)
+    {
+        var rng = new Random(seed);
+        var fires = 0;
+        for (var i = 0; i < trials; i++)
+        {
+            var tiles = BuildNullTiles(rng, tileCount, samplesPerTile);
+            var map = TrustworthySingleBucketMap();
+            var verdict = AnomalyGate.EvaluateTiles(
+                tiles, map, Threshold, AnomalyThresholds.ModifiedZThreshold, MagnitudeFloor,
+                AbsoluteFallbackBar, SigmaCap, window);
+            if (verdict is { Decision.Fire: true }) fires++;
+        }
+
+        return fires / (double)trials;
+    }
+
+    /// <summary>One null (mean 0, stddev 1) bucket that answers EVERY (hour, dow) key the same way — the
+    /// null-rate question here is about the union rule across tiles, not about bucket selection, so every
+    /// tile in a trial is deliberately scored against the identical trustworthy baseline.</summary>
+    private static BaselineBucketMap TrustworthySingleBucketMap()
+    {
+        var dict = new Dictionary<(int, int), BaselineBucket>();
+        for (var h = 0; h < 24; h++)
+        for (var d = 0; d < 7; d++)
+            dict[(h, d)] = new BaselineBucket
+            {
+                HourOfDay = h, DayOfWeek = d, Tier = BaselineTier.Full,
+                Mean = 0, StdDev = 1, SampleCount = 100, DistinctDays = 10, AbsStdDevFloor = 0,
+            };
+        return new BaselineBucketMap(dict, LocalClockWindow.Utc(new DateTime(2026, 9, 24)));
+    }
+
+    private static WindowTile[] BuildNullTiles(Random rng, int tileCount, int samplesPerTile)
+    {
+        var tiles = new WindowTile[tileCount];
+        for (var t = 0; t < tileCount; t++)
+        {
+            var peak = double.NegativeInfinity;
+            var sum = 0.0;
+            for (var s = 0; s < samplesPerTile; s++)
+            {
+                var z = NextStandardNormal(rng);
+                if (z > peak) peak = z;
+                sum += z;
+            }
+
+            var mean = sum / samplesPerTile;
+            var localHour = new DateTime(2026, 9, 24, t % 24, 0, 0, DateTimeKind.Unspecified);
+            tiles[t] = new WindowTile(localHour, peak, mean, samplesPerTile);
+        }
+
+        return tiles;
     }
 
     /// <summary>Box-Muller, one sample per call (discards the paired second sample — trial counts here

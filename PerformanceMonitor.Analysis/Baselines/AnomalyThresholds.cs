@@ -457,6 +457,17 @@ public static class AnomalyThresholds
     /// per-collection growth rate before the next release.</summary>
     public const double PgDatabaseGrowthFallbackBytesPerDay = 2.0 * 1024.0 * 1024.0 * 1024.0;  // 2 GiB of growth per day
 
+    /// <summary>
+    /// #3653 A8 option B (lane L1a): the minimum per-tile sample count for <c>AnomalyGate.EvaluateTiles</c> to
+    /// score a tile at all — the same figure as <c>BaselineMath.SelectBucket</c>'s flat-tier "minimum viable
+    /// baseline" floor (3). A tile below this is a partial first/last hour of the window or a restart gap, not
+    /// a real hour's worth of samples; the design's never-blind rule is that dropping it is safe because the
+    /// next overlapping scheduled pass scores it once it fills in. Unrelated to the baseline BUCKET's own
+    /// sample floors (<c>BaselineBucket</c>'s tier-specific sample minimums) — this gates the WINDOW tile's
+    /// sample count, not the historical bucket it is compared against.
+    /// </summary>
+    public const int MinTileSamples = 3;
+
     // #3653 A8 slice 1: the N-aware (Šidák) peak cutoff — see AnomalyGate class remarks for the pair gate this feeds.
 
     /// <summary>The reference window length the per-window peak cutoffs are anchored to: the 4-hour scheduled pass,
