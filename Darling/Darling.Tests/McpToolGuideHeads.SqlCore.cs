@@ -206,7 +206,7 @@ public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
         Assert.Contains("data_state purged, zeros are absences not measurements, no verdict.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
 
         Assert.Contains("status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);
-        Assert.Contains("zeros are absences, never Healthy.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);
+        Assert.Contains("both health_band NoData, never Healthy.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);
     }
 
     /// <summary>D9: <c>get_daily_summary_range</c>'s top-level "unavailable" means no collection has EVER been
@@ -218,7 +218,7 @@ public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
     {
         var head = McpToolGuideTests.Served("get_daily_summary_range").Served;
         Assert.Contains("status unavailable: nothing was ever collected.", head, StringComparison.Ordinal);
-        Assert.Contains("a row is data_state purged or past_horizon", head, StringComparison.Ordinal);
+        Assert.Contains("data_state purged rows' zeros are absences; past_horizon rows are real but a zero may be either", head, StringComparison.Ordinal);
     }
 
     /// <summary>D6: Darling's own tail keeps the rollup-tier disclosure (<c>unique_queries=null</c>,
