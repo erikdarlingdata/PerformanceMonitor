@@ -539,6 +539,33 @@ function Get-CimInstance {
     }
 
     /// <summary>
+    /// #4052, from a PowerShell 5.1 run on a standalone Windows 11 box (the live lock test above runs the lock as
+    /// TrustedInstaller, which is trusted everywhere, so it cannot see these):
+    /// <list type="bullet">
+    /// <item>the service stays trusted on darling.json and its backups. Step 4b gives it an explicit FullControl there
+    /// (#1647); without the trust the walk's explicit-ACE branch strips that grant and the service cannot read its
+    /// own config;</item>
+    /// <item>the bring-your-own key folder is handed to the lock as a NAME, because the lock Join-Paths it onto the
+    /// root and Join-Path does not treat a rooted child as rooted;</item>
+    /// <item>the helper avoids <c>Split-Path -LiteralPath -Parent</c>, an ambiguous parameter set on PowerShell 5.1.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public void TheNarrowedLock_KeepsTheServiceOnItsConfig_AndHandsTheKeyFolderOverAsAName()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var lockText = ExtractFunction(InstallScript, "Lock-DarlingInstallTree");
+        var helper = ExtractFunction(InstallScript, "Get-DarlingExtraServiceWriteDirectories");
+
+        Assert.Contains("$isSecretFile = $target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*'", lockText, StringComparison.Ordinal);
+        Assert.Contains("-or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }", lockText, StringComparison.Ordinal);
+        Assert.Contains("return @('darling-keys')", helper, StringComparison.Ordinal);
+        Assert.Equal(PerformanceMonitor.Darling.Service.DarlingLogHashKeyFile.BringYourOwnDirectoryName, "darling-keys");
+        Assert.DoesNotContain("(Split-Path -LiteralPath $configPath -Parent)", helper, StringComparison.Ordinal);
+        Assert.Equal(helper, ExtractFunction(upgrade, "Get-DarlingExtraServiceWriteDirectories"));
+    }
+
+    /// <summary>
     /// #4043: the pre-lock writable-extraction check ships twice for the same reason the lock itself does -
     /// install-darling.ps1 checks the install root before 1b2 ever runs, upgrade-darling.ps1 checks a folder
     /// -Source before it copies that folder's content over the (already locked) install root, and neither

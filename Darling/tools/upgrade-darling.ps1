@@ -420,7 +420,12 @@ function Get-DarlingExtraServiceWriteDirectories([string]$root, [string]$configP
     $match = [regex]::Matches($stripped, '"managed"\s*:\s*(true|false)')
     if ($match.Count -gt 0) { $isManaged = ($match[$match.Count - 1].Groups[1].Value -eq 'true') }
     if ($isManaged) { return @() }
-    return @((Join-Path (Split-Path -LiteralPath $configPath -Parent) 'darling-keys'))
+    # A NAME under the install root, not a path: Lock-DarlingInstallTree Join-Paths it onto the root, and Join-Path does not
+    # treat a rooted child as rooted ('C:\a' + 'C:\a\b' = 'C:\a\C:\a\b'). A darling.json outside the root puts the key
+    # folder outside the tree the lock covers, so it needs no grant from here.
+    $configDir = [System.IO.Path]::GetDirectoryName($configPath).TrimEnd('\')   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
+    if ($configDir -ine $root.TrimEnd('\')) { return @() }
+    return @('darling-keys')
 }
 
 function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string[]]$extraServiceDirectories = @()) {
@@ -537,7 +542,11 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         # other untrusted account, even though the SID is the same one the tree hands its own real access to.
         $trustedHere = $trusted
         $isServiceWritePath = $serviceSid -and (Test-DarlingServiceWritePath $path)
-        if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath)) { $trustedHere += $serviceSid }
+        # darling.json and its backups: step 4b gives the service an explicit FullControl there (#1647) and the setowner
+        # above makes it the owner, so the service is trusted on those files too. Without this the walk strips the
+        # service's own grant from its config (the explicit-ACE branch below) and the service cannot start.
+        $isSecretFile = $target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*'
+        if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
         $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
