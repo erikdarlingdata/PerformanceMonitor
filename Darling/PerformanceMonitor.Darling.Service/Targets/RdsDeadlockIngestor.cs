@@ -41,6 +41,13 @@ public sealed class RdsDeadlockIngestor
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
 
+    /// <summary>
+    /// The csvlog partial-record carry (#4053 part c2), the same <see cref="RdsCsvlogCarryBook"/>
+    /// <see cref="RdsLogEventIngestor"/> keeps — this ingestor's own book, never shared with another, for
+    /// the reason <see cref="RdsLogSource"/>'s own marker remark gives.
+    /// </summary>
+    private readonly RdsCsvlogCarryBook _csvCarry = new();
+
     public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -59,18 +66,34 @@ public sealed class RdsDeadlockIngestor
     /// <see cref="RdsLogUnavailableException"/> is: the runner classifies it and names the setting, where
     /// swallowing it would return zero rows and be recorded as a log that was read and held no
     /// deadlocks.</exception>
+    /// <param name="pgLogUsesCsvlog">#4053 part c2: whether the target's <c>log_destination</c> includes
+    /// <c>csvlog</c>, read by the caller the same way <see cref="RdsLogEventIngestor"/>'s own
+    /// <c>pgLogUsesCsvlog</c> parameter is (#4053 part c1) — this ingestor reaches the log through the AWS
+    /// API, so it has no connection of its own to probe with. True reads the newest <c>.csv</c> file through
+    /// the shared <see cref="RdsCsvlogCarry"/> carry instead of the stderr file; false is today's stderr
+    /// route, unchanged.</param>
     public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
         bool logTimezoneIsUtc = false,
+        bool pgLogUsesCsvlog = false,
         CancellationToken cancellationToken = default)
     {
         RdsLogSource.LogChunk? chunk;
 
+        var kind = pgLogUsesCsvlog ? RdsLogSource.LogFileKind.Csv : RdsLogSource.LogFileKind.Stderr;
+
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
+        }
+        catch (PgNoCsvlogFileException)
+        {
+            /* #4053 part c1's own arm on the log-events ingestor, mirrored here: propagated UNWRAPPED so
+               DarlingWorker's PgNoCsvlogFileException arm invalidates PgLogFormatCapability's cached verdict
+               for this server, the same fix a stale "csvlog is on" cache needs on this route too. */
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -96,7 +119,13 @@ public sealed class RdsDeadlockIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var (written, foreignZoneLines) = await StoreAsync(serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, cancellationToken);
+        var (carry, carryKey, droppedByRotation, currentFileName) = pgLogUsesCsvlog
+            ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
+            : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
+
+        var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry) = await StoreAsync(
+            serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
+            carry, chunk.Value.MoreAvailable, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
            either in the store or was nothing to store; anything else threw out of StoreAsync above and
@@ -105,10 +134,18 @@ public sealed class RdsDeadlockIngestor
            The order is the fix (#3008). While the marker advanced inside ReadNewestAsync, a parse fault, a
            COPY that tripped its deadline, a dropped store connection or a cancelled cycle each consumed a
            window nobody stored — and DownloadDBLogFilePortion does not hand the same bytes out twice, so
-           every deadlock in it was gone with no error naming the loss. */
+           every deadlock in it was gone with no error naming the loss. The csvlog carry moves alongside it
+           for the same reason (#4053 part c2, mirroring RdsLogEventIngestor's own commit). */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return RdsIngestOutcome.Read(written, foreignZoneLines);
+        var resumeAdvanced = !string.IsNullOrEmpty(chunk.Value.Resume.Marker);
+
+        if (carryKey is not null && resumeAdvanced)
+        {
+            csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
+        }
+
+        return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
     }
 
     /// <summary>
@@ -117,32 +154,71 @@ public sealed class RdsDeadlockIngestor
     /// deadlocks in it — is a legitimate zero that loses nothing, and every way it can FAIL leaves via an
     /// exception rather than a zero the caller would have to tell apart from those.
     /// </summary>
-    private async Task<(int Written, int ForeignZoneLines)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
         bool logTimezoneIsUtc,
+        bool pgLogUsesCsvlog,
+        RdsCsvlogCarry.CsvCarry carry,
+        bool additionalDataPending,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(text))
+        List<PgDeadlockLogParser.ParsedDeadlock> deadlocks;
+        int foreignZoneLines;
+        var csvRecordsDiscarded = 0;
+        var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
+
+        if (pgLogUsesCsvlog)
         {
-            return (0, 0);
+            if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
+            {
+                return (0, 0, 0, carry);
+            }
+
+            var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
+            var entries = portion.Entries;
+            csvRecordsDiscarded = portion.RecordsDiscarded;
+            nextCarry = portion.Next;
+
+            /* The SAME foreign-zone rule the stderr path applies below — PgLogEventsCollector's own,
+               shared here rather than the private copy PgDeadlocksCollector's SQL route used to keep
+               (#4053 part c2 dedupe). */
+            var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
+
+            deadlocks = new List<PgDeadlockLogParser.ParsedDeadlock>();
+            foreach (var entry in kept)
+            {
+                var parsed = PgDeadlockLogParser.FromEntry(entry);
+
+                if (parsed is not null)
+                {
+                    deadlocks.Add(parsed.Value);
+                }
+            }
         }
+        else
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return (0, 0, 0, nextCarry);
+            }
 
-        /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
-           statement about the target's configuration rather than about reaching it, and it has to reach the
-           runner to be classified.
+            /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
+               statement about the target's configuration rather than about reaching it, and it has to reach the
+               runner to be classified.
 
-           It also has to leave WITHOUT the marker being committed, which is why this whole method sits
-           ahead of the commit rather than around it: a refused zone that consumed the window would discard
-           every report in it, and the setting that caused the refusal is fixable, so those reports are
-           worth still being there afterwards (#3008). */
-        var deadlocks = PgDeadlockLogParser.Extract(text, logTimezoneIsUtc, out var foreignZoneLines);
+               It also has to leave WITHOUT the marker being committed, which is why this whole method sits
+               ahead of the commit rather than around it: a refused zone that consumed the window would discard
+               every report in it, and the setting that caused the refusal is fixable, so those reports are
+               worth still being there afterwards (#3008). */
+            deadlocks = PgDeadlockLogParser.Extract(text, logTimezoneIsUtc, out foreignZoneLines);
+        }
 
         if (deadlocks.Count == 0)
         {
             /* A log slab with no deadlocks in it is the ordinary case. Not worth a log line every cycle. */
-            return (0, foreignZoneLines);
+            return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry);
         }
 
         var rows = new List<PgDeadlocksCollector.Row>(deadlocks.Count);
@@ -160,7 +236,7 @@ public sealed class RdsDeadlockIngestor
                 GraphText: deadlock.GraphText));
         }
 
-        return (await WriteAsync(serverId, storageName, rows, cancellationToken), foreignZoneLines);
+        return (await WriteAsync(serverId, storageName, rows, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry);
     }
 
     /// <summary>

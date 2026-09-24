@@ -88,6 +88,11 @@ public sealed class RdsDeadlockIngestorTests
         "2026-08-26 22:30:00.000 UTC [1600] LOG:  checkpoint starting: time\n"
         + "2026-08-26 22:30:12.000 UTC [1600] LOG:  checkpoint complete: wrote 42 buffers\n";
 
+    /* #4053 part c2: the csvlog file name, mirroring RdsLogEventIngestorCsvlogTests' own StderrFile/CsvFile
+       pair — RDS for PostgreSQL writes the csvlog output as the stderr file's own name with .csv appended. */
+    private const string StderrFile = "error/postgresql.log.2026-08-26-22";
+    private const string CsvFile = StderrFile + ".csv";
+
     /// <summary>
     /// An RDS client that models the transport's ONE load-bearing property: what you get back depends on
     /// the marker you send, and a marker is only handed out once. A fake that answered the same text
@@ -104,13 +109,28 @@ public sealed class RdsDeadlockIngestorTests
         /// <summary>What the FIRST (unresumed) read returns.</summary>
         public string FirstBody { get; init; } = DeadlockText;
 
+        /// <summary>#4053 part c2: overrides the default single-stderr-file listing, for the csvlog cases
+        /// that need a <c>.csv</c> sibling present for <c>DescribeDBLogFiles</c> to name.</summary>
+        public List<DescribeDBLogFilesDetails>? Files { get; set; }
+
+        /// <summary>#4053 part c2: what a single-shot (unscripted) read of the <c>.csv</c> file returns.</summary>
+        public string CsvBody { get; set; } = string.Empty;
+
+        /// <summary>#4053 part c2: the marker a single-shot <c>.csv</c> read hands back.</summary>
+        public string? NextCsvMarker { get; set; } = "MARKER-1";
+
+        /// <summary>#4053 part c2: the portion queue for the carry-across-portions case, mirroring
+        /// RdsLogEventIngestorCsvlogTests' own <c>Portions</c> — one <c>.csv</c> download per queued entry,
+        /// with a fresh marker per call so <c>CommitResume</c> advances a distinct position each time.</summary>
+        public Queue<(string Body, bool AdditionalDataPending)>? CsvPortions { get; set; }
+
         public override Task<DescribeDBLogFilesResponse> DescribeDBLogFilesAsync(
             DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBLogFilesResponse
             {
-                DescribeDBLogFiles = new List<DescribeDBLogFilesDetails>
+                DescribeDBLogFiles = Files ?? new List<DescribeDBLogFilesDetails>
                 {
-                    new() { LogFileName = "error/postgresql.log.2026-08-26-22", LastWritten = 9999 },
+                    new() { LogFileName = StderrFile, LastWritten = 9999 },
                 },
             });
 
@@ -118,6 +138,28 @@ public sealed class RdsDeadlockIngestorTests
             DownloadDBLogFilePortionRequest request, CancellationToken cancellationToken = default)
         {
             Downloads.Add(request);
+
+            if (request.LogFileName.EndsWith(".csv", StringComparison.Ordinal))
+            {
+                if (CsvPortions is { Count: > 0 })
+                {
+                    var (body, pending) = CsvPortions.Dequeue();
+
+                    return Task.FromResult(new DownloadDBLogFilePortionResponse
+                    {
+                        LogFileData = body,
+                        Marker = "MARKER-" + Downloads.Count,
+                        AdditionalDataPending = pending,
+                    });
+                }
+
+                return Task.FromResult(new DownloadDBLogFilePortionResponse
+                {
+                    LogFileData = CsvBody,
+                    Marker = NextCsvMarker,
+                    AdditionalDataPending = false,
+                });
+            }
 
             /* Consume-once: the unresumed read yields the window under test, and only a read that
                presented MARKER-1 has moved past it. */
@@ -518,5 +560,198 @@ public sealed class RdsDeadlockIngestorTests
 
         Assert.Equal(2, client.Downloads.Count);
         Assert.Null(client.Downloads[1].Marker);
+    }
+
+    /* --- #4053 part c2: this ingestor's own csvlog route -------------------------------------------------- */
+
+    /* The wait-graph DETAIL a real deadlock writes, csvlog-shaped exactly as PgDeadlocksCsvlogTests builds it:
+       no tabs, newline-joined participant statements. */
+    private const string CsvDeadlockDetail =
+        "Process 5012 waits for ShareLock on transaction 809; blocked by process 5013."
+        + "\nProcess 5013 waits for ShareLock on transaction 810; blocked by process 5012."
+        + "\nProcess 5012: UPDATE accounts SET balance = balance - 1 WHERE card = 1"
+        + "\nProcess 5013: UPDATE accounts SET note = 'x' WHERE id = 7";
+
+    /// <summary>One complete csvlog deadlock record, built the same way <c>PgDeadlocksCsvlogTests.DeadlockRecord</c>
+    /// is — copied here rather than shared across assemblies, per this file's own remark on why the fixtures in
+    /// this suite are the ingestor's own rather than borrowed from the collector's SQL route.</summary>
+    private static string CsvDeadlockRecord(string zone = "UTC") =>
+        "2026-09-24 01:54:43.008 " + zone + ",\"app_rw\",\"app_db\",5012,\"10.0.0.5:41000\",6ab482e3.60,1,"
+        + "\"client backend\",2026-09-24 01:54:40 UTC,3/9,0,ERROR,40P01,\"deadlock detected\","
+        + "\"" + CsvDeadlockDetail.Replace("\"", "\"\"") + "\",\"See server log for query details.\","
+        + ",,,,,,\"client backend\",,,0\n";
+
+    /// <summary>An ordinary (non-deadlock) FATAL csvlog record, standing in for the traffic a real tail also
+    /// carries — must not become a report, copied from <c>PgDeadlocksCsvlogTests.OrdinaryFatalRecord</c>.</summary>
+    private const string CsvOrdinaryFatalRecord =
+        "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,\"startup\","
+        + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\",,,,,,,,,\"\","
+        + "\"client backend\",,0\n";
+
+    /// <summary>A record whose quoted message field carries a newline and a fake deadlock line inside it, copied
+    /// from <c>PgDeadlocksCsvlogTests.ForgedMessage</c>/<c>RecordWithForgedMessage</c>: the shape a client's own
+    /// field content can plant, which the resync must keep inside its one record rather than reading as its own
+    /// report.</summary>
+    private const string CsvForgedMessage =
+        "role \"nosuchuser\" does not exist\nADMIN 2026-09-24 01:54:43.008 UTC,\"x\",\"x\",9999,,,,,,,,ERROR,"
+        + "40P01,\"deadlock detected\",\"Process 1 waits for ShareLock on transaction 2; blocked by process 3.\n"
+        + "Process 1: SELECT 1\nProcess 3: SELECT 1\",,,,,,,\"\",\"client backend\",,0";
+
+    private static string CsvRecordWithForgedMessage() =>
+        "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,\"startup\","
+        + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"" + CsvForgedMessage.Replace("\"", "\"\"") + "\","
+        + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+    /// <summary>
+    /// #4053 part c2, case 1: csvlog on names the <c>.csv</c> file, and a portion holding one real deadlock
+    /// record reaches the write — proven the way every other test in this file proves it, over the dead store: a
+    /// throw that is not <see cref="RdsLogUnavailableException"/>.
+    /// </summary>
+    [Fact]
+    public async Task CsvlogOn_NamesTheCsvFile_AndAPortionHoldingOneDeadlockReachesTheWrite()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvBody = CsvOrdinaryFatalRecord + CsvDeadlockRecord(),
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+        Assert.Single(client.Downloads);
+        Assert.Equal(CsvFile, client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c2, case 2: a deadlock-shaped look-alike inside another record's quoted field — the same
+    /// shape <c>PgDeadlocksCsvlogTests</c> uses — must not be read as its own report. No write, zero rows: the
+    /// dead store is never opened.
+    /// </summary>
+    [Fact]
+    public async Task ALookAlikeInsideAQuotedField_ProducesNoWrite_AndZeroRows()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+
+        var entries = PgServerLogCsvParser.Parse(CsvRecordWithForgedMessage(), out var discardedAtParse);
+        Assert.Single(entries);
+        Assert.Equal(0, discardedAtParse);
+
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvBody = CsvRecordWithForgedMessage(),
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        var outcome = await ingestor.IngestAsync(
+            1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+    }
+
+    /// <summary>
+    /// #4053 part c2, case 3: csvlog off requests the stderr file, as before — unchanged from every other test
+    /// in this file that omits <c>pgLogUsesCsvlog</c>, asserted directly against a listing that ALSO carries a
+    /// <c>.csv</c> sibling so the choice is a real one rather than the sibling being absent.
+    /// </summary>
+    [Fact]
+    public async Task CsvlogOff_StillRequestsTheStderrFile()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            FirstBody = QuietText,
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: false);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Single(client.Downloads);
+        Assert.Equal(StderrFile, client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4053 part c2, case 4: a deadlock record split across two portions. Portion 1 is pending and holds only
+    /// the record's head — no events, so no write — and portion 2 holds the tail and reaches the write. The
+    /// record comes out once, from portion 2.
+    /// </summary>
+    [Fact]
+    public async Task ADeadlockRecordSplitAcrossTwoPortions_ComesOutOnce_FromTheSecondPortion()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var full = CsvDeadlockRecord();
+        var cut = full.IndexOf("Process 5012 waits", StringComparison.Ordinal);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvPortions = new Queue<(string, bool)>(new[]
+            {
+                (full[..cut], true),
+            }),
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        /* Portion 1: pending, holds only the record's head. No events, so no write and no throw. */
+        var first = await ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+        Assert.Equal(0, first.Rows);
+
+        /* Portion 2: the tail, queued as the single-shot CsvBody/NextCsvMarker so this read resumes with the
+           carry the first call recorded. Reaches the write — the dead store turns that into a throw. */
+        client.CsvBody = full[cut..];
+        client.NextCsvMarker = "MARKER-2";
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+    }
+
+    /// <summary>
+    /// #4053 part c2, case 5: a foreign-zone record under a UTC <c>log_timezone</c> is skipped and counted in
+    /// <see cref="RdsIngestOutcome.ForeignZoneLines"/>, with no write — the same #4046 trade the stderr route
+    /// and <c>PgDeadlocksCsvlogTests</c>' own SQL route give.
+    /// </summary>
+    [Fact]
+    public async Task AForeignZoneRecord_UnderAUtcLogTimezone_IsSkippedAndCounted_WithNoWrite()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var client = new FakeRds
+        {
+            Files = new List<DescribeDBLogFilesDetails>
+            {
+                new() { LogFileName = StderrFile, LastWritten = 9999 },
+                new() { LogFileName = CsvFile, LastWritten = 10000 },
+            },
+            CsvBody = CsvDeadlockRecord("PST"),
+        };
+        var (ingestor, _, _) = Build(store, client);
+
+        var outcome = await ingestor.IngestAsync(
+            1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true);
+
+        Assert.Equal(0, outcome.Rows);
+        Assert.Equal(1, outcome.ForeignZoneLines);
+        Assert.True(outcome.SourceReached);
     }
 }
