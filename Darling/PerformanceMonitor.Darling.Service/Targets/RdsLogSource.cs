@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Amazon;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Service.Targets;
 
@@ -55,6 +56,14 @@ public sealed class RdsLogSource
     /// capture-everything, and an unbounded first read would pull all of it across the network.
     /// </summary>
     private const int FirstReadLines = 10_000;
+
+    /// <summary>
+    /// #4053 review round 1 (item 4): how much newer the newest stderr file's <c>LastWritten</c> (in ms
+    /// since epoch, the SDK's own unit) has to be than the newest <c>.csv</c>'s before the csvlog route
+    /// treats the <c>.csv</c> listing as stale and throws <see cref="PgNoCsvlogFileException"/> rather than
+    /// reading it.
+    /// </summary>
+    private const long StaleCsvThresholdMs = 5 * 60 * 1000;
 
     /// <summary>
     /// Which of an instance's PostgreSQL log files a read is for (#4053 part c1). RDS writes a target's
@@ -333,6 +342,43 @@ public sealed class RdsLogSource
             : name => !string.IsNullOrEmpty(name)
                 && !name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
                 && !name.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+
+        if (kind == LogFileKind.Csv)
+        {
+            /* #4053 review round 1 (item 4): csvlog turned OFF leaves the cached "csvlog is on" verdict
+               (PgLogFormatCapability, an hour's TTL) reading a .csv file that has gone stale — the syslogger
+               keeps writing the stderr file every cycle but stopped rolling .csv ones, and without this check
+               the route would keep re-reading the same old .csv file's unread tail (nothing, since nothing
+               new ever arrives) rather than surfacing that the format actually in use changed. A newest-stderr
+               timestamp more than 5 minutes ahead of the newest .csv's is that signal: on an instance actually
+               taking write traffic, one round trip's worth of drift between two files rolled by the same
+               syslogger is not this large; a target so idle neither file moves within 5 minutes produces no
+               difference to flag at all, so idleness is not a false-positive path. */
+            var newestStderr = files.DescribeDBLogFiles?
+                .Where(f => !string.IsNullOrEmpty(f.LogFileName)
+                    && !f.LogFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+                    && !f.LogFileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                .Select(f => f.LastWritten)
+                .Where(w => w.HasValue)
+                .Select(w => w!.Value)
+                .OrderByDescending(w => w)
+                .FirstOrDefault();
+
+            var newestCsv = files.DescribeDBLogFiles?
+                .Where(f => !string.IsNullOrEmpty(f.LogFileName)
+                    && f.LogFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+                .Select(f => f.LastWritten)
+                .Where(w => w.HasValue)
+                .Select(w => w!.Value)
+                .OrderByDescending(w => w)
+                .FirstOrDefault();
+
+            if (newestStderr.HasValue && newestCsv.HasValue
+                && newestStderr.Value - newestCsv.Value > StaleCsvThresholdMs)
+            {
+                throw new PgNoCsvlogFileException();
+            }
+        }
 
         return files.DescribeDBLogFiles?
             .OrderByDescending(f => f.LastWritten)

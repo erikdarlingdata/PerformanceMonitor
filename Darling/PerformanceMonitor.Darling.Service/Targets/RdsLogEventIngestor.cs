@@ -112,6 +112,17 @@ public sealed class RdsLogEventIngestor
         {
             chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
         }
+        catch (PgNoCsvlogFileException)
+        {
+            /* #4053 review round 1 (item 4): the stale-csv check inside NewestLogFileAsync throws this
+               directly — propagated UNWRAPPED, not folded into RdsLogUnavailableException below, so it
+               reaches DarlingWorker's own PgNoCsvlogFileException arm, the same arm the self-hosted
+               pg_read_file route's "no .csv file yet" fault reaches. That arm invalidates
+               PgLogFormatCapability's cached verdict for this server, which is exactly the fix a stale
+               "csvlog is on" cache needs: csvlog was turned off, the cache hasn't caught up, and the next
+               probe re-reads log_destination instead of this route reading a dead .csv listing forever. */
+            throw;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #2633's fix, shared: rethrown so the runner degrades an authorization refusal to PERMISSIONS

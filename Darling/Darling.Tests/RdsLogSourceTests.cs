@@ -36,6 +36,7 @@ public class RdsLogSourceTests
         public List<DownloadDBLogFilePortionRequest> Downloads { get; } = new();
         public string? WriterId { get; init; }
         public string LogName { get; init; } = "error/postgresql.log.2026-08-25-18";
+        public string RotatedFromCsv { get; init; } = "error/postgresql.log.2026-08-24-18.csv";
         public string? NextMarker { get; set; } = "MARKER-1";
 
         /* The answers the populated fixtures above cannot produce. The AWS SDK leaves a response collection
@@ -95,6 +96,23 @@ public class RdsLogSourceTests
                     {
                         new() { LogFileName = LogName, LastWritten = 9999 },
                         new() { LogFileName = LogName + ".csv", LastWritten = 10000 },
+                    },
+                    /* #4053 review round 1 (item 4/6): the stderr file is 10 minutes NEWER than the newest
+                       .csv — csvlog was turned off and the syslogger kept rolling stderr files while no new
+                       .csv ever appeared, the stale-cache shape PgNoCsvlogFileException exists for. */
+                    "stale-csv" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = LogName + ".csv", LastWritten = 10_000 },
+                        new() { LogFileName = LogName, LastWritten = 10_000 + (10 * 60 * 1000) },
+                    },
+                    /* A rotation: an OLDER .csv file this instance's route already caught up on
+                       (RotatedFromCsv), beside a NEWER one (LogName + ".csv") it has never read — the shape
+                       HasAnyMarkerForInstance's rotation signal is checking for. */
+                    "csv-rotation" => new List<DescribeDBLogFilesDetails>
+                    {
+                        new() { LogFileName = LogName, LastWritten = 20_000 },
+                        new() { LogFileName = RotatedFromCsv, LastWritten = 9_000 },
+                        new() { LogFileName = LogName + ".csv", LastWritten = 20_000 },
                     },
                     _ => new List<DescribeDBLogFilesDetails>
                     {
@@ -421,6 +439,47 @@ public class RdsLogSourceTests
         Assert.Contains("reports no writer", ex.Message, StringComparison.Ordinal);
         Assert.Contains("during a failover", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("Value cannot be null", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 review round 1 (item 4/6): a stale csvlog listing — the newest stderr file more than 5 minutes
+    /// newer than the newest .csv — throws <see cref="PgNoCsvlogFileException"/> rather than reading the
+    /// dead .csv listing. Nothing is downloaded: the branch is decided before a byte is asked for, the same
+    /// shape the no-log-file refusal above takes.
+    /// </summary>
+    [Fact]
+    public async Task AStaleCsvListing_ThrowsPgNoCsvlogFileException()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "stale-csv" });
+
+        await Assert.ThrowsAsync<PgNoCsvlogFileException>(
+            () => source.ReadNewestAsync("solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv));
+
+        Assert.Empty(client.Downloads);
+    }
+
+    /// <summary>
+    /// #4053 review round 1 (item 2/6): a csv rotation — no marker for the newest .csv file's own key, but
+    /// one exists for the same instance under an OLDER .csv name — requests <c>Marker "0"</c> instead of the
+    /// bounded tail, and the chunk says <see cref="RdsLogSource.LogChunk.StartsAtFileStart"/>.
+    /// </summary>
+    [Fact]
+    public async Task ACsvRotation_RequestsMarkerZeroAndSetsStartsAtFileStart()
+    {
+        var (source, client) = Build(new FakeRds { LogFileShape = "csv-rotation" });
+
+        /* Seed a marker for the OLDER csv file, the same way a real prior cycle would have via CommitResume
+           after reading it while it was still the newest. */
+        var oldChunk = new RdsLogSource.ResumeMarker("solo|error/postgresql.log.2026-08-24-18.csv", "OLD-MARKER");
+        source.CommitResume(oldChunk);
+
+        var chunk = await source.ReadNewestAsync(
+            "solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.True(chunk!.Value.StartsAtFileStart);
+        Assert.Equal("0", client.Downloads[0].Marker);
+        Assert.Equal(0, client.Downloads[0].NumberOfLines);
+        Assert.Equal("error/postgresql.log.2026-08-25-18.csv", client.Downloads[0].LogFileName);
     }
 
     /// <summary>

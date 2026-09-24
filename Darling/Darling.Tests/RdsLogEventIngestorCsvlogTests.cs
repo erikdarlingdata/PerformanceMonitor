@@ -63,6 +63,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
         public FakeRds() : base(new Amazon.Runtime.BasicAWSCredentials("a", "b"), Amazon.RegionEndpoint.USEast1) { }
 
         public string CsvBody { get; init; } = string.Empty;
+        public string? NextMarker { get; init; } = "MARKER-1";
         public List<DownloadDBLogFilePortionRequest> Downloads { get; } = new();
 
         /* Portion queue for the carry tests: each IngestAsync call pulls the next (body, additionalDataPending)
@@ -113,7 +114,7 @@ public sealed class RdsLogEventIngestorCsvlogTests
             return Task.FromResult(new DownloadDBLogFilePortionResponse
             {
                 LogFileData = CsvBody,
-                Marker = "MARKER-1",
+                Marker = NextMarker,
                 AdditionalDataPending = false,
             });
         }
@@ -295,5 +296,147 @@ public sealed class RdsLogEventIngestorCsvlogTests
         var failure = await Assert.ThrowsAnyAsync<Exception>(
             () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
         Assert.IsNotType<RdsLogUnavailableException>(failure);
+    }
+
+    /* --- #4053 review round 1, item 6: the remaining pure-step tests --------------------------------------- */
+
+    /// <summary>Forward mode + a half-written last record: a portion with no pending data (the file's
+    /// current end) that still ends mid-record, because the last write landed there. It's carried, not
+    /// discarded and not scored as a boundary — forward mode never trusts a file's end — and the next
+    /// portion completes it exactly once.</summary>
+    [Fact]
+    public void ForwardMode_AHalfWrittenLastRecord_IsCarriedThenCompletedOnce()
+    {
+        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var full = Record("UTC", "first");
+        var half = RecordWithMultiLineMessage("line one\nline two");
+        var cut = half.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
+
+        /* pending: false — this IS the file's current end, and forward mode must not treat
+           that as license to score the cut as a boundary. */
+        var p1 = Step(knownStart, full + half[..cut], pending: false);
+        var only1 = Assert.Single(p1.Entries);
+        Assert.Equal("first", only1.UserName);
+        Assert.Equal(half[..cut], p1.Next.Partial);
+        Assert.True(p1.Next.StartKnown);
+
+        var p2 = Step(p1.Next, half[cut..], pending: false);
+        var only2 = Assert.Single(p2.Entries);
+        Assert.Equal("line one\nline two", only2.Message);
+        Assert.Equal(string.Empty, p2.Next.Partial);
+    }
+
+    /// <summary>Forward mode + the race shape: a portion ends right after a newline that is still INSIDE a
+    /// quoted field holding look-alike record lines. Neither this portion nor the next emits a look-alike —
+    /// the review's own finding, now pinned on the forward-only route rather than the removed resync.</summary>
+    [Fact]
+    public void ForwardMode_TheRaceShape_NeverEmitsALookAlike()
+    {
+        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+        var lookAlikeBody = Record("UTC", "planted").TrimEnd('\n').Replace("\"", "\"\"", StringComparison.Ordinal);
+        var straddler = RecordWithMultiLineMessage("line one\n" + lookAlikeBody + "\nline three");
+        var cut = straddler.IndexOf("line one\n", StringComparison.Ordinal) + "line one\n".Length;
+
+        var p1 = Step(knownStart, straddler[..cut], pending: true);
+        Assert.Empty(p1.Entries);
+        Assert.Equal(0, p1.RecordsDiscarded);
+
+        var p2 = Step(p1.Next, straddler[cut..] + Record("UTC", "after"), pending: false);
+        Assert.Equal(new[] { "nosuchuser", "after" }, p2.Entries.ConvertAll(e => e.UserName ?? ""));
+        Assert.DoesNotContain(p2.Entries, e => e.UserName == "planted");
+    }
+
+    /// <summary>Unknown-start mode never hands on a known start, over several portions — not just the one
+    /// step <see cref="AChunkEndingInsideARecord_LosesNothing_AndTheStraddlerComesOutOnce"/> already checks.
+    /// The only way this route's start ever becomes known again is a file-start read
+    /// (<see cref="RdsLogSource.LogChunk.StartsAtFileStart"/>), never a forward walk in this mode.</summary>
+    [Fact]
+    public void UnknownStartMode_NeverHandsOnAKnownStart_OverSeveralPortions()
+    {
+        var carry = RdsLogEventIngestor.CsvCarry.Empty;
+
+        for (var i = 0; i < 4; i++)
+        {
+            var step = Step(carry, Record("UTC", "user" + i), pending: true);
+            Assert.False(step.Next.StartKnown);
+            carry = step.Next;
+        }
+    }
+
+    /// <summary>No end edge when the body doesn't end in '\n': unknown-start mode with no more data pending
+    /// still must not state <c>EndsOnRecordBoundary</c> when the body's last character isn't a newline —
+    /// merely stopping pending is not the same fact as ending on a boundary.</summary>
+    [Fact]
+    public void UnknownStartMode_NoTrailingNewline_DoesNotStateAnEndEdge()
+    {
+        /* One full record followed by a record's worth of text with the trailing newline removed — if
+           EndsOnRecordBoundary were (wrongly) stated here, the parser would treat the missing newline's
+           position as a boundary anyway and this second, truncated record would be scored rather than
+           carried whole for the next portion to complete. */
+        var body = Record("UTC", "first") + Record("UTC", "second").TrimEnd('\n');
+
+        var step = Step(RdsLogEventIngestor.CsvCarry.Empty, body, pending: false);
+
+        var only = Assert.Single(step.Entries);
+        Assert.Equal("first", only.UserName);
+        Assert.NotEmpty(step.Next.Partial);
+        Assert.False(step.Next.StartKnown);
+    }
+
+    /// <summary>The forward-mode bound: a record over 1 MiB is skipped by PARITY, not dropped outright —
+    /// the next record still parses with the start known, and exactly one discard is counted for the whole
+    /// skipped record, not one per portion that skipped through it.</summary>
+    [Fact]
+    public void ForwardModeBound_SkipsByParity_NextRecordStartsKnown_CountsOne()
+    {
+        var knownStart = new RdsLogEventIngestor.CsvCarry(string.Empty, true);
+
+        /* An oversized "record": an open quote followed by well over 1 MiB of body text with no closing
+           quote in this portion — forward mode carries it whole until the bound trips. */
+        var oversized = "2026-09-24 01:54:43.008 UTC,\"" + new string('x', 1_200_000);
+        var p1 = Step(knownStart, oversized, pending: true);
+        Assert.Empty(p1.Entries);
+        Assert.Equal(string.Empty, p1.Next.Partial);
+        Assert.True(p1.Next.Skipping);
+
+        /* The record's true end (the closing quote, then the rest of its row, then the newline) plus one
+           genuine record after it — the skip must land exactly at that boundary, not one line early or
+           late, and the record after must parse with a known start. */
+        var closeAndRest = "\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,\"startup\",2026-09-24 01:54:43 UTC,3/3,0,"
+            + "FATAL,28000,\"role does not exist\",,,,,,,,\"\",\"client backend\",,0\n";
+        var p2 = Step(p1.Next, closeAndRest + Record("UTC", "after"), pending: false);
+
+        Assert.Equal(1, p2.RecordsDiscarded);
+        var only = Assert.Single(p2.Entries);
+        Assert.Equal("after", only.UserName);
+    }
+
+    /// <summary>A replay (empty <c>Resume.Marker</c>) doesn't touch the carry: the ingestor updates its
+    /// carry dictionary only when <c>CommitResume</c> actually advances, so a chunk RDS sent no token with
+    /// must not glue this portion's tail onto itself and must not consume the marker/carry pair a later
+    /// successful read still needs.</summary>
+    [Fact]
+    public async Task AReplayWithAnEmptyMarker_LeavesTheCarryUntouched()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+
+        /* NextMarker null: RDS sends back no resume token (the replay shape CommittingAChunkWithNoServiceMarkerDoesNothing
+           already pins on the source side), so CommitResume is a no-op and this portion's carry must not be
+           recorded either. One complete record, so both attempts below reach the write for the same reason
+           — the test is about the marker/carry bookkeeping, not straddling. */
+        var client = new FakeRds { CsvBody = Record("UTC", "first"), NextMarker = null };
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+
+        /* A second cycle against the SAME body (a real replay, since no marker moved) must reach the store
+           for the SAME one complete record again — not zero, which is what a carry wrongly recorded from
+           the first attempt (now believing that record already consumed) would produce. */
+        var replay = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true, pgLogUsesCsvlog: true));
+        Assert.IsNotType<RdsLogUnavailableException>(replay);
     }
 }
