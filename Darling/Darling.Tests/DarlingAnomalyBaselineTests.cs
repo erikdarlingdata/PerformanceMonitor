@@ -89,10 +89,10 @@ public sealed class DarlingAnomalyBaselineTests
         PgAnomalyDetector.WaitContribWindowSql,
         PgAnomalyDetector.BlockingWindowSql,
         PgAnomalyDetector.IoTileWindowSql,
-        PgAnomalyDetector.BatchRequestWindowSql,
-        PgAnomalyDetector.SessionWindowSql,
-        PgAnomalyDetector.QueryDurationWindowSql,
-        PgAnomalyDetector.MemoryWindowSql,
+        PgAnomalyDetector.BatchRequestTileWindowSql,
+        PgAnomalyDetector.SessionTileWindowSql,
+        PgAnomalyDetector.QueryDurationTileWindowSql,
+        PgAnomalyDetector.MemoryTileWindowSql,
         PgAnomalyDetector.ObjectGrowthSql,
         PgAnomalyDetector.ObjectContentionSql
     };
@@ -337,7 +337,11 @@ public sealed class DarlingAnomalyBaselineTests
     [Fact]
     public void BatchRequestWindow_DividesByMeasuredInterval_AndSkipsUnknowableRows()
     {
-        var sql = PgAnomalyDetector.BatchRequestWindowSql;
+        /* #3653 A8 option B (lane L2b): the SQL Server-store detector reads the TILED const now — the
+           production reader moved, so the pin follows it. The plain BatchRequestWindowSql const is
+           unchanged text (kept for its own #3527 shape) but has no production reader in PgAnomalyDetector
+           any more. */
+        var sql = PgAnomalyDetector.BatchRequestTileWindowSql;
 
         Assert.Contains("AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);
         Assert.Contains("MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);
