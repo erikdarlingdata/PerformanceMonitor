@@ -492,6 +492,7 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+peakRate\s*=\s*whole\.Peak"), $"{name}: missing 'var peakRate = whole.Peak'");
             Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+avgRate\s*=\s*whole\.Mean"), $"{name}: missing 'var avgRate = whole.Mean'");
         }
+        // Lite sums the same ordinal-3 column inside its tile read loop; Darling re-reads it (#3653 B).
         Assert.Matches(@"totalWaitMs\s*\+=\s*totalReader\.IsDBNull\(3\)", pg);
     }
 
