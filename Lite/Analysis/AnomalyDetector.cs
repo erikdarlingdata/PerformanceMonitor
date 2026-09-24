@@ -314,63 +314,112 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
                 context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.CancellationToken);
 
             if (baseline.SampleCount == 0) return;
-            // No effectiveStdDev<=0 early return — an untrustworthy/zero-dispersion baseline falls
-            // back to the absolute bar (below) rather than going silent.
-            var effectiveStdDev = baseline.EffectiveStdDev;
+            // An untrustworthy/zero-dispersion baseline falls back to the absolute bar (below)
+            // rather than going silent, so there is no effective-stddev early return here.
+
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var cpuThreshold = GetDeviationThreshold(MetricNames.Cpu);
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
 
             using var cmd = connection.CreateCommand();
+            /* #3653 A8 option B (lane L4a): one row per target-local hour tile — arg_max replaces the
+               ORDER BY … LIMIT 1 peak-time subquery, DuckDB's per-tile twin of Darling's array_agg. $4..$6
+               bind BaselineLocalClock's window clock (map.WindowClock), never the cached baseline clock. */
             cmd.CommandText = @"
-SELECT MAX(sqlserver_cpu_utilization) AS peak_cpu,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       (SELECT collection_time FROM v_cpu_utilization_stats
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
-        ORDER BY sqlserver_cpu_utilization DESC LIMIT 1) AS peak_time
+       arg_max(collection_time, sqlserver_cpu_utilization) AS peak_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
-AND   collection_time >= $2 AND collection_time < $3";
+AND   collection_time >= $2 AND collection_time < $3
+GROUP BY local_hour
+ORDER BY local_hour";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.TransitionAtUtc });
+            cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetBeforeMinutes });
+            cmd.Parameters.Add(new DuckDBParameter { Value = map.WindowClock.OffsetAfterMinutes });
 
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var tiles = new List<WindowTile>();
+            using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
+            {
+                while (await reader.ReadAsync(context.CancellationToken))
+                {
+                    tiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3, 4));
+                }
+            }
 
-            var peakCpu = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgCpu = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            var peakTime = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            if (windowSamples == 0) return;
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
+                cpuThreshold, ModifiedZThresholdFor(MetricNames.Cpu, cpuThreshold), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
+                window);
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakCpu, avgCpu,
-                GetDeviationThreshold(MetricNames.Cpu), ModifiedZThresholdFor(MetricNames.Cpu, GetDeviationThreshold(MetricNames.Cpu)), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
+            AnomalyGate.ZDecision decision;
+            BaselineBucket bucketUsed;
+            double peakCpu;
+            double avgCpu;
+            long windowSamples;
+            DateTime? peakTime;
+
+            if (tv is null)
+            {
+                // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
+                // bucket — score today's single-window path against the start bucket, unchanged.
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, whole.Peak, whole.Mean,
+                    cpuThreshold, ModifiedZThresholdFor(MetricNames.Cpu, cpuThreshold), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
+                    window: window);
+                bucketUsed = baseline;
+                peakCpu = whole.Peak;
+                avgCpu = whole.Mean;
+                windowSamples = whole.Samples;
+                peakTime = whole.PeakTimeUtc;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                bucketUsed = tv.Value.Bucket;
+                peakCpu = tv.Value.Tile.Peak;
+                avgCpu = tv.Value.Tile.Mean;
+                windowSamples = tv.Value.Tile.Samples;
+                peakTime = tv.Value.Tile.PeakTimeUtc;
+            }
+
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
             {
                 ["peak_cpu"] = peakCpu,
                 ["avg_cpu_in_window"] = avgCpu,
-                ["baseline_mean"] = baseline.Mean,
-                ["baseline_stddev"] = effectiveStdDev,
+                ["baseline_mean"] = bucketUsed.Mean,
+                ["baseline_stddev"] = bucketUsed.EffectiveStdDev,
                 ["deviation_sigma"] = decision.Sigma,
                 ["mean_deviation_sigma"] = decision.MeanSigma ?? 0,
                 ["fire_threshold"] = decision.ThresholdUsed,
                 ["baseline_low_quality"] = decision.LowQualityBaseline ? 1 : 0,
                 ["fallback_exceedance"] = decision.FallbackExceedance,
                 ["baseline_zero_history"] = decision.ZeroHistory ? 1 : 0,
-                ["baseline_samples"] = baseline.SampleCount,
+                ["baseline_samples"] = bucketUsed.SampleCount,
                 ["window_samples"] = windowSamples,
                 ["peak_time_ticks"] = peakTime?.Ticks ?? 0
             };
-            AddBaselineContext(metadata, baseline);
+            AddBaselineContext(metadata, bucketUsed);
+            if (tv is not null)
+            {
+                WindowTiles.AddTileMetadata(metadata, tv.Value, tiles, map.WindowClock);
+            }
 
             anomalies.Add(new Fact
             {
