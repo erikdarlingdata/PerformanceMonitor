@@ -44,11 +44,13 @@ namespace Lite.Tests;
 /// A framework this file has no mapping for is still a hard failure, because an undocumentable
 /// prerequisite is exactly the state that produced #2489.
 ///
-/// Note for whoever touches the CI path filters: <c>README.md</c> and <c>Lite/README.md</c> are named
-/// explicitly in build.yml's <c>lite</c> filter. They have to be. Every area filter carves markdown
-/// out (<c>dir/**/!(*.md)</c>), and a docs-only PR additionally engages the fast path that skips .NET
-/// setup entirely — so without those entries this guard would be unrunnable on precisely the change it
-/// exists to catch.
+/// Note for whoever touches the CI path filters: <c>README.md</c> and <c>Lite/README.md</c> were once
+/// named explicitly in build.yml's <c>lite</c> filter for exactly this reason — a docs-only PR takes
+/// the fast path that skips .NET setup entirely, so a README-only change could not reach this guard
+/// without them. Erik's 2026-09-24 ruling ended that trade: a README-only PR now takes the docs fast
+/// path and does not run this guard at all. It still runs on every CODE pull request (which builds
+/// Lite) and in the nightly, so a docs edit that quietly breaks the parity this file checks is caught
+/// there instead of at PR time.
 /// </summary>
 public sealed class LiteRuntimePrerequisiteDocsTests
 {
