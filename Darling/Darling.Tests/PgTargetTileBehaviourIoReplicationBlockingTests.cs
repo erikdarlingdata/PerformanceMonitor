@@ -95,7 +95,10 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             Assert.True(tileHour is 12 or 13, $"tile_local_hour was {tileHour}, expected 12 or 13");
             Assert.Equal(4, anomaly.Metadata["tiles_scored"]);
             Assert.Equal(2, anomaly.Metadata["tiles_fired"]);
-            Assert.Equal(AnomalyThresholds.DefaultDeviationThreshold, anomaly.Metadata["fire_threshold"]);
+            // The I/O family carries robust statistics: DecideRobustFirst grades tiles on the MODIFIED-z cutoff
+            // (3.5, not the classical 2.0 default), at the 4h reference window (no N-aware raise here).
+            var expectedTileCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgIoReadLatency);
+            Assert.Equal(expectedTileCutoff, anomaly.Metadata["fire_threshold"]);
 
             /* What case B exists for: the whole-window mean's own z against the START bucket is under k. */
             var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgIoReadLatency, windowStart, ct);
@@ -103,8 +106,8 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             // The window's four hours: two at μ, two at μ + 6σ → window mean = μ + 3σ.
             var wholeWindowMean = mu + 3 * sigma;
             var wholeWindowMeanZ = (wholeWindowMean - wholeBaseline.Mean) / wholeBaseline.EffectiveStdDev;
-            Assert.True(wholeWindowMeanZ < AnomalyThresholds.DefaultDeviationThreshold,
-                $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({AnomalyThresholds.DefaultDeviationThreshold}) — the case tile mode exists for");
+            Assert.True(wholeWindowMeanZ < expectedTileCutoff,
+                $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({expectedTileCutoff}) — the case tile mode exists for");
 
             bodySucceeded = true;
         }
@@ -161,7 +164,8 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var anomaly = Assert.Single(anomalies, a => a.Key == PgTargetFactKeys.AnomalyIoLatency);
 
             Assert.True(anomaly.Metadata.ContainsKey("tile_local_hour"), "the tile path did not fire (fell back to whole-window)");
-            var expectedCutoff = AnomalyThresholds.NAwarePeakCutoff(AnomalyThresholds.DefaultDeviationThreshold, TimeSpan.FromHours(24));
+            // The I/O family grades tiles on the MODIFIED-z cutoff (robust statistics), not the classical default.
+            var expectedCutoff = AnomalyThresholds.NAwarePeakCutoff(AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgIoReadLatency), TimeSpan.FromHours(24));
             Assert.Equal(expectedCutoff, anomaly.Metadata["fire_threshold"], precision: 2);
 
             bodySucceeded = true;
@@ -202,12 +206,18 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             const double mu = 3.0;
             const double sigma = 0.5;
             const long readsPerTick = 1000;
-            var totalTicks = (int)((windowEnd - baselineStart).TotalMinutes / MinutesPerTick);
+            // A finer grain than the shift scenarios (5 minutes, 12 ticks/hour instead of 4): with only 4 samples
+            // in a tile, ONE 10σ sample also drags the tile MEAN past the mean clause's cutoff, so the pair gate
+            // would fire on the mean alone — not the isolated-spike case this scenario is for. At 12 samples/hour
+            // the same single spike still clears the PEAK clause (it must, to prove the gate looked at it) but
+            // leaves the tile mean under the cutoff, so the AND of both clauses correctly does not fire.
+            const int spikeMinutesPerTick = 5;
+            var totalTicks = (int)((windowEnd - baselineStart).TotalMinutes / spikeMinutesPerTick);
             // One sample in hour 2 of the window (local hour 11): windowStart + 1h15m.
-            var spikeTick = (int)((windowStart.AddHours(1).AddMinutes(15) - baselineStart).TotalMinutes / MinutesPerTick);
+            var spikeTick = (int)((windowStart.AddHours(1).AddMinutes(15) - baselineStart).TotalMinutes / spikeMinutesPerTick);
 
             await PlantIoTimelineAsync(connection, serverId, serverName, baselineStart, totalTicks, readsPerTick,
-                $"CASE WHEN n = {spikeTick} THEN {mu + 10 * sigma} ELSE {mu} + {sigma} * sin(n) END", ct);
+                $"CASE WHEN n = {spikeTick} THEN {mu + 10 * sigma} ELSE {mu} + {sigma} * sin(n) END", ct, minutesPerTick: spikeMinutesPerTick);
 
             var context = Context(serverId, serverName, windowStart, windowEnd);
             var baselines = new PgTargetBaselineProvider(postgres);
@@ -399,7 +409,10 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             Assert.True(tileHour is 12 or 13, $"tile_local_hour was {tileHour}, expected 12 or 13");
             Assert.Equal(4, anomaly.Metadata["tiles_scored"]);
             Assert.Equal(2, anomaly.Metadata["tiles_fired"]);
-            Assert.Equal(AnomalyThresholds.DefaultDeviationThreshold, anomaly.Metadata["fire_threshold"]);
+            // The blocked-sessions bucket carries robust statistics too (RobustTierScaffold): the modified-z cutoff
+            // applies, not the classical default.
+            var expectedBlockingCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgBlockedSessions);
+            Assert.Equal(expectedBlockingCutoff, anomaly.Metadata["fire_threshold"]);
 
             var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgBlockedSessions, windowStart, ct);
             Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
