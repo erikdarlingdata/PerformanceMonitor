@@ -247,10 +247,11 @@ public sealed class McpToolGuideHeadsSqlCoreActiveQueriesTests
         ("get_active_queries", "database_name/blocking_only filter IN SQL"),
         ("get_active_queries", "total_snapshots is the filtered count"),
         ("get_active_queries", "truncated means over limit"),
-        ("get_active_queries", "serve null for zero and not-applicable alike"),
+        ("get_active_queries", "wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable"),
         ("get_active_queries", "Head blockers are never stripped"),
         ("get_active_queries", "not_captured, filtered, or past_page"),
-        ("get_active_queries", "A filtered empty doesn't mean nothing was ever collected"),
+        ("get_active_queries", "Empty: no snapshot in the window, or none matching filters"),
+        ("get_active_queries", "not_collected (unfiltered only): engine can't run it"),
     ];
 
     [Fact]
