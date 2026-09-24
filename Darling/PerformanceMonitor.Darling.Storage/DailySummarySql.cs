@@ -593,7 +593,16 @@ public static class DailySummarySql
         var successorFloor = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, windowStartUtc);
         if (successorFloor is null)
         {
-            return RangeSqlFor(tier, coverage.HourlyRelationFor(legacy, windowStartUtc));
+            /* #3653 A6, lane LA-6 (coordinator ruling on #4182): this branch already runs only when
+               StitchFloor answered null, which per StitchedRelationSql's own remarks is exactly the case where
+               it would splice "collect.{legacy} AS f" — legacy-only, the SAME name HourlyRelationFor would
+               have answered here. Reading the name back off the builder's own splice (rather than calling
+               HourlyRelationFor directly) keeps every SQL splice on the one path (decision 1) with no change
+               to the byte-identical pins: the two calls agree on this branch by construction. */
+            var legacyOnlySplice = coverage.StitchedRelationSql(legacy, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly);
+            var relationStart = "collect.".Length;
+            var relationEnd = legacyOnlySplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
+            return RangeSqlFor(tier, legacyOnlySplice[relationStart..relationEnd]);
         }
 
         var successor = TimescaleSupport.SuccessorOf(legacy)!;

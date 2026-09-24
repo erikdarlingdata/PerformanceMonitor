@@ -945,7 +945,7 @@ internal static class DarlingTrendReader
         return new DurationTrendRoute(
             ResolveTier(startUtc, nowUtc, hourlyAvailable, tierCoverage),
             /* Tier over the legacy pair's coverage; relation by the supply rule (#3653, Q12) — see the record. */
-            rawTable, coverage.HourlyRelationFor(hourlyView, startUtc), hourlyAvailable, tierCoverage,
+            rawTable, coverage.HourlyRelationNameFor(hourlyView, startUtc), hourlyAvailable, tierCoverage,
             /* Grain-scoped, not rollups != None — see the record's remarks: the arming gate is per table. */
             RawRetentionApplies: hourlyAvailable,
             ResolvedAtUtc: nowUtc,

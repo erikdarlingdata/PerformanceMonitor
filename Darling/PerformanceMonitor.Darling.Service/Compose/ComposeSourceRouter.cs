@@ -347,7 +347,7 @@ public static class ComposeSourceRouter
                compiler appended " AS f" itself. */
             RetentionTier.Hourly => (new ComposeRoute(
                 ComposeSourceTier.Hourly,
-                coverage.HourlyRelationFor(hourlyView, windowStartUtc),
+                coverage.HourlyRelationNameFor(hourlyView, windowStartUtc),
                 coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly)),
                 tierCoverage.HourlyFloorUtc),
             _ => (new ComposeRoute(ComposeSourceTier.Daily, dailyView!), tierCoverage.DailyFloorUtc),

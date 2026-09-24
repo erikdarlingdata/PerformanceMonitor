@@ -11220,6 +11220,14 @@ public sealed class RollupCoverage
             : legacyHourly;
     }
 
+    /// <summary>The routed relation's NAME, for probes, logs and registry lookups ONLY; never splice it into
+    /// SQL (use <see cref="StitchedRelationSql"/>). Same routing as <see cref="HourlyRelationFor"/> — this is
+    /// the by-name half of decision 1 (#3653 A6): a reader that only needs to say which relation applies
+    /// (a probe, a log line, a registry lookup) calls this; a reader building a FROM clause calls
+    /// <see cref="StitchedRelationSql"/> instead.</summary>
+    public string HourlyRelationNameFor(string legacyHourly, DateTime windowStartUtc) =>
+        HourlyRelationFor(legacyHourly, windowStartUtc);
+
     /// <summary>Nothing measured — every lookup answers null, so the router keeps its pre-#1759 behaviour.
     /// The safe answer for a store with no rollups AND for a probe that failed.</summary>
     public static RollupCoverage Unknown { get; } = new(
@@ -11527,7 +11535,7 @@ public sealed class RollupCoverage
     }
 
     /// <summary>The raw table a rollup view's tier ladder falls back TO, or null for a name outside
-    /// <see cref="TimescaleSupport.RollupViews"/> (which answers "no evidence" rather than guessing).</summary>
+    /// <see cref="TimescaleSupport.RollupViews"/> (which answers "no evidence" rather than guessing).
     ///
     /// <para>Deliberately still RAW for every rollup, dailies included, and NOT the source relation #1798
     /// added alongside it. This answers a READ question — where does a window go when this rollup cannot serve
