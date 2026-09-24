@@ -29,6 +29,9 @@ public sealed class PgServerLogCsvParserTests
         + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\",,,,,,,,,\"\","
         + "\"client backend\",,0\n";
 
+    /* The start of a tail read: the end of a record this window did not see the start of. */
+    private const string CutHead = "0,FATAL,28000,,,,,,,,,,\"client backend\",,0\n";
+
     private static string RecordWithUserName(string userName) =>
         "2026-09-24 01:54:43.008 UTC,\"" + userName + "\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
         + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
@@ -45,11 +48,11 @@ public sealed class PgServerLogCsvParserTests
     public void ForgedNewlineInQuotedUserNameStaysInOneEntry()
     {
         var forged = "admin\n2026-09-24 00:00:00.000 UTC [1] LOG:  forged";
-        var body = RealRecord + RecordWithUserName(forged);
+        var body = CutHead + RecordWithUserName(forged);
 
         var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
 
-        /* Resync drops the first complete record (RealRecord) by rule; only the forged one remains. */
+        /* The cut head is dropped; the forged newline stays inside the one real record. */
         var entry = Assert.Single(entries);
         Assert.Equal(1, recordsDiscarded);
         Assert.Equal(forged, entry.UserName);
@@ -61,7 +64,7 @@ public sealed class PgServerLogCsvParserTests
     public void MultiLineQuotedMessageIsOneRecord()
     {
         var message = "line one\nline two\nline three";
-        var body = RealRecord + RecordWithMessage(message);
+        var body = CutHead + RecordWithMessage(message);
 
         var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
 
@@ -76,7 +79,7 @@ public sealed class PgServerLogCsvParserTests
     public void DoubledQuoteUnescapesToLiteralQuote()
     {
         var message = "role \"nosuchuser\" does not exist";
-        var body = RealRecord + RecordWithMessage(message);
+        var body = CutHead + RecordWithMessage(message);
 
         var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
 
@@ -87,32 +90,64 @@ public sealed class PgServerLogCsvParserTests
     /* --- 4: mid-record start; a look-alike full record hides inside a quoted field ---------------------- */
 
     [Fact]
-    public void MidRecordStartDropsPartialAndLookAlikeThenResyncsCorrectly()
+    public void MidRecordStart_DropsOnlyTheCutHead_AndAPlantedLookAlikeStaysInsideItsCarrier()
     {
-        /* A look-alike record's text (up to 26 commas) sits inside ANOTHER record's quoted message field,
-           so a boundary-blind scan could mistake it for a real record if it started reading mid-field. */
+        /* A look-alike record's text sits inside ANOTHER record's quoted message field, on its own line. A
+           boundary scan that trusted a newline inside quotes would emit it as a record of its own. */
         var lookAlike = "2026-09-24 00:00:00.000 UTC,\"a\",\"b\",1,\"c\",1.1,1,\"d\",2026-09-24 00:00:00 UTC,"
             + "1/1,0,LOG,00000,fake,,,,,,,,,,backend,,0";
+        var carrier = RecordWithMessage("prefix\n" + lookAlike + "\nsuffix");
 
-        var carrier = RecordWithMessage("prefix " + lookAlike + " suffix");
+        var body = "garbage-mid-record-fragment,more,fields\n" + carrier + RealRecord + RealRecord;
+        var entries = PgServerLogCsvParser.Parse(body, out var discarded);
 
-        /* Body starts mid-record: a fragment with no leading newline (the cut head), then a newline, then
-           the look-alike carrier (the first "complete" record, dropped by rule), then two more real
-           records that must survive. */
-        var cutHead = "garbage-mid-record-fragment,more,fields";
-        var body = cutHead + "\n" + carrier + RealRecord + RealRecord;
+        Assert.Equal(3, entries.Count);
+        Assert.Equal(1, discarded);
+        Assert.Single(entries, e => e.Message.Contains("fake", System.StringComparison.Ordinal));
+        Assert.DoesNotContain(entries, e => e.Pid == 1);
+    }
 
-        var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
+    [Fact]
+    public void ATailThatStartsInsideAQuotedField_StillYieldsEveryLaterRecord()
+    {
+        /* The window starts in the middle of a quoted message, so the text before the first real boundary
+           carries an odd number of quotes. A forward parse inverts parity here and returns nothing. */
+        var first = RecordWithMessage("a long message whose middle is where the \"4 MB\" window starts");
+        var cut = first.IndexOf("middle", System.StringComparison.Ordinal);
+        var body = first[cut..] + RealRecord + RealRecord + RealRecord;
 
-        /* carrier is dropped by the resync rule (first complete record); cutHead is never even a candidate
-           because it lacks 26 fields, but it is counted only if it is tested — it precedes the first
-           newline and is not itself between newlines as a candidate record at all, since the split
-           produces cutHead as record 0. It fails the shape check (wrong field count) and is discarded;
-           carrier is the next candidate and is the one dropped by the resync rule. */
-        Assert.Equal(2, entries.Count);
-        Assert.True(recordsDiscarded >= 2);
-        Assert.DoesNotContain(entries, e => e.Message.Contains("fake"));
+        var entries = PgServerLogCsvParser.Parse(body, out _);
+
+        Assert.Equal(3, entries.Count);
         Assert.All(entries, e => Assert.Equal("role \"nosuchuser\" does not exist", e.Message));
+    }
+
+    [Fact]
+    public void ATailThatStartsInsideAQuotedFieldHoldingALookAlikeLine_NeverEmitsTheLookAlike()
+    {
+        /* Worst case for a forward parse: the window starts inside a quoted field whose remaining text is a
+           newline and a complete planted record, then the field closes. */
+        var lookAlike = "2026-09-24 00:00:00.000 UTC,\"a\",\"b\",1,\"c\",1.1,1,\"d\",2026-09-24 00:00:00 UTC,"
+            + "1/1,0,LOG,00000,fake,,,,,,,,,,backend,,0";
+        var carrier = RecordWithMessage("head\n" + lookAlike + "\ntail");
+        var cut = carrier.IndexOf("head", System.StringComparison.Ordinal) + 4;
+        var body = carrier[cut..] + RealRecord + RealRecord;
+
+        var entries = PgServerLogCsvParser.Parse(body, out _);
+
+        Assert.Equal(2, entries.Count);
+        Assert.DoesNotContain(entries, e => e.Message.Contains("fake", System.StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AWholeFileReadFromItsFirstByte_KeepsItsFirstRecord()
+    {
+        /* A log file smaller than the tail window is read from offset 0, which IS a record start: dropping
+           its first record would lose it on every cycle until the file outgrows the window. */
+        var entries = PgServerLogCsvParser.Parse(RealRecord + RealRecord, out var discarded);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(0, discarded);
     }
 
     /* --- 5: field-for-field parity with PgLogEntryAssembler over the same event -------------------------- */
@@ -132,7 +167,7 @@ public sealed class PgServerLogCsvParserTests
         var stderrEntries = PgLogEntryAssembler.Assemble(stderrLine);
         var stderrEntry = Assert.Single(stderrEntries);
 
-        var body = RealRecord + csvLine;
+        var body = CutHead + csvLine;
         var csvEntries = PgServerLogCsvParser.Parse(body, out _);
         var csvEntry = Assert.Single(csvEntries);
 
@@ -160,7 +195,7 @@ public sealed class PgServerLogCsvParserTests
             + "2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\",,,,,,,,,\"\","
             + "\"client backend\",,0\n";
 
-        var body = RealRecord + pg14Record;
+        var body = CutHead + pg14Record;
         var entries = PgServerLogCsvParser.Parse(body, out _);
         var entry = Assert.Single(entries);
 
@@ -181,7 +216,7 @@ public sealed class PgServerLogCsvParserTests
             + "2026-09-24 01:58:49 UTC,0/1,0,FATAL,28000,\"role \"\"nosuchuser\"\" does not exist\",,,,,,,,,\"\","
             + "\"client backend\",,0\n";
 
-        var body = RealRecord + pg18Record;
+        var body = CutHead + pg18Record;
         var entries = PgServerLogCsvParser.Parse(body, out _);
         var entry = Assert.Single(entries);
 
@@ -201,7 +236,7 @@ public sealed class PgServerLogCsvParserTests
         var partial = "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
             + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser"; // no closing quote, no newline
 
-        var body = RealRecord + RealRecord + partial;
+        var body = CutHead + RealRecord + partial;
 
         var entries = PgServerLogCsvParser.Parse(body, out var recordsDiscarded);
 

@@ -36,25 +36,20 @@ namespace PerformanceMonitor.Collectors;
 /// a count, not an equality, so a future confirmed shape (a different supported version) can be added
 /// without changing the reject path.</para>
 ///
-/// <para><b>The tail starts mid-file (the same window-edge problem <see cref="PgLogEntryAssembler"/>
-/// documents), so this resyncs before trusting anything:</b></para>
-/// <list type="number">
-/// <item>Discard everything up to the first newline: whatever preceded it is the cut head of a record this
-/// window did not see the start of.</item>
-/// <item>Then discard records, one at a time, until the first one that parses COMPLETELY — the right field
-/// count, a <c>log_time</c> that parses, a numeric <c>process_id</c>, and a <c>session_id</c> shaped
-/// <c>hex.hex</c> — because a window boundary that lands inside a quoted field could make "the first
-/// record" start on attacker-planted text that only coincidentally has 26 commas in it.</item>
-/// <item><b>Also discard that first genuinely complete record.</b> Landing inside a quoted field does not
-/// stop the record boundary rule above from finding a false 26-column split if the planted text itself
-/// contains 25 commas before a real field boundary — passing every shape check by chance is unlikely but
-/// not impossible, and dropping one more record costs nothing because consecutive tail reads overlap.</item>
-/// </list>
+/// <para><b>The tail starts mid-file, so record boundaries are found from the END.</b> Reading forward from an
+/// arbitrary offset cannot recover quote parity: a window that starts inside a quoted field (most of a csvlog's
+/// bytes are quoted text) inverts every quote after it, and the rest of the body glues into one record that fails
+/// the shape check. The body's end is a record boundary (the syslogger writes whole records), so parity is anchored
+/// there and walked backward. A newline outside quotes is a true boundary, and no text inside a quoted field, planted
+/// or not, can fake one. When the backward walk reaches offset 0 outside quotes, offset 0 is offered as a boundary too (a file
+/// under the tail size is read from its first byte), and the first segment is shape-checked: a cut fragment fails and is
+/// discarded. Inside quotes, the head is certainly a fragment and is excluded.</para>
 ///
-/// <para><b>Trailing partial record.</b> A record with no closing newline, or with a quote still open at
-/// end of input, is the cut tail of a record the next overlapping tail read will offer whole; it is not
-/// emitted, and it is not counted in <c>recordsDiscarded</c> (nothing was rejected — there was nothing
-/// complete to reject).</para>
+/// <para><b>Trailing partial record.</b> When the body does not end in a newline (a read that raced a write), the
+/// text after the last newline is a partial record whose quote state is unknown. The latest newline whose backward
+/// split validates the record just before it becomes the anchor (bounded tries); the partial is not emitted. Every
+/// complete record is still shape-checked: 26 fields, a <c>log_time</c> that parses, a numeric <c>process_id</c>,
+/// and a <c>session_id</c> shaped <c>hex.hex</c>.</para>
 /// </summary>
 public static class PgServerLogCsvParser
 {
@@ -79,131 +74,113 @@ public static class PgServerLogCsvParser
     {
         var entries = new List<PgLogEntry>();
         recordsDiscarded = 0;
-
         if (string.IsNullOrEmpty(body))
         {
             return entries;
         }
 
-        var records = SplitRecords(body, out var endedCleanly);
-
-        /* Rule 1: discard everything up to the first newline. A record that started before this window's
-           first byte is the cut head; if the very first raw record in the split has no complete newline
-           of its own preceding it (i.e. it IS the first line), it is still potentially a cut head, so it
-           is handled uniformly by requiring the first accepted record to also pass the shape checks below. */
-        var resynced = false;
-        var i = 0;
-
-        for (; i < records.Count; i++)
+        /* Quote parity cannot be recovered reading FORWARD from an arbitrary offset: a window that starts
+           inside a quoted field inverts every quote after it, every newline then reads as inside a field,
+           and the whole rest of the body glues into one record that fails the shape check, so a read that
+           happens to start mid-field (most of a csvlog's bytes are quoted text) would yield nothing. The
+           END of the body is a record boundary instead (the syslogger writes whole records), so parity is
+           anchored there and walked BACKWARD: a newline outside quotes is a true boundary, and no text
+           inside a quoted field, planted or not, can fake one. What precedes the first boundary is the cut
+           head. If the body does not end in a newline (a read that raced a write), the text after the
+           candidate boundary is a partial record whose quote state is unknown, so the latest candidate
+           newline whose backward split yields a valid record just before it wins; tries are bounded. */
+        var boundaries = FindBoundaries(body);
+        if (boundaries is null)
         {
-            var isLast = i == records.Count - 1;
+            recordsDiscarded = 1;
+            return entries;
+        }
 
-            if (isLast && !endedCleanly)
+        for (var r = 0; r + 1 < boundaries.Count; r++)
+        {
+            var start = boundaries[r] + 1;
+            var text = body.Substring(start, boundaries[r + 1] - start);
+            if (text.EndsWith('\r'))
             {
-                /* Trailing partial record: not emitted, not counted (see type header). */
-                break;
+                text = text[..^1];
             }
 
-            if (!TryParseRecord(records[i], out var entry))
+            if (TryParseRecord(text, out var entry))
+            {
+                entries.Add(entry);
+            }
+            else
             {
                 recordsDiscarded++;
-                continue;
             }
-
-            if (!resynced)
-            {
-                /* Rule 2 + rule 3: the first record that parses completely is dropped too — it may have
-                   started on attacker-planted text inside a quoted field from before this window. */
-                resynced = true;
-                recordsDiscarded++;
-                continue;
-            }
-
-            entries.Add(entry);
         }
 
         return entries;
     }
 
     /// <summary>
-    /// Splits <paramref name="body"/> into raw record texts on newlines that are OUTSIDE quotes, honouring
-    /// RFC 4180 quoting (a quoted field may contain literal commas and newlines, and <c>""</c> inside a
-    /// quoted field is an escaped quote, not a field terminator). <paramref name="endedCleanly"/> is false
-    /// when the body ends with an open quote or with no closing record terminator, in which case the last
-    /// element of the result is a partial record and must not be parsed as a whole one.
+    /// Positions of the newlines that end records, preceded by -1 when the body starts on a record boundary
+    /// (it never does for a tail read, but a whole file would). The cut head before the first boundary is
+    /// excluded. Null when no anchor validates (bounded tries), which the caller counts as one discard.
     /// </summary>
-    private static List<string> SplitRecords(string body, out bool endedCleanly)
+    private static List<int>? FindBoundaries(string body)
     {
-        var records = new List<string>();
-        var current = new StringBuilder();
-        var inQuotes = false;
-        var length = body.Length;
-
-        for (var i = 0; i < length; i++)
+        const int MaxAnchorTries = 64;
+        var anchor = body.Length - 1;
+        var tries = 0;
+        while (anchor >= 0 && tries < MaxAnchorTries)
         {
-            var c = body[i];
-
-            if (inQuotes)
+            anchor = body.LastIndexOf('\n', anchor);
+            if (anchor < 0)
             {
+                return null;
+            }
+
+            tries++;
+            var marks = new List<int> { anchor };
+            var inQuotes = false;
+            for (var i = anchor - 1; i >= 0; i--)
+            {
+                var c = body[i];
                 if (c == '"')
                 {
-                    if (i + 1 < length && body[i + 1] == '"')
-                    {
-                        /* Escaped quote: keep both characters as part of the raw record text; field-level
-                           unescaping happens in TryParseRecord. */
-                        current.Append('"').Append('"');
-                        i++;
-                        continue;
-                    }
-
-                    inQuotes = false;
-                    current.Append(c);
-                    continue;
+                    inQuotes = !inQuotes;
                 }
-
-                current.Append(c);
-                continue;
-            }
-
-            if (c == '"')
-            {
-                inQuotes = true;
-                current.Append(c);
-                continue;
-            }
-
-            if (c == '\n')
-            {
-                var text = current.ToString();
-
-                if (text.EndsWith('\r'))
+                else if (c == '\n' && !inQuotes)
                 {
-                    text = text[..^1];
+                    marks.Add(i);
                 }
-
-                records.Add(text);
-                current.Clear();
-                continue;
             }
 
-            current.Append(c);
+            /* Parity at offset 0 is now known exactly. Outside quotes, offset 0 may be a real record start (a
+               file under the tail size is read from its first byte), so it is offered as a boundary and the
+               first segment is shape-checked like any other: a cut fragment fails it and is discarded. Inside
+               quotes, the head is certainly a fragment and is excluded. */
+            if (!inQuotes)
+            {
+                marks.Add(-1);
+            }
+
+            marks.Reverse();
+            /* The anchor is right when the record that ends at it parses: with inverted parity the
+               "record" before it is a glued fragment that fails the shape check. A body with only one
+               boundary has no complete record to validate against, so it yields nothing this cycle. */
+            if (marks.Count >= 2)
+            {
+                var start = marks[^2] + 1;
+                var last = body.Substring(start, marks[^1] - start).TrimEnd('\r');
+                if (TryParseRecord(last, out _))
+                {
+                    return marks;
+                }
+            }
+
+            anchor--;
         }
 
-        /* Whatever is left in `current` is either empty (the body ended right after a newline: nothing
-           partial) or the cut tail of an unterminated record — including one whose open quote never
-           closed, which `inQuotes` still being true also signals. */
-        if (current.Length > 0 || inQuotes)
-        {
-            records.Add(current.ToString());
-            endedCleanly = false;
-        }
-        else
-        {
-            endedCleanly = true;
-        }
-
-        return records;
+        return null;
     }
+
 
     /// <summary>
     /// Parses one raw record's text into fields, checks its shape, and builds a <see cref="PgLogEntry"/> if
