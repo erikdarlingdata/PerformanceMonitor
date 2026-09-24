@@ -338,9 +338,8 @@ public sealed class DarlingAnomalyBaselineTests
     public void BatchRequestWindow_DividesByMeasuredInterval_AndSkipsUnknowableRows()
     {
         /* #3653 A8 option B (lane L2b): the SQL Server-store detector reads the TILED const now — the
-           production reader moved, so the pin follows it. The plain BatchRequestWindowSql const is
-           unchanged text (kept for its own #3527 shape) but has no production reader in PgAnomalyDetector
-           any more. */
+           production reader moved, so the pin follows it. The old plain BatchRequestWindowSql const had
+           no remaining reader and was deleted. */
         var sql = PgAnomalyDetector.BatchRequestTileWindowSql;
 
         Assert.Contains("AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0))", sql, StringComparison.Ordinal);

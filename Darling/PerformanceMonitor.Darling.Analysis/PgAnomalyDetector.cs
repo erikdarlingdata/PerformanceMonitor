@@ -297,24 +297,12 @@ AND   (delta_reads > 0 OR delta_writes > 0)
 GROUP BY local_hour
 ORDER BY local_hour";
 
-    /* Batch-request window: per-second rate per sample (#3527) — delta_cntr_value spans one collection
-       interval, so divide by the row's MEASURED sample_interval_seconds (#2234). Interval <= 0 marks an
-       unknowable delta (first sighting/reset/gap) and the row is skipped, never read as 0. Keeps the
-       window statistic in the same requests/sec unit as the baseline and the BatchRequestFloor/Fallback
-       thresholds. */
-    public const string BatchRequestWindowSql = @"
-SELECT AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
-       MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
-       COUNT(*) AS sample_count
-FROM v_perfmon_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   counter_name = 'Batch Requests/sec'
-AND   delta_cntr_value >= 0
-AND   sample_interval_seconds > 0";
-
     /* #3653 A8 option B (lane L2b): the tiled batch-requests window read — one row per target-local hour
-       (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock via BindTiledWindow). Same
-       per-second rate expression and unknowable-delta filter as BatchRequestWindowSql above. Column order
+       (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock via BindTiledWindow).
+       Per-second rate per sample (#3527) — delta_cntr_value spans one collection interval, so divide by
+       the row's MEASURED sample_interval_seconds (#2234). Interval <= 0 marks an unknowable delta (first
+       sighting/reset/gap) and the row is skipped, never read as 0. Keeps the window statistic in the same
+       requests/sec unit as the baseline and the BatchRequestFloor/Fallback thresholds. Column order
        (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract. */
     public const string BatchRequestTileWindowSql = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
@@ -329,19 +317,6 @@ AND   delta_cntr_value >= 0
 AND   sample_interval_seconds > 0
 GROUP BY local_hour
 ORDER BY local_hour";
-
-    public const string SessionWindowSql = @"
-WITH per_collection AS (
-    SELECT collection_time,
-           SUM(connection_count)::DOUBLE PRECISION AS total_connections
-    FROM v_session_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    GROUP BY collection_time
-)
-SELECT AVG(total_connections) AS avg_connections,
-       MAX(total_connections) AS peak_connections,
-       COUNT(*) AS sample_count
-FROM per_collection";
 
     /* #3653 A8 option B (lane L2b): the tiled session-count window read — the CTE keeps summing per
        collection_time (WindowTiles.LocalHourSql reads collection_time under that name); the OUTER select
@@ -363,21 +338,6 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
-
-    public const string QueryDurationWindowSql = @"
-WITH per_collection AS (
-    SELECT collection_time,
-           SUM(delta_elapsed_time)::DOUBLE PRECISION AS total_elapsed
-    FROM v_query_stats
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-    AND   delta_execution_count > 0
-    AND   delta_elapsed_time >= 0
-    GROUP BY collection_time
-)
-SELECT AVG(total_elapsed) AS avg_elapsed,
-       MAX(total_elapsed) AS peak_elapsed,
-       COUNT(*) AS sample_count
-FROM per_collection";
 
     /* #3653 A8 option B (lane L2b): the tiled query-duration window read — the CTE keeps summing per
        collection_time (WindowTiles.LocalHourSql reads collection_time under that name); the OUTER select
@@ -401,14 +361,6 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
-
-    public const string MemoryWindowSql = @"
-SELECT AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
-       MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS peak_pressure,
-       COUNT(*) AS sample_count
-FROM v_memory_stats
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
-AND   target_server_memory_mb > 0";
 
     /* #3653 A8 option B (lane L2b): the tiled memory-pressure window read — one row per target-local hour
        (WindowTiles.LocalHourSql, $4..$6 bound via BindTiledWindow). Column order (0 local_hour, 1 peak, 2
