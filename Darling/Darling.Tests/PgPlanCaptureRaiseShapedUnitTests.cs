@@ -65,4 +65,26 @@ public sealed class PgPlanCaptureRaiseShapedUnitTests
         Assert.Equal(0, forgedCaptures);
         Assert.Equal("Seq Scan", row.TopNodeType);
     }
+
+    /// <summary>
+    /// #4058 review round 1 of #4137: a real <c>log_min_duration_statement</c>/<c>log_duration</c> record
+    /// starts with the same marker text as an auto_explain capture but carries no " ms  plan:" tail, and
+    /// under verbose logging its Location names the statement-execution path, not
+    /// <c>explain_ExecutorEnd</c> — the same shape the provenance guard would otherwise flag as forged. The
+    /// no-plan-text skip must run BEFORE the provenance guard, so this record is dropped uncounted rather
+    /// than counted under forged_captures_skipped.
+    /// </summary>
+    [Fact]
+    public void PlanRowsFromCsvEntries_ARealDurationRecord_WithNoPlanText_YieldsNoRow_AndDoesNotCountAsForged()
+    {
+        var entry = PlanEntry(
+            "duration: 0.020 ms",
+            context: null,
+            location: "exec_simple_query, postgres.c:1");
+
+        var rows = PgPlanCaptureCollector.PlanRowsFromCsvEntries(new[] { entry }, out var forgedCaptures);
+
+        Assert.Empty(rows);
+        Assert.Equal(0, forgedCaptures);
+    }
 }
