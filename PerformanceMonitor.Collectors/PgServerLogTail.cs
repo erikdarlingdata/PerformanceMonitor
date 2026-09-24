@@ -211,6 +211,60 @@ tail AS (
 )";
 
     /// <summary>
+    /// The jsonlog twin of <see cref="TailCteSql"/> (#4053 part a2): the same file, the same offsets, the
+    /// same <c>logging_collector</c> gate — but <c>newest</c> requires <c>'jsonlog' = ANY(...)</c> in
+    /// <c>log_destination</c> instead of <c>'stderr'</c>, and selects the newest <c>name ~* '\.json$'</c>
+    /// sibling instead of excluding it. Sent by <see cref="PgLogEventsCollector"/> alone, in place of
+    /// <see cref="TailCteSql"/> and <see cref="TailCsvCteSql"/> both, once
+    /// <see cref="CollectorContext.PgLogUsesJsonlog"/> says the target's <c>log_destination</c> includes
+    /// <c>jsonlog</c> — jsonlog wins over csvlog when both are configured (<see cref="PgLogFormatCapability"/>'s
+    /// own remarks say why). Kept as an independent literal rather than built from a shared fragment with
+    /// <see cref="TailCteSql"/> or <see cref="TailCsvCteSql"/>, for the same reason <see cref="TailCteBinarySql"/>
+    /// is: a change here can never alter the byte-for-byte pin on the other twins.
+    /// </summary>
+    public const string TailJsonCteSql = @"
+WITH newest AS (
+    SELECT name, size
+    FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
+      AND name ~* '\.json$'
+      AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+    ORDER BY modification DESC
+    LIMIT 1
+),
+tail AS (
+    SELECT pg_catalog.pg_read_file(
+               pg_catalog.current_setting('log_directory') || '/' || n.name,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
+               " + TailBytesLiteral + @") AS body
+    FROM newest AS n
+)";
+
+    /// <summary>
+    /// The binary-route twin of <see cref="TailJsonCteSql"/> (#4053 part a2), the same shape
+    /// <see cref="TailCteBinarySql"/> is to <see cref="TailCteSql"/>: <c>pg_read_binary_file</c> in place
+    /// of <c>pg_read_file</c>, sent only once <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> finds
+    /// the grant.
+    /// </summary>
+    public const string TailJsonCteBinarySql = @"
+WITH newest AS (
+    SELECT name, size
+    FROM pg_catalog.pg_ls_logdir()
+    WHERE pg_catalog.current_setting('logging_collector') = 'on'
+      AND name ~* '\.json$'
+      AND 'jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))
+    ORDER BY modification DESC
+    LIMIT 1
+),
+tail AS (
+    SELECT pg_catalog.pg_read_binary_file(
+               pg_catalog.current_setting('log_directory') || '/' || n.name,
+               greatest(n.size - " + TailBytesLiteral + @", 0),
+               " + TailBytesLiteral + @") AS body
+    FROM newest AS n
+)";
+
+    /// <summary>
     /// The predicate the marker arm carries: true exactly when the gate above has refused to list. Each
     /// consumer appends <c>UNION ALL SELECT &lt;marker in its own columns&gt; WHERE</c> + this, because the
     /// marker row has to match the consumer's column list and there is no column-agnostic way to say so.

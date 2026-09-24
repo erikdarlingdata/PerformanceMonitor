@@ -123,6 +123,36 @@ UNION ALL
 SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
+    /* The jsonlog pair (#4053 part a2), sent ahead of both the csvlog and stderr pairs once
+       context.PgLogUsesJsonlog says the target's log_destination includes jsonlog — jsonlog wins over
+       csvlog when an operator has configured both (PgLogFormatCapability's own remarks say why). Same
+       shape as QueryText/BinaryQueryText, opened on PgServerLogTail.TailJsonCteSql/TailJsonCteBinarySql
+       instead: the marker arms carry PgLoggingCollectorOffException.Marker for the shared "collector is
+       off" state, and PgNoJsonlogFileException.Marker — not PgNoStderrLogFileException.Marker or
+       PgNoCsvlogFileException.Marker — for "on, but no .json file yet", so the fault message this route
+       throws names jsonlog, never stderr or csvlog. */
+    private const string JsonQueryText = PgServerLogTail.TailJsonCteSql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoJsonlogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    private const string JsonBinaryQueryText = PgServerLogTail.TailJsonCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoJsonlogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
     public override string Name => "pg_log_events";
 
     public override string TargetTable => "pg_log_events";
@@ -146,9 +176,11 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         _ = RequireKey(context);
-        return new(context.PgLogUsesCsvlog
-            ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
-            : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
+        return new(context.PgLogUsesJsonlog
+            ? (context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText)
+            : context.PgLogUsesCsvlog
+                ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+                : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
     }
 
     private static PgLogHashKey RequireKey(CollectorContext context) =>
@@ -230,6 +262,32 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
             var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
 
+            if (context.PgLogUsesJsonlog)
+            {
+                /* #4053 part a2: the jsonlog route's own "no file yet" marker — distinct from the csvlog
+                   and stderr routes' own, so the fault message names jsonlog, not csvlog or stderr. */
+                if (string.Equals(body, PgNoJsonlogFileException.Marker, StringComparison.Ordinal))
+                {
+                    throw new PgNoJsonlogFileException();
+                }
+
+                var jsonEntries = PgServerLogJsonParser.Parse(body ?? string.Empty, out var jsonRecordsDiscarded);
+
+                /* The same foreign-zone rule the csvlog and stderr paths apply: under a UTC log_timezone a
+                   record in another zone is not the server's own and is skipped and counted rather than
+                   refusing the whole read; otherwise a foreign zone refuses the read whole (#2993). */
+                var jsonKept = FilterForeignZoneEntries(jsonEntries, logTimezoneIsUtc, out var jsonForeignZoneLines);
+                PgServerLogTail.MeasureForeignZoneLines(context, jsonForeignZoneLines);
+
+                if (jsonRecordsDiscarded > 0)
+                {
+                    context.Measure(JsonRecordsDiscardedMeasurement, jsonRecordsDiscarded);
+                }
+
+                rows.AddRange(classifier.Classify(jsonKept));
+                continue;
+            }
+
             if (context.PgLogUsesCsvlog)
             {
                 /* #4053 part a1b: the csvlog route's own "no file yet" marker — distinct from the stderr
@@ -282,6 +340,13 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     /// <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>'s exact pattern.
     /// </summary>
     public const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
+
+    /// <summary>
+    /// The count a consumer records on its collection-log row when the jsonlog parser discarded a record
+    /// (malformed JSON, including a cut head, or a missing/unusable shape) (#4053 part a2): reported only
+    /// when &gt; 0, following <see cref="CsvRecordsDiscardedMeasurement"/>'s exact pattern.
+    /// </summary>
+    public const string JsonRecordsDiscardedMeasurement = "json_records_discarded";
 
     /// <summary>
     /// Filters <paramref name="entries"/> the same way <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>

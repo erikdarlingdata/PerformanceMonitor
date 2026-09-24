@@ -1143,7 +1143,11 @@ public sealed class DarlingCollectorRunner
         if (server.Target.Engine == CollectorTargetEngine.PostgreSql
             && PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
         {
+            /* #4053 part a2: one probe answers both flags (PgLogFormatCapability's own cache), so asking
+               for jsonlog right after csvlog on a cache miss still costs one round trip, not two. */
             context.PgLogUsesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+            context.PgLogUsesJsonlog = await PgLogFormatCapability.IsJsonlogEnabledAsync(
                 targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
         }
     }
