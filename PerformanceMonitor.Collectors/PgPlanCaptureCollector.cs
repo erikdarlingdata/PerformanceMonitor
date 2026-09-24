@@ -434,6 +434,16 @@ LIMIT 2000";
                 continue;
             }
 
+            /* #4058 item 3: a RAISE LOG can imitate this marker text verbatim — the client controls the
+               whole message. Caught here rather than left to the query-id/duration guards below, because a
+               forged capture that also happens to carry a real-looking query id and duration would
+               otherwise pass them; counted the same way those guards count a forgery. */
+            if (PgLogEntryProvenance.RaisedByPlpgsql(entry) || PgLogEntryProvenance.ReportedByOther(entry, "explain_ExecutorEnd"))
+            {
+                forgedCaptures++;
+                continue;
+            }
+
             var rest = entry.Message[PlanMarkerCsvLiteral.Length..];
             var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
 

@@ -249,6 +249,24 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        must stay equal to PgLogEventsCollector's label. */
     private const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
 
+    /// <summary>
+    /// #4058 item 1: deadlock-shaped entries the csvlog route skipped because they were not actually written
+    /// by PostgreSQL's own <c>DeadLockReport</c> — a database client's <c>RAISE</c> built to imitate a
+    /// deadlock, caught by <see cref="PgDeadlockLogParser.IsRaiseShaped"/> before <see cref="PgDeadlockLogParser.FromEntry"/>
+    /// ever runs. Counted rather than silently dropped, following <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>'s
+    /// pattern for the plan-capture twin of this same issue.
+    /// </summary>
+    public const string RaiseShapedDeadlocksSkippedMeasurement = "raise_shaped_deadlocks_skipped";
+
+    /// <summary>
+    /// The sentence the Darling runner puts beside <see cref="RaiseShapedDeadlocksSkippedMeasurement"/> on the
+    /// row, following <see cref="PgPlanCaptureCollector.ForgedCaptureNote"/>'s exact pattern.
+    /// </summary>
+    public const string RaiseShapedDeadlocksSkippedNote =
+        "Skipped deadlock-shaped log entries that were not written by PostgreSQL's own deadlock detector: a "
+        + "client can RAISE an ERROR whose message and DETAIL imitate a deadlock report (#4058). The read "
+        + "went on without them";
+
     public override string Name => "pg_deadlocks";
 
     public override string TargetTable => "pg_deadlocks";
@@ -392,14 +410,35 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
         var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
         PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
 
+        var raiseShapedSkipped = 0;
+
         foreach (var entry in kept)
         {
+            /* #4058 item 1: IsRaiseShaped is checked, and counted, only for an entry that already matches
+               the deadlock candidate shape FromEntry itself tests (severity ERROR, the deadlock marker
+               message, a non-empty DETAIL) — the same restriction FromEntry applies internally. Checking
+               every entry the tail carries would count an unrelated RAISE-based ERROR row toward a label
+               that is supposed to mean "looked like a deadlock and was not one". */
+            if (entry.Severity == "ERROR"
+                && entry.Message.TrimEnd() == "deadlock detected"
+                && !string.IsNullOrWhiteSpace(entry.Detail)
+                && PgDeadlockLogParser.IsRaiseShaped(entry))
+            {
+                raiseShapedSkipped++;
+                continue;
+            }
+
             var parsed = PgDeadlockLogParser.FromEntry(entry);
 
             if (parsed is not null)
             {
                 rows.Add(ToRow(parsed.Value));
             }
+        }
+
+        if (raiseShapedSkipped > 0)
+        {
+            context.Measure(RaiseShapedDeadlocksSkippedMeasurement, raiseShapedSkipped);
         }
     }
 

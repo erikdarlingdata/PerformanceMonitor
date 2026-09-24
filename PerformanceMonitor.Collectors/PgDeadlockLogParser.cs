@@ -323,12 +323,34 @@ public static class PgDeadlockLogParser
                 && entry.Message.TrimEnd() == "deadlock detected"
                 && !string.IsNullOrWhiteSpace(entry.Detail))
             {
+                /* #4058: the same RAISE-shaped check FromEntry applies below, applied here to the stderr
+                   route's own candidate entry. FAILS OPEN on this route in a way FromEntry does not: the
+                   assembler's block pattern captures the primary line and DETAIL, but the CONTEXT line a
+                   PL/pgSQL RAISE appends is not guaranteed to fall inside what this pattern captured, so a
+                   forged report whose CONTEXT landed outside the match is not caught here even though the
+                   csvlog route (whole assembled entry, no pattern to miss a line past) would catch it. */
+                if (PgDeadlockLogParser.IsRaiseShaped(entry))
+                {
+                    continue;
+                }
+
                 return BuildFromEntry(entry);
             }
         }
 
         return null;
     }
+
+    /// <summary>
+    /// #4058: true when <paramref name="e"/> — already matched as an ERROR "deadlock detected" row with a
+    /// DETAIL — was not actually written by PostgreSQL's own <c>DeadLockReport</c>. Either
+    /// <see cref="PgLogEntryProvenance.RaisedByPlpgsql"/> (a PL/pgSQL <c>RAISE</c> fired this ERROR itself) or
+    /// <see cref="PgLogEntryProvenance.ReportedByOther"/> against <c>"DeadLockReport"</c> (verbose
+    /// <c>Location</c> names a different C function) is true. Both callers below return null for such an
+    /// entry rather than storing it, so no caller of this parser can end up with a forged deadlock row.
+    /// </summary>
+    public static bool IsRaiseShaped(PgLogEntry e) =>
+        PgLogEntryProvenance.RaisedByPlpgsql(e) || PgLogEntryProvenance.ReportedByOther(e, "DeadLockReport");
 
     /// <summary>
     /// One report, built directly from an already-assembled <see cref="PgLogEntry"/> (#4053 part b1) — the
@@ -345,7 +367,8 @@ public static class PgDeadlockLogParser
     {
         if (entry.Severity != "ERROR"
             || entry.Message.TrimEnd() != "deadlock detected"
-            || string.IsNullOrWhiteSpace(entry.Detail))
+            || string.IsNullOrWhiteSpace(entry.Detail)
+            || IsRaiseShaped(entry))
         {
             return null;
         }
