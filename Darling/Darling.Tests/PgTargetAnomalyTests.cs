@@ -449,7 +449,9 @@ public sealed class PgTargetAnomalyTests
         /* Lane 17's detector is the first PostgreSQL one on the #3653 PAIR gate (peak AND window mean); pinned so a
            later edit back to the peak-only overload is a visible decision. */
         var blockingDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Blocking.cs"));
-        Assert.Contains("baseline, peakBlocked, avgBlocked,", blockingDetector, StringComparison.Ordinal);
+        /* #3653 A8 option B: the fallback path (tv is null) reads whole.Peak / whole.Mean directly rather than through
+           the peakBlocked/avgBlocked locals, which are now assigned AFTER the arm choice (from whichever arm fired). */
+        Assert.Contains("baseline, whole.Peak, whole.Mean,", blockingDetector, StringComparison.Ordinal);
         Assert.DoesNotContain("=> Task.CompletedTask;", blockingDetector, StringComparison.Ordinal);
         /* Lane 28's CPU-burn detector is the second on the pair gate — a cores-busy series is spiky by nature.
            #3653 A8 option B (lane L3c) moved it onto tiles: the never-blind fallback still runs the pair gate,
@@ -491,14 +493,18 @@ public sealed class PgTargetAnomalyTests
             code);
         Assert.Contains("var window = context.TimeRangeEnd - context.TimeRangeStart;", code, StringComparison.Ordinal);
 
+        /* #3653 A8 option B: the I/O and replication detectors moved onto per-hour tiles (lane L3b), so the
+           NEVER-BLIND FALLBACK arm (tv is null) now reads whole.Peak / whole.Mean directly, ahead of the
+           peakMsPerRead/avgMsPerRead (and peakBytes/avgBytes) locals — those are assigned AFTER the arm choice,
+           from whichever arm (tile or fallback) actually decided. */
         var ioDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Io.cs"));
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakMsPerRead,\s*avgMsPerRead,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*whole\.Peak,\s*whole\.Mean,[\s\S]{0,200}?window:\s*window\)",
             ioDetector);
 
         var replicationDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Replication.cs"));
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakBytes,\s*avgBytes,[\s\S]{0,300}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*whole\.Peak,\s*whole\.Mean,[\s\S]{0,300}?window:\s*window\)",
             replicationDetector);
 
         /* #3653 A8 option B (lane L3c): moved onto tiles — the never-blind fallback still runs the pair gate,
