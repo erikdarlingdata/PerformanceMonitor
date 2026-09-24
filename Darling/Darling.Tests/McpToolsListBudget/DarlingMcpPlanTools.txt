@@ -6,7 +6,7 @@ tool analyze_procedure_plan 618
 param analyze_procedure_plan.server_name 28
 param analyze_procedure_plan.sql_handle 52
 
-tool analyze_query_plan 915
+tool analyze_query_plan 616
 param analyze_query_plan.database_name 118
 param analyze_query_plan.query_hash 49
 param analyze_query_plan.server_name 28
