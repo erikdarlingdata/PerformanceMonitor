@@ -731,6 +731,19 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
+            /* collect.analysis_collection_caveats (#3691 part a1, V141): pruned on last_seen_utc at
+               CollectionCaveatStore.PruneAfterDays, same cadence as the backlog purge just above rather than
+               the catalog loop, for the same reason — the table is written by the analysis pass's own
+               best-effort caveat writer, not by a collector definition, so it is absent from
+               CollectorCatalog.All and nothing else prunes it. PruneAsync never throws (it logs + swallows and
+               returns 0 on a failed prune, exactly like OversizedPlanBacklog's own writer path), so there is
+               no tablesFailed arm here: a 0 either means nothing was stale or means the prune failed, and
+               either way the sweep goes on. */
+            var caveatsDeleted = await CollectionCaveatStore.PruneAsync(
+                postgres, utcNow.AddDays(-CollectionCaveatStore.PruneAfterDays), logger, cancellationToken);
+            tablesPurged++;
+            totalRowsDeleted += caveatsDeleted;
+
             /* #3466: the fleet-sweep tables (V123), written by FleetSweepEngine and pruned at
                FleetSweepRetentionDays — see that constant for the horizon's reasoning. NOT in
                CollectorCatalog.All (they are the sweep's own state, not a collector's rows), so the

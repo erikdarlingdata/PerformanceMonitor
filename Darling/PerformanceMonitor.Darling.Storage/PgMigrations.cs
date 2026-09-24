@@ -220,6 +220,7 @@ public static class PgMigrations
         new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
         new Migration(139, "postmaster-start-time", V139Sql),
         new Migration(140, "checkpointer-timed-count", V140Sql),
+        new Migration(141, "collection-caveats", V141Sql),
     };
 
     /// <summary>
@@ -1846,6 +1847,52 @@ ALTER TABLE collect.pg_write_stats
    reads as unmeasured rather than zero. */
 ALTER TABLE collect.store_metrics
     ADD COLUMN IF NOT EXISTS checkpoints_timed bigint;";
+
+    /// <summary>
+    /// V141 (#3691, part a1) — <c>collect.analysis_collection_caveats</c>: the CURRENT set of fact families an
+    /// analysis pass could not read, one row per (server, family), so a scheduled pass's caveats survive past
+    /// the in-process ledger <see cref="PerformanceMonitor.Analysis.CollectionCaveatLedger"/> already keeps —
+    /// that ledger is per-process and unread by anything outside the service that ran the pass, so the Viewer,
+    /// which is a separate process reading only the store, has never been able to say "this family has not
+    /// been read for N passes" at all. This table is what closes that gap: not a replacement for the ledger
+    /// (which stays in-memory by design, shared with Lite, and untouched here), but the store side <c>CollectionCaveatStore</c>
+    /// writes beside it, on the same pass, best-effort.
+    ///
+    /// <para><b>Current, not historical.</b> The table holds only the families a server is failing to read
+    /// RIGHT NOW: a family a pass reads successfully has its row deleted, not stamped closed, because the
+    /// pass already knows definitively which families it read and which it did not — there is no ambiguous
+    /// middle state to distinguish with a status column. Bounded by construction: at most (servers × distinct
+    /// families) rows, which on any fleet measured so far is a few hundred at most.</para>
+    ///
+    /// <para><b>Primary key <c>(server_id, family)</c>, no surrogate.</b> The upsert key IS the identity a
+    /// reader wants: one open caveat per server per family. <c>reason</c> keeps only the most recent failure's
+    /// classification (the payload spelling from <c>CollectionFailure.Label</c> — <c>timeout</c>, <c>cancelled</c>,
+    /// <c>missing_schema</c>, <c>error</c>); a family failing for two different reasons across passes is not a
+    /// fact this table tries to hold, because the ledger already holds the per-pass history for whoever wants
+    /// it and the Viewer's use is "is this family currently missing", not "how did it fail last Tuesday".</para>
+    ///
+    /// <para><b>Not a collector table.</b> Absent from <see cref="CollectorCatalog"/>, so <see cref="TimescaleSupport"/>'s
+    /// catalog-driven hypertable conversion and <c>DarlingRetention</c>'s catalog purge never reach it — the
+    /// <c>collect.oversized_plan_backlog</c> (V121) precedent exactly: it needs neither chunks nor compression
+    /// at this size, and its own prune (<c>CollectionCaveatStore.PruneAsync</c>, called beside the backlog's own
+    /// sweep-driven prune) is a simpler policy than retention's catalog-driven one because there is no sighting
+    /// cadence to reason about — a row not re-written this pass either was read (and is gone) or the server
+    /// stopped being analysed (and prune reaps it after 7 days).</para>
+    ///
+    /// <para>Granted through the <c>collect</c> schema's blanket <c>GRANT … ON ALL TABLES IN SCHEMA collect</c>
+    /// (the V54/V101 convention — no per-table GRANT here), which the service and viewer roles both already
+    /// hold, so the Viewer can SELECT it without a provisioning change.</para>
+    /// </summary>
+    private const string V141Sql = @"
+CREATE TABLE IF NOT EXISTS collect.analysis_collection_caveats
+(
+    server_id integer NOT NULL,
+    family text NOT NULL,
+    reason text NOT NULL,
+    first_seen_utc timestamp NOT NULL,
+    last_seen_utc timestamp NOT NULL,
+    CONSTRAINT pk_analysis_collection_caveats PRIMARY KEY (server_id, family)
+);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
