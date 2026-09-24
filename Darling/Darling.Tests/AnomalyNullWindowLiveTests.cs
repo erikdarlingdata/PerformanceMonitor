@@ -78,16 +78,17 @@ public sealed class AnomalyNullWindowLiveTests
         var serverIds = Enumerable.Range(0, ServerCount).Select(i => BaseServerId - i).ToArray();
         var serverNames = serverIds.Select(id => $"a8-null-window-{-id}").ToArray();
 
-        using var connection = new NpgsqlConnection(connectionString);
+        /* lane L5-2, #4177: the harness ran directly against the SHARED DARLING_TEST_PG store, and left
+           behind 7 collect.*_baseline relations that LivePostgresStoreFixture.DisposeAsync then flagged
+           as residue. Move onto a PRIVATE scratch database instead — SharedBaselineCacheTests.SeededStore's
+           pattern — so the analysis pass's baseline supplies land somewhere nobody checks for residue. */
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
-        await DeleteRowsAsync(connection, serverIds, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        await using var postgres = NpgsqlDataSource.Create(connectionString!);
-
-        var bodySucceeded = false;
-        try
         {
             for (var s = 0; s < ServerCount; s++)
             {
@@ -261,13 +262,6 @@ public sealed class AnomalyNullWindowLiveTests
             /* ---- assertion 3: no single spike fires in any pass whose window holds only the spike. */
             Assert.Equal(0, spikeAloneFires4h);
             Assert.Equal(0, spikeAloneFires24h);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-                await DeleteRowsAsync(cleanup, serverIds, cleanupCt));
         }
     }
 
@@ -373,15 +367,5 @@ public sealed class AnomalyNullWindowLiveTests
         }
 
         await importer.CompleteAsync(ct);
-    }
-
-    private static async Task DeleteRowsAsync(NpgsqlConnection connection, int[] serverIds, System.Threading.CancellationToken ct)
-    {
-        var idList = string.Join(",", serverIds);
-        using var command = new NpgsqlCommand(
-            $"DELETE FROM session_stats WHERE server_id IN ({idList}); " +
-            $"DELETE FROM cpu_utilization_stats WHERE server_id IN ({idList}); " +
-            $"DELETE FROM servers WHERE server_id IN ({idList});", connection);
-        await command.ExecuteNonQueryAsync(ct);
     }
 }
