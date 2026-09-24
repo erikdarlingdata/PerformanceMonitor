@@ -9938,8 +9938,17 @@ LIMIT 1";
             /* #4053 review L1: the cache said stderr-only, but no stderr-format file is left — the far more
                likely explanation is csvlog/jsonlog was just added and the cache has not caught up, not that
                log_destination emptied entirely. Drop the verdict so the next cycle re-probes instead of
-               reading no stderr file (and, on the csvlog route, no rows) for up to an hour. */
-            PgLogFormatCapability.Invalidate(runtime.StorageName);
+               reading no stderr file (and, on the csvlog route, no rows) for up to an hour.
+
+               #4053 review L1 (round 2): this marker is also thrown by pg_deadlocks and pg_plan_capture,
+               which read only the stderr tail on this branch and never consulted this cache to begin with —
+               their own no-stderr-file fault says nothing about whether csvlog is configured, so it must not
+               drop pg_log_events' verdict out from under it. Gate on RoutedCollectors, the same set the runner
+               keys the probe itself on, so only a collector this cache actually informs can invalidate it. */
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+            {
+                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+            }
 
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
                 server.Config.DisplayName, collectorName);
@@ -9964,8 +9973,15 @@ LIMIT 1";
                REMOVED from log_destination since the cache checked — the exception's own message text
                ("was only just added") is aimed at the fresher case, but this fault is exactly the evidence a
                stale cache needs. Drop the verdict so the next cycle re-probes; a genuinely fresh csvlog
-               addition simply gets the same true verdict back next time. */
-            PgLogFormatCapability.Invalidate(runtime.StorageName);
+               addition simply gets the same true verdict back next time.
+
+               #4053 review L1 (round 2): only pg_log_events can throw this marker today (see
+               PgLogEventsCollector), but the RoutedCollectors gate is applied here too, for the same reason
+               as the sibling arm above — one guard the cache trusts, not two that must agree by accident. */
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+            {
+                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+            }
 
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no csvlog file has appeared for this target yet",
                 server.Config.DisplayName, collectorName);

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
@@ -48,6 +49,19 @@ public static class PgLogFormatCapability
 
     /// <summary>Cache TTL — a target's verdict is re-checked after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// The collectors whose no-file marker is evidence about THIS cache (#4053 review L1). On this branch
+    /// only <c>pg_log_events</c> is on the csvlog route — <c>pg_deadlocks</c> and <c>pg_plan_capture</c>
+    /// still read only the stderr tail, so their own <see cref="PgNoStderrLogFileException"/> says nothing
+    /// about whether csvlog is configured and must not drop this verdict. A later PR that routes those two
+    /// collectors through this capability as well adds them here. Deliberately narrower than
+    /// <see cref="PgReadBinaryFileCapability"/>'s own grant cache, which is genuinely shared by all three.
+    /// </summary>
+    public static readonly IReadOnlySet<string> RoutedCollectors = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "pg_log_events",
+    };
 
     private sealed record CacheEntry(bool UsesCsvlog, DateTime CheckedAtUtc);
 

@@ -1136,9 +1136,11 @@ public sealed class DarlingCollectorRunner
 
         /* #4053 part a1b: pg_log_events alone — the deadlock and plan-capture collectors still read only the
            stderr tail, unchanged. Checked on the same connection, before BuildQuery decides which tail this
-           collector opens with, the same shape as the grant check just above. */
+           collector opens with, the same shape as the grant check just above. RoutedCollectors (#4053 review
+           L1 round 2) is the single source for this set, shared with the invalidation arms in DarlingWorker, so
+           the probe and the drop can never disagree about which collectors this cache answers for. */
         if (server.Target.Engine == CollectorTargetEngine.PostgreSql
-            && string.Equals(collectorName, "pg_log_events", StringComparison.Ordinal))
+            && PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
         {
             context.PgLogUsesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
                 targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
@@ -1151,7 +1153,7 @@ public sealed class DarlingCollectorRunner
     /// verdict all take the <see cref="ServerRuntime"/> and key through here. None of them can drift to a
     /// different key and leave an invalidation that never hits.
     /// </summary>
-    private static string ReadBinaryFileCacheKey(ServerRuntime server) => server.StorageName;
+    internal static string ReadBinaryFileCacheKey(ServerRuntime server) => server.StorageName;
 
     /// <summary>
     /// #4046 part 1c (#4051 review L1): drops <paramref name="targetKey"/>'s cached

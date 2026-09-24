@@ -45,16 +45,46 @@ namespace PerformanceMonitor.Collectors;
 /// under the tail size is read from its first byte), and the first segment is shape-checked: a cut fragment fails and is
 /// discarded. Inside quotes, the head is certainly a fragment and is excluded.</para>
 ///
-/// <para><b>Trailing partial record.</b> When the body does not end in a newline (a read that raced a write), the
-/// text after the last newline is a partial record whose quote state is unknown. Up to the last 8 candidate
-/// newlines are each walked backward and scored by how many of the records under them parse; the candidate with
-/// the most parseable records wins, latest anchor breaking a tie (#4053 review M1) — accepting the first candidate
-/// that merely validated its ONE preceding record let a forged, unquoted look-alike line win under inverted
-/// parity. The partial is not emitted. Every complete record is still shape-checked: 26 fields, a <c>log_time</c>
+/// <para><b>Trailing partial record.</b> When the caller cannot state <see cref="CsvBodyEdges.EndsOnRecordBoundary"/>,
+/// the text after the true last newline is a partial record whose quote state is unknown. A single backward pass
+/// tags every newline by the parity of the quote count strictly after it, splitting them into two hypotheses —
+/// H_even (the body ends outside quotes) and H_odd (it ends inside one) — and each is scored ONCE by how many of
+/// its records parse; the higher score wins, a tie broken by whichever hypothesis's last mark is later (#4053
+/// review M1, M2). This closes the old 8-candidate cap's hole (a trailing partial with 8 or more embedded
+/// newlines made every trial an inverted-parity one) at the cost of exactly two scoring passes. Scoring cannot
+/// see an edge it was never told, so a single statement bigger than the tail can still straddle the read's start
+/// and let inverted parity out-score the true one (#4053 review Q2) — naming that residual risk is why
+/// <see cref="CsvBodyEdges"/> exists: a caller that knows an edge should state it rather than lean on scoring.
+/// The partial is not emitted. Every complete record is still shape-checked: 26 fields, a <c>log_time</c>
 /// that parses, a numeric <c>process_id</c>, and a <c>session_id</c> shaped <c>hex.hex</c>.</para>
 /// </summary>
 public static class PgServerLogCsvParser
 {
+    /// <summary>
+    /// What the caller already knows about <c>body</c>'s two ends (#4053 review round 2). A tail reader
+    /// carries these across calls: the offset it starts a read at is always the previous call's
+    /// <c>consumedLength</c>, which is by construction a true record boundary, so every read after the
+    /// first can state <see cref="StartsOnRecordBoundary"/>; whether the read reached the file's current
+    /// end (<see cref="EndsOnRecordBoundary"/>) is the caller's own read-size bookkeeping, not something
+    /// this parser can infer honestly from the trailing byte alone — a body that happens to end in <c>\n</c>
+    /// might still be raced a byte short by the syslogger's own next write.
+    /// </summary>
+    [Flags]
+    public enum CsvBodyEdges
+    {
+        /// <summary>Neither end is known to be a record boundary.</summary>
+        None = 0,
+
+        /// <summary>Offset 0 is a true record boundary — parity is exact from the first byte, so a forward
+        /// walk never needs to score a candidate.</summary>
+        StartsOnRecordBoundary = 1,
+
+        /// <summary>The last byte of <c>body</c> is a true record boundary — the syslogger writes whole
+        /// records, so the caller's own read-size bookkeeping already knows this when it read up to the
+        /// file's current end.</summary>
+        EndsOnRecordBoundary = 2,
+    }
+
     /// <summary>The number of columns PostgreSQL 14 through 18 write per csvlog record, verified against
     /// live 14 and 18 containers for #4053. See the type header for the full column list.</summary>
     private const int ExpectedColumnCount = 26;
@@ -64,7 +94,10 @@ public static class PgServerLogCsvParser
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// Every complete, resynced record in <paramref name="body"/>, in log order.
+    /// Every complete, resynced record in <paramref name="body"/>, in log order. Infers <c>body</c>'s edges
+    /// exactly as the original single-overload parser did — <see cref="CsvBodyEdges.EndsOnRecordBoundary"/>
+    /// when <c>body</c> ends in <c>\n</c>, otherwise <see cref="CsvBodyEdges.None"/> — for the three stacked
+    /// branches (#4135, #4136, the plan-capture lane) that still call this signature.
     /// </summary>
     /// <param name="body">A slab of csvlog text, as read from the tail of a <c>.csv</c> log file. May start
     /// mid-record and may end mid-record.</param>
@@ -74,34 +107,103 @@ public static class PgServerLogCsvParser
     /// partial record, because nothing about it was rejected — it was never complete enough to judge.</param>
     public static List<PgLogEntry> Parse(string body, out int recordsDiscarded)
     {
+        var edges = !string.IsNullOrEmpty(body) && body[^1] == '\n'
+            ? CsvBodyEdges.EndsOnRecordBoundary
+            : CsvBodyEdges.None;
+        return Parse(body, edges, out recordsDiscarded, out _);
+    }
+
+    /// <summary>
+    /// Every complete, resynced record in <paramref name="body"/>, in log order (#4053 review round 2: the
+    /// caller states the edges it already knows instead of this parser inferring them from the trailing byte).
+    /// </summary>
+    /// <param name="body">A slab of csvlog text, as read from the tail of a <c>.csv</c> log file. May start
+    /// mid-record and may end mid-record.</param>
+    /// <param name="edges">What the caller already knows about <c>body</c>'s two ends. See the enum's own
+    /// remarks for why a tail reader can state <see cref="CsvBodyEdges.StartsOnRecordBoundary"/> on every
+    /// read after its first.</param>
+    /// <param name="recordsDiscarded">Every record dropped during resync or for a bad shape: the cut head's
+    /// records up to and including the first complete one (see the type header), plus any record later in
+    /// the body whose column count is not <see cref="ExpectedColumnCount"/>. Does not count a trailing
+    /// partial record, because nothing about it was rejected — it was never complete enough to judge.</param>
+    /// <param name="consumedLength">The index in <c>body</c> just past the last TRUE record boundary found.
+    /// A tail reader carries <c>body[consumedLength..]</c> into its next read, along with
+    /// <see cref="CsvBodyEdges.StartsOnRecordBoundary"/> for that next call. That is sound only when THIS call
+    /// stated an edge (a forward walk or the fast path), because then <c>consumedLength</c> is a record boundary
+    /// by construction. Under <see cref="CsvBodyEdges.None"/> it is the winning hypothesis's last boundary, a
+    /// guess: a caller must not claim a known start from it, since a wrong start inverts parity for every
+    /// later forward walk. Zero when no boundary was found at all.</param>
+    public static List<PgLogEntry> Parse(string body, CsvBodyEdges edges, out int recordsDiscarded, out int consumedLength)
+    {
         var entries = new List<PgLogEntry>();
         recordsDiscarded = 0;
+        consumedLength = 0;
         if (string.IsNullOrEmpty(body))
         {
             return entries;
         }
 
-        /* Quote parity cannot be recovered reading FORWARD from an arbitrary offset: a window that starts
-           inside a quoted field inverts every quote after it, every newline then reads as inside a field,
-           and the whole rest of the body glues into one record that fails the shape check, so a read that
-           happens to start mid-field (most of a csvlog's bytes are quoted text) would yield nothing. The
-           END of the body is a record boundary instead (the syslogger writes whole records), so parity is
-           anchored there and walked BACKWARD: a newline outside quotes is a true boundary, and no text
-           inside a quoted field, planted or not, can fake one. What precedes the first boundary is the cut
-           head. If the body does not end in a newline (a read that raced a write), the text after the
-           candidate boundary is a partial record whose quote state is unknown, so the latest candidate
-           newline whose backward split yields a valid record just before it wins; tries are bounded. */
-        var boundaries = FindBoundaries(body);
-        if (boundaries is null)
+        List<int>? marks;
+
+        if (edges.HasFlag(CsvBodyEdges.StartsOnRecordBoundary))
+        {
+            /* The caller already knows offset 0 is a true record boundary, so parity is exact from the
+               first byte: a FORWARD walk needs no scoring, because unlike an arbitrary mid-file offset
+               there is nothing to invert. Every newline seen outside quotes is a true boundary; the text
+               after the LAST one found is the carried partial (unknown quote state, not emitted, not
+               counted) whether or not EndsOnRecordBoundary is also set — if the caller was wrong about the
+               true end also being a boundary, the walk simply finds no newline there and the tail is
+               treated as a partial anyway, exactly as the brief calls for. */
+            marks = ComputeMarksForward(body);
+        }
+        else if (edges.HasFlag(CsvBodyEdges.EndsOnRecordBoundary))
+        {
+            /* Today's fast path: the caller says the last byte is a true record boundary (the syslogger
+               writes whole records), so parity is anchored there and walked BACKWARD — a newline outside
+               quotes is a true boundary, and no text inside a quoted field, planted or not, can fake one.
+               No candidate scoring is needed: the end is a boundary only because the CALLER says so, not
+               because this parser inferred it from the trailing byte.
+
+               Residual risk (Low, a race): the syslogger can split one record across more than one write
+               when the record is larger than stdio's buffer. A read that lands between two such writes can
+               end at a newline that is actually inside a still-open quoted field — the caller's own
+               bookkeeping said "end of file as of this read", which is not the same fact as "this byte
+               ends a record". Nothing in this parser can detect that case from the text alone; it is named
+               here because a caller for whom this matters needs to know the flag is a stated fact, not a
+               guarantee this parser re-derives. */
+            var anchorMarks = ComputeMarks(body, body.Length - 1);
+            marks = HasParseableRecord(body, anchorMarks) ? anchorMarks : null;
+        }
+        else
+        {
+            /* Neither edge is known (#4053 review M1/M2): two-hypothesis scoring. One backward pass over
+               the whole body tags every newline by the parity of the quote count strictly after it — H_even
+               takes the newlines seen with an even count (the body's true end is outside quotes) and H_odd
+               takes those seen with an odd count (the body's true end is inside a quoted field). Each
+               hypothesis is scored ONCE with CountParseableRecords; the higher wins, and a tie goes to the
+               hypothesis whose last mark is later. This costs exactly two parses, not up to
+               MaxAnchorCandidates-worth of retries, and it closes the old cap's hole: a trailing partial
+               with 8 or more embedded newlines used to make every one of the old 8 trial anchors an
+               inverted-parity trial, so the true parity was never even tried.
+
+               Residual risk (#4053 review Q2): a single statement bigger than the read's own tail can
+               straddle the read's start, and an inverted-parity hypothesis can then out-score the true one
+               by sheer bulk. Scoring cannot fix that without knowing an edge — which is exactly why a
+               caller that knows one should state it via <see cref="CsvBodyEdges"/> instead of leaving this
+               parser to guess. */
+            marks = FindBoundariesByScoring(body);
+        }
+
+        if (marks is null)
         {
             recordsDiscarded = 1;
             return entries;
         }
 
-        for (var r = 0; r + 1 < boundaries.Count; r++)
+        for (var r = 0; r + 1 < marks.Count; r++)
         {
-            var start = boundaries[r] + 1;
-            var text = body.Substring(start, boundaries[r + 1] - start);
+            var start = marks[r] + 1;
+            var text = body.Substring(start, marks[r + 1] - start);
             if (text.EndsWith('\r'))
             {
                 text = text[..^1];
@@ -117,74 +219,104 @@ public static class PgServerLogCsvParser
             }
         }
 
+        consumedLength = marks.Count > 0 ? marks[^1] + 1 : 0;
         return entries;
     }
 
     /// <summary>
-    /// The number of trailing candidate anchors <see cref="FindBoundaries"/> evaluates when the body does
-    /// not end on a record boundary (#4053 review M1/M2). A mid-write read normally resyncs within a few
-    /// newlines — one per embedded newline in the trailing partial record — so 8 covers the real case with
-    /// room to spare, without paying the 64-try worst case (roughly 270M character iterations, ~0.3–0.5s of
-    /// CPU per cycle per target) on every non-UTC target (H1) or every body with no parseable record.
+    /// Forward walk from offset 0 (#4053 review round 2), used only when the caller states
+    /// <see cref="CsvBodyEdges.StartsOnRecordBoundary"/>. Parity is exact from the first byte because the
+    /// caller already knows offset 0 is a true boundary, so no scoring is needed: every newline seen outside
+    /// quotes is a true boundary, in the order found. Never null — a body with no boundary at all simply
+    /// yields the head sentinel alone, and the caller's loop then finds nothing to emit.
     /// </summary>
-    private const int MaxAnchorCandidates = 8;
+    private static List<int> ComputeMarksForward(string body)
+    {
+        var marks = new List<int> { -1 };
+        var inQuotes = false;
+
+        for (var i = 0; i < body.Length; i++)
+        {
+            var c = body[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (c == '\n' && !inQuotes)
+            {
+                marks.Add(i);
+            }
+        }
+
+        return marks;
+    }
 
     /// <summary>
-    /// Positions of the newlines that end records, preceded by -1 when the body starts on a record boundary
-    /// (it never does for a tail read, but a whole file would). The cut head before the first boundary is
-    /// excluded. Null when no candidate anchor yields a parseable record, which the caller counts as one
-    /// discard.
+    /// Two-hypothesis scoring (#4053 review M1/M2, replacing the old 8-candidate trial loop): a single
+    /// backward pass tags every newline by the parity of the quote count seen strictly after it, splitting
+    /// them into H_even (the newlines consistent with the body's true end being outside quotes) and H_odd
+    /// (consistent with the end being inside one). Each hypothesis is scored ONCE with
+    /// <see cref="CountParseableRecords"/>; the higher wins, ties going to the later last mark. Null when
+    /// neither hypothesis scores above zero, which the caller counts as one discard.
     /// </summary>
-    private static List<int>? FindBoundaries(string body)
+    private static List<int>? FindBoundariesByScoring(string body)
     {
-        if (body.Length == 0)
+        var evenMarks = new List<int>();
+        var oddMarks = new List<int>();
+        var inQuotes = false;
+
+        for (var i = body.Length - 1; i >= 0; i--)
+        {
+            var c = body[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (c == '\n')
+            {
+                if (inQuotes)
+                {
+                    oddMarks.Add(i);
+                }
+                else
+                {
+                    evenMarks.Add(i);
+                }
+            }
+        }
+
+        /* Parity at offset 0 is now known exactly under H_even's own convention (the pass started with
+           inQuotes = false, i.e. "the body's true end is outside quotes"). Under H_odd the two states are
+           simply swapped, so exactly one hypothesis gets the -1 head mark — the same -1-at-offset-0 rule
+           ComputeMarks applies for a single anchor, applied here to each hypothesis in turn. */
+        if (!inQuotes)
+        {
+            evenMarks.Add(-1);
+        }
+        else
+        {
+            oddMarks.Add(-1);
+        }
+
+        evenMarks.Reverse();
+        oddMarks.Reverse();
+
+        var evenScore = CountParseableRecords(body, evenMarks);
+        var oddScore = CountParseableRecords(body, oddMarks);
+
+        if (evenScore == 0 && oddScore == 0)
         {
             return null;
         }
 
-        if (body[^1] == '\n')
+        if (evenScore != oddScore)
         {
-            /* The body already ends on a record boundary (an ordinary, non-mid-write read): anchor there,
-               as today. No candidate scoring is needed — the true end of the file is never ambiguous, so
-               there is exactly one anchor to consider. */
-            var marks = ComputeMarks(body, body.Length - 1);
-            return HasParseableRecord(body, marks) ? marks : null;
+            return evenScore > oddScore ? evenMarks : oddMarks;
         }
 
-        /* A read that raced a write: the text after the true last newline is a partial record whose quote
-           state is unknown, so the anchor is chosen by trial (#4053 review M1). Rather than accept the
-           FIRST candidate whose one preceding record validates — which a forged, unquoted look-alike line
-           can satisfy under inverted parity — score every candidate by how many of ITS records parse and
-           keep the best: with inverted parity a candidate yields at most a few planted valid records,
-           while the true parity yields nearly all of them. On a tie, the latest (largest) anchor wins,
-           which the scan order already gives for free by only overwriting on a strictly higher score. */
-        var anchor = body.Length - 1;
-        var candidates = 0;
-        List<int>? bestMarks = null;
-        var bestScore = 0;
-
-        while (anchor >= 0 && candidates < MaxAnchorCandidates)
-        {
-            anchor = body.LastIndexOf('\n', anchor);
-            if (anchor < 0)
-            {
-                break;
-            }
-
-            candidates++;
-            var marks = ComputeMarks(body, anchor);
-            var score = CountParseableRecords(body, marks);
-
-            if (score > bestScore)
-            {
-                bestScore = score;
-                bestMarks = marks;
-            }
-
-            anchor--;
-        }
-
-        return bestScore > 0 ? bestMarks : null;
+        var evenLast = evenMarks.Count > 0 ? evenMarks[^1] : -1;
+        var oddLast = oddMarks.Count > 0 ? oddMarks[^1] : -1;
+        return evenLast >= oddLast ? evenMarks : oddMarks;
     }
 
     /// <summary>
