@@ -169,6 +169,35 @@ public class BaselineProvider
         return BaselineMath.SelectBucket(baselines, hourOfDay, dayOfWeek);
     }
 
+    /// <summary>
+    /// #3653 A8 option B (lane L1b): the per-hour bucket map for a tiled window
+    /// <c>[<paramref name="windowStart"/>, <paramref name="windowEnd"/>]</c>, plus a clock re-resolved over that
+    /// window rather than the cached 30-day baseline window (design §1's Darling twin — Darling's
+    /// <c>PgBaselineProvider.GetBucketMapAsync</c> is not referenced from Lite, so this method mirrors it rather
+    /// than sharing code with it).
+    ///
+    /// <para>It calls <see cref="GetOrComputeBaselinesAsync"/> with <paramref name="windowStart"/> as the analysis
+    /// time — the SAME instant <see cref="GetBaselineAsync"/> is called with for the same pass, so this is the
+    /// SAME cache key and costs no second compute. The raw <c>(UtcOffsetMinutes, TimeZoneId)</c> the compute read
+    /// (<see cref="ReadServerClockAsync"/>) rides on the cached entry for exactly this: re-resolving in memory,
+    /// never re-reading the store.</para>
+    ///
+    /// <para>A failed compute (<c>Buckets</c> null) returns <see cref="BaselineBucketMap.Empty"/>, never throws —
+    /// the tile gate then skips every tile and the caller falls back to <c>EvaluateZScore</c>.</para>
+    /// </summary>
+    public async Task<BaselineBucketMap> GetBucketMapAsync(
+        int serverId, string metricName, DateTime windowStart, DateTime windowEnd, CancellationToken cancellationToken = default)
+    {
+        var entry = await GetOrComputeBaselinesAsync(serverId, metricName, windowStart, cancellationToken);
+        if (entry.Buckets is null || entry.Buckets.Count == 0)
+        {
+            return BaselineBucketMap.Empty(windowEnd);
+        }
+
+        var windowClock = _localClock.Resolve(entry.TimeZoneId, entry.UtcOffsetMinutes, windowStart, windowEnd);
+        return new BaselineBucketMap(entry.Buckets, windowClock);
+    }
+
     /// <summary>Forces cache eviction for a server — used during testing. Both tiers (#3941): a shared entry left
     /// behind would answer the very next lookup and defeat the eviction.</summary>
     public void InvalidateCache(int serverId)
@@ -219,14 +248,16 @@ public class BaselineProvider
             return cached!;
         }
 
-        var (buckets, clock) = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
+        var (buckets, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, analysisTime, cancellationToken);
 
         var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
             RealTime = DateTime.UtcNow,
             Buckets = buckets,
-            Clock = clock
+            Clock = clock,
+            UtcOffsetMinutes = utcOffsetMinutes,
+            TimeZoneId = timeZoneId
         };
         _cache[cacheKey] = entry;
 
@@ -272,7 +303,7 @@ LIMIT 1";
                 reader.IsDBNull(1) ? null : reader.GetString(1));
     }
 
-    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock)> ComputeBaselinesAsync(
+    private async Task<(Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets, LocalClockWindow Clock, int? UtcOffsetMinutes, string? TimeZoneId)> ComputeBaselinesAsync(
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         /* #3941: the window ends at the analysis HOUR, not the analysis instant. The cache has always keyed an entry on
@@ -284,10 +315,12 @@ LIMIT 1";
         var windowEnd = RoundedHour(analysisTime);
         var query = GetBaselineQuery(metricName);
         var clock = LocalClockWindow.Utc(windowEnd);
-        if (query == null) return (null, clock);
+        if (query == null) return (null, clock, null, null);
 
         var absStdDevFloor = BaselineMath.AbsStdDevFloorFor(metricName);
         var windowStart = windowEnd.AddDays(-BaselineMath.BaselineWindowDays);
+        int? rawUtcOffsetMinutes = null;
+        string? rawTimeZoneId = null;
 
         try
         {
@@ -299,6 +332,8 @@ LIMIT 1";
                purpose — a store that cannot answer a one-row read of v_server_properties cannot answer the 30-day
                scan either, and one catch is the right number of places for "no baseline this pass" to be said. */
             var (utcOffsetMinutes, timeZoneId) = await ReadServerClockAsync(connection, serverId, cancellationToken);
+            rawUtcOffsetMinutes = utcOffsetMinutes;
+            rawTimeZoneId = timeZoneId;
             clock = _localClock.Resolve(timeZoneId, utcOffsetMinutes, windowStart, windowEnd);
 
             using var cmd = connection.CreateCommand();
@@ -354,7 +389,7 @@ LIMIT 1";
                 };
             }
 
-            return (buckets, clock);
+            return (buckets, clock, rawUtcOffsetMinutes, rawTimeZoneId);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
         {
@@ -363,7 +398,7 @@ LIMIT 1";
                called off, and five of the seven lines #2299 was filed about came from exactly this
                catch on the Darling twin. */
             AppLogger.Error("BaselineProvider", $"Failed to compute baselines for {metricName}: {ex.Message}");
-            return (null, clock);
+            return (null, clock, rawUtcOffsetMinutes, rawTimeZoneId);
         }
     }
 
@@ -642,5 +677,13 @@ clean AS (
 
         /// <summary>The clock the buckets were keyed with (#3653 Q6) — the lookup must use the SAME one.</summary>
         public LocalClockWindow Clock { get; init; } = LocalClockWindow.Utc(DateTime.MinValue);
+
+        /// <summary>The raw offset <see cref="ReadServerClockAsync"/> read for this compute, beside the resolved
+        /// <see cref="Clock"/> (#3653 A8 option B, lane L1b) — see <see cref="GetBucketMapAsync"/>'s remarks.</summary>
+        public int? UtcOffsetMinutes { get; init; }
+
+        /// <summary>The raw time zone id <see cref="ReadServerClockAsync"/> read for this compute, beside
+        /// <see cref="UtcOffsetMinutes"/> — see its remarks.</summary>
+        public string? TimeZoneId { get; init; }
     }
 }
