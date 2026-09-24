@@ -236,3 +236,50 @@ public sealed class McpToolGuideHeadsSqlTailMemoryGrantTests
         }
     }
 }
+
+/// <summary>
+/// #3898 D1 head pins for the "SqlTail" lane's sixth drop, Lite's twin: <c>get_plan_corrections</c>. Darling's
+/// twin is <c>Darling.Tests/McpToolGuideHeadsSqlTailPlanCorrectionsTests</c>, which also holds the cross-SKU
+/// lockstep pin. No D4 removals: the original text carried no issue references or anecdotes. Follows the
+/// pattern in <see cref="McpToolGuideHeadsHealthParserTests"/>.
+/// </summary>
+public sealed class McpToolGuideHeadsSqlTailPlanCorrectionsTests
+{
+    /// <summary>The per-tool guardrail phrase the head must state.</summary>
+    private static readonly string[] HeadFacts =
+    [
+        "Rows recur per capture, not per distinct recommendation.",
+        "THE PAGE IS BOUNDED BY limit, NOT hours_back: truncated means more rows existed; oldest/newest_returned_collection_time bound the page.",
+        "automatic_tuning ignores the window: the latest snapshot; each row's as_of says when.",
+        "All timestamps are UTC.",
+        "No rows and no automatic_tuning: empty (not_collected checked first).",
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        var served = McpToolGuideTests.Served("get_plan_corrections");
+        Assert.NotNull(served.Tail);
+        Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+        Assert.True(served.Served.Length <= 620, $"served head {served.Served.Length} is over the 620 target");
+        Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"get_plan_corrections.{p.Parameter}: {p.Length} > 200"));
+
+        foreach (var fact in HeadFacts)
+        {
+            Assert.Contains(fact, served.Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>D6: the original description was already byte-identical on Darling and Lite, so the tail (the
+    /// full original prose, unchanged) opens with its own original first sentence and keeps the UTC-ordering
+    /// claim closing it; the generic cross-SKU pin
+    /// (<see cref="McpToolGuideTests.EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads"/>)
+    /// covers the head, and Darling's own copy of this class pins the cross-SKU byte-identical head.</summary>
+    [Fact]
+    public void PlanCorrections_TailKeepsOriginalOpeningSentence_AndClosingUtcClaim()
+    {
+        var served = McpToolGuideTests.Served("get_plan_corrections");
+        Assert.Contains("Gets SQL Server automatic plan correction (APC) activity: the engine's FORCE_LAST_GOOD_PLAN recommendations and actions over the window, NEWEST CAPTURE FIRST", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("Every timestamp here is UTC, including valid_since / last_refresh / execute_action_initiated_time / revert_action_initiated_time", served.Tail!, StringComparison.Ordinal);
+    }
+}
