@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -108,6 +109,49 @@ WHERE server_id = $1 AND collection_time >= $2";
     /// deadlock difference rides in the same scan (summed, and per database for the fold) so the two families
     /// read the table once each rather than twice.
     /// </summary>
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): the TPS tile read — <see cref="DatabaseCounterWindowSql"/>'s per-collection
+    /// rated series, but grouped by target-local hour (<c>WindowTiles.LocalHourSql</c>) instead of collapsed to one
+    /// window row, and without the deadlock columns the ratio path alone needs. A NEW const, on purpose: the
+    /// deadlock-rate detector keeps reading <see cref="DatabaseCounterWindowSql"/> unchanged (that path never took
+    /// tiles — the design's ratio-family exclusion), so this text cannot drift into it. Binds <c>$4..$6</c> from
+    /// the analysis window's clock (design §1), same as every other tiled read here.
+    /// </summary>
+    public const string TpsTileWindowSql = @"
+WITH sampled AS (
+    SELECT database_name,
+           collection_time,
+           (xact_commit + xact_rollback) - LAG(xact_commit + xact_rollback) OVER series AS raw_xacts,
+           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER series))) AS interval_sec
+    FROM pg_database_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    WINDOW series AS (
+        PARTITION BY database_name
+        ORDER BY collection_time
+    )
+),
+per_collection AS (
+    SELECT collection_time,
+           SUM(GREATEST(raw_xacts, 0))::DOUBLE PRECISION AS xacts,
+           MAX(interval_sec) AS interval_sec
+    FROM sampled
+    WHERE raw_xacts IS NOT NULL
+    GROUP BY collection_time
+),
+rated AS (
+    SELECT collection_time, xacts / interval_sec AS tps
+    FROM per_collection
+    WHERE interval_sec > 0
+)
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(tps)                                                             AS peak_tps,
+       AVG(tps)                                                             AS avg_tps,
+       COUNT(*)                                                             AS tps_samples,
+       (array_agg(collection_time ORDER BY tps DESC))[1]                    AS peak_time
+FROM rated
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
+
     public const string DatabaseCounterWindowSql = @"
 WITH sampled AS (
     SELECT database_name,
@@ -170,6 +214,28 @@ SELECT MAX(total_sessions) AS peak_sessions,
 FROM per_collection";
 
     /// <summary>
+    /// #3653 A8 option B (lane L3a): <see cref="SessionWindowSql"/>'s tile twin — keeps the <c>per_collection</c>
+    /// CTE (the recipe's rule for a family that already has one) and groups the OUTER select by target-local hour
+    /// instead of collapsing it to one row. Binds <c>$4..$6</c> from the analysis window's clock.
+    /// </summary>
+    public const string SessionTileWindowSql = @"
+WITH per_collection AS (
+    SELECT collection_time, MAX(total_sessions)::DOUBLE PRECISION AS total_sessions
+    FROM pg_session_states
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    AND   total_sessions IS NOT NULL
+    GROUP BY collection_time
+)
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(total_sessions)                                  AS peak_sessions,
+       AVG(total_sessions)                                  AS avg_sessions,
+       COUNT(*)                                              AS sample_count,
+       (array_agg(collection_time ORDER BY total_sessions DESC))[1] AS peak_time
+FROM per_collection
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
+
+    /// <summary>
     /// The window's percent-of-configured-capacity (Aurora): peak / average / count of <c>acu_utilization_percent</c>
     /// (#3281 — the bandable quantity; rows without a capacity sample are not samples), the time of the peak, and
     /// beside it the peak RAW <c>cpu_percent</c> for the advice to state as "was a core pinned", never to grade.
@@ -186,6 +252,25 @@ SELECT MAX(acu_utilization_percent) AS peak_capacity_pct,
        COUNT(*) AS rows_in_window
 FROM pg_cpu_utilization
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3";
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): <see cref="CpuWindowSql"/>'s tile twin, one row per target-local hour. The
+    /// peak-time subquery becomes the per-tile <c>array_agg ORDER BY … DESC)[1]</c> the recipe names (replacing the
+    /// <c>ORDER BY … LIMIT 1</c> shape, which cannot be windowed per tile). Also carries the raw <c>cpu_percent</c>
+    /// peak PER TILE (design's "extra window scalars" rule) — the detector reports the worst tile's. Binds
+    /// <c>$4..$6</c> from the analysis window's clock.
+    /// </summary>
+    public const string CpuTileWindowSql = @"
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(acu_utilization_percent)                                          AS peak_capacity_pct,
+       AVG(acu_utilization_percent)                                          AS avg_capacity_pct,
+       COUNT(acu_utilization_percent)                                        AS sample_count,
+       (array_agg(collection_time ORDER BY acu_utilization_percent DESC))[1] AS peak_time,
+       MAX(cpu_percent)                                                      AS peak_cpu_percent
+FROM pg_cpu_utilization
+WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>
     /// The window's Aurora all-types wait rate per collection (CPU excluded; the three-state interval of the wait
@@ -216,6 +301,37 @@ SELECT MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval
        COUNT(*) FILTER (WHERE interval_sec > 0)                                          AS sample_count,
        COUNT(*)                                                                          AS collection_count
 FROM per_collection";
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): <see cref="WaitRateWindowSql"/>'s tile twin — keeps the <c>per_collection</c>
+    /// CTE (it already exposes <c>collection_time</c> under that name, so <c>WindowTiles.LocalHourSql</c> reads it
+    /// unchanged) and groups the OUTER select by target-local hour. Column order per tile mirrors the whole-window
+    /// read's ordinal contract (0 peak, 1 mean, 2 total, 3 sample count, 4 collection count), with <c>local_hour</c>
+    /// first so <c>WindowTiles.ReadTile</c> reads it at ordinal 0 like every other tiled read here. Binds
+    /// <c>$4..$6</c> from the analysis window's clock.
+    /// </summary>
+    public const string WaitRateTileWindowSql = @"
+WITH per_collection AS (
+    SELECT collection_time,
+           CAST(SUM(GREATEST(delta_wait_time_us, 0)) FILTER (WHERE lower(wait_type) IS DISTINCT FROM 'cpu') AS DOUBLE PRECISION) / 1000.0 AS total_wait_ms,
+           CASE WHEN MAX(sample_interval_seconds) IS NULL
+                THEN extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time))))
+                ELSE NULLIF(MAX(sample_interval_seconds), 0)
+           END AS interval_sec
+    FROM pg_wait_stats
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+    GROUP BY collection_time
+)
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS peak_ms_per_sec,
+       AVG(CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) AS mean_ms_per_sec,
+       SUM(coalesce(total_wait_ms, 0)) FILTER (WHERE interval_sec > 0)                    AS total_wait_ms,
+       COUNT(*) FILTER (WHERE interval_sec > 0)                                          AS sample_count,
+       COUNT(*)                                                                          AS collection_count,
+       (array_agg(collection_time ORDER BY (CASE WHEN interval_sec > 0 THEN coalesce(total_wait_ms, 0) / interval_sec END) DESC NULLS LAST))[1] AS peak_time
+FROM per_collection
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>The window's six largest (type, event) wait contributors by measured time, CPU excluded, named in
     /// the anomaly's <c>contrib_Type:event</c> metadata keys (the value is milliseconds) for the advice to lead with.</summary>
@@ -335,24 +451,58 @@ LIMIT 6";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgTps, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgTps, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            var window = await ReadDatabaseCounterWindowAsync(context);
-            if (window is null || window.Value.TpsSamples == 0) return;
-            var (peakTps, avgTps, tpsSamples, _, _, _, _) = window.Value;
+            var tiles = await ReadTilesAsync(TpsTileWindowSql, context, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakTps, avgTps,
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgTps), PgTpsFloor, PgTpsFallback, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            double peakTps, avgTps;
+            long tpsSamples;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+
+            if (tv is null)
+            {
+                /* Never-blind fallback (design §1): no tile scored, so today's whole-window path against the
+                   start bucket — unchanged from before this lane. */
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgTps, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                peakTps = whole.Peak;
+                avgTps = whole.Mean;
+                tpsSamples = whole.Samples;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakTps, avgTps,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgTps), PgTpsFloor, PgTpsFallback, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakTps = tv.Value.Tile.Peak;
+                avgTps = tv.Value.Tile.Mean;
+                tpsSamples = tv.Value.Tile.Samples;
+                if (!decision.Fire) return;
+            }
 
             /* measured: PgTpsFloor / PgTpsFallback carry the 2026-09-19 fleet lineage (AnomalyThresholds). */
             var metadata = ZScoreMetadata(baseline, decision, tpsSamples, barsMeasured: true);
             metadata["peak_tps"] = peakTps;
             metadata["avg_tps"] = avgTps;
+            if (tv is not null)
+                WindowTiles.AddTileMetadata(metadata, tv.Value, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {
@@ -383,29 +533,55 @@ LIMIT 6";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgSessionCount, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgSessionCount, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            using var cmd = WindowCommand(SessionWindowSql, connection, context);
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var tiles = await ReadTilesAsync(SessionTileWindowSql, context, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var peakSessions = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgSessions = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            if (windowSamples == 0) return;
-
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakSessions, avgSessions,
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgSessionCount), PgSessionCountFloor, PgSessionCountFallback, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            double peakSessions, avgSessions;
+            long windowSamples;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+
+            if (tv is null)
+            {
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgSessionCount, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                peakSessions = whole.Peak;
+                avgSessions = whole.Mean;
+                windowSamples = whole.Samples;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakSessions, avgSessions,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgSessionCount), PgSessionCountFloor, PgSessionCountFallback, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakSessions = tv.Value.Tile.Peak;
+                avgSessions = tv.Value.Tile.Mean;
+                windowSamples = tv.Value.Tile.Samples;
+                if (!decision.Fire) return;
+            }
 
             var metadata = ZScoreMetadata(baseline, decision, windowSamples);
             metadata["peak_sessions"] = peakSessions;
             metadata["avg_sessions"] = avgSessions;
+            if (tv is not null)
+                WindowTiles.AddTileMetadata(metadata, tv.Value, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {
@@ -433,35 +609,70 @@ LIMIT 6";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgCpu, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgCpu, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            using var cmd = WindowCommand(CpuWindowSql, connection, context);
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            /* CpuTileWindowSql's own SELECT list: local_hour(0), peak_capacity_pct(1), avg_capacity_pct(2),
+               sample_count(3), peak_time(4), peak_cpu_percent(5) — the raw cpu_percent window scalar rides
+               beside the tile read, per tile (design's "extra window scalars" rule: report the worst tile's). */
+            var (tiles, peakCpuPercentByTile) = await ReadCpuTilesAsync(context);
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
 
-            var peakCapacity = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgCapacity = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            var peakTime = reader.IsDBNull(3) ? (DateTime?)null : reader.GetDateTime(3);
-            var peakCpuPercent = reader.IsDBNull(4) ? (double?)null : Convert.ToDouble(reader.GetValue(4));
-            if (windowSamples == 0) return;
-
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakCapacity, avgCapacity,
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpu), PgCpuFloorPct, PgCpuFallbackPct, SigmaDisplayCap,
-                window: context.TimeRangeEnd - context.TimeRangeStart);
-            if (!decision.Fire) return;
+                window);
+
+            double peakCapacity, avgCapacity;
+            long windowSamples;
+            DateTime? peakTime;
+            double? peakCpuPercent;
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+
+            if (tv is null)
+            {
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgCpu, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                peakCapacity = whole.Peak;
+                avgCapacity = whole.Mean;
+                windowSamples = whole.Samples;
+                peakTime = whole.PeakTimeUtc;
+                /* The whole-window fallback's raw cpu_percent: the WORST tile's own value — there is no
+                   whole-window aggregate for a scalar WindowTiles.WholeWindow does not carry. */
+                peakCpuPercent = peakCpuPercentByTile.Count > 0 ? peakCpuPercentByTile.Values.Max() : null;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakCapacity, avgCapacity,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpu), PgCpuFloorPct, PgCpuFallbackPct, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakCapacity = tv.Value.Tile.Peak;
+                avgCapacity = tv.Value.Tile.Mean;
+                windowSamples = tv.Value.Tile.Samples;
+                peakTime = tv.Value.Tile.PeakTimeUtc;
+                peakCpuPercent = peakCpuPercentByTile.TryGetValue(tv.Value.Tile.LocalHour, out var raw) ? raw : (double?)null;
+                if (!decision.Fire) return;
+            }
 
             /* measured: PgCpuFloorPct / PgCpuFallbackPct carry the 2026-09-19 fleet lineage (AnomalyThresholds). */
             var metadata = ZScoreMetadata(baseline, decision, windowSamples, barsMeasured: true);
             metadata["peak_capacity_pct"] = peakCapacity;
             metadata["avg_capacity_pct"] = avgCapacity;
             metadata["peak_time_ticks"] = peakTime?.Ticks ?? 0;
-            if (peakCpuPercent is { } raw)
-                metadata["peak_cpu_percent"] = raw;
+            if (peakCpuPercent is { } rawPeak)
+                metadata["peak_cpu_percent"] = rawPeak;
+            if (tv is not null)
+                WindowTiles.AddTileMetadata(metadata, tv.Value, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {
@@ -762,6 +973,52 @@ LIMIT 6";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         return cmd;
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): runs one tiled window SQL and reads every row through
+    /// <see cref="WindowTiles.ReadTile"/> — local hour at ordinal 0 (every tiled const in this file selects it
+    /// first, per the recipe), then <paramref name="peakOrdinal"/>/<paramref name="meanOrdinal"/>/
+    /// <paramref name="samplesOrdinal"/>/<paramref name="peakTimeOrdinal"/> as that const's own SELECT list orders
+    /// them. <paramref name="peakTimeOrdinal"/> defaults to -1 (no peak time) for a family that has none.
+    /// </summary>
+    private async Task<List<WindowTile>> ReadTilesAsync(
+        string sql, AnalysisContext context, int peakOrdinal, int meanOrdinal, int samplesOrdinal, int peakTimeOrdinal = -1)
+    {
+        var tiles = new List<WindowTile>();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        using var cmd = WindowCommand(sql, connection, context);
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal, meanOrdinal, samplesOrdinal, peakTimeOrdinal));
+        }
+
+        return tiles;
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3a): <see cref="CpuTileWindowSql"/>'s own reader — it carries one extra window
+    /// scalar (<c>peak_cpu_percent</c>, ordinal 5) that <see cref="WindowTiles.ReadTile"/>'s fixed shape has no
+    /// slot for, so it is read alongside the tile and keyed by the tile's own <c>LocalHour</c> for the caller to
+    /// look up by whichever tile (worst-tile or whole-window fallback) ends up reporting.
+    /// </summary>
+    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> PeakCpuPercentByTile)> ReadCpuTilesAsync(AnalysisContext context)
+    {
+        var tiles = new List<WindowTile>();
+        var peakCpuPercentByTile = new Dictionary<DateTime, double>();
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        using var cmd = WindowCommand(CpuTileWindowSql, connection, context);
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var tile = WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
+            tiles.Add(tile);
+            if (!reader.IsDBNull(5))
+                peakCpuPercentByTile[tile.LocalHour] = Convert.ToDouble(reader.GetValue(5));
+        }
+
+        return (tiles, peakCpuPercentByTile);
     }
 
     /// <summary>The z-family metadata the shared scorer grades from (<c>FactScorer.ScoreAnomalyFact</c> /
