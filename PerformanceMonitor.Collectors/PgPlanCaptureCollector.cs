@@ -326,7 +326,9 @@ LIMIT 2000";
     /// (#4053 part b2), following <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>'s exact
     /// pattern — the same underlying parser, the same discard reasons (a resync fragment or a bad shape).
     /// </summary>
-    public const string CsvRecordsDiscardedMeasurement = PgLogEventsCollector.CsvRecordsDiscardedMeasurement;
+    /* A literal on purpose: the measurement-label gate (CollectorMeasurementSeamTests) reads labels only as
+       string-literal consts in the collector's own file. It must stay equal to PgLogEventsCollector's label. */
+    public const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
 
     /// <summary>
     /// The csvlog branch (#4053 part b2): <c>PgServerLogCsvParser.Parse</c> on the raw body — the same call
