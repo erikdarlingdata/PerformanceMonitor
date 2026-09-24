@@ -515,10 +515,13 @@ public sealed class DarlingAnomalyBaselineTests
         var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
         var liteCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs"));
 
+        // #3653 B: pg picks up L2b's four (batch, sessions, query, memory) before Lite's mirror (L4b) lands,
+        // so pg's total legitimately runs ahead of lite's for a while -- this census only pins the FOUR this
+        // lane added (cpu, wait, io-read, io-write), not a claim that the two files carry the same total.
         foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
         {
             var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateTiles\(");
-            Assert.True(calls.Count == 4, $"{name}: expected 4 EvaluateTiles calls (cpu, wait, io-read, io-write), found {calls.Count}");
+            Assert.True(calls.Count >= 4, $"{name}: expected at least 4 EvaluateTiles calls (cpu, wait, io-read, io-write), found {calls.Count}");
         }
 
         // CPU: byte-identical.
