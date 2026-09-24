@@ -1134,11 +1134,12 @@ public sealed class DarlingCollectorRunner
                     : null;
         }
 
-        /* #4053 part a1b: pg_log_events alone — the deadlock and plan-capture collectors still read only the
-           stderr tail, unchanged. Checked on the same connection, before BuildQuery decides which tail this
-           collector opens with, the same shape as the grant check just above. RoutedCollectors (#4053 review
-           L1 round 2) is the single source for this set, shared with the invalidation arms in DarlingWorker, so
-           the probe and the drop can never disagree about which collectors this cache answers for. */
+        /* #4053 parts a1b and b1: the collectors in RoutedCollectors read the csvlog tail once this is on (each
+           collector's own change is in its collector file). Checked on the same
+           connection, before BuildQuery decides which tail this collector opens with, the same shape as the
+           grant check just above. RoutedCollectors (#4053 review L1 round 2) is the single source for this
+           set, shared with the invalidation arms in DarlingWorker, so the probe and the drop can never
+           disagree about which collectors this cache answers for. */
         if (server.Target.Engine == CollectorTargetEngine.PostgreSql
             && PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
         {
