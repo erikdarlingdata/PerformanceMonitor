@@ -34,7 +34,7 @@ namespace Darling.Tests;
 ///
 /// <para>The gates read <c>context.Connection.RemoteIpAddress</c>, so every request goes through
 /// <see cref="TestServer.SendAsync"/> (which allows setting it) rather than through
-/// <see cref="TestServer.CreateClient"/> (which does not expose it).</para>
+/// <c>TestServer.CreateClient</c> (which does not expose it).</para>
 /// </summary>
 public sealed class DarlingWebHostGateLiveTests
 {
