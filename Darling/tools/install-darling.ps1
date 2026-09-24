@@ -604,7 +604,14 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         # Read & Execute on the root only - the service still has to run its own exe and load its own DLLs -
         # not Modify: that goes only on the specific directories below, so a write anywhere else in the tree
         # is a stranger's, even from the service account itself.
-        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)RX")
+        #
+        # /grant:r, not /grant (#4052 round 2): plain /grant ADDS to whatever explicit ACE the SID already
+        # carries on $root - it never removes one. An install locked before this fix left an explicit
+        # (OI)(CI)M ACE for the service on $root (#4038's shape), and re-running the OLD /grant against that
+        # tree would only have ADDED (OI)(CI)RX beside the surviving Modify, not replaced it - Modify would
+        # have outlived every upgrade. /grant:r replaces the service SID's own explicit grant outright, so
+        # this one call is what actually narrows a tree #4038 (or an even older build) widened.
+        $grants += @('/grant:r', "*$($serviceSid.Value):(OI)(CI)RX")
     }
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
