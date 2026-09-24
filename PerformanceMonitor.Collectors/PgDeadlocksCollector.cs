@@ -273,7 +273,7 @@ LIMIT 500";
                is never escaped text and must be compared to the literal constant first. */
             if (context.PgReadBinaryFileGranted)
             {
-                firstColumn = PgBinaryTailText.UnescapeAndDecode(firstColumn);
+                firstColumn = PgBinaryTailText.UnescapeAndDecode(firstColumn, context.PgLogEncoding ?? System.Text.Encoding.UTF8);
             }
 
             /* One column, the candidate's text (#4005). Reaching the parser is what makes the stamp's meaning
