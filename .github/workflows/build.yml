@@ -994,18 +994,22 @@ jobs:
         run: |
           $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
 
-          function Start-LogFormatCluster($dataDir, $logFile, $port, $extraConfLines) {
-            & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
+          # clusterDataDir, not dataDir: CiClusterWorkerSizingTests' ConfAppend regex is keyed on the
+          # literal path "$dataDir\postgresql.conf" the 5541 cluster's step writes, and these clusters'
+          # own worker counts (8/16, not the hypertable-derived 74/85) would fail that guard as drift if
+          # this function reused the same variable name.
+          function Start-LogFormatCluster($clusterDataDir, $logFile, $port, $extraConfLines) {
+            & "$bin\initdb.exe" -D $clusterDataDir -U darling -A trust --encoding=UTF8
             if ($LASTEXITCODE -ne 0) { throw "initdb failed for port $port ($LASTEXITCODE)" }
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "port = $port"
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "max_worker_processes = 16"
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "deadlock_timeout = '100ms'"
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "compute_query_id = on"
-            Add-Content -Path "$dataDir\postgresql.conf" -Value "log_min_messages = notice"
-            foreach ($line in $extraConfLines) { Add-Content -Path "$dataDir\postgresql.conf" -Value $line }
-            & "$bin\pg_ctl.exe" -D $dataDir -l $logFile -w start
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "port = $port"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "max_worker_processes = 16"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "deadlock_timeout = '100ms'"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "compute_query_id = on"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "log_min_messages = notice"
+            foreach ($line in $extraConfLines) { Add-Content -Path "$clusterDataDir\postgresql.conf" -Value $line }
+            & "$bin\pg_ctl.exe" -D $clusterDataDir -l $logFile -w start
             if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed for port $port ($LASTEXITCODE)" }
             & "$bin\createdb.exe" -h 127.0.0.1 -p $port -U darling darling
             if ($LASTEXITCODE -ne 0) { throw "createdb failed for port $port ($LASTEXITCODE)" }
