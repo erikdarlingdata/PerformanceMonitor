@@ -252,7 +252,8 @@ FROM per_collection";
                    the gate, so a statement without an own-normal is never handed an absolute grade silently. */
                 var keyedDecision = AnomalyGate.EvaluateZScore(
                     keyed, candidate.PeakMeanMs, candidate.AvgMeanMs,
-                    DefaultDeviationThreshold, HeavyTailModifiedZThreshold, PgStatementMeanMsFloor, double.PositiveInfinity, SigmaDisplayCap);
+                    DefaultDeviationThreshold, HeavyTailModifiedZThreshold, PgStatementMeanMsFloor, double.PositiveInfinity, SigmaDisplayCap,
+                    window: context.TimeRangeEnd - context.TimeRangeStart);
 
                 if (!keyedDecision.Fire)
                 {
@@ -364,7 +365,8 @@ FROM per_collection";
            robust cutoff is used by reference as the shared query-duration cutoff, not re-declared. */
         var decision = AnomalyGate.EvaluateZScore(
             baseline, peakMeanMs, avgMeanMs,
-            DefaultDeviationThreshold, HeavyTailModifiedZThreshold, PgStatementMeanMsFloor, PgStatementMeanMsFallback, SigmaDisplayCap);
+            DefaultDeviationThreshold, HeavyTailModifiedZThreshold, PgStatementMeanMsFloor, PgStatementMeanMsFallback, SigmaDisplayCap,
+            window: context.TimeRangeEnd - context.TimeRangeStart);
         if (!decision.Fire) return;
 
         /* unmeasured: both bars — the helper's default stamp, threshold_lineage = 0. */

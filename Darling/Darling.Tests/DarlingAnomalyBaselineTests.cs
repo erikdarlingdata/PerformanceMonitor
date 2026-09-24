@@ -447,7 +447,7 @@ public sealed class DarlingAnomalyBaselineTests
             /* The robust arm: ONE pair call, the wait family's cutoff as the modified-z cutoff and its one bar as
                the floor — peak AND mean must clear 5.0, the 250 ms/sec floor stays on the peak inside the gate. */
             Assert.Matches(
-                @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*avgRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap\)",
+                @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*avgRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
                 code);
 
             /* The inline peak-only gate is gone. */

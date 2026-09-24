@@ -350,7 +350,8 @@ AND   collection_time >= $2 AND collection_time < $3";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakCpu, avgCpu,
-                GetDeviationThreshold(MetricNames.Cpu), ModifiedZThresholdFor(MetricNames.Cpu, GetDeviationThreshold(MetricNames.Cpu)), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap);
+                GetDeviationThreshold(MetricNames.Cpu), ModifiedZThresholdFor(MetricNames.Cpu, GetDeviationThreshold(MetricNames.Cpu)), CpuFloorPct, CpuFallbackPct, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -497,7 +498,8 @@ FROM per_collection";
                 ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
                 var decision = AnomalyGate.EvaluateZScore(
                     baseline, peakRate, avgRate,
-                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, WaitProfileFallbackMsPerSec, WaitProfileFallbackMsPerSec, SigmaDisplayCap);
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, WaitProfileFallbackMsPerSec, WaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                    window: context.TimeRangeEnd - context.TimeRangeStart);
                 if (!decision.Fire) return;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
@@ -740,7 +742,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             // Read latency anomaly — the reported value and sigma are the PEAK's, the pair decides (#3653).
             var readDecision = AnomalyGate.EvaluateZScore(
                 baseline, peakReadLat, avgReadLat,
-                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
+                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), ReadLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (readDecision.Fire)
             {
                 var metadata = new Dictionary<string, double>
@@ -772,7 +775,8 @@ AND   (delta_reads > 0 OR delta_writes > 0)";
             // Write latency anomaly
             var writeDecision = AnomalyGate.EvaluateZScore(
                 baseline, peakWriteLat, avgWriteLat,
-                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap);
+                ioThreshold, ModifiedZThresholdFor(MetricNames.IoLatency, ioThreshold), WriteLatencyFloorMs, IoLatencyFallbackMs, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (writeDecision.Fire)
             {
                 var metadata = new Dictionary<string, double>
@@ -855,7 +859,8 @@ AND   sample_interval_seconds > 0";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakBatch, avgBatch,
-                GetDeviationThreshold(MetricNames.BatchRequests), ModifiedZThresholdFor(MetricNames.BatchRequests, GetDeviationThreshold(MetricNames.BatchRequests)), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap);
+                GetDeviationThreshold(MetricNames.BatchRequests), ModifiedZThresholdFor(MetricNames.BatchRequests, GetDeviationThreshold(MetricNames.BatchRequests)), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -936,7 +941,8 @@ FROM per_collection";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakConnections, avgConnections,
-                GetDeviationThreshold(MetricNames.SessionCount), ModifiedZThresholdFor(MetricNames.SessionCount, GetDeviationThreshold(MetricNames.SessionCount)), SessionCountFloor, SessionCountFallback, SigmaDisplayCap);
+                GetDeviationThreshold(MetricNames.SessionCount), ModifiedZThresholdFor(MetricNames.SessionCount, GetDeviationThreshold(MetricNames.SessionCount)), SessionCountFloor, SessionCountFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -1020,7 +1026,8 @@ FROM per_collection";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakElapsed, avgElapsed,
-                GetDeviationThreshold(MetricNames.QueryDuration), ModifiedZThresholdFor(MetricNames.QueryDuration, GetDeviationThreshold(MetricNames.QueryDuration)), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap);
+                GetDeviationThreshold(MetricNames.QueryDuration), ModifiedZThresholdFor(MetricNames.QueryDuration, GetDeviationThreshold(MetricNames.QueryDuration)), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>
@@ -1098,7 +1105,8 @@ AND   target_server_memory_mb > 0";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakPressure, avgPressure,
-                GetDeviationThreshold(MetricNames.Memory), ModifiedZThresholdFor(MetricNames.Memory, GetDeviationThreshold(MetricNames.Memory)), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap);
+                GetDeviationThreshold(MetricNames.Memory), ModifiedZThresholdFor(MetricNames.Memory, GetDeviationThreshold(MetricNames.Memory)), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             var metadata = new Dictionary<string, double>

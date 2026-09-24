@@ -650,7 +650,8 @@ LIMIT 6";
                    for why the same cutoff is passed twice and the same bar as floor and fallback. */
                 var decision = AnomalyGate.EvaluateZScore(
                     baseline, peakRate, meanRate,
-                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap);
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                    window: context.TimeRangeEnd - context.TimeRangeStart);
                 if (!decision.Fire) return;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
