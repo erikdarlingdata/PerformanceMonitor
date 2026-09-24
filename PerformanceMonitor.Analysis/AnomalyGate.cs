@@ -148,6 +148,12 @@ public static class AnomalyGate
     /// quantities and the parameter order (baseline frame first, then the two window statistics) keeps
     /// them apart at every call site. <c>Sigma</c> is the peak's; <c>MeanSigma</c> the window mean's.
     /// </summary>
+    /// <param name="window">#3653 A8 slice 1: the analysis window's length (<c>context.TimeRangeEnd -
+    /// context.TimeRangeStart</c>). <c>null</c> (the default) keeps today's behaviour exactly — the peak clause
+    /// judges against <paramref name="deviationThreshold"/> unchanged. When supplied, the PEAK clause alone is
+    /// judged against the Šidák-corrected <c>AnomalyThresholds.NAwarePeakCutoff(deviationThreshold, window)</c>
+    /// instead — a no-op at the 4-hour reference window or shorter (class remarks). The mean clause and the
+    /// magnitude floor are unaffected either way.</param>
     public static ZDecision EvaluateZScore(
         double mean,
         double effectiveStdDev,
@@ -158,9 +164,10 @@ public static class AnomalyGate
         double magnitudeFloor,
         double absoluteFallbackBar,
         double sigmaCap,
-        bool isZeroHistory = false)
+        bool isZeroHistory = false,
+        TimeSpan? window = null)
         => Decide(mean, effectiveStdDev, isTrustworthy, peak, windowMean,
-            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, isZeroHistory);
+            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, isZeroHistory, window);
 
     /// <summary>
     /// #1743: the robust-first gate on the window PEAK alone — the pre-#3653 verdict, kept
@@ -200,6 +207,10 @@ public static class AnomalyGate
     /// classical pair gate at <paramref name="classicalDeviationThreshold"/>. The trust/fallback rule
     /// per statistic is the class remarks'. <c>Sigma</c> is the peak's; <c>MeanSigma</c> the mean's.
     /// </summary>
+    /// <param name="window">#3653 A8 slice 1: see the classical pair overload's remarks — <c>null</c> keeps
+    /// today's behaviour; supplied, it Šidák-corrects the peak clause only, on whichever frame
+    /// (<paramref name="modifiedZThreshold"/> or <paramref name="classicalDeviationThreshold"/>) the bucket
+    /// actually degrades to.</param>
     public static ZDecision EvaluateZScore(
         BaselineBucket baseline,
         double peak,
@@ -208,9 +219,10 @@ public static class AnomalyGate
         double modifiedZThreshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        TimeSpan? window = null)
         => DecideRobustFirst(baseline, peak, windowMean,
-            classicalDeviationThreshold, modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+            classicalDeviationThreshold, modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, window);
 
     private static ZDecision DecideRobustFirst(
         BaselineBucket baseline,
@@ -220,14 +232,15 @@ public static class AnomalyGate
         double modifiedZThreshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        TimeSpan? window = null)
     {
         var robustSigma = baseline.EffectiveRobustSigma;
         if (robustSigma <= 0)
         {
             return Decide(
                 baseline.Mean, baseline.EffectiveStdDev, baseline.IsTrustworthy, peak, windowMean,
-                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory);
+                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window);
         }
 
         /* A zero-history bucket cannot reach here: IsZeroHistory requires Mad <= 0, which is EffectiveRobustSigma
@@ -235,7 +248,7 @@ public static class AnomalyGate
            does have). The flag is threaded anyway so the two calls read the same and neither can silently drop it. */
         return Decide(
             baseline.Median, robustSigma, baseline.IsTrustworthy, peak, windowMean,
-            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory);
+            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window);
     }
 
     /// <summary>
@@ -256,8 +269,15 @@ public static class AnomalyGate
         double magnitudeFloor,
         double absoluteFallbackBar,
         double sigmaCap,
-        bool isZeroHistory = false)
+        bool isZeroHistory = false,
+        TimeSpan? window = null)
     {
+        // #3653 A8 slice 1: the Sidák-corrected peak cutoff, applied to the PEAK clause only (the mean clause
+        // below keeps judging against `threshold` unchanged — it is already sample-count-neutral, see the
+        // AnomalyThresholds.NAwarePeakCutoff and class remarks). `window` null, or at/under the 4-hour reference
+        // window, returns `threshold` itself — byte-identical to the pre-#3653/pre-A8 verdict.
+        var peakThreshold = window is { } w ? AnomalyThresholds.NAwarePeakCutoff(threshold, w) : threshold;
+
         /* #3691 lane 41: the ZERO-HISTORY arm, ONE `if` at the very top, so every verdict for every other
            baseline shape is structurally untouched — nothing runs before this test, nothing below it changed.
 
@@ -314,10 +334,13 @@ public static class AnomalyGate
             // dispersion > 0 is guaranteed when trustworthy (IsTrustworthy requires EffectiveStdDev > 0;
             // the robust frame arrives here only when EffectiveRobustSigma > 0).
             var peakDeviation = (peak - center) / dispersion;
-            var peakClears = peakDeviation >= threshold && peak >= magnitudeFloor;
-            // #3653: the mean's deviation clears the SAME cutoff; the floor stays on the peak (class remarks).
+            // #3653 A8 slice 1: the peak clears the (possibly N-aware-raised) peakThreshold; the floor is
+            // unchanged. ThresholdUsed carries peakThreshold, not threshold, so fire_threshold reports what was
+            // actually applied to the peak (class remarks; the scorer anchors its severity ramp here).
+            var peakClears = peakDeviation >= peakThreshold && peak >= magnitudeFloor;
+            // #3653: the mean's deviation clears the SAME (un-corrected) cutoff; the floor stays on the peak.
             var meanClears = windowMean is null || (windowMean.Value - center) / dispersion >= threshold;
-            return new ZDecision(peakClears && meanClears, Math.Min(peakDeviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: threshold, MeanSigma: meanSigma);
+            return new ZDecision(peakClears && meanClears, Math.Min(peakDeviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: peakThreshold, MeanSigma: meanSigma);
         }
 
         // Untrustworthy baseline → absolute-threshold fallback (NOT silence). The exceedance (>= 1.0 on a

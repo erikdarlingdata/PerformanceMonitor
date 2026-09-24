@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+
 namespace PerformanceMonitor.Analysis.Baselines;
 
 /// <summary>
@@ -454,4 +456,180 @@ public static class AnomalyThresholds
     /// unmeasured: chosen, not measured — the same day-old table as the floor; calibrate against the upper tail of the
     /// per-collection growth rate before the next release.</summary>
     public const double PgDatabaseGrowthFallbackBytesPerDay = 2.0 * 1024.0 * 1024.0 * 1024.0;  // 2 GiB of growth per day
+
+    // #3653 A8 slice 1: the N-aware (Šidák) peak cutoff — see AnomalyGate class remarks for the pair gate this feeds.
+
+    /// <summary>The reference window length the per-window peak cutoffs are anchored to: the 4-hour scheduled pass,
+    /// which stays byte-identical (see <see cref="NAwarePeakCutoff"/>). Every longer <c>as_of</c> window raises its
+    /// peak cutoff relative to this one; no window shorter than it lowers its cutoff (the rule clamps at k — see
+    /// the method remarks).</summary>
+    public static readonly TimeSpan NAwareReferenceWindow = TimeSpan.FromHours(4);
+
+    /// <summary>
+    /// #3653 A8 slice 1: the Šidák-corrected peak cutoff for a window of length <paramref name="window"/>, given the
+    /// cutoff <paramref name="k"/> the family already uses at the 4-hour reference window (classical 2.0, robust
+    /// 3.5, heavy-tail 5.0). The peak of N independent per-sample draws each with per-sample exceedance
+    /// rate 1 − Φ(k) has a WINDOW exceedance rate of 1 − Φ(k)^N under the null; holding that window-level rate fixed
+    /// across window lengths (rather than holding k fixed) is exactly the Šidák correction, and because the
+    /// per-sample tail rate cancels out of the ratio, N_ref⁄N reduces to the ratio of window LENGTHS — no sample
+    /// count is needed at any call site:
+    /// </summary>
+    /// <remarks>
+    /// k_W = Φ⁻¹(1 − (1 − Φ(k)) · r), r = min(1, W_ref ⁄ W).
+    ///
+    /// <para>At <paramref name="window"/> ≤ <see cref="NAwareReferenceWindow"/> (r = 1), this returns <paramref name="k"/>
+    /// ITSELF — the same <c>double</c>, with no Φ⁻¹(Φ(k)) round trip through the rational approximations below — so the
+    /// 4-hour scheduled pass, and anything shorter, is byte-identical to the pre-#3653 verdict. Longer windows raise
+    /// the cutoff (r &lt; 1 shrinks the tail probability the inverse-normal is asked for, which raises the quantile).
+    /// </para>
+    /// <para>Applies to the PEAK clause only (<c>AnomalyGate.Decide</c>) — the mean clause and the #1486 magnitude
+    /// floor are unchanged; see the design note for #3653 A8 for why the mean is already sample-count-neutral and
+    /// the peak was not.</para>
+    /// </remarks>
+    /// <param name="k">The family's existing cutoff at the 4-hour reference window — classical, robust, or
+    /// heavy-tail; whichever tail mapping the caller's frame already uses.</param>
+    /// <param name="window">The analysis window's length (<c>context.TimeRangeEnd - context.TimeRangeStart</c> at
+    /// every call site).</param>
+    internal static double NAwarePeakCutoff(double k, TimeSpan window)
+    {
+        if (window <= NAwareReferenceWindow)
+            return k;
+
+        var r = NAwareReferenceWindow.Ticks / (double)window.Ticks;
+        var tailAtReference = NormalUpperTail(k);
+        return InverseNormalCdf(1.0 - tailAtReference * r);
+    }
+
+    /// <summary>1 − Φ(x) — the standard normal's upper-tail probability, via <c>0.5 · erfc(x / √2)</c> so the
+    /// small-tail case (large x, the only case this cutoff ever asks for) stays accurate instead of subtracting two
+    /// numbers close to 1.</summary>
+    private static double NormalUpperTail(double x) => 0.5 * Erfc(x / Math.Sqrt(2.0));
+
+    /// <summary>The complementary error function, Cody's rational-Chebyshev approximation (W. J. Cody, "Rational
+    /// Chebyshev Approximations for the Error Function", Math. Comp. 23 (1969), the double-precision constants from
+    /// the reference CALERF/DERFC transcription at netlib.org/specfun/erf) — accurate to about 18 significant
+    /// decimal digits over the whole real line, restricted here to the JINT=1 (erfc) branch, the only one this file
+    /// needs.</summary>
+    private static double Erfc(double x)
+    {
+        var y = Math.Abs(x);
+
+        if (y <= 0.46875)
+        {
+            // Fortran A(1..5)/B(1..4): XNUM = A(5)*YSQ; DO I=1,3 XNUM=(XNUM+A(I))*YSQ; RESULT = X*(XNUM+A(4))/(XDEN+B(4));
+            // ERF(X) for |X| <= 0.46875, then ERFC = 1 - ERF.
+            var ysq = y > 1.11e-16 ? y * y : 0.0;
+            var xnum = ErfA[4] * ysq;
+            var xden = ysq;
+            for (var i = 0; i < 3; i++)
+            {
+                xnum = (xnum + ErfA[i]) * ysq;
+                xden = (xden + ErfB[i]) * ysq;
+            }
+            var result = x * (xnum + ErfA[3]) / (xden + ErfB[3]);
+            return 1.0 - result;
+        }
+
+        if (y <= 4.0)
+        {
+            // Fortran C(1..9)/D(1..8): XNUM = C(9)*Y; DO I=1,7 ...; RESULT = (XNUM+C(8))/(XDEN+D(8)).
+            var xnum = ErfcC[8] * y;
+            var xden = y;
+            for (var i = 0; i < 7; i++)
+            {
+                xnum = (xnum + ErfcC[i]) * y;
+                xden = (xden + ErfcD[i]) * y;
+            }
+            var result = (xnum + ErfcC[7]) / (xden + ErfcD[7]);
+            var ysqTrunc = Math.Truncate(y * 16.0) / 16.0;
+            var del = (y - ysqTrunc) * (y + ysqTrunc);
+            result = Math.Exp(-ysqTrunc * ysqTrunc) * Math.Exp(-del) * result;
+            return x < 0 ? 2.0 - result : result;
+        }
+
+        {
+            // XBIG: erfc underflows to 0 (double precision) for y at or beyond this.
+            if (y >= 26.543)
+                return x < 0 ? 2.0 : 0.0;
+
+            // Fortran P(1..6)/Q(1..5): XNUM = P(6)*YSQ; DO I=1,4 ...; RESULT = YSQ*(XNUM+P(5))/(XDEN+Q(5)); RESULT=(SQRPI-RESULT)/Y.
+            var ysqInv = 1.0 / (y * y);
+            var xnum = ErfcP[5] * ysqInv;
+            var xden = ysqInv;
+            for (var i = 0; i < 4; i++)
+            {
+                xnum = (xnum + ErfcP[i]) * ysqInv;
+                xden = (xden + ErfcQ[i]) * ysqInv;
+            }
+            var partial = ysqInv * (xnum + ErfcP[4]) / (xden + ErfcQ[4]);
+            var result = (SqrtPiInv - partial) / y;
+            var ysqTrunc = Math.Truncate(y * 16.0) / 16.0;
+            var del = (y - ysqTrunc) * (y + ysqTrunc);
+            result = Math.Exp(-ysqTrunc * ysqTrunc) * Math.Exp(-del) * result;
+            return x < 0 ? 2.0 - result : result;
+        }
+    }
+
+    private const double SqrtPiInv = 5.6418958354775628695e-1;
+
+    // Fortran DATA A/1..5/, B/1..4/ (erf, |x| <= 0.46875).
+    private static readonly double[] ErfA = { 3.16112374387056560e0, 1.13864154151050156e2, 3.77485237685302021e2, 3.20937758913846947e3, 1.85777706184603153e-1 };
+    private static readonly double[] ErfB = { 2.36012909523441209e1, 2.44024637934444173e2, 1.28261652607737228e3, 2.84423683343917062e3 };
+
+    // Fortran DATA C/1..9/, D/1..8/ (erfc, 0.46875 < |x| <= 4.0).
+    private static readonly double[] ErfcC = { 5.64188496988670089e-1, 8.88314979438837594e0, 6.61191906371416295e1, 2.98635138197400131e2, 8.81952221241769090e2, 1.71204761263407058e3, 2.05107837782607147e3, 1.23033935479799725e3, 2.15311535474403846e-8 };
+    private static readonly double[] ErfcD = { 1.57449261107098347e1, 1.17693950891312499e2, 5.37181101862009858e2, 1.62138957456669019e3, 3.29079923573345963e3, 4.36261909014324716e3, 3.43936767414372164e3, 1.23033935480374942e3 };
+
+    // Fortran DATA P/1..6/, Q/1..5/ (erfc, |x| > 4.0).
+    private static readonly double[] ErfcP = { 3.05326634961232344e-1, 3.60344899949804439e-1, 1.25781726111229246e-1, 1.60837851487422766e-2, 6.58749161529837803e-4, 1.63153871373020978e-2 };
+    private static readonly double[] ErfcQ = { 2.56852019228982242e0, 1.87295284992346047e0, 5.27905102951428412e-1, 6.05183413124413191e-2, 2.33520497626869185e-3 };
+
+    /// <summary>
+    /// #3653 A8 slice 1: the standard-normal inverse CDF (probit), Wichura's Algorithm AS 241, PPND16 (M. J.
+    /// Wichura, "Algorithm AS 241: The Percentage Points of the Normal Distribution", Appl. Statist. 37(3), 1988,
+    /// 477–484) — accurate to about 1 part in 10^16 over the whole open interval (0, 1). Internal, not private: the
+    /// unit tests pin its own accuracy directly (Φ⁻¹(0.975), Φ⁻¹(1e-10)) before trusting <see cref="NAwarePeakCutoff"/>
+    /// on top of it.
+    /// </summary>
+    internal static double InverseNormalCdf(double p)
+    {
+        var q = p - 0.5;
+        if (Math.Abs(q) <= 0.425)
+        {
+            var r = 0.180625 - q * q;
+            var num = (((((((PpndA[7] * r + PpndA[6]) * r + PpndA[5]) * r + PpndA[4]) * r + PpndA[3]) * r + PpndA[2]) * r + PpndA[1]) * r + PpndA[0]);
+            var den = (((((((PpndB[7] * r + PpndB[6]) * r + PpndB[5]) * r + PpndB[4]) * r + PpndB[3]) * r + PpndB[2]) * r + PpndB[1]) * r + 1.0);
+            return q * num / den;
+        }
+
+        var rr = q < 0 ? p : 1.0 - p;
+        if (rr <= 0.0)
+            return q < 0 ? double.NegativeInfinity : double.PositiveInfinity;
+
+        rr = Math.Sqrt(-Math.Log(rr));
+        double ret;
+        if (rr <= 5.0)
+        {
+            rr -= 1.6;
+            var num = (((((((PpndC[7] * rr + PpndC[6]) * rr + PpndC[5]) * rr + PpndC[4]) * rr + PpndC[3]) * rr + PpndC[2]) * rr + PpndC[1]) * rr + PpndC[0]);
+            var den = (((((((PpndD[7] * rr + PpndD[6]) * rr + PpndD[5]) * rr + PpndD[4]) * rr + PpndD[3]) * rr + PpndD[2]) * rr + PpndD[1]) * rr + 1.0);
+            ret = num / den;
+        }
+        else
+        {
+            rr -= 5.0;
+            var num = (((((((PpndE[7] * rr + PpndE[6]) * rr + PpndE[5]) * rr + PpndE[4]) * rr + PpndE[3]) * rr + PpndE[2]) * rr + PpndE[1]) * rr + PpndE[0]);
+            var den = (((((((PpndF[7] * rr + PpndF[6]) * rr + PpndF[5]) * rr + PpndF[4]) * rr + PpndF[3]) * rr + PpndF[2]) * rr + PpndF[1]) * rr + 1.0);
+            ret = num / den;
+        }
+
+        return q < 0 ? -ret : ret;
+    }
+
+    private static readonly double[] PpndA = { 3.3871328727963666080e0, 1.3314166789178437745e2, 1.9715909503065514427e3, 1.3731693765509461125e4, 4.5921953931549871457e4, 6.7265770927008700853e4, 3.3430575583588128105e4, 2.5090809287301226727e3 };
+    private static readonly double[] PpndB = { 0.0, 4.2313330701600911252e1, 6.8718700749205790830e2, 5.3941960214247511077e3, 2.1213794301586595867e4, 3.9307895800092710610e4, 2.8729085735721942674e4, 5.2264952788528545610e3 };
+    private static readonly double[] PpndC = { 1.42343711074968357734e0, 4.63033784615654529590e0, 5.76949722146069140550e0, 3.64784832476320460504e0, 1.27045825245236838258e0, 2.41780725177450611770e-1, 2.27238449892691845833e-2, 7.74545014278341407640e-4 };
+    private static readonly double[] PpndD = { 0.0, 2.05319162663775882187e0, 1.67638483018380384940e0, 6.89767334985100004550e-1, 1.48103976427480074590e-1, 1.51986665636164571966e-2, 5.47593808499534494600e-4, 1.05075007164441684324e-9 };
+    private static readonly double[] PpndE = { 6.65790464350110377720e0, 5.46378491116411436990e0, 1.78482653991729133580e0, 2.96560571828504891230e-1, 2.65321895265761230930e-2, 1.24266094738807843860e-3, 2.71155556874348757815e-5, 2.01033439929228813265e-7 };
+    private static readonly double[] PpndF = { 0.0, 5.99832206555887937690e-1, 1.36929880922735805310e-1, 1.48753612908506148525e-2, 7.86869131145613259100e-4, 1.84631831751005468180e-5, 1.42151175831644588870e-7, 2.04426310338993978564e-15 };
 }
