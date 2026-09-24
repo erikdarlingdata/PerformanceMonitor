@@ -310,7 +310,7 @@ public sealed class McpToolGuideHeadsPgBKernelXminBloatTests
         ("get_pg_kernel_stats", "per-interval deltas needing a second to difference"),
         ("get_pg_xmin_horizon", "EVERY capture in the window, not just captures with a holder"),
         ("get_pg_xmin_horizon", "no_holder: captured, found nothing - all-clear"),
-        ("get_pg_xmin_horizon", "unavailable: never captured"),
+        ("get_pg_xmin_horizon", "unavailable: no capture in the window"),
         ("get_pg_xmin_horizon", "feeds get_pg_wraparound_risk"),
         ("get_pg_table_bloat", "ESTIMATE, NOT MEASUREMENT"),
         ("get_pg_table_bloat", "SUPPRESSED (nulled), not shown"),
