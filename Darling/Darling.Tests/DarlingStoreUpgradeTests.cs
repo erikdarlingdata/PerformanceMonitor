@@ -904,7 +904,42 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
-    /// #3908's rollback guard, on the swap path. After the swap, this release's own stamp names the package it
+    /// #4052: the narrowed install-root grant leaves the service Modify on <c>pg-runtime-prev</c> itself but
+    /// only Read &amp; Execute on the root above it, so a delete-then-recreate of the folder can delete and then
+    /// fail to recreate. The rescue must EMPTY the folder in place rather than delete and recreate it — this
+    /// proves the folder surviving the rescue (same folder, not a new one) by comparing its creation time
+    /// before and after.
+    /// </summary>
+    [Fact]
+    public async Task RuntimeAdvance_LeavesPgRuntimePrevInPlace_RatherThanDeletingAndRecreatingIt()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-prev-inplace-");
+        try
+        {
+            var host = PlantHostAwaitingARuntimeSwap(root.FullName);
+
+            var previousRoot = DarlingStoreUpgrade.PreviousRuntimeRootFor(host.RuntimeRoot);
+            var staleFile = Path.Combine(previousRoot, "pgsql", "bin", "postgres.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(staleFile)!);
+            File.WriteAllText(staleFile, "previous runtime");
+            var creationTimeBefore = Directory.GetCreationTimeUtc(previousRoot);
+
+            var advance = await new DarlingStoreUpgrade(new CapturingLogger()).TryAdvanceRuntimeAsync(
+                host.RuntimeRoot, host.Package, host.DataDirectory,
+                (_, _) => Task.FromResult(false),
+                TestContext.Current.CancellationToken);
+
+            Assert.True(advance.Swapped);
+            Assert.True(Directory.Exists(previousRoot));
+            Assert.Equal(creationTimeBefore, Directory.GetCreationTimeUtc(previousRoot));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>#3908's rollback guard, on the swap path. After the swap, this release's own stamp names the package it
     /// installed, and the legacy file names the package every 3.3 to 3.8 release shipped. Each of those releases
     /// returns early when that file equals its own package, so a rollback to one keeps this runtime instead of
     /// swapping in one that cannot load the store. The legacy value is never this release's own hash.
