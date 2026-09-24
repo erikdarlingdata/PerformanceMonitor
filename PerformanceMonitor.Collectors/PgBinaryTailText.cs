@@ -19,14 +19,16 @@ public static class PgBinaryTailText
 {
     /// <summary>
     /// Decodes a whole <c>bytea</c> tail (the log_events route, which returns the body whole rather than
-    /// filtering it server-side). <see cref="Encoding.UTF8"/>'s static instance already uses
-    /// <see cref="DecoderReplacementFallback"/> — it does not throw on an invalid byte, it substitutes
-    /// U+FFFD — so no custom decoder is needed here.
+    /// filtering it server-side), using <paramref name="encoding"/> — the connected database's own
+    /// <c>server_encoding</c>, mapped by <see cref="PgServerEncoding"/> (#4062). Every <see cref="Encoding"/>
+    /// this route is called with, including <see cref="Encoding.UTF8"/>, already substitutes U+FFFD for an
+    /// invalid byte rather than throwing, so no custom decoder is needed here.
     /// </summary>
-    public static string DecodeWhole(byte[] bytes)
+    public static string DecodeWhole(byte[] bytes, Encoding encoding)
     {
         ArgumentNullException.ThrowIfNull(bytes);
-        return WithoutNul(Encoding.UTF8.GetString(bytes));
+        ArgumentNullException.ThrowIfNull(encoding);
+        return WithoutNul(encoding.GetString(bytes));
     }
 
     /// <summary>
@@ -43,9 +45,10 @@ public static class PgBinaryTailText
     /// <c>\NNN</c> need reversing here, which is what this method does — every other character escape()
     /// emits is a single ASCII code point, so casting it straight to <see cref="byte"/> is exact.</para>
     /// </summary>
-    public static string UnescapeAndDecode(string escaped)
+    public static string UnescapeAndDecode(string escaped, Encoding encoding)
     {
         ArgumentNullException.ThrowIfNull(escaped);
+        ArgumentNullException.ThrowIfNull(encoding);
 
         var bytes = new byte[escaped.Length];
         var length = 0;
@@ -81,7 +84,7 @@ public static class PgBinaryTailText
             bytes[length++] = (byte)c;
         }
 
-        return WithoutNul(Encoding.UTF8.GetString(bytes, 0, length));
+        return WithoutNul(encoding.GetString(bytes, 0, length));
     }
 
     /// <summary>
