@@ -295,10 +295,24 @@ public static class AnomalyGate
             if (bucket.SampleCount == 0)
                 continue;
 
+            // #3653 A8 option B (lane L1d): the lone-spike guard. The pair gate's mean clause is judged on the
+            // tile's mean WITHOUT its own peak sample (`gateMean`), so a single hot sample can never lift the
+            // clause it is itself supposed to be corroborated by. Without this, a tile of n samples with one hot
+            // sample lifts the reported mean by (peak - mean)/n, and at a coarse cadence (small n) that lift alone
+            // clears the mean threshold — the lone-spike case the pair gate exists to catch (#3724), reappearing
+            // through the tile's own arithmetic (design ruling: Lite's OneHotSampleInAQuietWindow regression, 4
+            // samples/hour, one at 90 among 10s, tile mean 30, now firing). `gateMean` is passed ALONGSIDE
+            // `tile.Mean` as `windowMean`: the reported MeanSigma and every detector's avg_*/mean_deviation_sigma
+            // metadata still reflect the tile's FULL mean (see `Decide`'s remarks); only the mean clause's pass/
+            // fail comparison is judged on the rest-mean.
+            var gateMean = tile.Samples > 1
+                ? (tile.Mean * tile.Samples - tile.Peak) / (tile.Samples - 1)
+                : tile.Mean;
+
             var decision = DecideRobustFirst(
                 bucket, tile.Peak, tile.Mean,
                 classicalDeviationThreshold, modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap,
-                window, correctMean: true);
+                window, correctMean: true, gateMean: gateMean);
 
             scored.Add((decision, tile, bucket));
         }
@@ -340,14 +354,15 @@ public static class AnomalyGate
         double absoluteFallbackBar,
         double sigmaCap,
         TimeSpan? window = null,
-        bool correctMean = false)
+        bool correctMean = false,
+        double? gateMean = null)
     {
         var robustSigma = baseline.EffectiveRobustSigma;
         if (robustSigma <= 0)
         {
             return Decide(
                 baseline.Mean, baseline.EffectiveStdDev, baseline.IsTrustworthy, peak, windowMean,
-                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window, correctMean);
+                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window, correctMean, gateMean);
         }
 
         /* A zero-history bucket cannot reach here: IsZeroHistory requires Mad <= 0, which is EffectiveRobustSigma
@@ -355,7 +370,7 @@ public static class AnomalyGate
            does have). The flag is threaded anyway so the two calls read the same and neither can silently drop it. */
         return Decide(
             baseline.Median, robustSigma, baseline.IsTrustworthy, peak, windowMean,
-            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window, correctMean);
+            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window, correctMean, gateMean);
     }
 
     /// <summary>
@@ -378,7 +393,8 @@ public static class AnomalyGate
         double sigmaCap,
         bool isZeroHistory = false,
         TimeSpan? window = null,
-        bool correctMean = false)
+        bool correctMean = false,
+        double? gateMean = null)
     {
         // #3653 A8 slice 1: the Sidák-corrected peak cutoff, applied to the PEAK clause only (the mean clause
         // below keeps judging against `threshold` unchanged — it is already sample-count-neutral, see the
@@ -451,7 +467,11 @@ public static class AnomalyGate
             // clause was just judged against — tile mode's own correction (design §1); every whole-window caller
             // leaves it false and keeps `threshold` exactly as before.
             var meanThreshold = correctMean ? peakThreshold : threshold;
-            var meanClears = windowMean is null || (windowMean.Value - center) / dispersion >= meanThreshold;
+            // #3653 A8 option B (lane L1d): the lone-spike guard. The clause's pass/fail comparison uses
+            // `gateMean ?? windowMean` — in tile mode the caller supplies the tile's mean WITHOUT its own peak
+            // sample, so a single hot sample cannot corroborate itself. MeanSigma above stays computed from the
+            // FULL `windowMean`, so the reported mean and its deviation are unaffected.
+            var meanClears = windowMean is null || ((gateMean ?? windowMean.Value) - center) / dispersion >= meanThreshold;
             return new ZDecision(peakClears && meanClears, Math.Min(peakDeviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: peakThreshold, MeanSigma: meanSigma);
         }
 
@@ -460,7 +480,8 @@ public static class AnomalyGate
         // #3653: the mean clears the magnitude FLOOR (the lower, "not trivial" bar — class remarks); the
         // exceedance stays the peak's, since that is what the scorer grades and the finding reports.
         var peakClearsBar = peak >= absoluteFallbackBar;
-        var meanClearsFloor = windowMean is null || windowMean.Value >= magnitudeFloor;
+        // #3653 A8 option B (lane L1d): the same lone-spike guard on the untrustworthy path's floor comparison.
+        var meanClearsFloor = windowMean is null || (gateMean ?? windowMean.Value) >= magnitudeFloor;
         return new ZDecision(
             peakClearsBar && meanClearsFloor,
             peakSigma,
