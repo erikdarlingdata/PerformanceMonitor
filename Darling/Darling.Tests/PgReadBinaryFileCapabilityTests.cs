@@ -136,7 +136,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Fact]
     public async Task ACacheHitInsideTheTtlMakesNoSecondRoundTrip()
     {
-        var connection = new FakeScalarConnection { Scalar = true };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:true" };
 
         var first = await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
         var second = await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
@@ -150,14 +150,14 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     public async Task ARepobeHappensAfterExpiry()
     {
         PgReadBinaryFileCapability.CacheTtl = TimeSpan.FromMilliseconds(20);
-        var connection = new FakeScalarConnection { Scalar = false };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:false" };
 
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
         Assert.Equal(1, connection.ExecuteCount);
 
         await Task.Delay(60);
 
-        connection.Scalar = true;
+        connection.Scalar = "UTF8:true";
         var second = await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
 
         Assert.True(second);
@@ -167,17 +167,17 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Fact]
     public async Task PerTargetKeysAreIndependent()
     {
-        var connection = new FakeScalarConnection { Scalar = true };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:true" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
 
-        connection.Scalar = false;
+        connection.Scalar = "UTF8:false";
         var forB = await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-b", CancellationToken.None);
 
         Assert.False(forB);
         Assert.Equal(2, connection.ExecuteCount);
 
         /* target-a's cached true must be untouched by target-b's probe. */
-        connection.Scalar = false; // if a round trip happened for target-a, this would flip it to false
+        connection.Scalar = "UTF8:false"; // if a round trip happened for target-a, this would flip it to false
         var forAAgain = await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
         Assert.True(forAAgain);
         Assert.Equal(2, connection.ExecuteCount);
@@ -186,12 +186,12 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Fact]
     public async Task ResetClearsEveryCachedVerdict()
     {
-        var connection = new FakeScalarConnection { Scalar = true };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:true" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
 
         PgReadBinaryFileCapability.Reset();
 
-        connection.Scalar = false;
+        connection.Scalar = "UTF8:false";
         var afterReset = await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
 
         Assert.False(afterReset);
@@ -201,8 +201,9 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Theory]
     [InlineData(null)]
     [InlineData(42)]
-    [InlineData("true")]
-    public async Task ADbNullOrNonBoolScalarGivesFalse(object? scalar)
+    [InlineData("true")] // missing the 'encoding:' prefix the real probe always sends
+    [InlineData("UTF8:notabool")]
+    public async Task ADbNullOrMalformedScalarGivesFalse(object? scalar)
     {
         var connection = new FakeScalarConnection { Scalar = scalar is null ? DBNull.Value : scalar };
 
@@ -221,12 +222,34 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Fact]
     public async Task TryGetCachedVerdict_ReadsTheProbedValueWithoutARoundTrip()
     {
-        var connection = new FakeScalarConnection { Scalar = true };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:true" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
 
         Assert.True(PgReadBinaryFileCapability.TryGetCachedVerdict("target-a", out var granted));
         Assert.True(granted);
         Assert.Equal(1, connection.ExecuteCount);
+    }
+
+    /// <summary>#4062: the cached encoding rides alongside the verdict, mapped from server_encoding.</summary>
+    [Fact]
+    public async Task TryGetCachedEncoding_ReadsTheMappedEncodingWithoutARoundTrip()
+    {
+        var connection = new FakeScalarConnection { Scalar = "WIN1252:true" };
+        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
+
+        Assert.True(PgReadBinaryFileCapability.TryGetCachedEncoding("target-a", out var encoding));
+        Assert.Same(PgServerEncoding.TryGet("WIN1252", out var expected) ? expected : null, encoding is not null ? encoding : null);
+        Assert.NotNull(encoding);
+    }
+
+    /// <summary>#4062: an unmapped encoding caches no Encoding at all, even though the privilege is granted.</summary>
+    [Fact]
+    public async Task TryGetCachedEncoding_FindsNothingForAnUnmappedEncoding()
+    {
+        var connection = new FakeScalarConnection { Scalar = "EUC_TW:true" };
+        await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
+
+        Assert.False(PgReadBinaryFileCapability.TryGetCachedEncoding("target-a", out _));
     }
 
     /// <summary>
@@ -242,7 +265,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     public async Task TheRunnerGateProbesOnlyAPostgresLogTailCollector(
         CollectorTargetEngine engine, string collectorName, bool expectedGranted, int expectedProbes)
     {
-        var connection = new FakeScalarConnection { Scalar = true };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:true" };
         var context = new CollectorContext
         {
             ServerId = 1, ServerName = "gate-target", CollectionTime = new DateTime(2026, 9, 23, 0, 0, 0, DateTimeKind.Utc),
@@ -257,30 +280,43 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     }
 
     /// <summary>
-    /// #4051 review L4: the probe answers NULL for a database that is neither UTF8 nor SQL_ASCII, where the binary
-    /// route would decode the database's own non-ASCII text wrongly. That target stays on the text route, the
-    /// advisory reads it as nothing to advise, and the NULL is cached like any verdict, so it costs no extra round
-    /// trip. The cache also reports it as an encoding the byte route does not serve (#4051 round-2 review, L-1).
+    /// #4062: the privilege is GRANTED, but the database's server_encoding is one <see cref="PgServerEncoding"/>
+    /// does not map (EUC_TW here, standing in for the unmapped list). The target stays on the text route, the
+    /// advisory reads it as nothing to advise, and the verdict is cached like any other, so it costs no extra
+    /// round trip. The cache also reports it as an encoding the byte route does not serve.
     /// </summary>
     [Fact]
-    public async Task ADatabaseTheByteRouteDoesNotServeStaysOnTheTextRouteAndIsNotAdvised()
+    public async Task AGrantedButUnmappedEncodingStaysOnTheTextRouteAndIsNotAdvised()
     {
-        var connection = new FakeScalarConnection { Scalar = DBNull.Value };
+        var connection = new FakeScalarConnection { Scalar = "EUC_TW:true" };
 
-        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "latin1-target", CancellationToken.None));
-        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "latin1-target", CancellationToken.None));
+        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "euctw-target", CancellationToken.None));
+        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "euctw-target", CancellationToken.None));
         Assert.Equal(1, connection.ExecuteCount);
-        Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("latin1-target", out _));
-        Assert.True(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("latin1-target"));
+        Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("euctw-target", out _));
+        Assert.True(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("euctw-target"));
     }
 
-    /// <summary>Only a NULL verdict reads as an encoding the byte route does not serve. A granted target, an
-    /// ungranted one, and one that was never checked all read false.</summary>
+    /// <summary>An ungranted target on an unmapped encoding reads as ungranted, not as unsupported-encoding:
+    /// the grant matters first.</summary>
     [Fact]
-    public async Task OnlyANullVerdictReadsAsAnUnsupportedEncoding()
+    public async Task AnUngrantedTargetOnAnUnmappedEncodingReadsAsUngranted()
     {
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = true }, "granted", default);
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = false }, "ungranted", default);
+        var connection = new FakeScalarConnection { Scalar = "EUC_TW:false" };
+
+        Assert.False(await PgReadBinaryFileCapability.IsGrantedAsync(connection, "euctw-ungranted", CancellationToken.None));
+        Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("euctw-ungranted"));
+        Assert.True(PgReadBinaryFileCapability.TryGetCachedVerdict("euctw-ungranted", out var granted));
+        Assert.False(granted);
+    }
+
+    /// <summary>Only granted-but-unmapped reads as an encoding the byte route does not serve. A granted-and-mapped
+    /// target, an ungranted one, and one that was never checked all read false.</summary>
+    [Fact]
+    public async Task OnlyAGrantedAndUnmappedVerdictReadsAsAnUnsupportedEncoding()
+    {
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "UTF8:true" }, "granted", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "UTF8:false" }, "ungranted", default);
 
         Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("granted"));
         Assert.False(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("ungranted"));
@@ -288,15 +324,15 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     }
 
     /// <summary>
-    /// The probe asks the database's encoding first, and a UTF8 or a SQL_ASCII database gets a grant answer
-    /// (#4051 round-2 review, M-1). PostgreSQL checks SQL_ASCII text as UTF-8 on its way to a UTF8 client, so
-    /// the text route there meets the same planted-byte failure, and the byte route is the fix there too.
+    /// #4062: the probe has no CASE gate — it always reports the server_encoding plus the raw privilege check.
+    /// C# decides whether the mapped encoding serves the binary route.
     /// </summary>
     [Fact]
-    public void TheProbeAnswersTheGrantOnUtf8AndSqlAsciiDatabasesOnly()
+    public void TheProbeAnswersUnconditionallyAndLeavesTheEncodingDecisionToCSharp()
     {
+        Assert.DoesNotContain("CASE", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
         Assert.Contains(
-            "current_setting('server_encoding') IN ('UTF8', 'SQL_ASCII')", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
+            "current_setting('server_encoding')", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
         Assert.Contains(
             "'pg_catalog.pg_read_binary_file(text, bigint, bigint)'", PgReadBinaryFileCapability.ProbeSql, StringComparison.Ordinal);
     }
@@ -304,7 +340,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Fact]
     public async Task InvalidateDropsOneTargetsVerdictOnly()
     {
-        var connection = new FakeScalarConnection { Scalar = true };
+        var connection = new FakeScalarConnection { Scalar = "UTF8:true" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-a", CancellationToken.None);
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "target-b", CancellationToken.None);
 
@@ -331,7 +367,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     public async Task AStaleVerdictIsForgottenOnlyOnTheFaultsThatMakeItStale(
         string collectorName, string? sqlState, bool cachedGranted, bool expectForgotten)
     {
-        var connection = new FakeScalarConnection { Scalar = cachedGranted };
+        var connection = new FakeScalarConnection { Scalar = $"UTF8:{(cachedGranted ? "true" : "false")}" };
         await PgReadBinaryFileCapability.IsGrantedAsync(connection, "stale-target", CancellationToken.None);
 
         Exception fault = sqlState is null ? new InvalidOperationException("not a server fault") : Pg(sqlState);
@@ -348,7 +384,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     [Fact]
     public async Task A22021FromTheStoreOrOnAnUnservedEncodingKeepsTheVerdict()
     {
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = false }, "store-target", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "UTF8:false" }, "store-target", default);
         var storeWrite = Pg("22021");
         CollectorFaultCopyPhase.Stamp(storeWrite, StoreCopyPhase.Data);
 
@@ -356,7 +392,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
 
         Assert.True(PgReadBinaryFileCapability.TryGetCachedVerdict("store-target", out _));
 
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = DBNull.Value }, "euc-target", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "EUC_TW:true" }, "euc-target", default);
 
         DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict("pg_log_events", Pg("22021"), Runtime("euc-target"));
 
@@ -369,8 +405,8 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     /// <list type="bullet">
     /// <item>On a UTF8 or SQL_ASCII database, a planted byte gets the grant sentence, and the cached verdict is
     /// dropped, so a grant made in answer takes effect on the next cycle.</item>
-    /// <item>On an encoding the byte route does not serve, the sentence says the grant does not help and names
-    /// #4062, and the verdict stays.</item>
+    /// <item>On an encoding the byte route does not serve, the sentence says the grant does not help, with no
+    /// issue reference in the served text, and the verdict stays.</item>
     /// <item>Any other fault, or any other collector, gets null and changes nothing.</item>
     /// </list>
     /// </summary>
@@ -379,7 +415,7 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
     {
         var planted = new PostgresException("invalid byte sequence for encoding UTF8: 0xff", "ERROR", "ERROR", "22021");
 
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = false }, "utf8-target", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "UTF8:false" }, "utf8-target", default);
         var grant = DarlingWorker.LogTailGeneralFault(planted, "pg_deadlocks", Runtime("utf8-target", connectedDatabase: "appdb"));
 
         Assert.NotNull(grant);
@@ -387,16 +423,16 @@ public sealed class PgReadBinaryFileCapabilityTests : IDisposable
         Assert.Contains("database 'appdb'", grant, StringComparison.Ordinal);
         Assert.False(PgReadBinaryFileCapability.TryGetCachedVerdict("utf8-target", out _));
 
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = DBNull.Value }, "euc-target", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "EUC_TW:true" }, "euc-target", default);
         var noRemedy = DarlingWorker.LogTailGeneralFault(planted, "pg_deadlocks", Runtime("euc-target"));
 
         Assert.NotNull(noRemedy);
         Assert.Contains("does not help", noRemedy, StringComparison.Ordinal);
-        Assert.Contains("#4062", noRemedy, StringComparison.Ordinal);
+        Assert.DoesNotContain("#4062", noRemedy, StringComparison.Ordinal);
         Assert.DoesNotContain("Grant EXECUTE", noRemedy, StringComparison.Ordinal);
         Assert.True(PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding("euc-target"));
 
-        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = true }, "other-target", default);
+        await PgReadBinaryFileCapability.IsGrantedAsync(new FakeScalarConnection { Scalar = "UTF8:true" }, "other-target", default);
 
         Assert.Null(DarlingWorker.LogTailGeneralFault(new InvalidOperationException("not a server fault"), "pg_deadlocks", Runtime("other-target")));
         Assert.Null(DarlingWorker.LogTailGeneralFault(planted, "pg_database_stats", Runtime("other-target")));
