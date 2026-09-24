@@ -86,6 +86,10 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, WalShiftServerId, WalShiftServerName, MonitoredEngineKind.Postgres, 18, ct);
+            // The baseline-data canary: DetectAnomaliesAsync gates the whole detector run on pg_database_stats
+            // having any row in the 30 days before the window's end (HasBaselineDataSql). Without it every
+            // detector, including this one, is skipped and DetectAnomaliesAsync returns no facts at all.
+            await PlantCanaryDatabaseStatsRowAsync(connection, WalShiftServerId, WalShiftServerName, WindowStartT, ct);
 
             // 21 days of history for hours 10-13 of this weekday, ~12 samples/hour, deterministic pseudo-noise.
             await PlantWalHistoryAsync(connection, WalShiftServerId, WalShiftServerName, WindowStartT, 4, WalBaseBytesPerMinute, ct);
@@ -104,8 +108,54 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
             Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgWalBytesPerSec),
                 $"the whole-window mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own — the shift was not actually diluted by construction (median={startBucket.Median}, sigma={startBucket.EffectiveRobustSigma})");
 
+            // ─── DIAGNOSTIC (T4178-2, temporary): printed evidence before the detector call ───
+            var map = await baselines.GetBucketMapAsync(WalShiftServerId, MetricNames.PgWalBytesPerSec, WindowStartT, WindowStartT.AddHours(4), ct);
+            await using (var diagConn = await postgres.OpenConnectionAsync(ct))
+            {
+                using (var countCmd = new NpgsqlCommand("SELECT count(*), count(wal_bytes) FROM pg_write_stats WHERE server_id = $1", diagConn))
+                {
+                    countCmd.Parameters.AddWithValue(WalShiftServerId);
+                    using var rdr = await countCmd.ExecuteReaderAsync(ct);
+                    await rdr.ReadAsync(ct);
+                    Console.WriteLine($"[DIAG] history+window rows for server: count={rdr.GetInt64(0)} count(wal_bytes)={rdr.GetInt64(1)}");
+                }
+                using (var windowCountCmd = new NpgsqlCommand("SELECT count(*), count(wal_bytes) FROM pg_write_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3", diagConn))
+                {
+                    windowCountCmd.Parameters.AddWithValue(WalShiftServerId);
+                    windowCountCmd.Parameters.AddWithValue(WindowStartT);
+                    windowCountCmd.Parameters.AddWithValue(WindowStartT.AddHours(4));
+                    using var rdr = await windowCountCmd.ExecuteReaderAsync(ct);
+                    await rdr.ReadAsync(ct);
+                    Console.WriteLine($"[DIAG] window rows: count={rdr.GetInt64(0)} count(wal_bytes)={rdr.GetInt64(1)}");
+                }
+
+                for (var h = 0; h < 4; h++)
+                {
+                    var hourStart = WindowStartT.AddHours(h);
+                    var bucket = map.For(hourStart.Hour, (int)hourStart.DayOfWeek);
+                    Console.WriteLine($"[DIAG] hour={hourStart:HH:mm} dow={hourStart.DayOfWeek} tier={bucket.Tier} SampleCount={bucket.SampleCount} DistinctDays={bucket.DistinctDays} IsTrustworthy={bucket.IsTrustworthy} Median={bucket.Median} EffectiveRobustSigma={bucket.EffectiveRobustSigma}");
+                }
+
+                using (var tileCmd = new NpgsqlCommand(PgTargetAnomalyDetector.WalVolumeTileWindowSql, diagConn))
+                {
+                    tileCmd.Parameters.AddWithValue(WalShiftServerId);
+                    tileCmd.Parameters.AddWithValue(WindowStartT);
+                    tileCmd.Parameters.AddWithValue(WindowStartT.AddHours(4));
+                    tileCmd.Parameters.AddWithValue(map.WindowClock.TransitionAtUtc);
+                    tileCmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+                    tileCmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
+                    using var rdr = await tileCmd.ExecuteReaderAsync(ct);
+                    while (await rdr.ReadAsync(ct))
+                    {
+                        Console.WriteLine($"[DIAG] tile local_hour={rdr.GetDateTime(0):HH:mm} peak={(rdr.IsDBNull(1) ? "null" : rdr.GetValue(1).ToString())} avg={(rdr.IsDBNull(2) ? "null" : rdr.GetValue(2).ToString())} rated_samples={(rdr.IsDBNull(3) ? "null" : rdr.GetValue(3).ToString())} wal_bytes={(rdr.IsDBNull(4) ? "null" : rdr.GetValue(4).ToString())} wal_records={(rdr.IsDBNull(5) ? "null" : rdr.GetValue(5).ToString())} wal_reset_count={(rdr.IsDBNull(6) ? "null" : rdr.GetValue(6).ToString())} wal_tracked={(rdr.IsDBNull(7) ? "null" : rdr.GetValue(7).ToString())}");
+                    }
+                }
+            }
+            // ─── end diagnostic ───
+
             var detector = new PgTargetAnomalyDetector(postgres, baselines);
             var facts = await detector.DetectAnomaliesAsync(FourHourContext(WalShiftServerId, WalShiftServerName));
+            Console.WriteLine($"[DIAG] facts returned: {facts.Count} keys=[{string.Join(',', facts.Select(f => f.Key))}]");
             var fact = Assert.Single(facts, f => f.Key == PgTargetFactKeys.AnomalyWalVolume);
 
             Assert.True(fact.Metadata.ContainsKey("tile_local_hour"), "the sustained two-hour WAL shift should have scored through the tile path");
@@ -151,6 +201,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
 
             var windowStart = WindowStartT.AddHours(-22);
             var windowEnd = WindowStartT.AddHours(2);
+            // The baseline-data canary (see the 4h scenario's comment) — anchored to this test's own window start.
+            await PlantCanaryDatabaseStatsRowAsync(connection, Wal24hServerId, Wal24hServerName, windowStart, ct);
 
             // 21 days of history covering all 24 hours of week the window spans.
             await PlantWalHistoryAsync(connection, Wal24hServerId, Wal24hServerName, windowStart, 24, WalBaseBytesPerMinute, ct);
@@ -209,6 +261,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, WalSpikeServerId, WalSpikeServerName, MonitoredEngineKind.Postgres, 18, ct);
+            // The baseline-data canary (see the 4h scenario's comment).
+            await PlantCanaryDatabaseStatsRowAsync(connection, WalSpikeServerId, WalSpikeServerName, WindowStartT, ct);
 
             await PlantWalHistoryAsync(connection, WalSpikeServerId, WalSpikeServerName, WindowStartT, 4, WalBaseBytesPerMinute, ct);
             // The whole window at the routine rate, with ONE lone-minute spike inside hour 2 (local hour 12).
@@ -255,6 +309,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, WalFallbackServerId, WalFallbackServerName, MonitoredEngineKind.Postgres, 18, ct);
+            // The baseline-data canary (see the 4h scenario's comment).
+            await PlantCanaryDatabaseStatsRowAsync(connection, WalFallbackServerId, WalFallbackServerName, WindowStartT, ct);
 
             await PlantWalHistoryAsync(connection, WalFallbackServerId, WalFallbackServerName, WindowStartT, 4, WalBaseBytesPerMinute, ct);
             // Only 2 rated collections per hour, all at the shift: every tile is under MinTileSamples (3).
@@ -303,6 +359,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, CpuShiftServerId, CpuShiftServerName, MonitoredEngineKind.Postgres, 18, ct);
+            // The baseline-data canary (see the WAL 4h scenario's comment).
+            await PlantCanaryDatabaseStatsRowAsync(connection, CpuShiftServerId, CpuShiftServerName, WindowStartT, ct);
 
             await PlantCpuBurnHistoryAsync(connection, CpuShiftServerId, CpuShiftServerName, WindowStartT, 4, CpuBaseCores, ct);
             await PlantCpuBurnWindowAsync(connection, CpuShiftServerId, CpuShiftServerName, WindowStartT, 4, shiftFromHour: 2, CpuBaseCores, CpuShiftCores, ct);
@@ -367,6 +425,8 @@ public sealed class PgTargetTileBehaviourWalKernelSampledTests
         try
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, SampledWaitShiftServerId, SampledWaitShiftServerName, MonitoredEngineKind.Postgres, 18, ct);
+            // The baseline-data canary (see the WAL 4h scenario's comment).
+            await PlantCanaryDatabaseStatsRowAsync(connection, SampledWaitShiftServerId, SampledWaitShiftServerName, WindowStartT, ct);
 
             await PlantSampledWaitHistoryAsync(connection, SampledWaitShiftServerId, SampledWaitShiftServerName, WindowStartT, 4, SampledBaseRelation, ct);
             await PlantSampledWaitWindowAsync(connection, SampledWaitShiftServerId, SampledWaitShiftServerName, WindowStartT, 4, shiftFromHour: 2, SampledBaseRelation, SampledShiftRelation, ct);
