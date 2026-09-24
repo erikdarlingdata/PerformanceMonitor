@@ -314,7 +314,8 @@ public sealed class PgTargetTileBehaviourTests
 
             const double baseMu = 60.0;
             const double baseSigma = 3.0;
-            const double shiftedTps = baseMu + 8 * baseSigma; // 84 tps, comfortably clears PgTpsFloor (50)
+            const double shiftedTps = baseMu + 16.0 / 3.0 * baseSigma; // 76 tps, clears PgTpsFloor (50), and the
+            // whole-window mean of baseline+shift stays under the fire cutoff (measured against the live bucket).
 
             await PlantTpsHistoryAsync(connection, TpsShiftServerId, TpsShiftServerName, WindowStartT, baseMu, baseSigma, ct);
             await PlantTpsWindowAsync(connection, TpsShiftServerId, TpsShiftServerName, WindowStartT, baseMu, baseSigma, shiftedTps, ct);
@@ -322,7 +323,11 @@ public sealed class PgTargetTileBehaviourTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var startBucket = await baselines.GetBaselineAsync(TpsShiftServerId, MetricNames.PgTps, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour TPS bucket must be trustworthy");
-            var wholeWindowMean = (baseMu + shiftedTps) / 2.0; // two hours at baseline, two hours at the shift
+            // The window's own per-collection mean (two quiet hours' seeded incr plus two shifted hours), NOT the
+            // simple (mu+shift)/2 — the seeded increments are pseudo-noise, not flat, so the true mean must be
+            // computed the same way the product's own read would collapse it.
+            var wholeWindowMean = Enumerable.Range(0, 4).SelectMany(h => Enumerable.Range(0, 12)
+                .Select(i => h >= 2 ? shiftedTps : baseMu + baseSigma * Math.Sin(h * 12 + i))).Average();
             var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
             Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgTps),
                 $"the whole-window TPS mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own");
@@ -374,7 +379,8 @@ public sealed class PgTargetTileBehaviourTests
 
             const double cpuMu = 30.0;
             const double cpuSigma = 2.0;
-            const double cpuShift = 90.0; // clears PgCpuFloorPct (40)
+            const double cpuShift = 60.0; // clears PgCpuFloorPct (40); the whole-window mean of baseline+shift
+            // stays under the fire cutoff (measured against the live bucket).
 
             await PlantCpuHistoryAsync(connection, CpuShiftServerId, CpuShiftServerName, WindowStartT, cpuMu, cpuSigma, ct);
             await PlantCpuWindowAsync(connection, CpuShiftServerId, CpuShiftServerName, WindowStartT, cpuMu, cpuSigma, cpuShift, ct);
@@ -382,7 +388,10 @@ public sealed class PgTargetTileBehaviourTests
             var baselines = new PgTargetBaselineProvider(postgres);
             var startBucket = await baselines.GetBaselineAsync(CpuShiftServerId, MetricNames.PgCpu, WindowStartT, ct);
             Assert.True(startBucket.IsTrustworthy, "the start-hour CPU bucket must be trustworthy");
-            var wholeWindowMean = (cpuMu + cpuShift) / 2.0; // two hours at baseline, two hours at the shift
+            // The window's own per-collection mean of the ROUNDED seeded values (the product rounds the CPU
+            // reading on the way in), not the simple (mu+shift)/2.
+            var wholeWindowMean = Enumerable.Range(0, 4).SelectMany(h => Enumerable.Range(0, 12)
+                .Select(i => Math.Round(h >= 2 ? cpuShift : cpuMu + cpuSigma * Math.Sin(h * 12 + i)))).Average();
             var wholeWindowMeanZ = BaselineMath.ModifiedZScore(startBucket, wholeWindowMean);
             Assert.True(wholeWindowMeanZ < AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgCpu),
                 $"the whole-window CPU mean z ({wholeWindowMeanZ}) unexpectedly cleared the cutoff on its own");
