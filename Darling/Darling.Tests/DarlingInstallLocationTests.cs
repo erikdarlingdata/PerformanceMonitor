@@ -539,6 +539,33 @@ function Get-CimInstance {
     }
 
     /// <summary>
+    /// #4052, from a PowerShell 5.1 run on a standalone Windows 11 box (the live lock test above runs the lock as
+    /// TrustedInstaller, which is trusted everywhere, so it cannot see these):
+    /// <list type="bullet">
+    /// <item>the service stays trusted on darling.json and its backups. Step 4b gives it an explicit FullControl there
+    /// (#1647); without the trust the walk's explicit-ACE branch strips that grant and the service cannot read its
+    /// own config;</item>
+    /// <item>the bring-your-own key folder is handed to the lock as a NAME, because the lock Join-Paths it onto the
+    /// root and Join-Path does not treat a rooted child as rooted;</item>
+    /// <item>the helper avoids <c>Split-Path -LiteralPath -Parent</c>, an ambiguous parameter set on PowerShell 5.1.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public void TheNarrowedLock_KeepsTheServiceOnItsConfig_AndHandsTheKeyFolderOverAsAName()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var lockText = ExtractFunction(InstallScript, "Lock-DarlingInstallTree");
+        var helper = ExtractFunction(InstallScript, "Get-DarlingExtraServiceWriteDirectories");
+
+        Assert.Contains("$isSecretFile = $target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*'", lockText, StringComparison.Ordinal);
+        Assert.Contains("-or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }", lockText, StringComparison.Ordinal);
+        Assert.Contains("return @('darling-keys')", helper, StringComparison.Ordinal);
+        Assert.Equal(PerformanceMonitor.Darling.Service.DarlingLogHashKeyFile.BringYourOwnDirectoryName, "darling-keys");
+        Assert.DoesNotContain("(Split-Path -LiteralPath $configPath -Parent)", helper, StringComparison.Ordinal);
+        Assert.Equal(helper, ExtractFunction(upgrade, "Get-DarlingExtraServiceWriteDirectories"));
+    }
+
+    /// <summary>
     /// #4043: the pre-lock writable-extraction check ships twice for the same reason the lock itself does -
     /// install-darling.ps1 checks the install root before 1b2 ever runs, upgrade-darling.ps1 checks a folder
     /// -Source before it copies that folder's content over the (already locked) install root, and neither
@@ -757,6 +784,11 @@ function Get-CimInstance {
     /// one of the four SIDs the base trusted set already carries (SYSTEM, Administrators, TrustedInstaller,
     /// the running admin) - using TrustedInstaller itself here would pass by accident and prove nothing about
     /// the new parameter.</para>
+    ///
+    /// <para>#4052 moved the service's Modify off the root and onto <c>pg-runtime\</c> and <c>pg-runtime-prev\</c>, so
+    /// the grant this test needs to see now sits one level down. The probe walks the tree with <c>-Recurse</c>, the
+    /// way every real caller of the check does, and also pins that the root itself no longer carries a write grant
+    /// for the service at all.</para>
     /// </summary>
     [Fact]
     public void ThePreLockWritableExtractionCheck_TrustsTheAccountTheLockItselfGranted_OnAnAlreadyLockedTree()
@@ -775,10 +807,11 @@ function Get-CimInstance {
                 $null = Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE'
 
                 $withoutAccount = Get-DarlingPreLockTrustedSids
-                'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount).Count
+                'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount -Recurse).Count
+                'rootOnlyWithoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount).Count
 
                 $withAccount = Get-DarlingPreLockTrustedSids 'NT AUTHORITY\LOCAL SERVICE'
-                'withAccountCount=' + @(Get-UntrustedWriteGrantees $root $withAccount).Count
+                'withAccountCount=' + @(Get-UntrustedWriteGrantees $root $withAccount -Recurse).Count
             }
             finally {
                 if (Test-Path -LiteralPath $root) {
@@ -793,6 +826,8 @@ function Get-CimInstance {
         var without = int.Parse(answers.Find(a => a.StartsWith("withoutAccountCount=", StringComparison.Ordinal))!.Substring("withoutAccountCount=".Length));
         Assert.True(without > 0, "a freshly locked tree must still name the service account as untrusted when the caller does not say who it is - otherwise this test proves nothing about the new parameter: " + string.Join(" | ", answers));
         Assert.Contains("withAccountCount=0", answers);
+        /* #4052: the root itself is RX for the service, so no write grant is left there to trust. */
+        Assert.Contains("rootOnlyWithoutAccountCount=0", answers);
     }
 
     /// <summary>
@@ -1311,6 +1346,13 @@ function Get-CimInstance {
                 'phase1Protected=' + (Get-Acl -LiteralPath $root).AreAccessRulesProtected
                 'phase1Service=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $service }).Count
 
+                # #4038's leftover shape (round 3, #4052): an install locked BEFORE this fix left an explicit
+                # (OI)(CI)M ACE for the service on $root, and plain icacls /grant only ADDS to an existing
+                # explicit ACE for that SID rather than replacing it - so re-running the OLD lock would never
+                # have cleared it. Planted directly (not through the old code, which no longer exists) so the
+                # phase-2 assertions below prove /grant:r removes it rather than merely never having added it.
+                $null = & icacls.exe $root /grant "*$($service.Value):(OI)(CI)M" 2>&1
+
                 # Phase 2, as step 4b2 and the upgrade run it: the service's grant, and the walk's report.
                 $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
                 $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
@@ -1321,6 +1363,11 @@ function Get-CimInstance {
                 'usersRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $users } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'serviceRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $service } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'postgresServiceInherited=' + @(Rules "$root\pg-runtime\pgsql\bin\postgres.exe" | Where-Object { $_.IdentityReference -eq $service -and $_.IsInherited }).Count
+                # #4052: the service's own real access is Modify on pg-runtime\ and pg-runtime-prev\ (an
+                # explicit ACE there, not inherited from root, since root only grants RX), and NOTHING on the
+                # svc.exe / planted paths above - those are a stranger's grant even though the SID is the same.
+                'pgRuntimeServiceRights=' + ((Rules "$root\pg-runtime" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'pgRuntimePrevServiceRights=' + ((Rules "$root\pg-runtime-prev" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'jsonProtected=' + (Get-Acl -LiteralPath "$root\darling.json").AreAccessRulesProtected
                 'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
                 'jsonOwnerIsService=' + ((Get-Acl -LiteralPath "$root\darling.json").GetOwner($sidType) -eq $service)
@@ -1393,8 +1440,13 @@ function Get-CimInstance {
         Assert.Contains("protected=True", answers);
         Assert.Contains("authenticatedUsers=0", answers);
         Assert.Contains("usersRights=ReadAndExecute, Synchronize", answers);
-        Assert.Contains("serviceRights=Modify, Synchronize", answers);
+        /* #4052: the service's grant on $root is /grant:r'd to Read & Execute only - not Modify - so a
+           leftover Modify ACE from an earlier #4038-shaped install (an explicit (OI)(CI)M ADD, which plain
+           /grant would only ADD to and never remove) does not survive an upgrade through this lock. */
+        Assert.Contains("serviceRights=ReadAndExecute, Synchronize", answers);
         Assert.Contains("postgresServiceInherited=1", answers);
+        Assert.Contains("pgRuntimeServiceRights=Modify, Synchronize", answers);
+        Assert.Contains("pgRuntimePrevServiceRights=Modify, Synchronize", answers);
         Assert.Contains("jsonProtected=True", answers);
         Assert.Contains("jsonInteractive=Read, Synchronize", answers);
     }
