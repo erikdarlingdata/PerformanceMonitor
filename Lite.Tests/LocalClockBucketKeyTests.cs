@@ -204,32 +204,45 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
     [Fact]
     public async Task Provider_ZoneId_EstAndEdtRowsAcrossTheSpringForward_ShareOneLocalBucket()
     {
+        // #3653 A8 option B (narrowed tier walk): both buckets below now carry a THIRD distinct
+        // Tuesday so DistinctDays clears Full's 3-day floor and neither is IsYoung — this test pins
+        // DST keying, not the tier walk, so it must not be walked past Full. The extra weeks reuse
+        // the same EST/EDT keying the test already exercises (Feb 17 and Feb 24 both pre-spring-
+        // forward, same as the original Feb 24 seed).
         await SeedServerClockAsync(-300, EasternWindowsId);
         var estTuesday = new DateTime(2026, 2, 24, 22, 0, 0);
+        var estTuesdayEarlier = new DateTime(2026, 2, 17, 22, 0, 0);
         var edtTuesday = new DateTime(2026, 3, 10, 21, 0, 0);
         var wednesdayThreeZ = new DateTime(2026, 3, 4, 3, 0, 0);
+        var wednesdayThreeZEarlier1 = new DateTime(2026, 2, 25, 3, 0, 0);
+        var wednesdayThreeZEarlier2 = new DateTime(2026, 2, 18, 3, 0, 0);
         for (var i = 0; i < 6; i++)
         {
             await SeedCpuAsync(estTuesday.AddMinutes(i * 5), 40 + i);
+            await SeedCpuAsync(estTuesdayEarlier.AddMinutes(i * 5), 80 + i);
             await SeedCpuAsync(edtTuesday.AddMinutes(i * 5), 60 + i);
         }
         for (var i = 0; i < 10; i++)
+        {
             await SeedCpuAsync(wednesdayThreeZ.AddMinutes(i * 5), 99);
+            await SeedCpuAsync(wednesdayThreeZEarlier1.AddMinutes(i * 5), 99);
+            await SeedCpuAsync(wednesdayThreeZEarlier2.AddMinutes(i * 5), 99);
+        }
 
         var analysisTime = new DateTime(2026, 3, 17, 21, 30, 0);
         var seventeen = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, analysisTime);
         Assert.Equal(BaselineTier.Full, seventeen.Tier);
         Assert.Equal((17, Tuesday), (seventeen.HourOfDay, seventeen.DayOfWeek));
-        Assert.Equal(12L, seventeen.SampleCount);
-        Assert.Equal(2L, seventeen.DistinctDays);
-        Assert.Equal((40 + 41 + 42 + 43 + 44 + 45 + 60 + 61 + 62 + 63 + 64 + 65) / 12.0, seventeen.Mean, 0.001);
+        Assert.Equal(18L, seventeen.SampleCount);
+        Assert.Equal(3L, seventeen.DistinctDays);
+        Assert.Equal((40 + 41 + 42 + 43 + 44 + 45 + 80 + 81 + 82 + 83 + 84 + 85 + 60 + 61 + 62 + 63 + 64 + 65) / 18.0, seventeen.Mean, 0.001);
 
         _provider.ClearCache();
         var rollover = await _provider.GetBaselineAsync(ServerId, MetricNames.Cpu, new DateTime(2026, 3, 11, 2, 50, 0)); // Tue 22:50 EDT, the next Tuesday's 22h
         Assert.Equal(BaselineTier.Full, rollover.Tier);
         Assert.Equal((22, Tuesday), (rollover.HourOfDay, rollover.DayOfWeek));
-        Assert.Equal(10L, rollover.SampleCount);
-        Assert.Equal(1L, rollover.DistinctDays);
+        Assert.Equal(30L, rollover.SampleCount);
+        Assert.Equal(3L, rollover.DistinctDays);
         Assert.Equal(99.0, rollover.Mean, 0.001);
     }
 

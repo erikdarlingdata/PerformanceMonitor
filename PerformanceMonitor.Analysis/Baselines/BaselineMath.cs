@@ -45,66 +45,151 @@ public static class BaselineMath
     /// maps without sentinels (a provider not yet migrated, or a cached pre-#1743 map): its
     /// buckets read Median=0/Mad=0, which EffectiveRobustSigma reports as zero-activity, and the
     /// detector's robust path degrades to the classical one rather than misfiring.</para>
+    /// <para>
+    /// #3653 A8 option B: a young target's Full (hour+dow) bucket clears its sample floor (10-14 at a
+    /// 5-minute cadence) on day one, but Full's day floor is 3 DISTINCT same-weekday dates — one per
+    /// calendar week — so <see cref="BaselineBucket.IsTrustworthy"/> stays false for about three weeks
+    /// even though the coarser HourOnly tier (day floor 10, cleared in about 10 days) or Flat (day
+    /// floor 3, cleared in about 3 days) is already trustworthy. Selecting a chosen-but-untrustworthy
+    /// tier routes every z-score detector to the much higher absolute-threshold bar for that whole
+    /// window, so a newly monitored server's z-path is dark for weeks it doesn't need to be.
+    /// <para>
+    /// The fix (narrowed after Lite CI, #3653 A8 option B) walks ONLY coarser tiers than the one
+    /// selected by sample count, and only when that selection is <see cref="BaselineBucket.IsYoung"/>:
+    /// real dispersion and enough samples, but too few distinct days for THIS tier's claim. A
+    /// trustworthy bucket, a zero-history bucket, a zero-dispersion bucket (constant-valued fixtures,
+    /// idle metrics) and a thin bucket (too few samples) are never young, so all four are returned
+    /// unchanged, byte-identical to today — walking a zero-dispersion or thin bucket away from its
+    /// tier was the original bug: three Lite tier-selection tests pinned a coarser tier for fixtures
+    /// that were untrustworthy for those reasons, not for youth. Each coarser tier is built exactly as
+    /// today — the provider's exact (GROUPING SETS) sentinel when present, else the pooled synthesis,
+    /// gated by the same CollapseThreshold / 3 sample floors — and the first one that clears <see
+    /// cref="BaselineBucket.IsTrustworthy"/> is returned. If none is, the original chosen bucket comes
+    /// back unchanged: the absolute-fallback path, and today's low-quality metadata.
+    /// </para>
     /// </summary>
     public static BaselineBucket SelectBucket(
         IReadOnlyDictionary<(int HourOfDay, int DayOfWeek), BaselineBucket> baselines,
         int hourOfDay,
         int dayOfWeek)
     {
+        var chosen = SelectBucketBySampleCount(baselines, hourOfDay, dayOfWeek, out var chosenTier);
+
+        if (!chosen.IsYoung)
+            return chosen;
+
+        if (chosenTier == BaselineTier.Full)
+        {
+            var hourOnly = BuildHourOnlyTier(baselines, hourOfDay);
+            if (hourOnly != null && hourOnly.IsTrustworthy)
+                return hourOnly;
+        }
+
+        if (chosenTier != BaselineTier.Flat)
+        {
+            var flat = BuildFlatTier(baselines);
+            if (flat != null && flat.IsTrustworthy)
+                return flat;
+        }
+
+        return chosen;
+    }
+
+    /// <summary>
+    /// Today's tier-by-sample-count selection, unchanged, factored out so <see cref="SelectBucket"/>
+    /// can build the same coarser tiers again for the trustworthy-fallback walk.
+    /// </summary>
+    private static BaselineBucket SelectBucketBySampleCount(
+        IReadOnlyDictionary<(int HourOfDay, int DayOfWeek), BaselineBucket> baselines,
+        int hourOfDay,
+        int dayOfWeek,
+        out BaselineTier tier)
+    {
         // Try full bucket (hour + day-of-week)
         var fullKey = (hourOfDay, dayOfWeek);
         if (baselines.TryGetValue(fullKey, out var fullBucket) && fullBucket.SampleCount >= RestoreThreshold)
+        {
+            tier = BaselineTier.Full;
             return fullBucket;
+        }
 
         // If full bucket exists but below restore threshold, check if it's above collapse threshold
         // (hysteresis: don't collapse if we're between 10-14 samples and were previously using full)
         if (fullBucket != null && fullBucket.SampleCount >= CollapseThreshold)
+        {
+            tier = BaselineTier.Full;
             return fullBucket;
+        }
 
-        // Hour-only tier: the provider's exact (GROUPING SETS) bucket when present, else pooled.
+        var hourOnly = BuildHourOnlyTier(baselines, hourOfDay);
+        if (hourOnly != null)
+        {
+            tier = BaselineTier.HourOnly;
+            return hourOnly;
+        }
+
+        var flat = BuildFlatTier(baselines);
+        if (flat != null)
+        {
+            tier = BaselineTier.Flat;
+            return flat;
+        }
+
+        tier = BaselineTier.Flat;
+        return BaselineBucket.Empty;
+    }
+
+    /// <summary>
+    /// Hour-only tier: the provider's exact (GROUPING SETS) bucket when present, else pooled. Returns
+    /// null when the tier does not clear <see cref="CollapseThreshold"/> samples, exactly as today's
+    /// selection gate.
+    /// </summary>
+    private static BaselineBucket? BuildHourOnlyTier(
+        IReadOnlyDictionary<(int HourOfDay, int DayOfWeek), BaselineBucket> baselines,
+        int hourOfDay)
+    {
         if (baselines.TryGetValue((hourOfDay, -1), out var exactHourOnly))
         {
-            if (exactHourOnly.SampleCount >= CollapseThreshold)
-                return exactHourOnly;
-        }
-        else
-        {
-            /* Pooled synthesis over the REAL full buckets only — sentinel entries must not
-               contribute or the tier would double-count itself. */
-            var hourBuckets = baselines
-                .Where(kvp => kvp.Key.HourOfDay == hourOfDay && kvp.Key.DayOfWeek >= 0)
-                .Select(kvp => kvp.Value)
-                .ToList();
-
-            if (hourBuckets.Count > 0)
-            {
-                var collapsed = CollapseToHourOnly(hourBuckets);
-                if (collapsed.SampleCount >= CollapseThreshold)
-                    return collapsed;
-            }
+            return exactHourOnly.SampleCount >= CollapseThreshold ? exactHourOnly : null;
         }
 
-        // Flat tier: same rule.
+        /* Pooled synthesis over the REAL full buckets only — sentinel entries must not
+           contribute or the tier would double-count itself. */
+        var hourBuckets = baselines
+            .Where(kvp => kvp.Key.HourOfDay == hourOfDay && kvp.Key.DayOfWeek >= 0)
+            .Select(kvp => kvp.Value)
+            .ToList();
+
+        if (hourBuckets.Count == 0)
+            return null;
+
+        var collapsed = CollapseToHourOnly(hourBuckets);
+        return collapsed.SampleCount >= CollapseThreshold ? collapsed : null;
+    }
+
+    /// <summary>
+    /// Flat tier: the provider's exact (GROUPING SETS) bucket when present, else pooled. Returns null
+    /// when the tier does not clear the 3-sample minimum-viable floor, exactly as today's selection
+    /// gate.
+    /// </summary>
+    private static BaselineBucket? BuildFlatTier(
+        IReadOnlyDictionary<(int HourOfDay, int DayOfWeek), BaselineBucket> baselines)
+    {
         if (baselines.TryGetValue((-1, -1), out var exactFlat))
         {
-            if (exactFlat.SampleCount >= 3) // Minimum viable baseline
-                return exactFlat;
-        }
-        else
-        {
-            var allBuckets = baselines
-                .Where(kvp => kvp.Key.HourOfDay >= 0 && kvp.Key.DayOfWeek >= 0)
-                .Select(kvp => kvp.Value)
-                .ToList();
-            if (allBuckets.Count > 0)
-            {
-                var flat = CollapseToFlat(allBuckets);
-                if (flat.SampleCount >= 3) // Minimum viable baseline
-                    return flat;
-            }
+            return exactFlat.SampleCount >= 3 ? exactFlat : null; // Minimum viable baseline
         }
 
-        return BaselineBucket.Empty;
+        var allBuckets = baselines
+            .Where(kvp => kvp.Key.HourOfDay >= 0 && kvp.Key.DayOfWeek >= 0)
+            .Select(kvp => kvp.Value)
+            .ToList();
+
+        if (allBuckets.Count == 0)
+            return null;
+
+        var flat = CollapseToFlat(allBuckets);
+        return flat.SampleCount >= 3 ? flat : null; // Minimum viable baseline
     }
 
     /// <summary>

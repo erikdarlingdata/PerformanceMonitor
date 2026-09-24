@@ -478,34 +478,55 @@ public sealed class LocalClockBucketKeyLiveTests
 
             var provider = new PgBaselineProvider(postgres);
 
-            var cpu = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, analysisTime, ct);
-            Assert.Equal(BaselineTier.Full, cpu.Tier);
-            Assert.Equal(17, cpu.HourOfDay);
-            Assert.Equal(Tuesday, cpu.DayOfWeek);
-            Assert.Equal(12L, cpu.SampleCount);       // both Tuesdays, one bucket
-            Assert.Equal(2L, cpu.DistinctDays);       // two LOCAL Tuesdays
-            Assert.Equal((40 + 41 + 42 + 43 + 44 + 45 + 60 + 61 + 62 + 63 + 64 + 65) / 12.0, cpu.Mean, 0.001);
+            /* #3653 B: DistinctDays=2 is under Full's day floor (3), and the bucket has real spread across the
+               two Tuesdays (40..45 vs 60..65) — BaselineBucket.IsYoung, so SelectBucket walks it looking for a
+               coarser trusted tier. Read the RAW Full bucket through the tile map first (this test pins KEYING —
+               which bucket the rows land in — not tier selection), then assert the walk's outcome separately. */
+            var map = await provider.GetBucketMapAsync(serverId, MetricNames.Cpu, analysisTime, analysisTime.AddHours(1), ct);
+            var full = map.Buckets[(17, Tuesday)];
+            Assert.Equal(12L, full.SampleCount);       // both Tuesdays, one bucket
+            Assert.Equal(2L, full.DistinctDays);       // two LOCAL Tuesdays
+            Assert.Equal((40 + 41 + 42 + 43 + 44 + 45 + 60 + 61 + 62 + 63 + 64 + 65) / 12.0, full.Mean, 0.001);
+            Assert.True(full.IsYoung); // #3653 B: real spread, enough samples, too few distinct days
 
-            /* And the label the finding would carry. */
+            /* And the label the finding would carry — the RAW bucket's key, unaffected by the walk. */
             var label = BaselineContextFormatter.FormatBaselineContext(new Dictionary<string, double>
             {
-                ["baseline_hour"] = cpu.HourOfDay,
-                ["baseline_dow"] = cpu.DayOfWeek,
+                ["baseline_hour"] = full.HourOfDay,
+                ["baseline_dow"] = full.DayOfWeek,
             });
             Assert.Equal("Tue 17:00", label!["bucket"]);
+
+            /* #3653 B: HourOnly(17) pools the same two Tuesdays (nothing else keys to hour 17), so it is just as
+               young; the walk falls through to Flat, which pools all 22 samples across THREE distinct Tuesdays
+               (Feb 24, Mar 3 — the rollover rows below, dated Tuesday — and Mar 10) and clears its 3-day floor. */
+            var cpu = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, analysisTime, ct);
+            Assert.Equal(BaselineTier.Flat, cpu.Tier); // #3653 B: a young Full bucket walks past HourOnly to Flat
+            Assert.True(cpu.IsTrustworthy);
+            Assert.Equal(22L, cpu.SampleCount);
 
             /* The rollover rows: Wednesday 03:xxZ is Tuesday 22h on the server, dated TUESDAY. A lookup at
                Wednesday 2026-03-11 02:50Z — Tuesday 22:50 EDT, the next Tuesday's 22h, whose window (ending on the hour,
                #3941) holds the rows whole — asks for (22, Tue) and finds the ten rows there — not at UTC's (3, Wed),
                which holds nothing. */
+            var rolloverTime = new DateTime(2026, 3, 11, 2, 50, 0, DateTimeKind.Unspecified);
             provider.ClearCache();
-            var rollover = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, new DateTime(2026, 3, 11, 2, 50, 0, DateTimeKind.Unspecified), ct);
-            Assert.Equal(BaselineTier.Full, rollover.Tier);
-            Assert.Equal(22, rollover.HourOfDay);
-            Assert.Equal(Tuesday, rollover.DayOfWeek);
-            Assert.Equal(10L, rollover.SampleCount);
-            Assert.Equal(1L, rollover.DistinctDays);
-            Assert.Equal(99.0, rollover.Mean, 0.001);
+            var rolloverMap = await provider.GetBucketMapAsync(serverId, MetricNames.Cpu, rolloverTime, rolloverTime.AddHours(1), ct);
+            var rolloverFull = rolloverMap.Buckets[(22, Tuesday)];
+            Assert.Equal(10L, rolloverFull.SampleCount);
+            Assert.Equal(1L, rolloverFull.DistinctDays);
+            Assert.Equal(99.0, rolloverFull.Mean, 0.001);
+
+            /* #3653 B: SampleCount 10 clears Full's sample floor, but CPU carries an absolute dispersion floor
+               (5.0, see AbsStdDevFloorFor) that keeps EffectiveStdDev above zero even on this constant-valued
+               bucket, so IsYoung reads true here too — not because the data has spread, but because the floor
+               does not require any. HourOnly(22) is just as thin (the same ten rows, one distinct day); the walk
+               falls through to the SAME Flat bucket the CPU lookup above resolved (22 samples, 3 distinct days). */
+            Assert.True(rolloverFull.IsYoung);
+            var rollover = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, rolloverTime, ct);
+            Assert.Equal(BaselineTier.Flat, rollover.Tier);
+            Assert.True(rollover.IsTrustworthy);
+            Assert.Equal(22L, rollover.SampleCount);
 
             /* The hand-EXTRACT arm, read at the SQL level. The event family counts DAYS as samples (a 30-day
                window holds at most five Tuesdays), so SelectBucket always collapses it and a provider-level read
