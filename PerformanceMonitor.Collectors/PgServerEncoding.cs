@@ -18,15 +18,23 @@ namespace PerformanceMonitor.Collectors;
 /// bytes it reads in the connected database's own encoding, not hard-coded UTF-8, or a database whose
 /// encoding is not UTF8 gets its own non-ASCII text turned into U+FFFD.
 ///
-/// <para><b>Only exact charsets are mapped.</b> Each entry here is PostgreSQL's own encoding, byte for
-/// byte, as a .NET code page — not an approximation. An encoding this type does not map (EUC_TW,
-/// EUC_JIS_2004, LATIN6, LATIN8, LATIN10, MULE_INTERNAL, and anything that fails to resolve on this
-/// runtime) stays on the existing text route, gated exactly as before <see cref="TryGet"/> existed.
-/// There is deliberately no UTF-8 fallback for an unmapped encoding: that would turn the database's own
-/// text into U+FFFD just as surely as the bug this type fixes, only silently.</para>
+/// <para><b>Most charsets here are exact; the EUC family is approximate.</b> LATIN1–4 (28591–28594),
+/// LATIN5 (28599, ISO-8859-9), LATIN7 (28603, 8859-13), LATIN9 (28605, 8859-15), ISO_8859_5..8
+/// (28595–28598), WIN866/874/125x, KOI8R (20866) and KOI8U (21866) are PostgreSQL's own encoding, byte
+/// for byte, as a .NET code page. The three EUC entries are not exact, though none of them throws:
+/// <c>EUC_CN → 936</c> is GBK, a superset of GB2312 (an unmapped lead byte can pair with an ASCII byte in
+/// 0x40–0x7E and swallow it as one CJK character); <c>EUC_JP → 51932</c> does not decode 3-byte JIS X 0212
+/// sequences (.NET's own source says it does not use JIS 0212, and treats the 0x8F lead byte as a single
+/// byte instead); <c>EUC_KR → 51949</c> also goes through the same DBCS table path and is approximate for
+/// the same reason. An encoding this type does not map (EUC_TW, EUC_JIS_2004, LATIN6, LATIN8, LATIN10,
+/// MULE_INTERNAL, and anything that fails to resolve on this runtime) stays on the existing text route,
+/// gated exactly as before <see cref="TryGet"/> existed. There is deliberately no UTF-8 fallback for an
+/// unmapped encoding: that would turn the database's own text into U+FFFD just as surely as the bug this
+/// type fixes, only silently.</para>
 ///
 /// <para><b>Replacement, never a throw.</b> Every <see cref="Encoding"/> this type hands out is built with
-/// <see cref="EncoderFallback.ReplacementFallback"/> and <see cref="DecoderFallback.ReplacementFallback"/>
+/// <see cref="EncoderFallback.ReplacementFallback"/> and a <see cref="DecoderReplacementFallback"/> whose
+/// replacement string is U+FFFD, not the default <c>"?"</c>
 /// (<see cref="Encoding.GetEncoding(int, EncoderFallback, DecoderFallback)"/>), so a byte the encoding
 /// cannot decode becomes U+FFFD instead of throwing — the same lenient behavior
 /// <see cref="PgBinaryTailText"/> already relies on for <see cref="Encoding.UTF8"/>.</para>
@@ -84,7 +92,7 @@ public static class PgServerEncoding
             try
             {
                 s_encodings[name] = Encoding.GetEncoding(
-                    codePage, EncoderFallback.ReplacementFallback, DecoderFallback.ReplacementFallback);
+                    codePage, EncoderFallback.ReplacementFallback, new DecoderReplacementFallback("\uFFFD"));
             }
             catch (NotSupportedException)
             {

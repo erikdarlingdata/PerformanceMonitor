@@ -70,7 +70,7 @@ public sealed class PgServerEncodingTests
     /// <summary>
     /// WIN1252 byte 0x81 never throws — checked here rather than assumed. .NET's Windows-1252 code page maps
     /// every byte to SOME Unicode code point (0x81 to U+0081, a C1 control byte reserved rather than assigned
-    /// by the published standard), so <see cref="DecoderFallback.ReplacementFallback"/> is never actually
+    /// by the published standard), so the <see cref="DecoderReplacementFallback"/> fallback is never actually
     /// invoked for this byte — there is no byte value in a single-byte .NET code page that lacks a mapping.
     /// The no-throw guarantee is what matters for #4062 (a captured log line must never fail the whole read
     /// over one byte); which exact code point an unassigned byte round-trips to does not.
