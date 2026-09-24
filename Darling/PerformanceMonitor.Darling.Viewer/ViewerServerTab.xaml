@@ -3582,10 +3582,10 @@
                           IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
                     <DataGrid x:Name="CollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="200"/>
-                            <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="160"/>
-                            <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="140"/>
-                            <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="*"/>
+                            <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
+                            <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                            <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150"/>
+                            <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150"/>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Expander>
@@ -3811,8 +3811,25 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgEngineBanner" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" TextWrapping="Wrap"/>
-                <TextBlock Grid.Row="1" x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="1">
+                    <TextBlock x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <!-- #3691 part a2: the same persisted analysis collection caveats, on the PostgreSQL tab set.
+                         The Collection Health tab is SQL Server-only, and the PostgreSQL-target analysis engine
+                         is what writes most of these rows, so without this the section would never show for
+                         the servers it describes. Collapsed when the list is empty (a pre-V141 store too). -->
+                    <Expander x:Name="PgCollectionCaveatsExpander" Header="Analysis could not read these data families"
+                              IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
+                        <DataGrid x:Name="PgCollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
+                                <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                                <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150"/>
+                                <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Expander>
+                </StackPanel>
                 <DataGrid Grid.Row="2" x:Name="PgCollectorHealthGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>

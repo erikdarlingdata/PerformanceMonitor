@@ -135,4 +135,22 @@ public sealed class ViewerCollectionCaveatsGateTests
         var result = (int)method.Invoke(null, throughV140)!;
         Assert.True(result < 141, $"expected below 141 with the V141 sentinel absent, got {result}");
     }
+
+    /// <summary>#3691 part a2: the Collection Health tab is SQL Server-only, and the PostgreSQL-target analysis engine writes
+    /// most caveat rows, so the PostgreSQL Overview tab carries the same section and loads it.</summary>
+    [Fact]
+    public void ThePostgresOverviewTab_CarriesAndLoadsTheCaveatsSection()
+    {
+        var xaml = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.xaml");
+        var pgOverview = xaml[xaml.IndexOf("x:Name=\"PgOverviewTab\"", StringComparison.Ordinal)..];
+        pgOverview = pgOverview[..pgOverview.IndexOf("</TabItem>", StringComparison.Ordinal)];
+        Assert.Contains("x:Name=\"PgCollectionCaveatsExpander\"", pgOverview, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"PgCollectionCaveatsGrid\"", pgOverview, StringComparison.Ordinal);
+
+        var code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerServerTab.Postgres.cs");
+        var load = code[code.IndexOf("private async Task LoadPgOverviewAsync()", StringComparison.Ordinal)..];
+        load = load[..load.IndexOf("private ", 10, StringComparison.Ordinal)];
+        Assert.Contains("GetCollectionCaveatsAsync(_server.ServerId)", load, StringComparison.Ordinal);
+        Assert.Contains("PgCollectionCaveatsExpander.Visibility", load, StringComparison.Ordinal);
+    }
 }
