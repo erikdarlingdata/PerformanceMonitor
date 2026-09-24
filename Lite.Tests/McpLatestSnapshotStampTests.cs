@@ -113,6 +113,11 @@ public sealed class McpLatestSnapshotStampTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(Stamp(@base.AddMinutes(-30)), window.GetProperty("first_snapshot_at").GetString());
         /* The window's last snapshot IS the stamped one — one span, one set of rows, two halves. */
         Assert.Equal(root.GetProperty("captured_at").GetString(), window.GetProperty("last_snapshot_at").GetString());
+
+        /* #3653 item 17: interval_seconds is sample_interval_seconds under the name get_latch_stats and
+           get_spinlock_stats use; both rows here predate the sample-interval column, so both read null. */
+        Assert.Equal(JsonValueKind.Null, latest.GetProperty("sample_interval_seconds").ValueKind);
+        Assert.Equal(JsonValueKind.Null, latest.GetProperty("interval_seconds").ValueKind);
     }
 
     [Fact]
