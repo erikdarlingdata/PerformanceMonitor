@@ -385,12 +385,22 @@ LIMIT 2000";
                     continue;
                 }
 
+                /* auto_explain writes at LOG. The stderr route's regex requires the LOG label, so the csv route
+                   does too (review round 1): without it, a client's RAISE NOTICE or WARNING whose message
+                   starts with the marker would reach the parse, which the stderr route never allows. */
+                if (!string.Equals(entry.Severity, "LOG", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
                 var rest = entry.Message[PlanMarkerCsvLiteral.Length..];
                 var msIndex = rest.IndexOf(" ms  plan:", StringComparison.Ordinal);
 
+                /* No plan text: a genuine log_min_duration_statement or log_duration record starts the same way.
+                   It is not a capture, and not forged, so it is skipped WITHOUT counting (review round 1);
+                   counting it would grow forged_captures_skipped with every slow statement. */
                 if (msIndex < 0)
                 {
-                    forgedCaptures++;
                     continue;
                 }
 

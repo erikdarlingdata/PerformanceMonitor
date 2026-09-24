@@ -116,6 +116,35 @@ public sealed class PgPlanCaptureCsvUnitTests
         Assert.Equal(1, forgedMeasurement.Value);
     }
 
+    /// <summary>Review round 1: a genuine log_min_duration_statement record starts with the same "duration: "
+    /// text but carries no plan. It is not a capture and not forged, so it yields no row and is NOT counted as
+    /// forged.</summary>
+    [Fact]
+    public async Task ADurationRecordWithNoPlan_IsSkippedWithoutCountingItForged()
+    {
+        var durationOnly = CutHead + RealPlanRecord[..RealPlanRecord.IndexOf("duration: ", StringComparison.Ordinal)]
+            + "duration: 12.345 ms\",,,,,,,,,\"psql\",\"client backend\",,-3560200806914842915\n";
+
+        var (rows, context) = await ReadAsync(durationOnly);
+
+        Assert.Empty(rows);
+        Assert.DoesNotContain(context.Measurements, m => m.Label == PgPlanCaptureCollector.ForgedCaptureMeasurement);
+    }
+
+    /// <summary>Review round 1: auto_explain writes at LOG, and the stderr route requires the LOG label. A record
+    /// at another severity (a client's RAISE NOTICE, say) whose message starts with the marker is skipped, just
+    /// as the stderr route skips it.</summary>
+    [Fact]
+    public async Task APlanShapedRecordAtNoticeSeverity_YieldsNoRow()
+    {
+        var notice = CutHead + RealPlanRecord.Replace(",6/2,781,LOG,00000,", ",6/2,781,NOTICE,00000,", StringComparison.Ordinal);
+        Assert.NotEqual(CutHead + RealPlanRecord, notice);
+
+        var (rows, _) = await ReadAsync(notice);
+
+        Assert.Empty(rows);
+    }
+
     [Fact]
     public async Task TheNoCsvlogFileMarker_ThrowsTheCsvlogNamedSkip()
     {
