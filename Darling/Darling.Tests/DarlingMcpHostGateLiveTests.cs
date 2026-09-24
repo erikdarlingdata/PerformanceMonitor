@@ -138,11 +138,11 @@ public sealed class DarlingMcpHostGateLiveTests
             {
                 c.Request.Headers.Authorization = $"Bearer {bearer}";
             }
-
-            c.Response.Body = new System.IO.MemoryStream();
         });
 
-        ctx.Response.Body.Seek(0, System.IO.SeekOrigin.Begin);
+        /* TestServer hands back its own response stream (a reader over what the pipeline wrote), and it
+           can't seek: read it from where it stands. Replacing Response.Body in the configure callback has no
+           effect, because TestServer installs its own response feature. */
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         var body = await reader.ReadToEndAsync();
         return (ctx.Response.StatusCode, body);
@@ -227,11 +227,23 @@ public sealed class DarlingMcpHostGateLiveTests
 
         Assert.Equal(DarlingCoreToolProfile.Closure.ToHashSet(), toolNames);
 
-        var instructions = payload.TryGetProperty("instructions", out var instructionsElement)
-            ? instructionsElement.GetString() ?? ""
-            : "";
-        Assert.Contains("/core", instructions, StringComparison.OrdinalIgnoreCase);
+        /* The instructions travel in the initialize result, not tools/list. A /core session's lead with
+           DarlingCoreToolProfile.CoreNote; the full set's do not. */
+        var (coreInitStatus, coreInitBody) = await SendJsonRpcAsync(server, "/core", "localhost", IPAddress.Loopback,
+            "initialize", InitializeParams, bearer: null);
+        Assert.Equal(StatusCodes.Status200OK, coreInitStatus);
+        var coreInstructions = ReadJsonRpcResult(coreInitBody).GetProperty("instructions").GetString() ?? "";
+        Assert.StartsWith(DarlingCoreToolProfile.CoreNote, coreInstructions, StringComparison.Ordinal);
+
+        var (fullInitStatus, fullInitBody) = await SendJsonRpcAsync(server, "/", "localhost", IPAddress.Loopback,
+            "initialize", InitializeParams, bearer: null);
+        Assert.Equal(StatusCodes.Status200OK, fullInitStatus);
+        var fullInstructions = ReadJsonRpcResult(fullInitBody).GetProperty("instructions").GetString() ?? "";
+        Assert.False(fullInstructions.StartsWith(DarlingCoreToolProfile.CoreNote, StringComparison.Ordinal));
     }
+
+    private const string InitializeParams =
+        "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"gate-test\",\"version\":\"1\"}}";
 
     /// <summary>A <c>tools/call</c> on <c>/core</c> for a tool OUTSIDE its pinned set gets the SDK's own
     /// unknown-tool error — Darling registers no fallback <c>CallToolHandler</c>, so this is a real subset,
