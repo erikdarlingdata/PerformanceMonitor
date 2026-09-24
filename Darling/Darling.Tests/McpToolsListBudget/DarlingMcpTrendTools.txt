@@ -12,7 +12,7 @@ param get_memory_trend.bucket_minutes 55
 param get_memory_trend.hours_back 29
 param get_memory_trend.server_name 28
 
-tool get_perfmon_trend 600
+tool get_perfmon_trend 609
 param get_perfmon_trend.as_of 167
 param get_perfmon_trend.bucket_minutes 55
 param get_perfmon_trend.counter_name 50

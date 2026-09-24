@@ -4,7 +4,7 @@ param get_perfmon_stats.counter_name 61
 param get_perfmon_stats.instance_name 57
 param get_perfmon_stats.server_name 28
 
-tool get_perfmon_trend 600
+tool get_perfmon_trend 609
 param get_perfmon_trend.as_of 167
 param get_perfmon_trend.bucket_minutes 55
 param get_perfmon_trend.counter_name 50
