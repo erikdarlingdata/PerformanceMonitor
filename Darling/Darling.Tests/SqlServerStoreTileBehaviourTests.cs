@@ -478,7 +478,14 @@ public sealed class SqlServerStoreTileBehaviourTests
 
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
             var provider = new PgBaselineProvider(postgres);
-            var baseline = await provider.GetBaselineAsync(serverId, MetricNames.IoLatency, T.AddHours(-24), ct);
+            // Read the START bucket at T itself (Wednesday 10:00) — the SAME (hour, day-of-week) key the
+            // detector's own tile map will look up for the window's first tile. Reading at T.AddHours(-24)
+            // (a Tuesday) missed the seeded Wednesday-10/11 Full bucket entirely and fell through to a
+          // pooled HourOnly bucket over only the last ~4 weeks inside the 30-day baseline window, an
+            // under-sized, untrustworthy sigma that mis-sized the shift (recipe: "size the shift from the
+            // bucket you ACTUALLY read").
+            var baseline = await provider.GetBaselineAsync(serverId, MetricNames.IoLatency, T, ct);
+            Assert.True(baseline.IsTrustworthy, "the tiled arm requires a trustworthy start bucket");
 
             var detector = new PgAnomalyDetector(postgres, provider);
             var context = new AnalysisContext
