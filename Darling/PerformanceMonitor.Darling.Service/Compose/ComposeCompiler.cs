@@ -170,7 +170,13 @@ public static class ComposeCompiler
     {
         if (route.IsCagg)
         {
-            return $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation!}";
+            /* #3653 A6: CaggFromClause is the FROM-clause item (decision 2) — either
+               "collect.<relation> AS f" unchanged, or RollupCoverage.StitchedRelationSql's stitched form.
+               AppendFactBody appends " AS f" itself for the raw/QueryStore branches below, but a CAGG
+               FROM-clause item is already a complete, aliased relation, so BuildFactRelation returns it
+               whole and AppendFactBody's own " AS f" suffix applies to it as a no-op repeat of the SAME
+               alias the clause already carries — see the guard in DarlingComposeTests pinning that shape. */
+            return route.CaggFromClause ?? $"{PgSchemaGenerator.CollectSchema}.{route.CaggRelation!}";
         }
 
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
@@ -270,8 +276,18 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam))
-                .Append(" AS ").Append(FactAlias).Append('\n');
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam));
+
+            /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
+               relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a
+               second " AS f" appended here (that would be a syntax error). The raw/QueryStore branches in
+               BuildFactRelation still return a bare relation, so they still need the alias appended below. */
+            if (!route.IsCagg || route.CaggFromClause is null)
+            {
+                sql.Append(" AS ").Append(FactAlias);
+            }
+
+            sql.Append('\n');
 
             if (plan.UsesModuleJoin)
             {
