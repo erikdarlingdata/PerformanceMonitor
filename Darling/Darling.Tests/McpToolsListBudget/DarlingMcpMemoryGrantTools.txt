@@ -1,5 +1,5 @@
 # DarlingMcpMemoryGrantTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_memory_grants 988
+tool get_memory_grants 546
 param get_memory_grants.as_of 167
 param get_memory_grants.hours_back 120
 param get_memory_grants.server_name 28
@@ -9,7 +9,7 @@ param get_memory_pressure_events.as_of 167
 param get_memory_pressure_events.hours_back 29
 param get_memory_pressure_events.server_name 28
 
-tool get_resource_semaphore 1310
+tool get_resource_semaphore 616
 param get_resource_semaphore.as_of 167
 param get_resource_semaphore.hours_back 121
 param get_resource_semaphore.server_name 28

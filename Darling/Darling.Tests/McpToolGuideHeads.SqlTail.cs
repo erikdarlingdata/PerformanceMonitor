@@ -264,3 +264,74 @@ public sealed class McpToolGuideHeadsSqlTailDefaultTraceTests
         Assert.Contains("intentionally excluded here to avoid double-counting", served.Tail!, StringComparison.Ordinal);
     }
 }
+
+/// <summary>
+/// #3898 D3 head pins for the "SqlTail" lane's fifth drop: <c>get_resource_semaphore</c> and
+/// <c>get_memory_grants</c>, twins on both products (D6) whose original descriptions were already
+/// byte-identical on Darling and Lite, so their tails are too. No D4 removals: the original text on either
+/// tool carried no issue references or anecdotes. Follows the pattern in
+/// <see cref="McpToolGuideHeadsHealthParserTests"/>.
+/// </summary>
+public sealed class McpToolGuideHeadsSqlTailMemoryGrantTests
+{
+    private static readonly string[] ConvertedTools =
+    [
+        "get_resource_semaphore",
+        "get_memory_grants",
+    ];
+
+    /// <summary>The per-tool guardrail phrase each head must state.</summary>
+    private static readonly (string Tool, string Fact)[] HeadFacts =
+    [
+        ("get_resource_semaphore", "TWO READS: grants[] is the NEWEST snapshot"),
+        ("get_resource_semaphore", "window[] aggregates EVERY snapshot"),
+        ("get_resource_semaphore", "No rows: unavailable (or not_collected first)"),
+        ("get_resource_semaphore", "sample_interval_seconds/interval_known null/false on a restart-marker or pre-column row"),
+        ("get_memory_grants", "TWO READS: grants[] is the NEWEST snapshot"),
+        ("get_memory_grants", "window[] aggregates EVERY snapshot"),
+        ("get_memory_grants", "No rows: unavailable (or not_collected first)"),
+    ];
+
+    [Fact]
+    public void EveryConvertedHead_CarriesItsGuardrailFact_AndThePointer()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            var served = McpToolGuideTests.Served(tool);
+            Assert.NotNull(served.Tail);
+            Assert.EndsWith(McpToolGuide.GuidePointer, served.Served, StringComparison.Ordinal);
+            Assert.True(served.Served.Length <= 620, $"{tool}: served head {served.Served.Length} is over the 620 target");
+            Assert.All(served.ParameterDescriptionLengths, p => Assert.True(p.Length <= 200, $"{tool}.{p.Parameter}: {p.Length} > 200"));
+        }
+
+        foreach (var (tool, fact) in HeadFacts)
+        {
+            Assert.Contains(fact, McpToolGuideTests.Served(tool).Served, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>D6: the original descriptions were already byte-identical on Darling and Lite, so each tail
+    /// (the full original prose, unchanged) opens with its own original first sentence; the generic cross-SKU
+    /// pin (<see cref="McpToolGuideTests.EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads"/>)
+    /// covers the head, and Lite's own copy of this class pins Lite's served tail directly.</summary>
+    [Fact]
+    public void ResourceSemaphoreAndMemoryGrants_TailsKeepTheirOwnOriginalOpeningSentence()
+    {
+        var rsTail = McpToolGuideTests.Served("get_resource_semaphore").Tail!;
+        var mgTail = McpToolGuideTests.Served("get_memory_grants").Tail!;
+        Assert.Contains("Gets resource semaphore statistics showing granted vs available workspace memory against the target/max-target ceiling", rsTail, StringComparison.Ordinal);
+        Assert.Contains("Gets resource semaphore statistics showing granted vs available workspace memory per resource pool", mgTail, StringComparison.Ordinal);
+    }
+
+    /// <summary>The closing sentence was identical, word for word, on both tools and both products before this
+    /// PR (four verbatim copies of the same read-order guidance); it now lives once as a topic that each tail
+    /// appends, so <c>get_tool_guide</c> still serves it for every one of the four, unchanged.</summary>
+    [Fact]
+    public void ResourceSemaphoreAndMemoryGrants_TailsCarryTheSharedReadOrderTopic()
+    {
+        foreach (var tool in ConvertedTools)
+        {
+            Assert.EndsWith(McpToolGuideTopics.MemoryGrantWindowReadOrder, McpToolGuideTests.Served(tool).Tail!, StringComparison.Ordinal);
+        }
+    }
+}
