@@ -161,4 +161,33 @@ public sealed class DarlingTrendReaderStitchTests
 
         Assert.Equal(Legacy, route.ProbeHourlyViewOrDefault);
     }
+
+    /// <summary>
+    /// #3653 A6, decision 4 wired live (LA-5): every production call site
+    /// (<c>DarlingMcpTrendTools.GetQueryDurationTrend</c> / <c>GetProcedureDurationTrend</c>) now passes the
+    /// read's own window end into both resolvers, so a store whose successor's floor is at or before that end
+    /// probes the successor rather than the frozen legacy — the procedure twin of
+    /// <see cref="ResolveRoute_SuccessorFloorAtOrBeforeWindowEnd_ProbeHourlyViewOrDefault_IsSuccessor"/>, over
+    /// <see cref="DarlingTrendReader.ResolveProcedureDurationTrendRoute"/>.
+    /// </summary>
+    [Fact]
+    public void ResolveProcedureRoute_SuccessorFloorAtOrBeforeWindowEnd_ProbeHourlyViewOrDefault_IsSuccessor()
+    {
+        const string procedureLegacy = TimescaleSupport.ProcedureStatsHourlyView;
+        const string procedureSuccessor = TimescaleSupport.ProcedureStatsIntervalHourlyView;
+
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [procedureLegacy] = DaysAgo(80),
+                [procedureSuccessor] = DaysAgo(3),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All);
+
+        var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(
+            DaysAgo(10), RollupAvailability.All, coverage, nowUtc: Now, windowEndUtc: Now);
+
+        Assert.Equal(procedureSuccessor, route.ProbeHourlyViewOrDefault);
+    }
 }

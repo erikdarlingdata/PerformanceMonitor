@@ -503,7 +503,7 @@ public sealed class DarlingMcpTrendTools
                 as_of anchor decides the window, not how old its rows are.
             */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
-            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage);
+            var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
 
             /* #3897: the hourly rollup's points are whole hours, so a width it cannot serve is refused rather than
                quietly answered at another, and an automatic width is never finer than the rollup's hour. */
@@ -580,7 +580,7 @@ public sealed class DarlingMcpTrendTools
             /* #3541 A2 — the same routing as get_query_duration_trend, over the procedure pair, and #3897 the same
                width rule on the hourly tier. */
             var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
-            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage);
+            var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
             if (route.Tier == RetentionTier.Hourly)
             {
                 var hourlyError = TrendBuckets.RequireWholeHours(bucket_minutes, RawRetentionDays);

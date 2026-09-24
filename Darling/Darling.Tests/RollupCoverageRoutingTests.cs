@@ -427,7 +427,7 @@ public sealed class RollupCoverageRoutingTests
     /// and <see cref="RollupCoverage.StitchedRelationSql"/> both live in, and which keeps
     /// <c>HourlyRelationFor</c> around for the pins (lane-3653-A6-LA-2.md).</para>
     /// </summary>
-    [Fact(Explicit = true)]
+    [Fact]
     public void NoReaderOutsideTheBuilder_CallsHourlyRelationForDirectly()
     {
         var root = FindRepoRoot();

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -202,6 +203,48 @@ VALUES ($1, $2, $3, $4, $5, 'RESTART', 'RESTARTHANDLE', 0, 0, 0, 0)", connection
         Assert.Equal(3 * scale, totalsByHour[Hour(2)], 3); /* F itself: successor-side */
         Assert.Equal(4 * scale, totalsByHour[Hour(3)], 3);
         Assert.Equal(5 * scale, totalsByHour[Hour(4)], 3);
+
+        /* ── item 4 (LA-5): a THIRD caller over the SAME seeded stitched pair — DarlingTrendReader's own
+           query-history read, which every production caller (get_query_history) reaches through
+           RollupCoverage.StitchedRelationSql, exactly the same builder step 2 and step 3 exercised. Per-bucket
+           totals must be the legacy's below F and the successor's at or above F, with exactly one row set (a
+           single query_hash) landing at F itself. */
+        var hourlyFromClause = coverage.StitchedRelationSql(legacy, "h", d0, RollupCoverage.StitchTier.Hourly);
+        var history = await DarlingTrendReader.GetQueryHistoryAsync(
+            dataSource, ServerId, db, "HASH2", d0, d0.AddDays(5),
+            hourlyAvailable: rollups.QueryGrainHourly,
+            coverage: coverage.For(legacy, TimescaleSupport.QueryStatsDailyView),
+            hourlyRelation: hourlyFromClause,
+            cancellationToken: ct);
+
+        /* HASH2 was planted at Hour(2) — exactly F, the successor's first materialized bucket — so the
+           stitched read must find it, and find it exactly once: not double-counted across the UNION ALL
+           seam, and not missing because the split fell on the wrong side. */
+        Assert.Single(history.Points);
+        Assert.Equal(Hour(2), history.Points[0].CollectionTime);
+        Assert.Equal(3000, history.Points[0].DeltaCpuUs);
+
+        /* A hash from BELOW F (legacy-only side) must also be found through the same stitched read. */
+        var belowF = await DarlingTrendReader.GetQueryHistoryAsync(
+            dataSource, ServerId, db, "HASH0", d0, d0.AddDays(5),
+            hourlyAvailable: rollups.QueryGrainHourly,
+            coverage: coverage.For(legacy, TimescaleSupport.QueryStatsDailyView),
+            hourlyRelation: hourlyFromClause,
+            cancellationToken: ct);
+        Assert.Single(belowF.Points);
+        Assert.Equal(Hour(0), belowF.Points[0].CollectionTime);
+        Assert.Equal(1000, belowF.Points[0].DeltaCpuUs);
+
+        /* A hash from AT/ABOVE F (successor-only side) too. */
+        var atOrAboveF = await DarlingTrendReader.GetQueryHistoryAsync(
+            dataSource, ServerId, db, "HASH4", d0, d0.AddDays(5),
+            hourlyAvailable: rollups.QueryGrainHourly,
+            coverage: coverage.For(legacy, TimescaleSupport.QueryStatsDailyView),
+            hourlyRelation: hourlyFromClause,
+            cancellationToken: ct);
+        Assert.Single(atOrAboveF.Points);
+        Assert.Equal(Hour(4), atOrAboveF.Points[0].CollectionTime);
+        Assert.Equal(5000, atOrAboveF.Points[0].DeltaCpuUs);
     }
 
     private static async Task RefreshAsync(NpgsqlConnection connection, string view, DateTime from, DateTime to, CancellationToken ct)
