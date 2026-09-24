@@ -329,50 +329,25 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
     }
 
     /// <summary>
-    /// #3653 A8 option B (lane L1b): <c>GetBucketMapAsync</c> reuses the SAME cached compute
-    /// <c>GetBaselineAsync</c> uses, so a second call after the seeded rows are deleted still returns the SAME
-    /// <c>Buckets</c> object — a recompute would see no rows and return an empty map.
+    /// #3653 A8 option B (lane L1b): a server with no CPU history gets a map with NO USABLE bucket, and the call never
+    /// throws. Lite's scaffold (GROUPING SETS over zero rows) returns one zero-sample placeholder at the flat key
+    /// (-1, -1), not an empty dictionary. So the contract is checked the way the tile gate reads it: every
+    /// (hour, dow) resolves to a zero-sample bucket, and <c>AnomalyGate.EvaluateTiles</c> skips every tile. There is
+    /// no Lite twin of the Darling cache-hit test on purpose. This class's constructor sets the static
+    /// <c>BaselineProvider.CacheTtl</c> to 1 ms, and other classes set it in parallel, so a "second call is a hit"
+    /// assertion cannot be deterministic here. The accessor calls the same <c>GetOrComputeBaselinesAsync</c> that
+    /// <c>BaselineProviderTests</c>' cache tests cover, and the Darling live test pins the shared cache key.
     /// </summary>
     [Fact]
-    public async Task Provider_GetBucketMapAsync_SecondCall_IsACacheHit_NoSecondCompute()
-    {
-        var windowStart = new DateTime(2026, 3, 8, 4, 0, 0);
-        var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0);
-        var seedTime = new DateTime(2026, 2, 24, 22, 0, 0);
-        for (var i = 0; i < 10; i++)
-            await SeedCpuAsync(seedTime.AddMinutes(i * 5), 50);
-
-        var first = await _provider.GetBucketMapAsync(ServerId, MetricNames.Cpu, windowStart, windowEnd);
-        Assert.NotEmpty(first.Buckets);
-
-        /* Delete the seeded rows, then call again with the same arguments. */
-        using var readLock = _duckDb.AcquireReadLock();
-        var conn = await SeedConnectionAsync();
-        using (var cmd = conn.CreateCommand())
-        {
-            cmd.CommandText = "DELETE FROM cpu_utilization_stats WHERE server_id = $1";
-            cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        var second = await _provider.GetBucketMapAsync(ServerId, MetricNames.Cpu, windowStart, windowEnd);
-
-        Assert.Same(first.Buckets, second.Buckets);
-        Assert.NotEmpty(second.Buckets);
-    }
-
-    /// <summary>
-    /// #3653 A8 option B (lane L1b): a server with no CPU history returns an empty map, never throws.
-    /// </summary>
-    [Fact]
-    public async Task Provider_GetBucketMapAsync_NoHistory_ReturnsAnEmptyMap_AndDoesNotThrow()
+    public async Task Provider_GetBucketMapAsync_NoHistory_HasNoUsableBucket_AndDoesNotThrow()
     {
         var windowStart = new DateTime(2026, 3, 8, 4, 0, 0);
         var windowEnd = new DateTime(2026, 3, 8, 10, 0, 0);
 
         var map = await _provider.GetBucketMapAsync(ServerId, MetricNames.Cpu, windowStart, windowEnd);
 
-        Assert.Empty(map.Buckets);
-        Assert.Equal(0L, map.For(0, 0).SampleCount);
+        for (var hour = 0; hour < 24; hour++)
+            for (var dow = 0; dow < 7; dow++)
+                Assert.Equal(0L, map.For(hour, dow).SampleCount);
     }
 }
