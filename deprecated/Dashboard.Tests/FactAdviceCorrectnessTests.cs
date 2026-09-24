@@ -42,12 +42,22 @@ public class FactAdviceCorrectnessTests
         Assert.DoesNotContain("every INSERT/UPDATE/DELETE pays", Text("MISSING_INDEX"));
     }
 
+    // #4149: last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY moved to PAGELATCH_EX — LATCH_EX excludes
+    // buffer latches (sys.dm_os_wait_stats), so it is no longer where this advice belongs.
     [Fact]
-    public void LatchEx_LastPageFix_IsOptimizeForSequentialKey_NotAddClusteredIndex()
+    public void PagelatchEx_LastPageFix_IsOptimizeForSequentialKey_NotAddClusteredIndex()
     {
-        var t = Text("LATCH_EX");
+        var t = Text("PAGELATCH_EX");
         Assert.DoesNotContain("add a clustered index", t);
         Assert.Contains("OPTIMIZE_FOR_SEQUENTIAL_KEY", t);
+    }
+
+    [Fact]
+    public void LatchEx_DoesNotDescribePageLatches()
+    {
+        var t = Text("LATCH_EX");
+        Assert.DoesNotContain("OPTIMIZE_FOR_SEQUENTIAL_KEY", t);
+        Assert.Contains("non-buffer", t);
     }
 
     [Fact]

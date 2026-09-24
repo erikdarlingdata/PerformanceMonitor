@@ -213,7 +213,10 @@ public sealed class DarlingMcpLatchSpinlockToolsSurfaceAndSqlTests
     [InlineData("PAGEIOLATCH_SH", "I/O bottleneck - check disk latency, add memory")]
     [InlineData("PAGELATCH_EX", "Page contention - check for hot pages, tempdb issues")]
     [InlineData("BUFFER", "Buffer pool contention - check for memory pressure")]
-    [InlineData("ACCESS_METHODS_DATASET_PARENT", "Index/heap access contention")]
+    // #4149: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR name parallel scans.
+    [InlineData("ACCESS_METHODS_DATASET_PARENT", "Index/heap access, or parallel scan coordination (DATASET_PARENT, SCAN_RANGE_GENERATOR)")]
+    [InlineData("ACCESS_METHODS_SCAN_RANGE_GENERATOR", "Index/heap access, or parallel scan coordination (DATASET_PARENT, SCAN_RANGE_GENERATOR)")]
+    [InlineData("ACCESS_METHODS_HOBT_VIRTUAL_ROOT", "Index/heap access contention")]
     [InlineData("ALLOC_FREESPACE_CACHE", "Allocation contention - consider pre-sizing files")]
     [InlineData("LOG_MANAGER", "Log contention - check log disk")]
     [InlineData("WHATEVER", "Review latch class documentation")]
@@ -320,7 +323,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::integer)",
 
             var latch = await DarlingMcpLatchSpinlockTools.GetLatchStats(postgres, ServerName);
             DarlingMcpTestData.AssertEnvelope(latch, ServerName, "latches");
-            Assert.Contains("Index/heap access contention", latch, StringComparison.Ordinal);
+            /* #4149: the seeded ACCESS_METHODS_DATASET_PARENT now reads as parallel scan coordination. */
+            Assert.Contains("Index/heap access, or parallel scan coordination", latch, StringComparison.Ordinal);
             var latches = System.Text.Json.JsonDocument.Parse(latch).RootElement.GetProperty("latches").EnumerateArray()
                 .ToDictionary(l => l.GetProperty("latch_class").GetString()!);
             Assert.Equal(3, latches.Count);
