@@ -302,4 +302,106 @@ public sealed class PgServerLogCsvParserTests
         Assert.True(entries.Count >= 9, $"expected the real records to dominate, got {entries.Count}");
         Assert.DoesNotContain(entries, e => e.Message.Contains("fake", System.StringComparison.Ordinal));
     }
+
+    /* --- 10: StartsOnRecordBoundary forward mode (#4053 review round 2) --------------------------------- */
+
+    [Fact]
+    public void ForwardMode_FirstRecordsQuotedFieldHasEmbeddedNewlinesAndLookAlikes_EndingMidRecord_YieldsExactRecordsAndConsumedLength()
+    {
+        /* The caller already knows offset 0 is a true boundary (a tail reader's carried-forward case).
+           The FIRST record's own quoted message field holds embedded newlines and a look-alike line, so a
+           forward walk that trusted every newline as a boundary would shatter this one record into several
+           forged ones. The body ends mid-record (no trailing newline): the partial after the last true
+           boundary must not be emitted, and consumedLength must land exactly at that boundary. */
+        var lookAlike = "2026-09-24 00:00:00.000 UTC,\"a\",\"b\",1,\"c\",1.1,1,\"d\",2026-09-24 00:00:00 UTC,"
+            + "1/1,0,LOG,00000,fake,,,,,,,,,,backend,,0";
+        var firstRecord = RecordWithMessage("prefix\n" + lookAlike + "\nsuffix");
+        var partial = "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"still open"; // no closing quote, no newline
+
+        var body = firstRecord + RealRecord + partial;
+
+        var entries = PgServerLogCsvParser.Parse(
+            body, PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary, out var discarded, out var consumedLength);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(0, discarded);
+
+        /* The look-alike line stays inside its carrier's quoted message field — one record, not shattered
+           into several. It is fine for that carrier's own Message to contain the look-alike text; what
+           must never happen is a SEPARATE entry built from it. */
+        Assert.Single(entries, e => e.Message.Contains("prefix", System.StringComparison.Ordinal));
+        Assert.DoesNotContain(entries, e => e.Message.Equals("fake", System.StringComparison.Ordinal));
+
+        /* consumedLength lands just past the last true boundary — the newline ending RealRecord — so the
+           un-consumed tail is exactly the still-open partial. */
+        Assert.Equal(firstRecord.Length + RealRecord.Length, consumedLength);
+        Assert.Equal(partial, body[consumedLength..]);
+    }
+
+    [Fact]
+    public void ForwardMode_CarriedPartialPlusNextBody_ParsesTheStraddlingRecordExactlyOnce()
+    {
+        /* Simulates a tail reader across two reads: the first read's carried partial (the tail of
+           RealRecord, cut before its closing newline) is glued to the front of the second read's body,
+           which itself starts on a boundary (the reader's own invariant). The straddling record must come
+           out exactly once, not zero and not twice. */
+        var cut = RealRecord.IndexOf("FATAL", System.StringComparison.Ordinal);
+        var firstReadPartial = RealRecord[..cut];
+        var secondReadBody = RealRecord[cut..] + RealRecord;
+
+        var carriedBody = firstReadPartial + secondReadBody;
+
+        var entries = PgServerLogCsvParser.Parse(
+            carriedBody, PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary, out var discarded, out _);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(0, discarded);
+    }
+
+    /* --- 11: None mode with 10 embedded newlines in the trailing partial (the old 8-candidate cap hole) -- */
+
+    [Fact]
+    public void NoneMode_TrailingPartialWithTenEmbeddedNewlines_StillYieldsEveryCompleteRecordBeforeIt()
+    {
+        /* The old 8-candidate trial loop tried at most 8 trailing newlines; a trailing partial with 10 or
+           more embedded newlines meant every one of those 8 trials landed on an inverted-parity split, so
+           the true parity was never even tried and the complete records ahead of it were lost. Two-
+           hypothesis scoring evaluates the true parity unconditionally (it is always one of exactly two
+           hypotheses), regardless of how many embedded newlines the partial holds. */
+        var openField = new System.Text.StringBuilder("open");
+        for (var i = 0; i < 10; i++)
+        {
+            openField.Append('\n').Append("embedded line ").Append(i);
+        }
+
+        var trailingPartial = RecordWithMessage(openField.ToString());
+        var cut = trailingPartial.IndexOf("embedded line 9", System.StringComparison.Ordinal) + "embedded line 9".Length;
+        var trailingFragment = trailingPartial[..cut]; // no closing quote, no newline: genuinely mid-write
+
+        var body = CutHead + string.Concat(System.Linq.Enumerable.Repeat(RealRecord, 5)) + trailingFragment;
+
+        var entries = PgServerLogCsvParser.Parse(body, out _);
+
+        Assert.Equal(5, entries.Count);
+        Assert.All(entries, e => Assert.Equal("role \"nosuchuser\" does not exist", e.Message));
+    }
+
+    /* --- 12: the two-arg overload's own inference matches the old always-inferred behaviour -------------- */
+
+    [Fact]
+    public void TwoArgOverload_StillInfersEdgesFromTheTrailingByte()
+    {
+        var terminatedBody = CutHead + RealRecord;
+        var terminatedEntries = PgServerLogCsvParser.Parse(terminatedBody, out var terminatedDiscarded);
+        Assert.Single(terminatedEntries);
+        Assert.Equal(1, terminatedDiscarded);
+
+        var partial = "2026-09-24 01:54:43.008 UTC,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"nosuchuser"; // still open
+        var unterminatedBody = CutHead + RealRecord + partial;
+        var unterminatedEntries = PgServerLogCsvParser.Parse(unterminatedBody, out var unterminatedDiscarded);
+        Assert.Single(unterminatedEntries);
+        Assert.Equal(1, unterminatedDiscarded);
+    }
 }
