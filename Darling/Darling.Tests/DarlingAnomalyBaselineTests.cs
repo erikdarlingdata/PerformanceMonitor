@@ -496,6 +496,48 @@ public sealed class DarlingAnomalyBaselineTests
     }
 
     /// <summary>
+    /// #3653 B (#4172 then #4169): a census of <c>AnomalyGate.EvaluateTiles</c> calls in the tiled families
+    /// (CPU, wait-profile's robust arm, I/O read, I/O write) — four on each SKU. CPU and wait's calls are
+    /// byte-identical between the two detectors (checked literally). I/O's two calls tolerate the SAME two
+    /// differences this file already tolerates elsewhere by design, not by omission: the baseline-map
+    /// argument (PG re-fetches into <c>readMap</c>/<c>writeMap</c>, each gate scoring independently; Lite
+    /// shares one <c>map</c> fetch — same cache key, same value, mirroring how this file already accepts
+    /// <c>\w*[Bb]aseline</c> for PG's <c>readBaseline</c>/<c>writeBaseline</c> against Lite's shared
+    /// <c>baseline</c>), and the modified-z threshold argument (PG hoists it once into <c>modifiedZThreshold</c>;
+    /// Lite calls <c>ModifiedZThresholdFor</c> inline at each site — same pure function, same two inputs —
+    /// mirroring how the wait test above already accepts either the hoisted <c>window</c> local or the inline
+    /// <c>context.TimeRangeEnd - context.TimeRangeStart</c> expression for the SAME reason).
+    /// </summary>
+    [Fact]
+    public void AnomalyGate_EvaluateTilesCalls_AreFourPerSku_AndMatchBetweenPgAndLite()
+    {
+        var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs"));
+
+        foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
+        {
+            var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateTiles\(");
+            Assert.True(calls.Count == 4, $"{name}: expected 4 EvaluateTiles calls (cpu, wait, io-read, io-write), found {calls.Count}");
+        }
+
+        // CPU: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*cpuThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Cpu,\s*cpuThreshold\),\s*CpuFloorPct,\s*CpuFallbackPct,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*cpuThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Cpu,\s*cpuThreshold\),\s*CpuFloorPct,\s*CpuFallbackPct,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Wait profile's robust arm: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*WaitProfileFallbackMsPerSec,\s*WaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // I/O read: the map argument and the modified-z threshold tolerate the two documented differences.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*readTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*ReadLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*readTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*ReadLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // I/O write: same tolerances.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+    }
+
+    /// <summary>
     /// #3527 proven live, both halves in one place: the BatchRequests BASELINE arm derives its
     /// per-second unit from LAG(collection_time) over the perfmon_baseline supply, and the DETECTOR's
     /// window read divides by the stored measured interval — so the two sides meet in the same
