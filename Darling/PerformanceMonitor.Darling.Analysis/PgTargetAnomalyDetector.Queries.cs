@@ -197,7 +197,8 @@ ORDER BY w.stmt_ms DESC";
                 var decision = AnomalyGate.EvaluateZScore(
                     baseline, candidate.PeakShare, candidate.MeanShare,
                     DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgStatementShare),
-                    PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, SigmaDisplayCap);
+                    PgTargetScorer.BadActorShareConcerning, double.PositiveInfinity, SigmaDisplayCap,
+                    window: context.TimeRangeEnd - context.TimeRangeStart);
 
                 if (!decision.Fire)
                 {

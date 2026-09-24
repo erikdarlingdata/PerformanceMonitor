@@ -110,7 +110,8 @@ FROM rated";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakPerDay, meanPerDay,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgDatabaseGrowthBytesPerDay), PgDatabaseGrowthFloorBytesPerDay, PgDatabaseGrowthFallbackBytesPerDay, SigmaDisplayCap);
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgDatabaseGrowthBytesPerDay), PgDatabaseGrowthFloorBytesPerDay, PgDatabaseGrowthFallbackBytesPerDay, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             /* unmeasured: both bars (see AnomalyThresholds) — the helper's default stamp, threshold_lineage = 0. */

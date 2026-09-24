@@ -25,5 +25,8 @@
          the internal reconstruction to the shared Common BlockingChainModel through its own copied
          BlockingChainViewerProjection (the same per-app pattern Lite and Dashboard use). -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Viewer" />
+    <!-- #3653 A8 slice 1: Darling.Tests pins AnomalyThresholds.NAwarePeakCutoff / InverseNormalCdf directly,
+         both internal, before trusting AnomalyGate on top of them. -->
+    <InternalsVisibleTo Include="Darling.Tests" />
   </ItemGroup>
 </Project>

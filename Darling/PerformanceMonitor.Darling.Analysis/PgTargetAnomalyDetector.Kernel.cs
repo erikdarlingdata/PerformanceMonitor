@@ -87,7 +87,8 @@ public sealed partial class PgTargetAnomalyDetector
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakCores, meanCores,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpuBurnCores), PgCpuBurnCoresFloor, PgCpuBurnCoresFallback, SigmaDisplayCap);
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgCpuBurnCores), PgCpuBurnCoresFloor, PgCpuBurnCoresFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             /* unmeasured: both bars (see AnomalyThresholds) — the helper's default stamp, threshold_lineage = 0. */

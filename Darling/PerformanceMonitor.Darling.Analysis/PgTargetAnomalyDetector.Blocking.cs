@@ -103,7 +103,8 @@ FROM per_capture";
 
             var decision = AnomalyGate.EvaluateZScore(
                 baseline, peakBlocked, avgBlocked,
-                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgBlockedSessions), PgBlockedSessionsFloor, PgBlockedSessionsFallback, SigmaDisplayCap);
+                DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgBlockedSessions), PgBlockedSessionsFloor, PgBlockedSessionsFallback, SigmaDisplayCap,
+                window: context.TimeRangeEnd - context.TimeRangeStart);
             if (!decision.Fire) return;
 
             /* unmeasured: both bars (see AnomalyThresholds) — the helper's default stamp, threshold_lineage = 0. */

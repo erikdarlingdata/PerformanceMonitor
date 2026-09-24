@@ -180,6 +180,12 @@ LIMIT 6";
 
             bool isNew;
             double ratio, meanRatio, fallbackExceedance;
+            /* #3653 A8 slice 1: this gate is inline, not the shared AnomalyGate.EvaluateZScore pair overload, so the
+               Šidák-corrected peak cutoff is applied here directly, to the peak clause alone — the mean clause
+               (meanModifiedZ / meanRatio below) is unaffected, matching the shared gate's rule exactly. */
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var modifiedZThresholdForPeak = NAwarePeakCutoff(HeavyTailModifiedZThreshold, window);
+            var ratioThresholdForPeak = NAwarePeakCutoff(PgRatioAnomalyThreshold, window);
             var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
             var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, meanRate);
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
@@ -189,7 +195,7 @@ LIMIT 6";
                 meanRatio = baseline.Mean > 0 ? meanRate / baseline.Mean : 0;
                 fallbackExceedance = 0;
                 /* The heavy-tail cutoff by reference on BOTH statistics; the (unmeasured) magnitude bar on the peak. */
-                if (modifiedZ < HeavyTailModifiedZThreshold || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
+                if (modifiedZ < modifiedZThresholdForPeak || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
@@ -198,7 +204,7 @@ LIMIT 6";
                 meanRatio = meanRate / baseline.Mean;
                 fallbackExceedance = 0;
                 /* unmeasured: PgRatioAnomalyThreshold on both statistics, PgSampledWaitProfileFallbackMsPerSec on the peak. */
-                if (ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
+                if (ratio < ratioThresholdForPeak || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
             }
             else
             {
