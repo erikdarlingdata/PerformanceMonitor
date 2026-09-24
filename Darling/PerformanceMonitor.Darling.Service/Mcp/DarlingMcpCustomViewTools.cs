@@ -241,12 +241,13 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "run_custom_view_panel"), Description(
-        "Runs one composed (v2) panel and returns its DATA: {sql, rows, annotations, notice?}, with no 'status' " +
-        "field on success. status appears only as {status:\"invalid\"|\"error\", message} when the spec, panel, " +
-        "or query fails. notice means retention covered only part of the window, or the row cap truncated the " +
-        "result; absent means neither happened. Window ends now: 'hours' (default 24), unless ISO-8601 " +
-        "'windowStart'+'windowEnd' win instead (capped at 90 days; old windows come from retention rollups " +
-        "automatically). 'server' omitted or \"All\" runs the whole fleet. Only 'panel' is required. <<GUIDE>> " +
+        "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
+        "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
+        "failed or timed-out query; \"error\" for an internal fault. notice means retention covered only " +
+        "part of the window, or the row cap truncated the result; absent means neither happened. Window ends " +
+        "now: 'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win instead (max 90 days; old " +
+        "windows read rollups). 'server' omitted or \"All\" runs the whole fleet. Only 'panel' is " +
+        "required. <<GUIDE>> " +
         "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
         "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — " +
         "so a generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the " +

@@ -22,7 +22,7 @@ namespace Darling.Tests;
 public sealed class McpToolGuideHeadsCustomViewTests
 {
     private const int ValidateCustomViewServedCap = 561;
-    private const int RunCustomViewPanelServedCap = 615;
+    private const int RunCustomViewPanelServedCap = 612;
 
     /// <summary>Guardrail facts the head alone must carry for each tool: what a caller could otherwise misread
     /// about the answer (dry-run vs write, exhaustiveness, strictness, status shape, and what an absent
@@ -34,7 +34,7 @@ public sealed class McpToolGuideHeadsCustomViewTests
         ("validate_custom_view", "Unknown keys are ERRORS at every level (root, panel, cell, filter, overlay), never silently dropped"),
         ("validate_custom_view", "A notebook cell is FLAT (carries the panel's own keys directly); only run_custom_view_panel's spec nests under 'panel'."),
         ("run_custom_view_panel", "with no 'status' field on success"),
-        ("run_custom_view_panel", "status appears only as {status:\"invalid\"|\"error\", message} when the spec, panel, or query fails"),
+        ("run_custom_view_panel", "Failures return {status, message}: \"invalid\" for a bad spec or panel, or a failed or timed-out query; \"error\" for an internal fault."),
         ("run_custom_view_panel", "notice means retention covered only part of the window, or the row cap truncated the result; absent means neither happened"),
         ("run_custom_view_panel", "Window ends now: 'hours' (default 24)"),
         ("run_custom_view_panel", "Only 'panel' is required."),
