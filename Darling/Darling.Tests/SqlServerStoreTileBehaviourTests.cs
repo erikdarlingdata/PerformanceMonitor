@@ -40,8 +40,11 @@ public sealed class SqlServerStoreTileBehaviourTests
     private static readonly DateTime T = new(2026, 1, 14, 10, 0, 0, DateTimeKind.Unspecified);
     private const int Wednesday = (int)DayOfWeek.Wednesday;
 
-    private const double CpuMu = 20.0;
-    private const double CpuSigmaAmp = 2.0; // deterministic pseudo-noise amplitude: mu + sigmaAmp * sin(i)
+    // mu = 30, sigmaAmp = 5 gives a sample stddev of about 3.69 (CpuBaselineStdDev, below), so mu + 6 sigma is
+    // about 52.1 — clears CpuFloorPct (50.0 %) with margin, which mu = 20 amp = 2 (stddev about 1.48, mu + 6
+    // sigma about 28.9) never did (#4172 lane T4172-2 diagnosis: no fact fired because nothing cleared the floor).
+    private const double CpuMu = 30.0;
+    private const double CpuSigmaAmp = 5.0; // deterministic pseudo-noise amplitude: mu + sigmaAmp * sin(i)
 
     // ───────────────────────── CPU: all four scenarios ─────────────────────────
 
@@ -99,14 +102,19 @@ public sealed class SqlServerStoreTileBehaviourTests
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
             Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
             Assert.Equal(2.0, fact.Metadata["tiles_fired"]);
-            Assert.Equal(AnomalyThresholds.DefaultDeviationThreshold, fact.Metadata["fire_threshold"], 0.001); // 4h window, no Sidak raise
+            // The CPU baseline carries a positive robust sigma (deterministic sin(i) noise), so the tiled gate's
+            // trustworthy path runs the MODIFIED-z frame (AnomalyGate.DecideRobustFirst), not the classical one —
+            // ModifiedZThreshold (3.5), not DefaultDeviationThreshold (2.0). 4h window, no Sidak raise.
+            Assert.Equal(AnomalyThresholds.ModifiedZThreshold, fact.Metadata["fire_threshold"], 0.001);
 
             // What the whole-window gate would have seen: the window MEAN across all 4 hours, judged as one
-            // z against the baseline mean/stddev — the case tiling exists for.
+            // z against the baseline the detector actually trusts — the robust (median/MAD) frame, since this
+            // baseline carries a positive robust sigma and the tiled/whole-window gates both run the modified-z
+            // path (ModifiedZThreshold, 3.5) on it, not the classical DefaultDeviationThreshold path.
             var wholeMean = await ReadWindowMeanAsync(connection, serverId, T, T.AddHours(4), ct);
             var baseline = await provider.GetBaselineAsync(serverId, MetricNames.Cpu, T.AddHours(-24), ct);
-            var wholeWindowZ = (wholeMean - baseline.Mean) / baseline.EffectiveStdDev;
-            Assert.True(wholeWindowZ < AnomalyThresholds.DefaultDeviationThreshold,
+            var wholeWindowZ = (wholeMean - baseline.Median) / baseline.EffectiveRobustSigma;
+            Assert.True(wholeWindowZ < AnomalyThresholds.ModifiedZThreshold,
                 $"the whole-window mean's z ({wholeWindowZ:F2}) must stay under the CPU cutoff for this to be the case tiling exists for");
 
             bodySucceeded = true;
@@ -176,7 +184,9 @@ public sealed class SqlServerStoreTileBehaviourTests
             var facts = await detector.DetectAnomaliesAsync(context);
             var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
 
-            var expectedThreshold = AnomalyThresholds.NAwarePeakCutoff(AnomalyThresholds.DefaultDeviationThreshold, TimeSpan.FromHours(24));
+            // The robust (modified-z) frame runs here too (see scenario 1's note), so the Sidak raise is over
+            // ModifiedZThreshold (3.5), not the classical DefaultDeviationThreshold (2.0).
+            var expectedThreshold = AnomalyThresholds.NAwarePeakCutoff(AnomalyThresholds.ModifiedZThreshold, TimeSpan.FromHours(24));
             Assert.Equal(expectedThreshold, fact.Metadata["fire_threshold"], 0.01);
 
             bodySucceeded = true;
