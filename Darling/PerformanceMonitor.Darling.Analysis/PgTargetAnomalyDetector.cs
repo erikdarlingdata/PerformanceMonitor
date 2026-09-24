@@ -102,14 +102,6 @@ WHERE server_id = $1 AND collection_time >= $2";
        the PgAnomalyDetector convention. ── */
 
     /// <summary>
-    /// The window's transactions per second, per collection, then peak / average / count — the PG_TPS read's
-    /// difference (<c>PgTargetFactCollector.PgTargetDatabaseCountersSql</c>: per-series <c>LAG</c>, <c>GREATEST</c>
-    /// clamp, explicit reset) rated over each collection's own gap, exactly as the <c>pg_tps</c> baseline arm rates
-    /// it, so peak and bucket are in one unit. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC). The
-    /// deadlock difference rides in the same scan (summed, and per database for the fold) so the two families
-    /// read the table once each rather than twice.
-    /// </summary>
-    /// <summary>
     /// #3653 A8 option B (lane L3a): the TPS tile read — <see cref="DatabaseCounterWindowSql"/>'s per-collection
     /// rated series, but grouped by target-local hour (<c>WindowTiles.LocalHourSql</c>) instead of collapsed to one
     /// window row, and without the deadlock columns the ratio path alone needs. A NEW const, on purpose: the
@@ -152,6 +144,14 @@ FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
 
+    /// <summary>
+    /// The window's transactions per second, per collection, then peak / average / count — the PG_TPS read's
+    /// difference (<c>PgTargetFactCollector.PgTargetDatabaseCountersSql</c>: per-series <c>LAG</c>, <c>GREATEST</c>
+    /// clamp, explicit reset) rated over each collection's own gap, exactly as the <c>pg_tps</c> baseline arm rates
+    /// it, so peak and bucket are in one unit. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC). The
+    /// deadlock difference rides in the same scan (summed, and per database for the fold) so the two families
+    /// read the table once each rather than twice.
+    /// </summary>
     public const string DatabaseCounterWindowSql = @"
 WITH sampled AS (
     SELECT database_name,
