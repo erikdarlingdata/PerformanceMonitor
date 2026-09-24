@@ -1,5 +1,5 @@
 # DarlingMcpStoreQueryStatsTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_store_query_stats 984
+tool get_store_query_stats 614
 param get_store_query_stats.full_text 95
 param get_store_query_stats.order_by 165
 param get_store_query_stats.role 83

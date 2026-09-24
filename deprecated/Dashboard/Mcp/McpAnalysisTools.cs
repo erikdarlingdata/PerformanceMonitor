@@ -622,7 +622,7 @@ internal static class ToolRecommendations
         ],
         ["LATCH_EX"] =
         [
-            new("get_latch_stats", "Check latch contention by class (ACCESS_METHODS_DATASET_PARENT / FGCB_ADD_REMOVE point at TempDB allocation contention)"),
+            new("get_latch_stats", "Check latch contention by class"),
             new("get_tempdb_trend", "Check TempDB for allocation contention"),
             new("get_wait_trend", "Track the latch contention trend", new() { ["wait_type"] = "LATCH_EX" })
         ],
