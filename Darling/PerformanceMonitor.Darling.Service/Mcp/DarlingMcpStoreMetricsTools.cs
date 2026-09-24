@@ -414,6 +414,14 @@ public sealed class DarlingMcpStoreMetricsTools
                     cumulative_write_ms = checkpointer.CumulativeWriteMs,
                     cumulative_sync_ms = checkpointer.CumulativeSyncMs,
                     cumulative_requested = checkpointer.CumulativeRequested,
+                    /* (V140, #4037) timed is null on a row from before the rung, which leaves checkpoint_count and
+                       average_sync_ms_per_checkpoint null too — the average arm's denominator has no evidence, never
+                       a guess from requested alone. pressure and the self-alert now judge the AVERAGE against
+                       sync_bar_ms (a PER-CHECKPOINT bar), not the summed sync_ms above. */
+                    timed = checkpointer.Timed,
+                    cumulative_timed = checkpointer.CumulativeTimed,
+                    checkpoint_count = checkpointer.CheckpointCount,
+                    average_sync_ms_per_checkpoint = checkpointer.AverageSyncMsPerCheckpoint,
                     pressure = checkpointer.IsPressure,
                     sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs,
                     note = CheckpointerNote(checkpointer),
@@ -721,27 +729,31 @@ public sealed class DarlingMcpStoreMetricsTools
 
         var syncMs = reading.SyncMs ?? 0;
         var requested = reading.Requested ?? 0;
+        var checkpointCount = reading.CheckpointCount;
+        var averageSyncMs = reading.AverageSyncMsPerCheckpoint;
+        var barSeconds = (DarlingSelfAlertEvaluator.CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture);
         var minutes = ((reading.IntervalSeconds ?? 0) / 60.0).ToString("0.0", CultureInfo.InvariantCulture);
-        var measured = $" Over the {minutes} minutes ending {Stamp(reading.ObservedAt)} the checkpointer spent "
-            + $"{(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its sync (fsync) phase and "
-            + $"{((reading.WriteMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its write phase, and "
-            + $"{requested} checkpoint(s) were REQUESTED (WAL-forced by max_wal_size) rather than timed.";
+        var measured = $" Over the {minutes} minutes ending {Stamp(reading.ObservedAt)} the checkpointer ran "
+            + (checkpointCount is long count ? $"{count} checkpoint(s), spending " : "an unmeasured number of checkpoints (a row before V140 has no timed count), spending ")
+            + $"{(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s total in its sync (fsync) phase and "
+            + $"{((reading.WriteMs ?? 0) / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s in its write phase — "
+            + (averageSyncMs is double average ? $"an average of {(average / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s of sync per checkpoint — " : string.Empty)
+            + $"and {requested} checkpoint(s) were REQUESTED (WAL-forced by max_wal_size) rather than timed.";
 
         if (!reading.IsPressure)
         {
-            return source + measured + $" Both under the lines the self-alert judges (sync over "
-                + $"{(DarlingSelfAlertEvaluator.CheckpointSyncBarMs / 1000.0).ToString("0", CultureInfo.InvariantCulture)}s in an interval, or any requested checkpoint).";
+            return source + measured + $" Both under the lines the self-alert judges (average sync over "
+                + $"{barSeconds}s PER CHECKPOINT, or any requested checkpoint).";
         }
 
         return source + measured + " That is CHECKPOINTER PRESSURE: "
-            + (syncMs > DarlingSelfAlertEvaluator.CheckpointSyncBarMs
-                ? "a sync phase past the MCP host's own read deadline is an I/O stall every reader on the store shares — on one "
-                  + "production store, three otherwise-unexplained read kills in a day all sat inside 25.2 s and 14.0 s sync phases. "
+            + (averageSyncMs is double avg && avg > DarlingSelfAlertEvaluator.CheckpointSyncBarMs
+                ? $"a per-checkpoint sync average past {barSeconds}s (the MCP host's own read deadline) is an I/O stall every "
+                  + "reader on the store shares — on one production store, three otherwise-unexplained read kills in a day all "
+                  + "sat inside 25.2 s and 14.0 s sync phases. "
                 : "a requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size allows, so the "
                   + "checkpointer ran early and the next one is closer. ")
-            + "The levers are configuration: WAL sizing (#3802 — max_wal_size and checkpoint_completion_target; the managed "
-            + "store gained them as the v12 postgresql.conf block) and refresh slicing (#3745 — smaller continuous-aggregate "
-            + "refreshes write less WAL per tick). The informational Store Checkpointer Pressure self-alert says the same.";
+            + "The informational Store Checkpointer Pressure self-alert says the same.";
     }
 
     /// <summary>

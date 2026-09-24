@@ -219,6 +219,7 @@ public static class PgMigrations
         new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
         new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
         new Migration(139, "postmaster-start-time", V139Sql),
+        new Migration(140, "checkpointer-timed-count", V140Sql),
     };
 
     /// <summary>
@@ -1816,6 +1817,35 @@ ALTER TABLE collect.store_metrics
    collector's payload order, so the positional COPY writer and an upgraded store's column order agree. */
 ALTER TABLE collect.pg_write_stats
     ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;";
+
+    /// <summary>
+    /// V140 — <c>checkpoints_timed</c> on the store's own checkpointer row (#4037): the cumulative COUNT of
+    /// TIMED checkpoints, beside the write-ms/sync-ms/requested counters V137 already carries. Store
+    /// Checkpointer Pressure (#3783) and <c>get_store_metrics</c>' checkpointer block judged the interval's
+    /// SUMMED sync-phase milliseconds against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, a
+    /// PER-CHECKPOINT bar (the MCP read deadline), and the hourly interval covers about twelve timed
+    /// checkpoints on the default five-minute <c>checkpoint_timeout</c> — so a healthy store whose checkpoints
+    /// each sync in five to eight seconds summed past the bar every interval and never recovered, while the
+    /// actual per-checkpoint figure never approached it. Judging the AVERAGE (<c>SyncMs / (timed +
+    /// requested)</c>) needs the timed count on the row the sync-ms delta already comes from; nothing else in
+    /// the store carries it per-store (<c>pg_write_stats.num_timed</c>, V88, is the MONITORED-target series,
+    /// a different row for a different server).</para>
+    ///
+    /// <para><b>One column, same convention as V137/V139</b>: filled on the <c>object_kind = 'checkpointer'</c>
+    /// row only, NULL on every other kind. Nullable, no DEFAULT, no backfill — a row written before this rung
+    /// has no timed count, and the reader treats that NULL as unmeasured for the average arm rather than as
+    /// zero (a zero would read as "every checkpoint" and misjudge the row). <c>store_metrics</c> is a plain
+    /// table with no <c>v_</c> passthrough (V53), so this ALTER stands alone; appended last, matching V137's
+    /// and V139's columns, so a fresh V1 store and an upgraded one agree on column order for the same reason
+    /// those rungs did.</para>
+    /// </summary>
+    private const string V140Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row
+   only, NULL on every other kind by the table's per-kind convention. Nullable, no DEFAULT, no backfill: a
+   pre-rung row cannot know how many checkpoints were timed, and NULL is what the average-per-checkpoint rule
+   reads as unmeasured rather than zero. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS checkpoints_timed bigint;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
