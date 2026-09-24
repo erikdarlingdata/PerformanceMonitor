@@ -546,8 +546,30 @@ public sealed class DarlingMcpHostService : BackgroundService
                 })
                 /* Stateless mode: each request is self-contained (no Mcp-Session-Id round-trip).
                    Required for clients like Google Antigravity that don't echo the session id,
-                   which otherwise connect but list zero tools (issue #1074). */
-                .WithHttpTransport(options => options.Stateless = true)
+                   which otherwise connect but list zero tools (issue #1074).
+
+                   ConfigureSessionOptions is the /core profile's ONLY hook (#3898 D7): in Stateless mode the
+                   SDK invokes it on every request with that request's HttpContext, after ToolCollection is
+                   already populated from every tool class registered below. A /core request gets
+                   ToolCollection replaced with DarlingCoreToolProfile's closure; every other path (in
+                   practice, just /) is untouched and keeps the full set. This is a REAL subset, not a listing
+                   filter: the SDK's tools/call dispatch checks the same ToolCollection before falling back to
+                   any handler, and Darling registers no fallback CallToolHandler, so a tools/call for a tool
+                   outside the closure gets the SDK's own "unknown tool" error on /core. Security posture is
+                   inherited for free: this callback runs from inside the MCP transport, AFTER every _app.Use
+                   middleware below (Host-header guard, bearer token, CIDR) — a /core request is refused there
+                   exactly as a / request would be, before this callback, or MapMcp, ever runs. */
+                .WithHttpTransport(options =>
+                {
+                    options.Stateless = true;
+                    options.ConfigureSessionOptions = (context, sessionOptions, _) =>
+                    {
+                        if (DarlingCoreToolProfile.IsCorePath(context.Request.Path))
+                            sessionOptions.ToolCollection = DarlingCoreToolProfile.FilterToolCollection(sessionOptions.ToolCollection);
+
+                        return Task.CompletedTask;
+                    };
+                })
                 /* WithGeminiCompatibleTools (not the SDK's WithTools) rewrites parameter schemas into
                    the subset Gemini/Antigravity accepts — collapsing nullable type unions and
                    dropping the default keyword. The companion to stateless transport for issue #1074. */
@@ -942,6 +964,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             _app.MapMcp();
+
+            /* #3898 D7: /core, the same endpoint narrowed to DarlingCoreToolProfile's closure via
+               ConfigureSessionOptions above. Mapped on the SAME _app after the SAME middleware (the Host-header
+               guard, and in network mode the bearer-token and CIDR checks) — nothing about this route is
+               exempt from any gate above. / is unchanged and keeps serving every tool, for good. */
+            _app.MapMcp("/core");
 
             /* #2389: name the authority for each half of what is being started. enabled/port come from
                whichever plane the supervisor resolved; listen/allowFrom/token are always darling.json. */

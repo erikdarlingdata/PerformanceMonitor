@@ -1323,7 +1323,7 @@ internal static class ToolRecommendations
         [
             new("get_waiting_tasks", "See what's actively waiting for worker threads"),
             new("get_top_queries_by_cpu", "Find queries consuming the most resources"),
-            new("get_blocked_process_reports", "Check if blocking is holding worker threads")
+            new("get_blocking", "Check if blocking is holding worker threads")
         ],
         ["PAGEIOLATCH_SH"] =
         [
@@ -1367,23 +1367,23 @@ internal static class ToolRecommendations
         ],
         ["LCK"] =
         [
-            new("get_blocked_process_reports", "Get detailed blocking event reports"),
+            new("get_blocking", "Get detailed blocking event reports"),
             new("get_blocking_trend", "Track blocking frequency over time"),
             new("get_waiting_tasks", "See currently waiting tasks with lock details")
         ],
         ["LCK_M_S"] =
         [
-            new("get_blocked_process_reports", "Get reader/writer blocking details"),
+            new("get_blocking", "Get reader/writer blocking details"),
             new("get_blocking_trend", "Track blocking frequency over time")
         ],
         ["LCK_M_IS"] =
         [
-            new("get_blocked_process_reports", "Get reader/writer blocking details"),
+            new("get_blocking", "Get reader/writer blocking details"),
             new("get_blocking_trend", "Track blocking frequency over time")
         ],
         ["BLOCKING_EVENTS"] =
         [
-            new("get_blocked_process_reports", "Get detailed blocking reports with full query text"),
+            new("get_blocking", "Get detailed blocking reports with full query text"),
             new("get_blocking_trend", "Track blocking event frequency over time"),
             new("get_deadlocks", "Check if blocking is escalating to deadlocks")
         ],
@@ -1396,7 +1396,7 @@ internal static class ToolRecommendations
         ["SCH_M"] =
         [
             new("get_waiting_tasks", "See what's waiting on schema locks"),
-            new("get_blocked_process_reports", "Check if DDL operations are causing blocking"),
+            new("get_blocking", "Check if DDL operations are causing blocking"),
             new("get_running_jobs", "See whether maintenance jobs (index rebuilds, stats updates) are taking schema-modification locks")
         ],
         ["CPU_SQL_PERCENT"] =
@@ -1471,7 +1471,7 @@ internal static class ToolRecommendations
         ["DB_CONFIG"] =
         [
             new("audit_config", "Check server-level configuration"),
-            new("get_blocked_process_reports", "Check if RCSI-off databases have blocking")
+            new("get_blocking", "Check if RCSI-off databases have blocking")
         ],
         ["FILE_AUTOGROWTH_PERCENT"] =
         [
@@ -1514,7 +1514,7 @@ internal static class ToolRecommendations
         ],
         ["ANOMALY_BLOCKING"] =
         [
-            new("get_blocked_process_reports", "Get detailed blocking event reports"),
+            new("get_blocking", "Get detailed blocking event reports"),
             new("get_deadlocks", "Get recent deadlock events"),
             new("get_blocking_trend", "Track blocking frequency over time")
         ],
@@ -1627,6 +1627,16 @@ internal static class ToolRecommendations
 
         return result;
     }
+
+    /// <summary>Every distinct tool name this table's <c>next_tools</c> can name, SQL Server keys only (#3898
+    /// D7) — the <c>/core</c> profile's closure computation reads this instead of re-walking <see cref="ByFactKey"/>
+    /// by hand, so a lane that adds a fact-key row here widens <c>/core</c> automatically. Ordinal, deduplicated,
+    /// order not meaningful.</summary>
+    internal static IReadOnlyCollection<string> AllToolNames { get; } =
+        ByFactKey.Values
+            .SelectMany(recommendations => recommendations)
+            .Select(recommendation => recommendation.Tool)
+            .ToHashSet(StringComparer.Ordinal);
 
 }
 

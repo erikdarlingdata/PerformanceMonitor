@@ -209,4 +209,43 @@ public sealed class HostHeaderGuardTests
         Assert.True(mapMcp >= 0, "MapMcp is no longer called — this guard needs rewriting");
         Assert.True(guard >= 0 && guard < mapMcp, "the Host-header guard must run before MapMcp registers the MCP endpoints");
     }
+
+    /// <summary>#3898 D7: <c>/core</c> must be guarded exactly like <c>/</c> — the Host-header guard precedes
+    /// it too, not only the unqualified mapping.</summary>
+    [Fact]
+    public void McpHost_RunsTheGuardBeforeMapMcpCore()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        var guard = source.IndexOf("IsAllowedHost(context.Request.Host.Host", StringComparison.Ordinal);
+        var mapMcpCore = source.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+
+        Assert.True(mapMcpCore >= 0, "/core is no longer mapped — this test needs rewriting");
+        Assert.True(guard >= 0 && guard < mapMcpCore, "the Host-header guard must run before MapMcp(\"/core\") registers the /core endpoint");
+    }
+
+    /// <summary>
+    /// #3898 D7's security claim in full: <c>/core</c> is not a separate, lighter-weight endpoint — it is
+    /// mapped on the SAME <c>_app</c>, after the SAME network-mode gate (the unconditional bearer token, then
+    /// the loopback-exempt CIDR check) as <c>/</c>. A request to <c>/core</c> without a token is refused there,
+    /// before either <c>MapMcp</c> call — and therefore before the <c>/core</c> tool filter in
+    /// <c>ConfigureSessionOptions</c> ever runs — exactly as a token-less request to <c>/</c> is.
+    /// </summary>
+    [Fact]
+    public void McpHost_RunsTheNetworkModeGateBeforeBothMapMcpCalls()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
+
+        var networkGate = afterBuild.IndexOf("if (networkMode)", StringComparison.Ordinal);
+        var mapMcpRoot = afterBuild.IndexOf("_app.MapMcp();", StringComparison.Ordinal);
+        var mapMcpCore = afterBuild.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+
+        Assert.True(networkGate >= 0, "expected a network-mode-only middleware block (bearer token, CIDR) to exist after Build()");
+        Assert.True(mapMcpRoot >= 0, "MapMcp() is no longer called — this test needs rewriting");
+        Assert.True(mapMcpCore >= 0, "/core is no longer mapped — this test needs rewriting");
+        Assert.True(
+            networkGate < mapMcpRoot && networkGate < mapMcpCore,
+            "the network-mode gate (bearer token + CIDR) must be registered before BOTH MapMcp calls, or a " +
+            "request to /core could reach a tool handler the token/CIDR check would have refused on /.");
+    }
 }
