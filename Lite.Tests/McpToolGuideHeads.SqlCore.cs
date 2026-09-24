@@ -192,7 +192,9 @@ public sealed class McpToolGuideHeadsSqlCoreDailySummaryTests
         }
 
         Assert.Contains("status empty: no row for that day.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
-        Assert.Contains("data_state purged, zeros are absences not measurements, no verdict.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
+        Assert.Contains("data_state purged, zeros are absences, no verdict;", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
+        Assert.Contains("past_horizon if a signal table still holds the day (band NoData, non-zero counts real).", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
+        Assert.Contains("the band stands on real zeros, no_run_record too; only its collection-error share has no denominator.", McpToolGuideTests.Served("get_daily_summary").Served, StringComparison.Ordinal);
 
         Assert.Contains("status empty: no collected day in range but the server has history elsewhere; status unavailable: nothing was ever collected.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);
         Assert.Contains("both health_band NoData, never Healthy.", McpToolGuideTests.Served("get_daily_summary_range").Served, StringComparison.Ordinal);

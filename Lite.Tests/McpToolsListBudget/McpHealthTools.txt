@@ -22,7 +22,7 @@ param get_current_waits_trend.database_name 73
 param get_current_waits_trend.hours_back 190
 param get_current_waits_trend.server_name 28
 
-tool get_daily_summary 571
+tool get_daily_summary 617
 param get_daily_summary.server_name 28
 param get_daily_summary.summary_date 155
 
