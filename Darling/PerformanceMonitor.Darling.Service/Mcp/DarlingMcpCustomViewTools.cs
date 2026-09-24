@@ -88,22 +88,28 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "validate_custom_view"), Description(
-        "Dry-run: validates a custom-view definition against the measure catalog and the composer rules WITHOUT " +
-        "persisting anything. Returns {valid:true} or {valid:false, error:\"...\"} naming the first problem. This is " +
-        "the exact authority create_custom_view / update_custom_view run before saving, so use it to iterate on a " +
-        "generated definition until it is valid. The definition is a dashboard {\"panels\":[...]} or a notebook " +
-        "{\"kind\":\"notebook\",\"cells\":[...]}; a composed panel names a catalog 'source' + 'measure'|'ratio', an " +
-        "'aggregate', an optional 'timeBucket' (time series), 'topN' (ranked), or both together (the bucketed " +
-        "trend of the top-N groups by window total; optional 'includeOther' folds the remainder into one " +
-        "'(other)' series), 'filters', 'groupBy', 'unit', 'viz', and optionally an " +
-        "'overlay' second measure (scatter's y axis, or a dual-axis line/area). Unknown keys are ERRORS at every " +
-        "level (root, panel, cell, filter, overlay), with a did-you-mean for a near-miss — a typo'd key can never " +
-        "silently validate as a different panel. Note a notebook panel cell is FLAT (the cell object carries " +
-        "'type':'panel' plus the panel's own keys); only run_custom_view_panel's spec nests under 'panel'. A " +
-        "notebook panel cell may also carry its own 'range' — {\"hours\":n} or {\"windowStart\",\"windowEnd\"} " +
-        "(ISO-8601 UTC, one shape only) — pinning that cell's window over the notebook's view-level range so a " +
-        "comparison document (say, two Fridays side by side) stays a LIVE view; absent means the cell follows the " +
-        "view window. The view-level 'range' itself stays relative ({\"hours\":n} only).")]
+        "Dry-run: validates a custom-view definition (dashboard {\"panels\":[...]} or notebook " +
+        "{\"kind\":\"notebook\",\"cells\":[...]}) against the measure catalog and composer rules WITHOUT " +
+        "persisting anything. Returns {valid:true} or {valid:false, error:\"...\"} naming only the FIRST problem " +
+        "found; fixing it can reveal more. Unknown keys are ERRORS at every level (root, panel, cell, filter, " +
+        "overlay), never silently dropped. A notebook cell is FLAT (carries the panel's own keys directly); only " +
+        "run_custom_view_panel's spec nests under 'panel'. <<GUIDE>> Dry-run: validates a custom-view definition " +
+        "against the measure catalog and the composer rules WITHOUT persisting anything. Returns {valid:true} or " +
+        "{valid:false, error:\"...\"} naming the first problem. This is the exact authority create_custom_view / " +
+        "update_custom_view run before saving, so use it to iterate on a generated definition until it is valid. " +
+        "The definition is a dashboard {\"panels\":[...]} or a notebook {\"kind\":\"notebook\",\"cells\":[...]}; " +
+        "a composed panel names a catalog 'source' + 'measure'|'ratio', an 'aggregate', an optional 'timeBucket' " +
+        "(time series), 'topN' (ranked), or both together (the bucketed trend of the top-N groups by window " +
+        "total; optional 'includeOther' folds the remainder into one '(other)' series), 'filters', 'groupBy', " +
+        "'unit', 'viz', and optionally an 'overlay' second measure (scatter's y axis, or a dual-axis line/area). " +
+        "Unknown keys are ERRORS at every level (root, panel, cell, filter, overlay), with a did-you-mean for a " +
+        "near-miss — a typo'd key can never silently validate as a different panel. Note a notebook panel cell is " +
+        "FLAT (the cell object carries 'type':'panel' plus the panel's own keys); only run_custom_view_panel's " +
+        "spec nests under 'panel'. A notebook panel cell may also carry its own 'range' — {\"hours\":n} or " +
+        "{\"windowStart\",\"windowEnd\"} (ISO-8601 UTC, one shape only) — pinning that cell's window over the " +
+        "notebook's view-level range so a comparison document (say, two Fridays side by side) stays a LIVE view; " +
+        "absent means the cell follows the view window. The view-level 'range' itself stays relative " +
+        "({\"hours\":n} only).")]
     public static Task<string> ValidateCustomView(
         [Description("The view definition JSON to validate (NOT persisted).")] string definition)
     {
@@ -235,17 +241,24 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [McpServerTool(Name = "run_custom_view_panel"), Description(
+        "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
+        "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
+        "failed or timed-out query; \"error\" for an internal fault. notice means retention covered only " +
+        "part of the window, or the row cap truncated the result; absent means neither happened. Window ends " +
+        "now: 'hours' (default 24), unless ISO-8601 'windowStart'+'windowEnd' win instead (max 90 days; old " +
+        "windows read rollups). 'server' omitted or \"All\" runs the whole fleet. Only 'panel' is " +
+        "required. <<GUIDE>> " +
         "Runs a single composed (v2) panel and returns the DATA it produces — {sql, rows, annotations, notice?} " +
-        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — so a " +
-        "generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the web " +
-        "composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and executed " +
-        "against the collected store under a statement_timeout. The spec is a JSON object " +
-        "{\"panel\":{...}, \"variables\":[...], \"values\":{...}, \"server\":\"NAME\"|[\"A\",\"B\"], \"hours\":N} — only " +
-        "'panel' is required (a composed panel, the same shape a dashboard panel or a notebook panel cell uses); " +
-        "omit 'server' (or use \"All\") for the whole fleet, and 'hours' defaults to 24. For an ABSOLUTE window " +
-        "(historical analysis), pass ISO-8601 'windowStart' + 'windowEnd' instead — they win over 'hours', the span " +
-        "is capped at 90 days, and old windows are served from the retention rollups automatically. To read back a " +
-        "SAVED view, call get_custom_view and run each of its composed panels here.")]
+        "(notice = a partial-window caveat when the store's retention cannot cover the whole requested range) — " +
+        "so a generated view can be checked end-to-end without saving it. This is the SAME compile-and-run the " +
+        "web composer's live preview uses: the panel is validated, compiled to catalog-only bound SQL, and " +
+        "executed against the collected store under a statement_timeout. The spec is a JSON object " +
+        "{\"panel\":{...}, \"variables\":[...], \"values\":{...}, \"server\":\"NAME\"|[\"A\",\"B\"], \"hours\":N} " +
+        "— only 'panel' is required (a composed panel, the same shape a dashboard panel or a notebook panel cell " +
+        "uses); omit 'server' (or use \"All\") for the whole fleet, and 'hours' defaults to 24. For an ABSOLUTE " +
+        "window (historical analysis), pass ISO-8601 'windowStart' + 'windowEnd' instead — they win over 'hours', " +
+        "the span is capped at 90 days, and old windows are served from the retention rollups automatically. To " +
+        "read back a SAVED view, call get_custom_view and run each of its composed panels here.")]
     public static async Task<string> RunCustomViewPanel(
         NpgsqlDataSource postgres,
         [Description("The composed-panel run spec as JSON (see the tool description for the shape). Only 'panel' is required.")] string spec)

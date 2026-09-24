@@ -14,7 +14,7 @@ param get_custom_view.view_id 61
 
 tool list_custom_views 313
 
-tool run_custom_view_panel 1084
+tool run_custom_view_panel 612
 param run_custom_view_panel.spec 103
 
 tool update_custom_view 785
@@ -24,5 +24,5 @@ param update_custom_view.name 43
 param update_custom_view.version 116
 param update_custom_view.view_id 54
 
-tool validate_custom_view 1576
+tool validate_custom_view 561
 param validate_custom_view.definition 53
