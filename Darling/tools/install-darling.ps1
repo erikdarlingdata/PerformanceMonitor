@@ -528,7 +528,54 @@ function Get-DarlingServiceLogonName([string]$name) {
 # link below the root (the walk does not descend it and a real install never holds one), or a root that is
 # itself a junction (the lock would change the link, not the folder it points to). Kept byte-identical in
 # install-darling.ps1 and upgrade-darling.ps1, which DarlingInstallLocationTests compares.
-function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
+#
+# NARROWED (#4052): the service only ever writes under pg-runtime\ and pg-runtime-prev\ (it extracts the
+# bundled runtime there and rescues the previous one on an update - see DarlingManagedPostgres and
+# DarlingStoreUpgrade, whose stamp/blocked files (pg-runtime.sha256/.stamp/.blocked) all live INSIDE
+# pg-runtime\, never beside it). So the service account gets Read & Execute on $root - it still needs to
+# run its own exe and load its own DLLs - and Modify is granted ONLY on pg-runtime\, pg-runtime-prev\, and
+# whatever $extraServiceDirectories names (the bring-your-own-Postgres log-hash-key folder,
+# DarlingLogHashKeyFile.BringYourOwnDirectoryName, when that mode is configured - #4052's resolution of
+# #4050's open write-site row). Every one of those directories is created ahead of time if missing, so the
+# grant has something to land on and the first extraction never has to create its own root-owned folder.
+
+# What $extraServiceDirectories should hold for a given install root (#4052): the bring-your-own-Postgres
+# log-hash-key folder, DarlingLogHashKeyFile.BringYourOwnDirectoryName ('darling-keys'), beside darling.json -
+# but ONLY when that install is configured for it (postgres.managed = false). A managed install's log-hash key
+# lives inside the credential directory pg-runtime already covers, so granting a second directory there would
+# widen the service's Modify footprint for nothing it writes.
+#
+# darling.json is JSONC (comments, trailing commas) and the file this runs against may not exist yet (a fresh
+# extraction, or an operator who has not copied darling.sample.json over) or may not parse (hand-edited,
+# mid-write) - none of those is this function's problem to solve, and guessing wrong here would silently drop
+# the service's Modify grant on its own key folder in BYO mode. So every failure to read or parse falls back to
+# treating the install as managed (no extra directory): that is always safe, because a BYO install with the
+# grant missing is caught and reported by the same untrusted-write-grantee walk that catches everything else -
+# an operator sees a finding on darling-keys\ and re-runs after fixing darling.json, rather than the lock
+# silently widening access on a config it could not trust. A regex, not ConvertFrom-Json: Windows PowerShell
+# 5.1's ConvertFrom-Json rejects comments and trailing commas outright, and this only ever needs one boolean
+# out of one well-known key - not a general JSONC parser. It matches the LAST 'managed' key at the top level's
+# "postgres" object width (a value of false explicitly disables managed mode; true or absent are both managed).
+function Get-DarlingExtraServiceWriteDirectories([string]$root, [string]$configPath) {
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return @() }
+    try { $text = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop }
+    catch { return @() }
+    # Strip // line comments (never inside a string in this file's own shipped shape) before matching, so a
+    # commented-out "managed": false example above the real key can never be mistaken for it.
+    $stripped = ($text -split "`r?`n" | ForEach-Object { $_ -replace '(?<!:)//.*$', '' }) -join "`n"
+    $isManaged = $true
+    $match = [regex]::Matches($stripped, '"managed"\s*:\s*(true|false)')
+    if ($match.Count -gt 0) { $isManaged = ($match[$match.Count - 1].Groups[1].Value -eq 'true') }
+    if ($isManaged) { return @() }
+    # A NAME under the install root, not a path: Lock-DarlingInstallTree Join-Paths it onto the root, and Join-Path does not
+    # treat a rooted child as rooted ('C:\a' + 'C:\a\b' = 'C:\a\C:\a\b'). A darling.json outside the root puts the key
+    # folder outside the tree the lock covers, so it needs no grant from here.
+    $configDir = [System.IO.Path]::GetDirectoryName($configPath).TrimEnd('\')   # Split-Path -LiteralPath -Parent is ambiguous on PowerShell 5.1
+    if ($configDir -ine $root.TrimEnd('\')) { return @() }
+    return @('darling-keys')
+}
+
+function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string[]]$extraServiceDirectories = @()) {
     # icacls reports a file it could not change on stderr (under /C it carries on), and Windows PowerShell 5.1
     # turns redirected native stderr into a TERMINATING error when the preference is Stop, as both scripts set
     # it. So this function judges icacls by its exit code and output, and reports an unreadable object rather
@@ -557,12 +604,29 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
         if ($serviceAccount -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
         $serviceAccount = $serviceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
         $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
-        $trusted += $serviceSid
-        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)M")
+        # NOT added to $trusted here (#4052): the service is only trusted to write under $serviceWritePaths,
+        # below, once that list is known - a write grant it holds anywhere else in the tree is a stranger's.
+        # Read & Execute on the root only - the service still has to run its own exe and load its own DLLs -
+        # not Modify: that goes only on the specific directories below, so a write anywhere else in the tree
+        # is a stranger's, even from the service account itself.
+        #
+        # /grant:r, not /grant (#4052 round 2): plain /grant ADDS to whatever explicit ACE the SID already
+        # carries on $root - it never removes one. An install locked before this fix left an explicit
+        # (OI)(CI)M ACE for the service on $root (#4038's shape), and re-running the OLD /grant against that
+        # tree would only have ADDED (OI)(CI)RX beside the surviving Modify, not replaced it - Modify would
+        # have outlived every upgrade. /grant:r replaces the service SID's own explicit grant outright, so
+        # this one call is what actually narrows a tree #4038 (or an even older build) widened.
+        $grants += @('/grant:r', "*$($serviceSid.Value):(OI)(CI)RX")
     }
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $open = @()
+    # The directories the service actually writes to: pg-runtime\ and pg-runtime-prev\ always, plus whatever
+    # $extraServiceDirectories names (the BYO-Postgres log-hash-key folder, when that mode is configured).
+    # Each is created ahead of time if missing - best-effort, since a directory this lock cannot create is a
+    # directory the first extraction would have had to create itself, root-owned, which is no better - and
+    # then granted Modify with its own icacls call, so a failure on one directory does not lose the others.
+    $serviceWriteDirectories = @('pg-runtime', 'pg-runtime-prev') + @($extraServiceDirectories | Where-Object { $_ })
 
     # icacls, not Set-Acl: Set-Acl on what Get-Acl read writes the SACL too, which needs SeSecurityPrivilege, and
     # icacls is what the warnings tell an operator to run by hand, so the fix and the remediation are the same
@@ -579,10 +643,30 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
     }
     $output = & icacls.exe $root /setowner "*$($adminsSid.Value)" /T /C /L /Q 2>&1
     if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
+    $serviceWritePaths = @()
     if ($serviceSid) {
         foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'darling.json' -or $_.Name -like 'darling.json.bak-*' })) {
             $null = & icacls.exe $secret.FullName /setowner "*$($serviceSid.Value)" /L /Q 2>&1
         }
+        foreach ($dir in $serviceWriteDirectories) {
+            $dirPath = Join-Path $root $dir
+            if (-not (Test-Path -LiteralPath $dirPath)) {
+                try { $null = New-Item -ItemType Directory -Path $dirPath -Force -ErrorAction Stop }
+                catch { $open += "$dirPath (could not create this directory to grant the service Modify on it: $($_.Exception.Message))"; continue }
+            }
+            $grantOutput = & icacls.exe $dirPath /grant "*$($serviceSid.Value):(OI)(CI)M" 2>&1
+            if ($LASTEXITCODE -ne 0) { $open += "$dirPath (icacls /grant Modify for the service failed: $($grantOutput -join ' '))"; continue }
+            $serviceWritePaths += (Get-Item -LiteralPath $dirPath -Force).FullName.TrimEnd('\')
+        }
+    }
+    # A write grant to the service SID is only trusted under one of $serviceWritePaths (path-prefix match,
+    # case-insensitive as Windows paths are); everywhere else in the tree it is treated like a stranger's and
+    # closed, same as any other untrusted grant, by the walk below.
+    function Test-DarlingServiceWritePath([string]$candidate) {
+        foreach ($allowed in $serviceWritePaths) {
+            if ($candidate -ieq $allowed -or $candidate.StartsWith("$allowed\", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+        return $false
     }
 
     # VERIFY rather than assume (#1957), and close what a folder lock cannot: every directory and file is read
@@ -600,25 +684,39 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
             $open += "$path (a junction or link)"
             continue
         }
+        # The service SID is trusted here only if $path is $root itself (its RX grant) or falls under one of
+        # $serviceWritePaths (its Modify grant) - everywhere else its write grant is a stranger's, same as any
+        # other untrusted account, even though the SID is the same one the tree hands its own real access to.
+        $trustedHere = $trusted
+        $isServiceWritePath = $serviceSid -and (Test-DarlingServiceWritePath $path)
+        # darling.json and its backups: step 4b gives the service an explicit FullControl there (#1647) and the setowner
+        # above makes it the owner, so the service is trusted on those files too. Without this the walk strips the
+        # service's own grant from its config (the explicit-ACE branch below) and the service cannot start.
+        $isSecretFile = $target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*'
+        if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
         $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
-            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         if ($explicit.Count -gt 0) {
             if ($target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*') {
                 foreach ($rule in $explicit) { $null = & icacls.exe $path /remove:g "*$($rule.IdentityReference.Value)" /L /Q 2>&1 }
             }
             else {
                 $null = & icacls.exe $path /reset /L /Q 2>&1
+                # /reset drops the directory's OWN explicit Modify grant along with a planted ACE, since both are
+                # explicit ACEs on the same object - so a service write directory gets its real grant put straight
+                # back, rather than left open until the next lock run.
+                if ($isServiceWritePath) { $null = & icacls.exe $path /grant "*$($serviceSid.Value):(OI)(CI)M" 2>&1 }
             }
         }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
         $writers = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
-            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         $owner = $acl.GetOwner($sidType)
         if ($writers.Count -gt 0) { $open += $path }
-        elseif ($trusted -notcontains $owner) { $open += "$path (owned by $($owner.Value))" }
+        elseif ($trustedHere -notcontains $owner) { $open += "$path (owned by $($owner.Value))" }
     }
     return $open
 }
@@ -631,14 +729,14 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount) {
 function Invoke-InstallTreeLock([string]$account, [switch]$StopOnOpen) {
     $open = @()
     try {
-        $open = @(Lock-DarlingInstallTree $root $account)
+        $open = @(Lock-DarlingInstallTree $root $account (Get-DarlingExtraServiceWriteDirectories $root $configPath))
     }
     catch {
         $open = @("$root ($($_.Exception.Message))")
     }
     if ($open.Count -eq 0) {
         if ($account) {
-            Write-Host "Locked the install folder: only SYSTEM, Administrators and $account can change what runs from $root." -ForegroundColor Green
+            Write-Host "Locked the install folder: only SYSTEM and Administrators can change what runs from $root; $account can write only its runtime folders." -ForegroundColor Green
         }
         else {
             Write-Host "Locked the install folder against ordinary users before running anything from it: $root" -ForegroundColor Green
