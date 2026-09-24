@@ -340,14 +340,15 @@ internal static class McpHelpers
     /// own — a client still reading <c>truncated</c> off these tools reads a key that is no longer there and
     /// gets <c>undefined</c>, not <c>false</c>. Leading space: it is appended to each tool's own sentence.</para>
     ///
-    /// <para>#3898 cut it to the fact and the remedy it rules out. The WIRE CHANGE sentence stays on the wire
-    /// until the rename has shipped for one release (#3898's ruling on wire-change notices); it has not shipped
-    /// in one yet, and no on-demand guide exists to carry it instead.</para>
+    /// <para>#3898 cut it to the fact and the remedy it rules out. The WIRE CHANGE sentence stays served until
+    /// the rename has shipped for one release (#3898's ruling on wire-change notices); it has not shipped in one
+    /// yet. On a tool whose description is split it sits in the guide tail get_tool_guide serves; on an unsplit
+    /// one it is still in the tools/list text.</para>
     /// </summary>
     public const string WindowTruncatedDescription =
         " window_truncated is true when the store did not hold the start of the window; effective_start / " +
         "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
-        "changes it. WIRE CHANGE: spelled truncated before.";
+        "changes it. WIRE CHANGE: formerly named truncated.";
 
     /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.
