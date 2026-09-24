@@ -119,7 +119,8 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
         var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
 
         Assert.True(fact.Metadata.ContainsKey("tile_local_hour"), "the sustained two-hour shift should have scored through the tile path");
-        Assert.InRange(fact.Metadata["tile_local_hour"], _windowStart.AddHours(2).Hour, _windowStart.AddHours(3).Hour);
+        var tileOffset = ((int)fact.Metadata["tile_local_hour"] - _windowStart.Hour + 24) % 24; // wall-clock window: compare the offset, not the hour, so it passes across midnight (#3653 B)
+        Assert.InRange(tileOffset, 2, 3);
         Assert.Equal(4, fact.Metadata["tiles_scored"]);
         Assert.Equal(2, fact.Metadata["tiles_fired"]);
         Assert.Equal(AnomalyThresholds.ModifiedZThresholdFor(MetricNames.Cpu), fact.Metadata["fire_threshold"], precision: 6);
@@ -150,7 +151,8 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
         var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_WAIT_PROFILE");
 
         Assert.True(fact.Metadata.ContainsKey("tile_local_hour"), "the sustained wait-profile shift should have scored through the tile path");
-        Assert.InRange(fact.Metadata["tile_local_hour"], _windowStart.AddHours(2).Hour, _windowStart.AddHours(3).Hour);
+        var tileOffset = ((int)fact.Metadata["tile_local_hour"] - _windowStart.Hour + 24) % 24; // wall-clock window: compare the offset, not the hour, so it passes across midnight (#3653 B)
+        Assert.InRange(tileOffset, 2, 3);
         Assert.Equal(4, fact.Metadata["tiles_scored"]);
         Assert.Equal(2, fact.Metadata["tiles_fired"]);
         Assert.Equal(AnomalyThresholds.HeavyTailModifiedZThreshold, fact.Metadata["fire_threshold"], precision: 6);
