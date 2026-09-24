@@ -50,8 +50,14 @@ jobs:
     # the suite when this reads `skipped`; a second list of paths there would be free to fall out
     # of agreement with the list here, and area lists falling out of agreement with what a guard
     # reads is the thing that job exists to stop.
+    #
+    # docs-fastpath is published the same way, from the classify step's OWN decision rather than a
+    # second copy of the docs allowlist: darling-tree-guards must not pay ~5 minutes running the whole
+    # suite on a docs-only change just because that change also left Darling.Tests `skipped` - the two
+    # skip reasons look identical from `outcome` alone, so the guards job needs to tell them apart.
     outputs:
       darling-tests: ${{ steps.darling-tests.outcome }}
+      docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
       - uses: actions/checkout@v7
@@ -127,18 +133,14 @@ jobs:
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
-              # #2489: LiteRuntimePrerequisiteDocsTests derives Lite's .NET runtime prerequisites
-              # from the BUILT runtimeconfig and from the publish shapes in this very file, then
-              # asserts these two READMEs say so - which artifact is self-contained, which needs two
-              # runtimes. Naming them here is not optional. Every area filter carves markdown out
-              # (dir/**/!(*.md)), and a docs-only PR additionally engages the fast path above, which
-              # skips .NET setup and restore outright - so without these two entries the guard could
-              # not run on a README-only change, i.e. on exactly the edit that would undo the fix.
-              # The cost is that a root-README edit now runs the Lite suite; that is the same trade
-              # the Darling entries below already take, and the alternative is a guard that quietly
-              # stops guarding.
-              - 'README.md'
-              - 'Lite/README.md'
+              # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
+              # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
+              # (which reads these two READMEs against the built runtimeconfig and this file's
+              # publish shapes) could still run on a README-only change. That guard now runs on
+              # every CODE pull request and in the nightly instead - both of which build Lite -
+              # so a README edit alone no longer has to pay the Lite suite to keep it exercised.
+              # A README-only PR takes the docs fast path below and does not build or test
+              # anything; the trade is deliberate and is Erik's call, not an oversight.
               # Same silently-stops-guarding reason as the darling filter's Lite entries below:
               # Lite.Tests/ThemeParityLiteDarlingTests.cs READS the Darling viewer's theme
               # dictionaries to assert the two apps' shared brush keys still resolve to the same
@@ -230,6 +232,10 @@ jobs:
               - 'CITATION.cff'
               - '.gitignore'
               - '.gitattributes'
+              # The exact root path, not '**/*.txt': Darling/Darling.Tests/McpToolsListBudget/*.txt
+              # (and Lite's copy) are test INPUTS, not documentation, and a bare extension glob
+              # would wave every budget-pin edit through the fast path unbuilt and untested.
+              - 'llms.txt'
               - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
               - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
             # Catch-all COUNTER, not a boolean gate: the classify step below decides
@@ -247,20 +253,21 @@ jobs:
       # it off every path where a skipped restore would be a real loss:
       #   release  — the filter step does not even run there, and a release must always
       #              compile and publish from a cold, fully restored tree.
-      #   push     — dev/main pushes are the integration signal for what just merged, so
-      #              they restore unconditionally even for a docs-only commit. Cheap
-      #              insurance: this only forces the restore back on, it does not force
-      #              the per-product build/test steps, which stay path-gated as before.
-      #   merge_group — a queue run is the LAST validation before its result lands on dev,
-      #              so it takes the same always-restore path as a push.
       #   areas    — belt and suspenders: even when the counts say docs-only, any lit
       #              area filter vetoes the fast path, because an area=true with restore
       #              skipped would run `dotnet build --no-restore` against nothing. The
       #              two classifications are built from the same allowlist so they cannot
       #              disagree today; this guard is for the day someone edits one and not
       #              the other.
-      # Everything else (pull_request) is eligible, and engages only when EVERY changed
-      # file is on the documentation allowlist (all_count == docs_count).
+      # Everything else — including push and merge_group, per Erik's 2026-09-24 ruling —
+      # is eligible, and engages only when EVERY changed file is on the documentation
+      # allowlist (all_count == docs_count). push/merge_group used to force the restore
+      # back on unconditionally as "cheap insurance" against NuGet drift that a lock-file
+      # diff would not show; that insurance buys nothing on a docs-only commit specifically
+      # BECAUSE it is docs-only — no lock file, Directory.Packages.props, or global.json is
+      # among the changed files (all of those are `root`, which is off the docs allowlist
+      # and vetoes the fast path via the areas guard above), so nothing this restore
+      # validates could have moved since the push that last validated it.
       - name: Classify change for the docs fast path
         id: fastpath
         shell: bash
@@ -275,12 +282,6 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "engaged=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Full build::Release event - the docs fast path never applies to a release."
-            exit 0
-          fi
-
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo "engaged=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Full build::${{ github.event_name }} on '${{ github.ref_name }}' - integration runs always restore, even for a docs-only change."
             exit 0
           fi
 
@@ -1295,6 +1296,7 @@ jobs:
         shell: bash
         env:
           DARLING_TESTS: ${{ needs.build.outputs.darling-tests }}
+          DOCS_FASTPATH: ${{ needs.build.outputs.docs-fastpath }}
           WORKFLOW: ${{ steps.filter.outputs.workflow }}
         run: |
           set -euo pipefail
@@ -1302,6 +1304,9 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards skipped::Release event - the build job compiles and runs every suite unconditionally."
+          elif [ "${DOCS_FASTPATH:-}" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards skipped::The build job took the docs fast path - every changed file is on the documentation allowlist, so there is no code change for the whole-tree guards to catch. They still run on the next code PR and in the nightly."
           elif [ "${DARLING_TESTS:-}" = "skipped" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards running::The build job's path filters left Darling.Tests unrun, so the guards that read the whole repository run here."
@@ -1413,8 +1418,6 @@ jobs:
             lite_shard:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
-              - 'README.md'
-              - 'Lite/README.md'
               - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
               - 'Darling/Darling.Tests/**/!(*.md)'
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
