@@ -289,9 +289,14 @@ public sealed class PgTargetAnomalyTests
     [
         PgTargetAnomalyDetector.HasBaselineDataSql,
         PgTargetAnomalyDetector.DatabaseCounterWindowSql,
+        /* #3653 A8 option B (lane L3a/L3a2): the per-hour tile twins */
+        PgTargetAnomalyDetector.TpsTileWindowSql,
         PgTargetAnomalyDetector.SessionWindowSql,
+        PgTargetAnomalyDetector.SessionTileWindowSql,
         PgTargetAnomalyDetector.CpuWindowSql,
+        PgTargetAnomalyDetector.CpuTileWindowSql,
         PgTargetAnomalyDetector.WaitRateWindowSql,
+        PgTargetAnomalyDetector.WaitRateTileWindowSql,
         PgTargetAnomalyDetector.WaitContribWindowSql,
         /* v2 (#3691) lane 11 */
         PgTargetAnomalyDetector.IoLatencyWindowSql,
@@ -374,6 +379,20 @@ public sealed class PgTargetAnomalyTests
         Assert.Contains("IS DISTINCT FROM 'cpu'", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
         Assert.Contains("IS DISTINCT FROM 'cpu'", PgTargetAnomalyDetector.WaitContribWindowSql, StringComparison.Ordinal);
         Assert.DoesNotContain("pg_wait_sampling", PgTargetAnomalyDetector.WaitRateWindowSql, StringComparison.Ordinal);
+
+        /* #3653 A8 option B (lane L3a/L3a2): the tile twins — same table, local_hour first, keep the shared const
+           the deadlock-rate detector still reads unchanged (DatabaseCounterWindowSql). */
+        Assert.Contains("FROM pg_database_stats", PgTargetAnomalyDetector.TpsTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("local_hour", PgTargetAnomalyDetector.TpsTileWindowSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("deadlocks", PgTargetAnomalyDetector.TpsTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_session_states", PgTargetAnomalyDetector.SessionTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("local_hour", PgTargetAnomalyDetector.SessionTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_cpu_utilization", PgTargetAnomalyDetector.CpuTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("local_hour", PgTargetAnomalyDetector.CpuTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("peak_cpu_percent", PgTargetAnomalyDetector.CpuTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("FROM pg_wait_stats", PgTargetAnomalyDetector.WaitRateTileWindowSql, StringComparison.Ordinal);
+        Assert.Contains("local_hour", PgTargetAnomalyDetector.WaitRateTileWindowSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_wait_sampling", PgTargetAnomalyDetector.WaitRateTileWindowSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -448,16 +467,21 @@ public sealed class PgTargetAnomalyTests
 
         /* #3653 A8 slice 2: the six remaining peak-only PostgreSQL families moved onto the pair gate (peak AND
            window mean, with the N-aware peak cutoff window: argument) — pinned per family so a later edit back to
-           the transitional overload is a visible decision, not a silent regression. */
+           the transitional overload is a visible decision, not a silent regression.
+           #3653 A8 option B (lane L3a): TPS/sessions/CPU's never-blind fallback now runs inside the tiled call
+           flow, where `window` is a local (`context.TimeRangeEnd - context.TimeRangeStart`, computed once at the
+           method's top for AnomalyGate.EvaluateTiles too) rather than the inline expression this pin used to
+           match verbatim — the pin now matches the local and separately pins that it is assigned correctly. */
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakTps,\s*avgTps,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakTps,\s*avgTps,[\s\S]{0,200}?window:\s*window\)",
             code);
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakSessions,\s*avgSessions,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakSessions,\s*avgSessions,[\s\S]{0,200}?window:\s*window\)",
             code);
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakCapacity,\s*avgCapacity,[\s\S]{0,200}?window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakCapacity,\s*avgCapacity,[\s\S]{0,200}?window:\s*window\)",
             code);
+        Assert.Contains("var window = context.TimeRangeEnd - context.TimeRangeStart;", code, StringComparison.Ordinal);
 
         var ioDetector = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetAnomalyDetector.Io.cs"));
         Assert.Matches(
@@ -1332,9 +1356,14 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
         var end = code.IndexOf("\n    internal const string AnomalySource", start, StringComparison.Ordinal);
         Assert.True(start > 0 && end > start, "the Aurora wait-profile detector moved");
         var body = code[start..end];
+        /* #3653 A8 option B (lane L3a2): the coordinator's ruling moved this call inside the tiled arm's own
+           null-fallback branch; `window` is now a local (`context.TimeRangeEnd - context.TimeRangeStart`,
+           computed once at the top of the method for AnomalyGate.EvaluateTiles too) rather than the inline
+           expression this pin used to match verbatim. */
         Assert.Matches(
-            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*meanRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*PgWaitProfileFallbackMsPerSec,\s*PgWaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window:\s*context\.TimeRangeEnd\s*-\s*context\.TimeRangeStart\)",
+            @"AnomalyGate\.EvaluateZScore\(\s*baseline,\s*peakRate,\s*meanRate,\s*HeavyTailModifiedZThreshold,\s*HeavyTailModifiedZThreshold,\s*PgWaitProfileFallbackMsPerSec,\s*PgWaitProfileFallbackMsPerSec,\s*SigmaDisplayCap,\s*window:\s*window\)",
             body);
+        Assert.Contains("var window = context.TimeRangeEnd - context.TimeRangeStart;", body, StringComparison.Ordinal);
         Assert.Contains("if (!decision.Fire) return;", body, StringComparison.Ordinal);
         Assert.DoesNotMatch(@"modifiedZ\s*<\s*HeavyTailModifiedZThreshold", body);
         Assert.Contains("meanRatio < PgRatioAnomalyThreshold", body, StringComparison.Ordinal);
