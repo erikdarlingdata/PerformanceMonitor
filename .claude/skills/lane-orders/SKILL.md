@@ -40,6 +40,12 @@ At dispatch:
 - Set a wall-clock check at each lane's deadline; don't wait on notifications.
 - Size each lane to finish under 200k. In wave B (2026-09-23), a lane's context grew about 1.9k tokens per call
   from a 40k base, so 200k is about 80 calls. A #3898 lane that converted three tools used 100-117 calls.
+  In wave C (2026-09-24), the base fell to 24k, but a lane with two twin pairs (two tools on both products) still
+  used 103-167 calls and peaked at 214-242k. Give a #3898 lane ONE twin pair, or two tools on one product.
+- Check that the effort level took effect: grep a lane transcript for `"effort":`. In wave C, `effort: high` in the
+  agent file did not apply, and every lane turn logged the seat's `max`.
+- Every head clause about a status must keep its condition's scope. In wave C, each head-fact fix the coordinator
+  made was a scope error: "nothing collected yet" for "none collected in the window", or one state left out.
 - Paste into the brief the few lines a lane needs (an example, a ruling) instead of pointing it at a PR or file.
   In wave B, every lane read an 8-10k-character PR section to see one example.
 - Label each issue the lane takes `in-progress` (`gh issue edit <n> --add-label in-progress`), so the board shows
@@ -84,6 +90,8 @@ census, one of them introduced by that night's own wave).
   own worktree.
 - Never paste full test output. Grep for `[FAIL]|Total:`.
 - Read files by offset/limit. Never read a whole large file.
+- grep prints whole lines. Pipe it through `cut -c1-200` in files with long lines: each MCP `Description(...)` is
+  one line of 1-3k characters.
 - Run targeted test classes while iterating. Run the FULL suite ONCE, at the end.
 - Cap command output: pipe through `head`, `tail -n` or `grep`. Never dump full CI logs, full JSON, or whole
   issue/PR bodies.
