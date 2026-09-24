@@ -19,14 +19,16 @@ public static class PgBinaryTailText
 {
     /// <summary>
     /// Decodes a whole <c>bytea</c> tail (the log_events route, which returns the body whole rather than
-    /// filtering it server-side). <see cref="Encoding.UTF8"/>'s static instance already uses
-    /// <see cref="DecoderReplacementFallback"/> — it does not throw on an invalid byte, it substitutes
-    /// U+FFFD — so no custom decoder is needed here.
+    /// filtering it server-side), using <paramref name="encoding"/> — the connected database's own
+    /// <c>server_encoding</c>, mapped by <see cref="PgServerEncoding"/> (#4062). Every <see cref="Encoding"/>
+    /// this route is called with, including <see cref="Encoding.UTF8"/>, already substitutes U+FFFD for an
+    /// invalid byte rather than throwing, so no custom decoder is needed here.
     /// </summary>
-    public static string DecodeWhole(byte[] bytes)
+    public static string DecodeWhole(byte[] bytes, Encoding encoding)
     {
         ArgumentNullException.ThrowIfNull(bytes);
-        return WithoutNul(Encoding.UTF8.GetString(bytes));
+        ArgumentNullException.ThrowIfNull(encoding);
+        return WithoutNul(SplitAndDecode(bytes, bytes.Length, encoding));
     }
 
     /// <summary>
@@ -43,9 +45,10 @@ public static class PgBinaryTailText
     /// <c>\NNN</c> need reversing here, which is what this method does — every other character escape()
     /// emits is a single ASCII code point, so casting it straight to <see cref="byte"/> is exact.</para>
     /// </summary>
-    public static string UnescapeAndDecode(string escaped)
+    public static string UnescapeAndDecode(string escaped, Encoding encoding)
     {
         ArgumentNullException.ThrowIfNull(escaped);
+        ArgumentNullException.ThrowIfNull(encoding);
 
         var bytes = new byte[escaped.Length];
         var length = 0;
@@ -81,7 +84,43 @@ public static class PgBinaryTailText
             bytes[length++] = (byte)c;
         }
 
-        return WithoutNul(Encoding.UTF8.GetString(bytes, 0, length));
+        return WithoutNul(SplitAndDecode(bytes, length, encoding));
+    }
+
+    /// <summary>
+    /// Some DBCS decoders (EUC-JP/936/EUC-KR, code pages 51932/936/51949) pair an unmapped lead byte with
+    /// whatever byte follows it, even an ASCII byte like 0x0A, so a planted lead byte right before a real
+    /// newline eats the newline and can merge the next real line into the attacker's (#4062 review, Medium).
+    /// Splitting on the raw byte 0x0A before decoding, then decoding each segment and joining with '\n',
+    /// restores the property .NET's own UTF-8 decoder has: an ASCII control byte is never consumed as a
+    /// trail byte. This is safe for every encoding this route is called with: 0x0A is never a valid trail
+    /// byte in EUC-JP, EUC-KR or GBK (their trail bytes are all 0xA1 or higher), and single-byte encodings
+    /// treat 0x0A as one character regardless. Valid text decodes to exactly the same string either way.
+    /// </summary>
+    private static string SplitAndDecode(byte[] bytes, int length, Encoding encoding)
+    {
+        var sb = new StringBuilder();
+        var start = 0;
+        var first = true;
+
+        for (var i = 0; i <= length; i++)
+        {
+            if (i < length && bytes[i] != (byte)'\n')
+            {
+                continue;
+            }
+
+            if (!first)
+            {
+                sb.Append('\n');
+            }
+
+            sb.Append(encoding.GetString(bytes, start, i - start));
+            first = false;
+            start = i + 1;
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>

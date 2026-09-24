@@ -631,10 +631,6 @@ public sealed class DocCommentHygieneTests
         ["CallerMemberNameAttribute"] =
             "OUTSIDE. Same elision as the entry above.",
 
-        ["DecoderReplacementFallback"] =
-            "OUTSIDE. System.Text.DecoderReplacementFallback, named to explain why Encoding.UTF8 already turns "
-            + "an invalid byte into U+FFFD. The code relies on that default and never constructs one (#4046).",
-
         ["HostString.Host"] =
             "OUTSIDE. Microsoft.AspNetCore.Http.HostString, reached through a property chain rather than "
             + "named, so the type name appears in no code here.",

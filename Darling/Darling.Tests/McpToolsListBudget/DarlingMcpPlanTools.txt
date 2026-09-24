@@ -1,5 +1,5 @@
 # DarlingMcpPlanTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool analyze_plan_xml 880
+tool analyze_plan_xml 618
 param analyze_plan_xml.plan_xml 25
 
 tool analyze_procedure_plan 926
