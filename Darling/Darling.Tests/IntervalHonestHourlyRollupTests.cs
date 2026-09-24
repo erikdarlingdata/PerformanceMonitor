@@ -507,6 +507,13 @@ public sealed class IntervalHonestHourlyRollupLiveTests
     private const int ServerId = -936536;
     private const string ServerName = "interval-honest-e2e";
 
+    private readonly ITestOutputHelper _output;
+
+    public IntervalHonestHourlyRollupLiveTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
     [Fact]
     public async Task RestartRow_CountedByTheLegacy_NotByTheSuccessor_AndTheProbeRoutesByCoverage_AgainstDevPostgres()
     {
@@ -611,6 +618,22 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
         var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
         Assert.True(rollups.QueryGrainIntervalHourly && rollups.DbGrainIntervalHourly && rollups.ProcedureGrainIntervalHourly);
         Assert.True(rollups.AllPresent);
+
+        /* #3653 A6 lane LB-4: before the probe reads a possibly-missing relation, print what the availability
+           probe itself says and the actual catalog contents, so a 42P01 here is diagnosed from THIS run's
+           evidence rather than inferred. */
+        _output.WriteLine("RollupAvailability: " + rollups);
+        await using (var listCommand = dataSource.CreateCommand(
+            "SELECT view_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' ORDER BY view_name"))
+        await using (var listReader = await listCommand.ExecuteReaderAsync(ct))
+        {
+            var existingViews = new List<string>();
+            while (await listReader.ReadAsync(ct))
+            {
+                existingViews.Add(listReader.GetString(0));
+            }
+            _output.WriteLine("timescaledb_information.continuous_aggregates (collect): " + string.Join(", ", existingViews));
+        }
 
         var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
         Assert.Equal(hour, coverage.FloorOf(TimescaleSupport.QueryStatsHourlyView));

@@ -72,7 +72,7 @@ public sealed class SuccessorDailyLiveTests
            exactly that: 26/27 with no test-visible error. Assert NOW, before the count check, so a future
            swallowed failure fails HERE with the verbatim Postgres/Timescale error in the message, rather than
            surfacing three call frames downstream as a bare "relation does not exist". */
-        Assert.DoesNotContain("Warning", log.Joined, StringComparison.Ordinal);
+        Assert.False(log.Joined.Contains("Warning", StringComparison.Ordinal), "ensure sweep warnings:\n" + log.Joined);
         Assert.Equal(
             TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
                 + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
