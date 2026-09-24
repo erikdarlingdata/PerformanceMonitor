@@ -339,6 +339,10 @@ public sealed class RdsPlanIngestorTests
         Assert.Equal(0, outcome.Rows);
         /* Not dropped as forged: the look-alike never became a plan record at all (review round 1). */
         Assert.Equal(0, outcome.ForgedCaptures);
+
+        /* Lane 4053-rds-tests item 7: the look-alike stays inside its one record — the csv parser
+           discards nothing, because there is nothing outside a complete record here for it to discard. */
+        Assert.Equal(0, outcome.CsvRecordsDiscarded);
     }
 
     /// <summary>
@@ -376,6 +380,11 @@ public sealed class RdsPlanIngestorTests
         var outcome = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
 
         Assert.Equal(0, outcome.Rows);
+
+        /* Lane 4053-rds-tests item 7: a NOTICE-severity record is not read as a forged capture either —
+           it is simply not a plan candidate at all, the same distinction the look-alike test above draws. */
+        Assert.Equal(0, outcome.ForgedCaptures);
+        Assert.Equal(0, outcome.CsvRecordsDiscarded);
     }
 
     /// <summary>
@@ -431,5 +440,76 @@ public sealed class RdsPlanIngestorTests
             () => ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true));
 
         Assert.IsNotType<RdsLogUnavailableException>(failure);
+    }
+
+    /// <summary>
+    /// Lane 4053-rds-tests item 5: the plan route's copy of the deadlock suite's store-failure replay. Portion
+    /// 1 (pending) holds only the record's head, so there is no write and the carry's own marker commits.
+    /// Portion 2 holds the tail and throws on the dead store — a write was attempted. Re-serving portion 2
+    /// (the same bytes, unresumed past it) presents the SAME marker as the first attempt and throws again,
+    /// because the record is still whole rather than half-consumed by the failed attempt.
+    /// </summary>
+    [Fact]
+    public async Task AStoreFailureOnTheSecondPortion_PresentsTheSameMarkerAgain_AndThrowsAgain()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var full = CsvPlanRecord;
+        var cut = full.IndexOf("duration: 0.020", StringComparison.Ordinal);
+        var client = new CsvFakeRds
+        {
+            CsvPortions = new Queue<(string, bool)>(new[]
+            {
+                (full[..cut], true),
+            }),
+        };
+        var logs = new RdsLogSource(_ => client);
+        var ingestor = new RdsPlanIngestor(store, logs);
+
+        var first = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+        Assert.Equal(0, first.Rows);
+
+        client.CsvBody = full[cut..];
+        client.NextCsvMarker = "MARKER-2";
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true));
+
+        /* Serve the SAME bytes again — client.CsvBody/NextCsvMarker untouched — exactly the request a
+           resumed-but-not-yet-advanced caller would make. The third download must present the SAME marker
+           as the second, and the record must throw again rather than being silently dropped or split. */
+        var third = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(third);
+        Assert.Equal(3, client.Downloads.Count);
+        Assert.Equal(client.Downloads[1].Marker, client.Downloads[2].Marker);
+    }
+
+    /// <summary>
+    /// Lane 4053-rds-tests item 6: the plan route's copy of
+    /// <c>RdsLogEventIngestorCsvlogTests.AReplayWithAnEmptyMarker_LeavesTheCarryUntouched</c>. Built so it
+    /// FAILS if the carry is wrongly committed on an empty (replay) marker: the first read has no marker
+    /// and holds only a straddling record's head, so it has no events, no write, and must not record a
+    /// carry. The second read holds only the tail; without a carry it is a cut head with no events, no
+    /// write, no throw. Had the first read's carry been wrongly recorded, the two would glue into one
+    /// complete record, reach the write, and throw on the dead store.
+    /// </summary>
+    [Fact]
+    public async Task AReplayWithAnEmptyMarker_LeavesTheCarryUntouched()
+    {
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var full = CsvPlanRecord;
+        var cut = full.IndexOf("duration: 0.020", StringComparison.Ordinal);
+
+        var client = new CsvFakeRds { CsvBody = full[..cut], NextCsvMarker = null };
+        var ingestor = new RdsPlanIngestor(store, new RdsLogSource(_ => client));
+
+        var outcome1 = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+        Assert.Equal(0, outcome1.Rows);
+
+        client.CsvBody = full[cut..];
+        client.NextCsvMarker = "MARKER-2";
+        var outcome2 = await ingestor.IngestAsync(1, "target-a", Host, pgLogUsesCsvlog: true);
+        Assert.Equal(0, outcome2.Rows);
+        Assert.Equal(2, client.Downloads.Count);
     }
 }
