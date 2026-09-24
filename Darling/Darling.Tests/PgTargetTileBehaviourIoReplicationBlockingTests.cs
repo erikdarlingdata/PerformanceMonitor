@@ -100,12 +100,19 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var expectedTileCutoff = AnomalyThresholds.ModifiedZThresholdFor(MetricNames.PgIoReadLatency);
             Assert.Equal(expectedTileCutoff, anomaly.Metadata["fire_threshold"]);
 
-            /* What case B exists for: the whole-window mean's own z against the START bucket is under k. */
+            /* What case B exists for: the whole-window mean's own z against the START bucket is under k, judged
+               in the DETECTOR'S OWN FRAME (robust median/EffectiveRobustSigma when the bucket has one, since this
+               family's tile arm grades on the modified-z cutoff against that frame — not the classical Mean/
+               EffectiveStdDev pair, which is a different statistic with a different z and proves nothing about
+               the frame the detector actually compares against). */
             var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgIoReadLatency, windowStart, ct);
             Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
             // The window's four hours: two at μ, two at μ + 6σ → window mean = μ + 3σ.
             var wholeWindowMean = mu + 3 * sigma;
-            var wholeWindowMeanZ = (wholeWindowMean - wholeBaseline.Mean) / wholeBaseline.EffectiveStdDev;
+            var (center, dispersion) = wholeBaseline.EffectiveRobustSigma > 0
+                ? (wholeBaseline.Median, wholeBaseline.EffectiveRobustSigma)
+                : (wholeBaseline.Mean, wholeBaseline.EffectiveStdDev);
+            var wholeWindowMeanZ = (wholeWindowMean - center) / dispersion;
             Assert.True(wholeWindowMeanZ < expectedTileCutoff,
                 $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({expectedTileCutoff}) — the case tile mode exists for");
 
@@ -345,7 +352,11 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgReplayLagBytes, windowStart, ct);
             Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
             var wholeWindowMean = mu + 3 * sigma;
-            var wholeWindowMeanZ = (wholeWindowMean - wholeBaseline.Mean) / wholeBaseline.EffectiveStdDev;
+            // The detector's own frame: robust (median/EffectiveRobustSigma) when the bucket has one, else classical.
+            var (center, dispersion) = wholeBaseline.EffectiveRobustSigma > 0
+                ? (wholeBaseline.Median, wholeBaseline.EffectiveRobustSigma)
+                : (wholeBaseline.Mean, wholeBaseline.EffectiveStdDev);
+            var wholeWindowMeanZ = (wholeWindowMean - center) / dispersion;
             Assert.True(wholeWindowMeanZ < AnomalyThresholds.DefaultDeviationThreshold,
                 $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({AnomalyThresholds.DefaultDeviationThreshold}) — the case tile mode exists for");
 
@@ -417,7 +428,11 @@ public sealed class PgTargetTileBehaviourIoReplicationBlockingTests
             var wholeBaseline = await baselines.GetBaselineAsync(serverId, MetricNames.PgBlockedSessions, windowStart, ct);
             Assert.True(wholeBaseline.SampleCount > 0, "expected a non-empty start-bucket baseline for the whole-window comparison");
             var wholeWindowMean = Math.Round(mu + 3 * sigma);
-            var wholeWindowMeanZ = (wholeWindowMean - wholeBaseline.Mean) / wholeBaseline.EffectiveStdDev;
+            // The detector's own frame: robust (median/EffectiveRobustSigma) when the bucket has one, else classical.
+            var (center, dispersion) = wholeBaseline.EffectiveRobustSigma > 0
+                ? (wholeBaseline.Median, wholeBaseline.EffectiveRobustSigma)
+                : (wholeBaseline.Mean, wholeBaseline.EffectiveStdDev);
+            var wholeWindowMeanZ = (wholeWindowMean - center) / dispersion;
             Assert.True(wholeWindowMeanZ < AnomalyThresholds.DefaultDeviationThreshold,
                 $"expected the whole-window mean's z ({wholeWindowMeanZ}) to sit BELOW k ({AnomalyThresholds.DefaultDeviationThreshold}) — the case tile mode exists for");
 
