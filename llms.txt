@@ -1,16 +1,19 @@
 # SQL Server Performance Monitor
 
-> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). 41 T-SQL collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server with 89-159 tools for AI-powered analysis. Two current editions: Lite (standalone desktop app with DuckDB storage) and Darling (headless 24/7 service with a central PostgreSQL/TimescaleDB store plus a detached viewer); the older Full/Dashboard edition is deprecated. Replaces expensive commercial tools like SentryOne and Solarwinds DPA. MIT licensed.
+> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). 42 SQL Server collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server with 89-159 tools for AI-powered analysis. Two current editions: Lite (standalone desktop app with DuckDB storage) and Darling (headless 24/7 service with a central PostgreSQL/TimescaleDB store). The older Full/Dashboard edition is deprecated. Replaces expensive commercial tools like SolarWinds SQL Sentry (formerly SentryOne) and SolarWinds DPA. MIT licensed.
 
-- Supports SQL Server 2016-2025, Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite only)
+- Supports SQL Server 2016-2025, Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling)
+- Darling's service runs on Windows or Linux, and its viewers are a Windows desktop app and a web dashboard
+- Darling also monitors PostgreSQL (self-hosted, AWS RDS, and Aurora) with 29 PostgreSQL collectors
 - Monitors wait stats, query performance, blocking chains, deadlocks, memory grants, file I/O, tempdb, CPU, perfmon counters, and more
-- Real-time alerts via system tray notifications and styled HTML emails
+- Real-time alerts via system tray notifications (Lite), styled HTML emails, Microsoft Teams, Slack, PagerDuty, and generic webhooks
 - Built-in MCP server exposes monitoring data to Claude Code, Cursor, and other LLM clients
-- 4,300+ downloads across releases
+- 15,000+ downloads across releases
 
 ## Documentation
 
-- [README](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/README.md): Complete documentation including quick start, permissions, collector reference, alert configuration, MCP server setup, and edition comparison
+- [README](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/README.md): Main documentation including quick start, permissions, collector reference, alert configuration, MCP server setup, and edition comparison
+- [Darling operator guide](https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/Darling/README.md): Installing and configuring the Darling service, its store, PostgreSQL targets, and its MCP tools
 - [Releases](https://github.com/erikdarlingdata/PerformanceMonitor/releases): Download pre-built binaries
 - [Product page](https://erikdarling.com/free-sql-server-performance-monitoring/): Overview and commercial support options
 
