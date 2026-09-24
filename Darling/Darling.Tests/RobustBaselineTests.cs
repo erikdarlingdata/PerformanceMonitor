@@ -549,6 +549,123 @@ public sealed class RobustBaselineTests
         Assert.Equal(0, selected.EffectiveRobustSigma);
     }
 
+    /* ── #3653 A8 option B: fall back to the first coarser TRUSTWORTHY tier ── */
+
+    [Fact]
+    public void SelectBucket_ChosenFullUntrustworthy_ExactHourOnlyTrustworthy_ReturnsHourOnly()
+    {
+        /* Full clears its sample count (RestoreThreshold) but has only 2 distinct days — a young
+           target, weeks from Full's 3-distinct-day floor. The exact hour-only sentinel already
+           clears its own (higher) floors, so the fallback should hand it back instead of the
+           absolute-fallback Full bucket. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 100, StdDev = 5, SampleCount = 20, DistinctDays = 2 },
+            [(5, -1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = -1, Tier = BaselineTier.HourOnly, Mean = 90, StdDev = 20, SampleCount = 10, DistinctDays = 10 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.HourOnly, selected.Tier);
+        Assert.Equal(90, selected.Mean);
+    }
+
+    [Fact]
+    public void SelectBucket_FullAndHourOnlyUntrustworthy_ExactFlatTrustworthy_ReturnsFlat()
+    {
+        /* Full is untrustworthy (2 distinct days) AND the hour-only tier is also untrustworthy (5
+           distinct days, short of its 10-day floor) — the walk must not stop at HourOnly, it must
+           keep going to Flat. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 100, StdDev = 5, SampleCount = 20, DistinctDays = 2 },
+            [(5, -1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = -1, Tier = BaselineTier.HourOnly, Mean = 90, StdDev = 10, SampleCount = 15, DistinctDays = 5 },
+            [(-1, -1)] = new BaselineBucket { HourOfDay = -1, DayOfWeek = -1, Tier = BaselineTier.Flat, Mean = 95, StdDev = 8, SampleCount = 50, DistinctDays = 10 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.Flat, selected.Tier);
+        Assert.Equal(95, selected.Mean);
+    }
+
+    [Fact]
+    public void SelectBucket_EveryTierUntrustworthy_ReturnsChosenFull_TheAbsoluteFallbackAsToday()
+    {
+        /* Full, hour-only AND flat are all untrustworthy — the walk finds nothing and returns
+           today's chosen bucket unchanged: the absolute-fallback path, exactly as before this
+           lane. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 100, StdDev = 5, SampleCount = 20, DistinctDays = 2 },
+            [(5, -1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = -1, Tier = BaselineTier.HourOnly, Mean = 90, StdDev = 10, SampleCount = 15, DistinctDays = 5 },
+            [(-1, -1)] = new BaselineBucket { HourOfDay = -1, DayOfWeek = -1, Tier = BaselineTier.Flat, Mean = 95, StdDev = 8, SampleCount = 50, DistinctDays = 2 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.Full, selected.Tier);
+        Assert.Equal(100, selected.Mean);
+        Assert.Equal(2, selected.DistinctDays);
+    }
+
+    [Fact]
+    public void SelectBucket_ChosenFullIsZeroHistory_NeverReplacedByACoarserTier()
+    {
+        /* A Full bucket that clears its floors with every statistic at zero is IsZeroHistory —
+           the strongest statement a bounded metric's baseline can make — and must never be
+           overridden by a coarser tier even when one is trustworthy. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 0, StdDev = 0, Median = 0, Mad = 0, SampleCount = 20, DistinctDays = 5 },
+            [(5, -1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = -1, Tier = BaselineTier.HourOnly, Mean = 90, StdDev = 10, SampleCount = 15, DistinctDays = 12 },
+            [(-1, -1)] = new BaselineBucket { HourOfDay = -1, DayOfWeek = -1, Tier = BaselineTier.Flat, Mean = 95, StdDev = 8, SampleCount = 50, DistinctDays = 10 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.Full, selected.Tier);
+        Assert.True(selected.IsZeroHistory);
+        Assert.Equal(0, selected.Mean);
+    }
+
+    [Fact]
+    public void SelectBucket_TrustworthyFull_ReturnedUnchanged_MatureTargetIsByteIdentical()
+    {
+        /* A mature target's Full bucket is already trustworthy — the fallback walk must not run
+           at all, and the bucket handed back is the exact same instance selected by sample count
+           today. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(5, 1)] = new BaselineBucket { HourOfDay = 5, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 100, StdDev = 5, SampleCount = 20, DistinctDays = 5 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 5, 1);
+        Assert.Equal(BaselineTier.Full, selected.Tier);
+        Assert.True(selected.IsTrustworthy);
+        Assert.Same(map[(5, 1)], selected);
+    }
+
+    [Fact]
+    public void SelectBucket_NoSentinels_PooledFullUntrustworthy_PooledHourOnlyTrustworthy_ReturnsPooledHourOnly()
+    {
+        /* No provider sentinels at all (pre-#1743 map): the fallback tier must be built by the
+           SAME pooled synthesis as today's selection, not skipped just because there's no exact
+           bucket to hand back. Five hour-8 dow buckets pool to 40 samples across 10 distinct days
+           with differing means, which is enough to clear HourOnly's (10 sample, 10 day) floor with
+           real pooled dispersion. */
+        var map = new Dictionary<(int, int), BaselineBucket>
+        {
+            [(8, 1)] = new BaselineBucket { HourOfDay = 8, DayOfWeek = 1, Tier = BaselineTier.Full, Mean = 100, StdDev = 5, SampleCount = 20, DistinctDays = 2 },
+            [(8, 2)] = new BaselineBucket { HourOfDay = 8, DayOfWeek = 2, Tier = BaselineTier.Full, Mean = 110, StdDev = 5, SampleCount = 5, DistinctDays = 2 },
+            [(8, 3)] = new BaselineBucket { HourOfDay = 8, DayOfWeek = 3, Tier = BaselineTier.Full, Mean = 90, StdDev = 5, SampleCount = 5, DistinctDays = 2 },
+            [(8, 4)] = new BaselineBucket { HourOfDay = 8, DayOfWeek = 4, Tier = BaselineTier.Full, Mean = 105, StdDev = 5, SampleCount = 5, DistinctDays = 2 },
+            [(8, 5)] = new BaselineBucket { HourOfDay = 8, DayOfWeek = 5, Tier = BaselineTier.Full, Mean = 95, StdDev = 5, SampleCount = 5, DistinctDays = 2 },
+        };
+
+        var selected = BaselineMath.SelectBucket(map, 8, 1);
+        Assert.Equal(BaselineTier.HourOnly, selected.Tier);
+        Assert.Equal(40, selected.SampleCount);
+        Assert.Equal(10, selected.DistinctDays);
+        Assert.True(selected.IsTrustworthy);
+    }
+
     /* ── honest confidence ── */
 
     [Fact]
