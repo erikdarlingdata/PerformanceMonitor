@@ -807,14 +807,19 @@ public sealed class DarlingCollectorRunner
            effect with no reconnect and #3604-style connect-time caching would miss that. */
         var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
 
+        /* #4053 part c2: the same target-configuration read IngestRdsLogEventsAsync makes, for the same
+           reason — this ingestor reaches the log through the AWS API, not SQL, so it carries no target
+           connection of its own to probe with. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, logTimezoneIsUtc, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines);
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded);
 
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));

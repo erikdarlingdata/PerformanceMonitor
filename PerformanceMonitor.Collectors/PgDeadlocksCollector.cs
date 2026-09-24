@@ -389,7 +389,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
         }
 
         var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
-        var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
+        var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
         PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
 
         foreach (var entry in kept)
@@ -401,47 +401,6 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 rows.Add(ToRow(parsed.Value));
             }
         }
-    }
-
-    /// <summary>
-    /// The same foreign-zone rule <c>PgLogEventsCollector.FilterForeignZoneEntries</c> applies (#4053 part b1),
-    /// kept as this collector's own copy rather than a shared call: under a UTC <c>log_timezone</c> a record in
-    /// another zone is not the server's own and is dropped and counted in <paramref name="foreignZoneLines"/>;
-    /// otherwise a foreign zone throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole
-    /// batch, the #2993 trade every reader of this tail makes.
-    /// </summary>
-    private static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
-    {
-        foreignZoneLines = 0;
-
-        if (!logTimezoneIsUtc)
-        {
-            foreach (var entry in entries)
-            {
-                if (!PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
-                {
-                    throw new PgLogTimezoneUnsupportedException(entry.ZoneText);
-                }
-            }
-
-            return entries;
-        }
-
-        var kept = new List<PgLogEntry>(entries.Count);
-
-        foreach (var entry in entries)
-        {
-            if (PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
-            {
-                kept.Add(entry);
-            }
-            else
-            {
-                foreignZoneLines++;
-            }
-        }
-
-        return kept;
     }
 
     private static Row ToRow(PgDeadlockLogParser.ParsedDeadlock parsed) => new(
