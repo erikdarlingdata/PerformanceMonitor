@@ -143,8 +143,9 @@ public sealed class PgPlanCaptureLiveTests
     /// beside a REAL capture in the same tail. Before #4058, <c>(m[1])::bigint</c> and
     /// <c>(m[2])::double precision</c> ran unconditionally, so either forged row's cast error would abort
     /// the whole <c>SELECT</c> and blind every other row in the same 4 MB read, including the real one.
-    /// <c>pg_input_is_valid</c> nulls the forged column instead: the real capture still comes back, on both
-    /// the text and the binary route.
+    /// The guarded CASE chain nulls the forged column instead of casting it: the real capture still comes
+    /// back, on both the text and the binary route. Not <c>pg_input_is_valid</c> — that function is
+    /// PostgreSQL 16+, and this text route serves 14 and 15 targets too.
     /// </summary>
     [Fact]
     public async Task AForgedOverflowingQueryIdOrDuration_NullsOutAndLeavesTheRealCaptureIntact()

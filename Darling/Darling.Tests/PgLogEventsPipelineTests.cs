@@ -1364,6 +1364,27 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(tail, Lf(PgServerLogTail.TailCteSql));
     }
 
+    /// <summary>
+    /// #4058 L3: a unit pin of both binary-route amplification guards. The first lane's <c>position(...
+    /// IN ...)</c> syntax error broke every binary-route read and only a live test caught it, because CI
+    /// does not run the gated live classes. This pins the correct form beside the existing byte pin above,
+    /// on every commit.
+    /// </summary>
+    [Fact]
+    public void TheBinaryRouteGuards_UseTheCorrectPositionSyntax_NotTheOldInForm()
+    {
+        var binaryContext = TestContext();
+        binaryContext.PgReadBinaryFileGranted = true;
+
+        var planBinarySql = PgPlanCaptureCollector.Instance.BuildQuery(binaryContext).Text;
+        var deadlockBinarySql = PgDeadlocksCollector.Instance.BuildQuery(binaryContext).Text;
+
+        Assert.Contains("WHERE pg_catalog.position(tail.body, 'LOG:  duration: '::bytea) > 0", planBinarySql, StringComparison.Ordinal);
+        Assert.Contains("WHERE pg_catalog.position(tail.body, 'ERROR:  deadlock detected'::bytea) > 0", deadlockBinarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("position('", planBinarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("position('", deadlockBinarySql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task TheCollector_ClassifiesTheBody_ThrowsOnTheMarker_AndWritesTheColumnsInOrder()
     {
