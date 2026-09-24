@@ -94,4 +94,74 @@ public sealed class PgLogEntryProvenanceTests
         Assert.True(PgLogEntryProvenance.ReportedByOther(
             Entry(location: "exec_stmt_raise, pl_exec.c:1"), "DeadLockReport"));
     }
+
+    /* ---- #4058 review round 1: the innermost-frame parse ---------------------------------------------- */
+
+    private const string Prefix = "PL/pgSQL function ";
+
+    [Fact]
+    public void ADoBlockRaiseFrame_IsRaiseShaped()
+    {
+        Assert.True(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + "inline_code_block line 2 at RAISE")));
+    }
+
+    [Fact]
+    public void AFunctionNamedInlineCodeBlock_IsParsedAsASignature_NotAsADoBlock()
+    {
+        /* A client can CREATE FUNCTION inline_code_block(...): its frame has an argument list, and its RAISE must
+           still be caught rather than fail open on the DO-block branch. */
+        Assert.True(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + "inline_code_block(integer) line 3 at RAISE")));
+    }
+
+    [Fact]
+    public void AQuotedFunctionNameHoldingANewline_StillEndsItsFrameAtRaise()
+    {
+        var name = "\"forge" + "\n" + "d\"";
+        Assert.True(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + name + "() line 3 at RAISE")));
+    }
+
+    [Fact]
+    public void AQuotedNameImitatingAnSqlStatementFrame_IsStillReadToItsRealRaiseKind()
+    {
+        var name = "\"x() line 1 at SQL statement" + "\n" + "\"";
+        Assert.True(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + name + "() line 3 at RAISE")));
+    }
+
+    [Fact]
+    public void AQuotedTypeArgumentContainingAParen_IsParsedToTheRealCloseParen()
+    {
+        Assert.True(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + "f(\"odd)type\") line 3 at RAISE")));
+    }
+
+    [Fact]
+    public void ARealDeadlockInsideAFunction_WhoseInnermostFrameIsAnSqlStatement_IsKept()
+    {
+        var context = "SQL statement \"UPDATE t SET v = 1 WHERE id = 2\"" + "\n" + Prefix + "upd(integer,integer) line 3 at SQL statement";
+        Assert.False(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: context)));
+    }
+
+    [Fact]
+    public void ARealDeadlockInARaisesSubquery_WhoseInnermostFrameIsAnSqlExpression_IsKept()
+    {
+        var context = "SQL expression \"(SELECT v FROM t WHERE id = 1 FOR UPDATE)\"" + "\n" + Prefix + "f() line 3 at RAISE";
+        Assert.False(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: context)));
+    }
+
+    [Fact]
+    public void AFunctionFrameAtAnotherStatementKind_IsNotRaiseShaped()
+    {
+        Assert.False(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + "f() line 3 at SQL statement")));
+        Assert.False(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: Prefix + "f() line 3 at RAISE statement")));
+    }
+
+    [Theory]
+    [InlineData("PL/pgSQL function")]
+    [InlineData("PL/pgSQL function f(")]
+    [InlineData("PL/pgSQL function f() line x at RAISE")]
+    [InlineData("PL/pgSQL function f() at RAISE")]
+    [InlineData("garbage with no frame")]
+    public void AnUnparseableContext_FailsOpen(string context)
+    {
+        Assert.False(PgLogEntryProvenance.RaisedByPlpgsql(Entry(context: context)));
+    }
 }

@@ -94,7 +94,10 @@ internal static class PgLogEntryProvenance
 
         var rest = context.AsSpan(FunctionFramePrefix.Length);
 
-        if (rest.StartsWith(InlineCodeBlockLiteral))
+        /* A DO block prints no argument list: the frame reads inline_code_block, then " line N at KIND". The
+           literal plus the line token together, not the bare word, because a client can CREATE FUNCTION
+           inline_code_block(...) and its frame must still be parsed as a signature, or its RAISE would fail open. */
+        if (rest.StartsWith(InlineCodeBlockLiteral + LineToken))
         {
             /* A DO block: PostgreSQL names it "inline_code_block" rather than a signature, and no
                parenthesized argument list follows it. */
