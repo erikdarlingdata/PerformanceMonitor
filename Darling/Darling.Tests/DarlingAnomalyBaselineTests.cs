@@ -1101,10 +1101,20 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal("ANOMALY_READ_LATENCY", fact.Key);
             Assert.Equal(60.0, fact.Value, 0.001);                                  // the PEAK, not the window average
             Assert.Equal(60.0, fact.Metadata["current_latency_ms"], 0.001);
-            Assert.Equal(41.25, fact.Metadata["avg_latency_ms"], 0.001);
+            /* #3653 A8 option B: the fact reports the WORST TILE, the target-local hour holding the 60 ms row. Its mean is
+               that hour's n rows (n - 1 at 40 ms plus the 60 ms row), not the whole window's 41.25. The whole window's 16
+               rows ride in window_samples_total. */
+            var tileStart = new DateTime((long)fact.Metadata["tile_start_ticks"]);
+            var rowTimes = Enumerable.Range(0, 16).Select(i => analysisTime.AddMinutes(5 * (i + 1))).ToList();
+            Assert.InRange(rowTimes[7], tileStart, tileStart.AddHours(1).AddTicks(-1));   // the worst hour holds the hot row
+            var tileRows = rowTimes.Count(t => t >= tileStart && t < tileStart.AddHours(1));
+            var tileMean = ((tileRows - 1) * 40.0 + 60.0) / tileRows;
+            Assert.Equal(tileMean, fact.Metadata["avg_latency_ms"], 0.001);
+            Assert.Equal(16.0, fact.Metadata["window_samples_total"]);
+            Assert.Equal(60.0, fact.Metadata["window_peak"], 0.001);
             Assert.Equal(0.0, fact.Metadata["baseline_low_quality"]);               // the z path
-            Assert.Equal((60.0 - 2.0) / 2.5, fact.Metadata["deviation_sigma"], 0.001);       // 23.2σ, the peak's
-            Assert.Equal((41.25 - 2.0) / 2.5, fact.Metadata["mean_deviation_sigma"], 0.001); // 15.7σ, the mean's
+            Assert.Equal((60.0 - 2.0) / 2.5, fact.Metadata["deviation_sigma"], 0.001);         // 23.2σ, the peak's
+            Assert.Equal((tileMean - 2.0) / 2.5, fact.Metadata["mean_deviation_sigma"], 0.001); // the worst hour's mean
             Assert.Equal(AnomalyThresholds.ModifiedZThreshold, fact.Metadata["fire_threshold"]);
 
             bodySucceeded = true;
@@ -1240,11 +1250,19 @@ public sealed class DarlingAnomalyBaselineTests
             Assert.Equal("ANOMALY_WAIT_PROFILE", fact.Key);
             Assert.Equal(0.0, fact.Metadata["is_new"]);                                     // the trusted robust arm
             Assert.Equal(3200.0, fact.Metadata["current_ms_per_sec"], 0.001);                // the PEAK
-            Assert.Equal(1606.25, fact.Metadata["avg_ms_per_sec"], 0.001);                   // the window mean (15 × 1500 + 3200) / 16
+            /* #3653 A8 option B: the worst tile's mean, the hour holding the 3,200 ms/s collection: its n rated
+               collections, n - 1 at 1,500 plus the spike. It is not the whole window's (15 × 1500 + 3200) / 16. */
+            var tileStart = new DateTime((long)fact.Metadata["tile_start_ticks"]);
+            var collectionTimes = Enumerable.Range(0, 17).Select(i => analysisTime.AddMinutes(5 * (i + 1))).ToList();
+            Assert.InRange(collectionTimes[8], tileStart, tileStart.AddHours(1).AddTicks(-1));   // the worst hour holds the spike
+            var tileCollections = collectionTimes.Skip(1).Count(t => t >= tileStart && t < tileStart.AddHours(1)); // the first is unrated
+            var tileMeanRate = ((tileCollections - 1) * 1500.0 + 3200.0) / tileCollections;
+            Assert.Equal(tileMeanRate, fact.Metadata["avg_ms_per_sec"], 0.001);
+            Assert.Equal(16.0, fact.Metadata["window_samples_total"]);
             Assert.Equal(16 * 450000.0 + 960000.0, fact.Value, 0.001);                        // every collection's total, the unrated first included
             Assert.Equal(3200.0 / baseline.Mean, fact.Metadata["ratio"], 0.001);             // the ratio stays the peak's
             Assert.Equal(peakZ, fact.Metadata["modified_z"], 0.001);                          // uncapped, the scorer's anchor
-            Assert.Equal((1606.25 - baseline.Median) / robustSigma, fact.Metadata["mean_modified_z"], 0.001);
+            Assert.Equal((tileMeanRate - baseline.Median) / robustSigma, fact.Metadata["mean_modified_z"], 0.001);
             Assert.True(fact.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
             Assert.True(fact.Metadata["modified_z"] >= fact.Metadata["mean_modified_z"], "the reported deviation is the peak's; the mean's is the smaller one");
             Assert.Equal(16 * 450000.0 + 960000.0, fact.Metadata[$"contrib_{TestWaitType}"], 0.001); // the one type carries the whole total
