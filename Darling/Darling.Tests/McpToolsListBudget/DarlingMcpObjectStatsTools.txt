@@ -2,7 +2,7 @@
 tool get_database_sizes 480
 param get_database_sizes.server_name 28
 
-tool get_index_usage 856
+tool get_index_usage 466
 param get_index_usage.database_name 123
 param get_index_usage.limit 36
 param get_index_usage.server_name 28
