@@ -434,6 +434,10 @@ public static class PgServerLogCsvParser
         var statement = NullIfEmpty(fields[19]);
         var userName = NullIfEmpty(fields[1]);
         var databaseName = NullIfEmpty(fields[2]);
+        /* Index 21 of the 26 columns (#4058 item 2): the reporting function's own name, filled only
+           under log_error_verbosity = verbose. Empty on every other verbosity, mapped to null the same
+           way every other optional companion here is. */
+        var location = NullIfEmpty(fields[21]);
 
         entry = new PgLogEntry(
             TimestampText: logTime,
@@ -451,7 +455,8 @@ public static class PgServerLogCsvParser
             DatabaseName: databaseName,
             SqlState: sqlState,
             RawText: recordText,
-            DetailComplete: true);
+            DetailComplete: true,
+            Location: location);
 
         return true;
     }

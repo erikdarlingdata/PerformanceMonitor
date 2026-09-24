@@ -60,6 +60,14 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="DetailComplete">Whether the DETAIL is proven whole (#3996's review): another companion followed it
 /// in this entry and nothing cut into its lines. <see cref="PgLogTextRedactor.RedactDetail"/> trusts a deadlock
 /// report's later query heads after one that does not read to its end only then.</param>
+/// <param name="Location">The reporting function's own name — csvlog's <c>location</c> column (index 21 of 26,
+/// rendered <c>funcname, file:line</c>) or jsonlog's <c>func_name</c> key — filled only under
+/// <c>log_error_verbosity = verbose</c>, and null on every other verbosity and on the stderr transport, which
+/// carries no such field at all (#4058 item 2). A genuine deadlock report is written by PostgreSQL's own
+/// <c>DeadLockReport</c> and a genuine <c>auto_explain</c> capture by its own <c>explain_ExecutorEnd</c> —
+/// verified on a live 18 target — so a RAISE built to imitate either carries the reporting PL/pgSQL frame's own
+/// function, <c>exec_stmt_raise</c>, instead. LAST member, added rather than inserted, so every existing
+/// positional construction of this record stays source-compatible.</param>
 public readonly record struct PgLogEntry(
     string TimestampText,
     string ZoneText,
@@ -76,7 +84,8 @@ public readonly record struct PgLogEntry(
     string? DatabaseName,
     string? SqlState,
     string RawText,
-    bool DetailComplete = false)
+    bool DetailComplete = false,
+    string? Location = null)
 {
     /// <summary>
     /// PostgreSQL's severity labels ranked by SERIOUSNESS, which is the order a reader filtering on

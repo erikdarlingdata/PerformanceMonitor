@@ -179,6 +179,11 @@ public static class PgServerLogJsonParser
             TryGetString(root, "user", out var userName);
             TryGetString(root, "dbname", out var databaseName);
             TryGetString(root, "state_code", out var sqlState);
+            /* jsonlog's own twin of csvlog's location column (#4058 item 2): the reporting function's
+               own name, present only under log_error_verbosity = verbose. PostgreSQL omits the key
+               entirely rather than writing it empty, exactly as it does for user/dbname on a
+               pre-authentication line, so TryGetString's absent-key handling already reads it right. */
+            TryGetString(root, "func_name", out var location);
 
             entry = new PgLogEntry(
                 TimestampText: timestampText!,
@@ -196,7 +201,8 @@ public static class PgServerLogJsonParser
                 DatabaseName: databaseName,
                 SqlState: sqlState,
                 RawText: line,
-                DetailComplete: true);
+                DetailComplete: true,
+                Location: location);
 
             return true;
         }
