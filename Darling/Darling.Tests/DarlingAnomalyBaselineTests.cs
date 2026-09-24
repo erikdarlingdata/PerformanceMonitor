@@ -518,13 +518,12 @@ public sealed class DarlingAnomalyBaselineTests
         var pg = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
         var liteCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs"));
 
-        // #3653 B: pg picks up L2b's four (batch, sessions, query, memory) before Lite's mirror (L4b) lands,
-        // so pg's total legitimately runs ahead of lite's for a while -- this census only pins the FOUR this
-        // lane added (cpu, wait, io-read, io-write), not a claim that the two files carry the same total.
+        // #3653 B: L4b lands Lite's mirror of L2b's four (batch, sessions, query, memory), so the census is
+        // exact again -- eight calls on each side, byte-identical per family.
         foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
         {
             var calls = System.Text.RegularExpressions.Regex.Matches(code, @"AnomalyGate\.EvaluateTiles\(");
-            Assert.True(calls.Count >= 4, $"{name}: expected at least 4 EvaluateTiles calls (cpu, wait, io-read, io-write), found {calls.Count}");
+            Assert.True(calls.Count == 8, $"{name}: expected 8 EvaluateTiles calls (cpu, wait, io-read, io-write, batch, sessions, query, memory), found {calls.Count}");
         }
 
         // CPU: byte-identical.
@@ -542,6 +541,22 @@ public sealed class DarlingAnomalyBaselineTests
         // I/O write: same tolerances.
         Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", pg);
         Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*writeTiles,\s*\w*[Mm]ap,\s*ioThreshold,\s*(modifiedZThreshold|ModifiedZThresholdFor\(MetricNames\.IoLatency,\s*ioThreshold\)),\s*WriteLatencyFloorMs,\s*IoLatencyFallbackMs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Batch requests: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*batchThreshold,\s*ModifiedZThresholdFor\(MetricNames\.BatchRequests,\s*batchThreshold\),\s*BatchRequestFloor,\s*BatchRequestFallback,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*batchThreshold,\s*ModifiedZThresholdFor\(MetricNames\.BatchRequests,\s*batchThreshold\),\s*BatchRequestFloor,\s*BatchRequestFallback,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Sessions: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*sessionThreshold,\s*ModifiedZThresholdFor\(MetricNames\.SessionCount,\s*sessionThreshold\),\s*SessionCountFloor,\s*SessionCountFallback,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*sessionThreshold,\s*ModifiedZThresholdFor\(MetricNames\.SessionCount,\s*sessionThreshold\),\s*SessionCountFloor,\s*SessionCountFallback,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Query duration: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*queryDurationThreshold,\s*ModifiedZThresholdFor\(MetricNames\.QueryDuration,\s*queryDurationThreshold\),\s*QueryDurationFloorUs,\s*QueryDurationFallbackUs,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*queryDurationThreshold,\s*ModifiedZThresholdFor\(MetricNames\.QueryDuration,\s*queryDurationThreshold\),\s*QueryDurationFloorUs,\s*QueryDurationFallbackUs,\s*SigmaDisplayCap,\s*window\)", liteCode);
+
+        // Memory: byte-identical.
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*memoryThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Memory,\s*memoryThreshold\),\s*MemoryPressureFloorPct,\s*MemoryPressureFallbackPct,\s*SigmaDisplayCap,\s*window\)", pg);
+        Assert.Matches(@"AnomalyGate\.EvaluateTiles\(\s*tiles,\s*map,\s*memoryThreshold,\s*ModifiedZThresholdFor\(MetricNames\.Memory,\s*memoryThreshold\),\s*MemoryPressureFloorPct,\s*MemoryPressureFallbackPct,\s*SigmaDisplayCap,\s*window\)", liteCode);
     }
 
     /// <summary>

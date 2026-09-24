@@ -1089,14 +1089,14 @@ ORDER BY local_hour";
             {
                 // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
                 // bucket — score today's single-window path against the start bucket, unchanged.
-                decision = AnomalyGate.EvaluateZScore(
-                    baseline, whole.Peak, whole.Mean,
-                    batchThreshold, ModifiedZThresholdFor(MetricNames.BatchRequests, batchThreshold), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap,
-                    window: window);
                 bucketUsed = baseline;
                 peakBatch = whole.Peak;
                 avgBatch = whole.Mean;
                 windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakBatch, avgBatch,
+                    batchThreshold, ModifiedZThresholdFor(MetricNames.BatchRequests, batchThreshold), BatchRequestFloor, BatchRequestFallback, SigmaDisplayCap,
+                    window: window);
             }
             else
             {
@@ -1222,14 +1222,14 @@ ORDER BY local_hour";
             {
                 // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
                 // bucket — score today's single-window path against the start bucket, unchanged.
-                decision = AnomalyGate.EvaluateZScore(
-                    baseline, whole.Peak, whole.Mean,
-                    sessionThreshold, ModifiedZThresholdFor(MetricNames.SessionCount, sessionThreshold), SessionCountFloor, SessionCountFallback, SigmaDisplayCap,
-                    window: window);
                 bucketUsed = baseline;
                 peakConnections = whole.Peak;
                 avgConnections = whole.Mean;
                 windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakConnections, avgConnections,
+                    sessionThreshold, ModifiedZThresholdFor(MetricNames.SessionCount, sessionThreshold), SessionCountFloor, SessionCountFallback, SigmaDisplayCap,
+                    window: window);
             }
             else
             {
@@ -1292,7 +1292,7 @@ ORDER BY local_hour";
             if (baseline.SampleCount == 0) return;
 
             var window = context.TimeRangeEnd - context.TimeRangeStart;
-            var queryThreshold = GetDeviationThreshold(MetricNames.QueryDuration);
+            var queryDurationThreshold = GetDeviationThreshold(MetricNames.QueryDuration);
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
@@ -1345,7 +1345,7 @@ ORDER BY local_hour";
 
             var tv = AnomalyGate.EvaluateTiles(
                 tiles, map,
-                queryThreshold, ModifiedZThresholdFor(MetricNames.QueryDuration, queryThreshold), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
+                queryDurationThreshold, ModifiedZThresholdFor(MetricNames.QueryDuration, queryDurationThreshold), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
                 window);
 
             AnomalyGate.ZDecision decision;
@@ -1358,14 +1358,14 @@ ORDER BY local_hour";
             {
                 // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
                 // bucket — score today's single-window path against the start bucket, unchanged.
-                decision = AnomalyGate.EvaluateZScore(
-                    baseline, whole.Peak, whole.Mean,
-                    queryThreshold, ModifiedZThresholdFor(MetricNames.QueryDuration, queryThreshold), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
-                    window: window);
                 bucketUsed = baseline;
                 peakElapsed = whole.Peak;
                 avgElapsed = whole.Mean;
                 windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakElapsed, avgElapsed,
+                    queryDurationThreshold, ModifiedZThresholdFor(MetricNames.QueryDuration, queryDurationThreshold), QueryDurationFloorUs, QueryDurationFallbackUs, SigmaDisplayCap,
+                    window: window);
             }
             else
             {
@@ -1486,14 +1486,14 @@ ORDER BY local_hour";
             {
                 // Never-blind fallback (design §1): no tile cleared MinTileSamples or had a non-empty
                 // bucket — score today's single-window path against the start bucket, unchanged.
-                decision = AnomalyGate.EvaluateZScore(
-                    baseline, whole.Peak, whole.Mean,
-                    memoryThreshold, ModifiedZThresholdFor(MetricNames.Memory, memoryThreshold), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap,
-                    window: window);
                 bucketUsed = baseline;
                 peakPressure = whole.Peak;
                 avgPressure = whole.Mean;
                 windowSamples = whole.Samples;
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, peakPressure, avgPressure,
+                    memoryThreshold, ModifiedZThresholdFor(MetricNames.Memory, memoryThreshold), MemoryPressureFloorPct, MemoryPressureFallbackPct, SigmaDisplayCap,
+                    window: window);
             }
             else
             {
