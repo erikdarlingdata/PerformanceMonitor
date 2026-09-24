@@ -169,6 +169,14 @@ ORDER BY " + WindowTiles.LocalHourSql;
             await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
             {
                 using var cmd = WindowCommand(CpuBurnTileWindowSql, connection, context);
+                /* #3653 A8 option B (lane L3c): the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds
+                   $4..$6 from the ANALYSIS window's clock — bound here, not in PgTargetAnomalyDetector.cs, per this
+                   lane's brief. WindowCommand only binds $1..$3, so this family silently never fired live (lesson 1)
+                   until this fix. */
+                cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
+
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
