@@ -105,6 +105,37 @@ public sealed class DarlingCoreToolProfileTests
         Assert.Empty(filtered);
     }
 
+    /// <summary>/core serves reads only. The closure comes from the next_tools tables, so a future row naming a
+    /// write tool would widen /core with no other signal. Every Darling write tool starts with one of these
+    /// verbs, and the first assertion keeps the check from passing vacuously.</summary>
+    [Fact]
+    public void ClosureHoldsNoWriteTool()
+    {
+        string[] writeVerbs = ["create_", "update_", "delete_", "set_", "add_", "remove_", "mute_"];
+        var writers = McpToolsListBudgetTests.Measure().Tools
+            .Select(t => t.Name)
+            .Where(name => writeVerbs.Any(verb => name.StartsWith(verb, StringComparison.Ordinal)))
+            .ToList();
+
+        Assert.NotEmpty(writers);
+        Assert.DoesNotContain(writers, DarlingCoreToolProfile.Closure.Contains);
+    }
+
+    /// <summary>The shared instructions count and describe every tool on /. A /core session leads with a note
+    /// that says what it serves, then keeps the full text unchanged.</summary>
+    [Fact]
+    public void CoreInstructions_LeadWithTheCoreNote_AndKeepTheFullText()
+    {
+        const string full = "## Tools\n\nThis server exposes every tool.";
+
+        var core = DarlingCoreToolProfile.CoreInstructions(full);
+
+        Assert.StartsWith("## This is the /core endpoint", core, StringComparison.Ordinal);
+        Assert.Contains($"It serves {DarlingCoreToolProfile.Closure.Count} of this server's tools", core, StringComparison.Ordinal);
+        Assert.EndsWith("\n\n" + full, core, StringComparison.Ordinal);
+        Assert.Equal(DarlingCoreToolProfile.CoreNote, DarlingCoreToolProfile.CoreInstructions(null));
+    }
+
     [Fact]
     public void ClosureIsPinned()
     {

@@ -558,14 +558,22 @@ public sealed class DarlingMcpHostService : BackgroundService
                    outside the closure gets the SDK's own "unknown tool" error on /core. Security posture is
                    inherited for free: this callback runs from inside the MCP transport, AFTER every _app.Use
                    middleware below (Host-header guard, bearer token, CIDR) — a /core request is refused there
-                   exactly as a / request would be, before this callback, or MapMcp, ever runs. */
+                   exactly as a / request would be, before this callback, or MapMcp, ever runs.
+                   The subset holds only in Stateless mode, where this callback runs on every request. A stateful
+                   session is looked up by its id alone, not by route, so one opened on / could call any tool on
+                   /core. HostHeaderGuardTests pins Stateless while /core is mapped. The instructions change too:
+                   the shared text counts and describes every tool on /, so /core leads with a note saying what
+                   it serves. */
                 .WithHttpTransport(options =>
                 {
                     options.Stateless = true;
                     options.ConfigureSessionOptions = (context, sessionOptions, _) =>
                     {
                         if (DarlingCoreToolProfile.IsCorePath(context.Request.Path))
+                        {
                             sessionOptions.ToolCollection = DarlingCoreToolProfile.FilterToolCollection(sessionOptions.ToolCollection);
+                            sessionOptions.ServerInstructions = DarlingCoreToolProfile.CoreInstructions(sessionOptions.ServerInstructions);
+                        }
 
                         return Task.CompletedTask;
                     };

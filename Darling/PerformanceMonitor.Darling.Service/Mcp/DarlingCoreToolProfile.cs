@@ -80,6 +80,21 @@ internal static class DarlingCoreToolProfile
     /// <c>MapMcp("/core")</c>.</summary>
     internal static bool IsCorePath(PathString path) => path.StartsWithSegments("/core");
 
+    /// <summary>The note a <c>/core</c> session's instructions lead with. The shared instructions count and
+    /// describe every tool on <c>/</c>, and <c>get_tool_guide</c> reads a catalog of every tool too, so without
+    /// it an agent on <c>/core</c> is told about tools that fail here as unknown.</summary>
+    internal static string CoreNote =>
+        $"## This is the /core endpoint\n\nIt serves {Closure.Count} of this server's tools: {string.Join(", ", EntryTools)}, " +
+        "plus every tool an analysis finding's next_tools can name. The tool count and the tool notes below " +
+        "describe the full set on /. A tool this endpoint does not serve fails as an unknown tool, even though " +
+        "get_tool_guide can still describe it. Connect to / for the rest, including every tool that writes to " +
+        "the monitoring store.";
+
+    /// <summary>The instructions a <c>/core</c> session serves: <see cref="CoreNote"/>, then the full set's
+    /// instructions unchanged.</summary>
+    internal static string CoreInstructions(string? fullInstructions) =>
+        string.IsNullOrEmpty(fullInstructions) ? CoreNote : CoreNote + "\n\n" + fullInstructions;
+
     /// <summary>
     /// Narrows a session's served tools to the closure — the ENTIRE mechanism behind <c>/core</c> being a real
     /// subset rather than a <c>tools/list</c> filter. The returned collection is a fresh

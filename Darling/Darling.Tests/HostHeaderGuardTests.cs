@@ -248,4 +248,50 @@ public sealed class HostHeaderGuardTests
             "the network-mode gate (bearer token + CIDR) must be registered before BOTH MapMcp calls, or a " +
             "request to /core could reach a tool handler the token/CIDR check would have refused on /.");
     }
+
+    /// <summary>
+    /// The order checks above only mean something if no middleware branches on the path. Endpoints run at the
+    /// end of the pipeline wherever <c>MapMcp</c> sits in the source, so a gate that skipped <c>/core</c> by path
+    /// would still pass them. This pins that nothing between <c>Build()</c> and the <c>/core</c> mapping reads the
+    /// path or maps a branch.
+    /// </summary>
+    [Fact]
+    public void McpHost_HasNoPathConditionalMiddlewareBeforeTheMcpMappings()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        var build = source.IndexOf("_app = builder.Build();", StringComparison.Ordinal);
+        var mapMcpCore = source.IndexOf("_app.MapMcp(\"/core\");", StringComparison.Ordinal);
+        Assert.True(build >= 0 && mapMcpCore > build, "expected Build() before MapMcp(\"/core\") — this test needs rewriting");
+
+        var pipeline = source[build..mapMcpCore];
+        foreach (var branch in new[] { "Request.Path", "UseWhen(", "MapWhen(", ".Map(", "UsePathBase(" })
+        {
+            Assert.False(
+                pipeline.Contains(branch, StringComparison.Ordinal),
+                $"'{branch}' appears between Build() and MapMcp(\"/core\"). A path-conditional gate can skip /core " +
+                "while every order check above still passes.");
+        }
+    }
+
+    /// <summary>
+    /// #3898 D7: /core is a real subset only in Stateless mode, where <c>ConfigureSessionOptions</c> runs on every
+    /// request. A stateful session is found by its id alone, not by route, so a session opened on / could call
+    /// any tool on /core. While /core is mapped, the transport stays stateless.
+    /// </summary>
+    [Fact]
+    public void McpHost_KeepsTheTransportStatelessWhileCoreIsMapped()
+    {
+        var source = ReadHostSource("DarlingMcpHostService.cs");
+        Assert.True(source.Contains("_app.MapMcp(\"/core\");", StringComparison.Ordinal), "/core is no longer mapped — this test needs rewriting");
+
+        var transport = source.IndexOf(".WithHttpTransport(options =>", StringComparison.Ordinal);
+        var stateless = source.IndexOf("options.Stateless = true;", StringComparison.Ordinal);
+        var configure = source.IndexOf("options.ConfigureSessionOptions =", StringComparison.Ordinal);
+
+        Assert.True(transport >= 0, "WithHttpTransport(options => ...) is gone — this test needs rewriting");
+        Assert.True(
+            stateless > transport && configure > stateless,
+            "options.Stateless = true must be set in the same WithHttpTransport block as ConfigureSessionOptions");
+        Assert.False(source.Contains("Stateless = false", StringComparison.Ordinal), "the MCP transport must stay stateless while /core is mapped");
+    }
 }

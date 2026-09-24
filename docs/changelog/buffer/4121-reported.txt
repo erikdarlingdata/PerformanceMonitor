@@ -1,5 +1,0 @@
-SECTION: Added
-ENTRY:
-- **Darling's MCP host now serves a /core endpoint alongside /** ([#4121]) - / keeps serving every Darling MCP tool, unchanged. /core serves a fixed 74-tool subset: the four tools a fresh conversation starts from (list_servers, get_fleet_overview, analyze_server, get_tool_guide) plus every tool the analysis engine's next_tools recommendations can point at. /core sits behind the exact same Host, bearer-token and CIDR checks as /, and a tool outside the subset fails the same way an unknown tool name would. Along the way, fixed eight next_tools entries that recommended get_blocked_process_reports, a tool Darling has never had (Darling's name is get_blocking), so those findings always pointed at a call that failed.
-REF:
-[#4121]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4121
