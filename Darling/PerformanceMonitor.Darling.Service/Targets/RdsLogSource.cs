@@ -88,7 +88,12 @@ public sealed class RdsLogSource
     /// <param name="Resume">Where the NEXT read should start, once <see cref="Text"/> has actually reached
     /// the store. Handed back rather than recorded on the way out — see
     /// <see cref="CommitResume"/>.</param>
-    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume);
+    /// <param name="StartsAtFileStart">#4053 review round 1: true when this read was requested from offset 0
+    /// of a NEW file — a rotation, where no marker existed for this file's key but one existed for the same
+    /// instance under a different (older) csvlog file name. The forward-only route's only source of a known
+    /// start: <see cref="Text"/> begins at the file's first byte, so parity is exact from it without any
+    /// forward walk having to prove it.</param>
+    public readonly record struct LogChunk(string Text, bool MoreAvailable, ResumeMarker Resume, bool StartsAtFileStart = false);
 
     /// <summary>
     /// A position this source can resume from, and the file it belongs to. Opaque to the caller: the
@@ -173,18 +178,33 @@ public sealed class RdsLogSource
         var newest = await NewestLogFileAsync(client, instanceId, kind, cancellationToken);
 
         var key = instanceId + "|" + newest;
-        _markers.TryGetValue(key, out var marker);
+        var hasMarkerForThisFile = _markers.TryGetValue(key, out var marker);
+
+        /* #4053 review round 1 (item 2): a csvlog rotation — no marker for THIS file's key, but one exists
+           for the same instance under a DIFFERENT csv file name — requests Marker "0" (from the start)
+           instead of the bounded tail. That is the forward-only route's only honest source of a known start:
+           a first-ever read of an instance still wants the bounded tail (an unbounded "0" read against a
+           rotated multi-GB log is the #2565 cost this type exists to avoid), but a rotation is not a first
+           read — the route was already caught up, and reading the new file's tail instead of its start would
+           silently skip whatever it wrote between the rotation and this cycle. */
+        var startsAtFileStart = false;
+        string? requestedMarker = marker;
+        var requestedLines = hasMarkerForThisFile ? 0 : FirstReadLines;
+
+        if (kind == LogFileKind.Csv && !hasMarkerForThisFile && HasAnyMarkerForInstance(instanceId, newest))
+        {
+            startsAtFileStart = true;
+            requestedMarker = "0";
+            requestedLines = 0;
+        }
 
         var response = await client.DownloadDBLogFilePortionAsync(
             new DownloadDBLogFilePortionRequest
             {
                 DBInstanceIdentifier = instanceId,
                 LogFileName = newest,
-                /* "0" means from the start, which on a rotated multi-GB log is not what anyone wants on a
-                   first read. NumberOfLines with no marker asks RDS for the TAIL, matching the file
-                   route's bounded-tail behaviour. */
-                Marker = marker,
-                NumberOfLines = marker is null ? FirstReadLines : 0,
+                Marker = requestedMarker,
+                NumberOfLines = requestedLines,
             },
             cancellationToken);
 
@@ -197,7 +217,33 @@ public sealed class RdsLogSource
         return new LogChunk(
             response.LogFileData ?? string.Empty,
             response.AdditionalDataPending == true,
-            new ResumeMarker(key, response.Marker));
+            new ResumeMarker(key, response.Marker),
+            startsAtFileStart);
+    }
+
+    /// <summary>Whether ANY marker exists for <paramref name="instanceId"/> under a csv file name other than
+    /// <paramref name="currentFile"/> — the rotation signal for #4053 review round 1's item 2: this instance's
+    /// csvlog route was already caught up on an older file, so the newest name changing means a rotation, not
+    /// a first-ever read.</summary>
+    private bool HasAnyMarkerForInstance(string instanceId, string currentFile)
+    {
+        var prefix = instanceId + "|";
+        foreach (var existingKey in _markers.Keys)
+        {
+            if (!existingKey.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var fileName = existingKey[prefix.Length..];
+            if (!string.Equals(fileName, currentFile, StringComparison.Ordinal)
+                && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /* An AWS SDK response collection is NULL when the service omitted it, not an empty list, so the two

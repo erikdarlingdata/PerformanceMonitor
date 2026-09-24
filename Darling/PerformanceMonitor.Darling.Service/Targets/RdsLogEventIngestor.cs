@@ -46,8 +46,14 @@ public sealed class RdsLogEventIngestor
     /// </summary>
     internal const int MaxCarryLength = 1_048_576;
 
-    /// <summary>A carried partial csvlog record and whether its start is a known record boundary (#4053 part c1).</summary>
-    internal readonly record struct CsvCarry(string Partial, bool StartKnown)
+    /// <summary>A carried partial csvlog record and what's known about resuming it (#4053 part c1, review round 1).
+    /// <see cref="StartKnown"/> is true ONLY when the partial starts on a record boundary this route actually
+    /// walked forward from — never inferred from a file's end, which the multi-write race can lie about.
+    /// <see cref="Skipping"/> is the parity-bound state (#4053 review round 1): an oversized record was
+    /// dropped, but instead of losing <see cref="StartKnown"/> outright the route remembers whether the drop
+    /// left an open quote (<see cref="SkipInQuotes"/>) and keeps scanning forward for the first newline
+    /// outside quotes — the record's own true end — before resuming with a known start again.</summary>
+    internal readonly record struct CsvCarry(string Partial, bool StartKnown, bool Skipping = false, bool SkipInQuotes = false, string? FileName = null)
     {
         public static CsvCarry Empty => new(string.Empty, false);
     }
@@ -128,16 +134,30 @@ public sealed class RdsLogEventIngestor
 
         string? carryKey = null;
         var carry = CsvCarry.Empty;
+        var currentFileName = ResumeFileName(chunk.Value.Resume.Key);
 
         if (pgLogUsesCsvlog)
         {
-            /* Keyed exactly like the resume marker (instance + file name), so a rotation to a new file starts
-               the carry fresh instead of gluing a new file's bytes onto an old file's tail. */
-            carryKey = chunk.Value.Resume.Key;
+            /* #4053 review round 1 (item 3): keyed by INSTANCE alone, with the file name stored inside the
+               carry rather than folded into the key. A rotation to a new file name resets the carry — the old
+               file's carry is dead, not merely stale — which also fixes the per-file entry leak the old
+               (instance + file) key had: a rotation used to leave the old key's entry in this dictionary
+               forever, since nothing ever removed it once its file stopped being the newest. */
+            carryKey = InstanceKey(chunk.Value.Resume.Key);
 
-            if (!string.IsNullOrEmpty(carryKey))
+            if (!string.IsNullOrEmpty(carryKey)
+                && _csvCarry.TryGetValue(carryKey, out var held)
+                && string.Equals(held.FileName, currentFileName, StringComparison.Ordinal))
             {
-                carry = _csvCarry.TryGetValue(carryKey, out var held) ? held : CsvCarry.Empty;
+                carry = held;
+            }
+
+            if (chunk.Value.StartsAtFileStart)
+            {
+                /* #4053 review round 1 (item 2's tail): a rotation's first read of the NEW file starts at
+                   offset 0, so the carry gets a known start with nothing carried — the only source of a
+                   known start this forward-only route has besides a forward walk actually proving one. */
+                carry = new CsvCarry(string.Empty, true, FileName: currentFileName);
             }
         }
 
@@ -151,19 +171,51 @@ public sealed class RdsLogEventIngestor
            between here and the next read loses at most the one record this carry holds. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        if (carryKey is not null)
+        /* #4053 review round 1 (item 3): the carry advances ONLY when the marker actually did —
+           CommitResume is a no-op on an empty/null marker (a replay), and gluing this portion's carry onto
+           itself in that case would apply the same bytes' tail twice. */
+        var resumeAdvanced = !string.IsNullOrEmpty(chunk.Value.Resume.Marker);
+
+        if (carryKey is not null && resumeAdvanced)
         {
-            if (nextCarry.Partial.Length == 0 && !nextCarry.StartKnown)
+            var nextCarryWithFile = nextCarry with { FileName = currentFileName };
+
+            if (nextCarryWithFile.Partial.Length == 0 && !nextCarryWithFile.StartKnown && !nextCarryWithFile.Skipping)
             {
                 _csvCarry.Remove(carryKey);
             }
             else
             {
-                _csvCarry[carryKey] = nextCarry;
+                _csvCarry[carryKey] = nextCarryWithFile;
             }
         }
 
         return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
+    }
+
+    /// <summary>The instance half of a <c>ResumeMarker.Key</c> ("instance|file"), or null when the key itself
+    /// is null/empty — #4053 review round 1's carry key.</summary>
+    private static string? InstanceKey(string? resumeKey)
+    {
+        if (string.IsNullOrEmpty(resumeKey))
+        {
+            return null;
+        }
+
+        var separator = resumeKey.IndexOf('|');
+        return separator < 0 ? resumeKey : resumeKey[..separator];
+    }
+
+    /// <summary>The file half of a <c>ResumeMarker.Key</c>, or null when the key itself is null/empty.</summary>
+    private static string? ResumeFileName(string? resumeKey)
+    {
+        if (string.IsNullOrEmpty(resumeKey))
+        {
+            return null;
+        }
+
+        var separator = resumeKey.IndexOf('|');
+        return separator < 0 ? null : resumeKey[(separator + 1)..];
     }
 
     private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, CsvCarry NextCarry)> StoreAsync(
@@ -223,61 +275,155 @@ public sealed class RdsLogEventIngestor
     }
 
     /// <summary>
-    /// One csvlog portion through the parser, with the carry (#4053 part c1). A pure step, so the carry rules
-    /// are testable without a store.
-    /// <para>DownloadDBLogFilePortion cuts a portion on a PHYSICAL line, which can land just after a newline
-    /// inside a multi-line quoted field. So a portion's trailing newline is never trusted as a record boundary;
-    /// the parser is told only what is known:</para>
-    /// <list type="bullet">
-    /// <item>the start is a boundary when the carry says so (StartKnown): the previous portion ended at the
-    /// file's end, or a forward walk found the boundary exactly;</item>
-    /// <item>the end is a boundary when no more data is pending: the file's end as of this read. The syslogger
-    /// writes whole records, with the same Low race the self-hosted route names (a record bigger than stdio's
-    /// buffer reaches the file in several writes).</item>
-    /// </list>
-    /// <para>After a portion that ends at the file's end, nothing is carried and the next portion's start is
-    /// known. After a pending portion, the text past the last boundary is carried. Its start is known only
-    /// when a forward walk found that boundary: under no stated edge the boundary is a scored guess (see
-    /// <c>consumedLength</c> on <see cref="PgServerLogCsvParser.Parse(string, PgServerLogCsvParser.CsvBodyEdges, out int, out int)"/>).
-    /// A pending portion with no boundary at all carries whole, and nothing in it is counted as discarded yet.</para>
-    /// <para>Resync: a wrong known start (the race above) inverts the parity of every later forward walk. With
-    /// correct parity a forward walk discards almost nothing, because PostgreSQL writes every record whole,
-    /// and text inside quotes can't make a boundary. So when a known-start parse keeps fewer records than it
-    /// discards, over at least 3, its entries are thrown away (under inverted parity the only lines that parse
-    /// are look-alikes planted inside quoted fields), and the body is re-parsed with the start unknown. When
-    /// the inverted walk finds no boundary at all instead, the carry grows until the bound below drops it.
-    /// That can cost up to <see cref="MaxCarryLength"/> of log once after a race; it can never emit a forged
-    /// row.</para>
-    /// <para>Bound: a carry longer than <see cref="MaxCarryLength"/> is dropped and counted as one discard, and
-    /// the next start is unknown. One oversized record can't grow memory across portions.</para>
+    /// One csvlog portion through the parser, with the carry (#4053 part c1; forward-only after review round
+    /// 1). A pure step, so the carry rules are testable without a store.
+    ///
+    /// <para><b>The only known start is offset 0 of a file, and a file's end is never trusted.</b> The old
+    /// design let a portion that reached the file's current end hand the NEXT portion a known start — but
+    /// the syslogger can write one record across several writes, so a read can land between two of them at a
+    /// newline that is still inside an open quoted field. Trusting that as a boundary inverts the parity of
+    /// every later forward walk, and the old resync check (kept &lt; discarded, then re-parse) was gameable: a
+    /// client that plants enough look-alike lines inside a quoted field can make the inverted walk keep more
+    /// than it discards. So this step never states <see cref="PgServerLogCsvParser.CsvBodyEdges.EndsOnRecordBoundary"/>
+    /// and there is no resync trigger to game.</para>
+    ///
+    /// <para><b>Forward mode</b> (<see cref="CsvCarry.StartKnown"/> or <see cref="CsvCarry.Skipping"/>): every
+    /// portion of the file is parsed with <see cref="PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary"/>
+    /// ONLY, whether or not more data is pending. The text after the last true boundary found is ALWAYS
+    /// carried — a half-written last record simply waits for the portion that completes it — and the next
+    /// carry's start is known again, because <c>consumedLength</c> under a forward walk is a true boundary by
+    /// construction.</para>
+    ///
+    /// <para><b>Unknown-start mode</b> (first contact, via the tail read): parsed with
+    /// <see cref="PgServerLogCsvParser.CsvBodyEdges.None"/>, or <c>EndsOnRecordBoundary</c> when no more data
+    /// is pending AND the body ends in <c>'\n'</c> — never inferred from a body that merely stops pending with
+    /// no trailing newline, which is not the same fact. The next carry's start is ALWAYS unknown in this mode;
+    /// it can never become known until the next file (see <see cref="RdsLogSource.LogChunk.StartsAtFileStart"/>).</para>
+    ///
+    /// <para><b>The forward-mode bound</b> (#4053 review round 1): a carry over <see cref="MaxCarryLength"/>
+    /// keeps the PARITY instead of dropping <see cref="CsvCarry.StartKnown"/> outright — the text is dropped,
+    /// but <see cref="CsvCarry.Skipping"/> and <see cref="CsvCarry.SkipInQuotes"/> (whether the dropped text
+    /// left an open quote) are kept. The NEXT portion scans forward from that quote state for the first
+    /// newline outside quotes — the true end of the record being skipped — drops up to it, counts exactly one
+    /// discard, and resumes with a known start from there; a portion with no such newline in it keeps
+    /// skipping. The unknown-start mode's own bound is unchanged: drop, count one, carry empty.</para>
     /// </summary>
     internal static CsvPortion ParseCsvPortion(CsvCarry carry, string? text, bool additionalDataPending)
     {
-        var body = (carry.Partial ?? string.Empty) + (text ?? string.Empty);
-        if (body.Length == 0)
+        if (carry.Skipping)
         {
-            return new CsvPortion(new List<PgLogEntry>(), 0, new CsvCarry(string.Empty, carry.StartKnown));
+            return StepSkipping(carry, text ?? string.Empty);
         }
 
-        var endEdge = additionalDataPending
-            ? PgServerLogCsvParser.CsvBodyEdges.None
-            : PgServerLogCsvParser.CsvBodyEdges.EndsOnRecordBoundary;
-        var edges = (carry.StartKnown ? PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary : PgServerLogCsvParser.CsvBodyEdges.None)
-            | endEdge;
+        if (carry.StartKnown)
+        {
+            /* additionalDataPending is deliberately never read here: EndsOnRecordBoundary is never stated in
+               forward mode, whether or not more data is pending, which is exactly what makes this immune to
+               the multi-write race the round-1 review found. */
+            return StepForward(carry.Partial, text);
+        }
+
+        return StepUnknownStart(carry.Partial, text, additionalDataPending);
+    }
+
+    /// <summary>Forward mode: parity is exact from offset 0, so only <c>StartsOnRecordBoundary</c> is ever
+    /// stated — never <c>EndsOnRecordBoundary</c>.</summary>
+    private static CsvPortion StepForward(string? carriedPartial, string? text)
+    {
+        var body = (carriedPartial ?? string.Empty) + (text ?? string.Empty);
+        if (body.Length == 0)
+        {
+            return new CsvPortion(new List<PgLogEntry>(), 0, new CsvCarry(string.Empty, true));
+        }
+
+        var entries = PgServerLogCsvParser.Parse(
+            body, PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary, out var discarded, out var consumedLength);
+
+        var partial = body[consumedLength..];
+
+        if (partial.Length > MaxCarryLength)
+        {
+            var skipInQuotes = IsQuoteCountOdd(partial);
+            return new CsvPortion(entries, discarded, new CsvCarry(string.Empty, false, Skipping: true, SkipInQuotes: skipInQuotes));
+        }
+
+        return new CsvPortion(entries, discarded, new CsvCarry(partial, true));
+    }
+
+    /// <summary>Skipping mode: scans forward from the carried quote state for the record's true end (the
+    /// first newline outside quotes), one portion of new text at a time. Nothing before that newline was
+    /// ever a candidate boundary, so nothing here is scored or trusted except the newline itself.</summary>
+    private static CsvPortion StepSkipping(CsvCarry carry, string text)
+    {
+        var inQuotes = carry.SkipInQuotes;
+        var boundary = -1;
+
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+            }
+            else if (c == '\n' && !inQuotes)
+            {
+                boundary = i;
+                break;
+            }
+        }
+
+        if (boundary < 0)
+        {
+            /* No true end found yet in this portion either — keep skipping, carrying only the quote state,
+               never the text itself (the whole point of the bound: an oversized record must not regrow the
+               carry it was just dropped for). */
+            return new CsvPortion(new List<PgLogEntry>(), 0, new CsvCarry(string.Empty, false, Skipping: true, SkipInQuotes: inQuotes));
+        }
+
+        /* The record's true end was found: everything up to and including it is the rest of the skipped
+           record, counted as exactly one discard (matching the single discard already counted when the
+           record was first dropped over the bound). Text after it resumes forward parsing with a known
+           start. */
+        var rest = text[(boundary + 1)..];
+        var resumed = StepForward(null, rest);
+        return new CsvPortion(resumed.Entries, resumed.RecordsDiscarded + 1, resumed.Next);
+    }
+
+    /// <summary>Unknown-start mode (first contact via the tail read, or right after a resync): scoring
+    /// decides the boundaries, and the next carry's start is NEVER known — it stays this way until the next
+    /// file gives a true offset-0 start (#4053 review round 1). <c>EndsOnRecordBoundary</c> is stated only
+    /// when the body actually ends in <c>'\n'</c>, never merely because no more data is pending.</summary>
+    private static CsvPortion StepUnknownStart(string? carriedPartial, string? text, bool additionalDataPending)
+    {
+        var body = (carriedPartial ?? string.Empty) + (text ?? string.Empty);
+        if (body.Length == 0)
+        {
+            return new CsvPortion(new List<PgLogEntry>(), 0, CsvCarry.Empty);
+        }
+
+        var endsInNewline = body.Length > 0 && body[^1] == '\n';
+        var edges = (!additionalDataPending && endsInNewline)
+            ? PgServerLogCsvParser.CsvBodyEdges.EndsOnRecordBoundary
+            : PgServerLogCsvParser.CsvBodyEdges.None;
 
         var entries = PgServerLogCsvParser.Parse(body, edges, out var discarded, out var consumedLength);
 
-        if (edges.HasFlag(PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary)
-            && entries.Count < discarded
-            && entries.Count + discarded >= 3)
-        {
-            edges = endEdge;
-            entries = PgServerLogCsvParser.Parse(body, edges, out discarded, out consumedLength);
-        }
-
         if (!additionalDataPending)
         {
-            return new CsvPortion(entries, discarded, new CsvCarry(string.Empty, true));
+            /* The file's read ended here, but the start is still unknown — the carry (if any) is whatever
+               follows the winning hypothesis's last mark, still guessed, still not a known start. */
+            if (consumedLength == 0)
+            {
+                discarded = 0;
+            }
+
+            var tail = body[consumedLength..];
+            if (tail.Length > MaxCarryLength)
+            {
+                return new CsvPortion(entries, discarded + 1, CsvCarry.Empty);
+            }
+
+            return new CsvPortion(entries, discarded, new CsvCarry(tail, false));
         }
 
         if (consumedLength == 0)
@@ -291,8 +437,23 @@ public sealed class RdsLogEventIngestor
             return new CsvPortion(entries, discarded + 1, CsvCarry.Empty);
         }
 
-        var startKnown = edges.HasFlag(PgServerLogCsvParser.CsvBodyEdges.StartsOnRecordBoundary);
-        return new CsvPortion(entries, discarded, new CsvCarry(partial, startKnown));
+        return new CsvPortion(entries, discarded, new CsvCarry(partial, false));
+    }
+
+    /// <summary>Whether <paramref name="text"/> leaves an open quote by its end — used only to seed
+    /// <see cref="CsvCarry.SkipInQuotes"/> when a forward-mode carry is dropped over the bound.</summary>
+    private static bool IsQuoteCountOdd(string text)
+    {
+        var count = 0;
+        foreach (var c in text)
+        {
+            if (c == '"')
+            {
+                count++;
+            }
+        }
+
+        return (count & 1) == 1;
     }
 
     /// <summary>
