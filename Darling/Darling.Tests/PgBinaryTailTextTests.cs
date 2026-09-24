@@ -215,4 +215,44 @@ public sealed class PgBinaryTailTextTests
         Assert.Equal(2, lines.Length);
         Assert.Equal("x", lines[1]);
     }
+
+    /// <summary>
+    /// Review round 1, M3: the same planted-lead-byte hazard applies to a quote byte, not only a newline
+    /// — the csvlog route's quote-parity walk depends on every <c>"</c> surviving decoding. A planted
+    /// EUC/GBK lead byte right before a closing quote must not eat it.
+    /// </summary>
+    [Theory]
+    [InlineData("EUC_JP")]
+    [InlineData("EUC_CN")]
+    [InlineData("EUC_KR")]
+    public void DecodeWhole_PlantedDbcsLeadByteBeforeQuote_DoesNotSwallowTheQuote(string serverEncoding)
+    {
+        Assert.True(PgServerEncoding.TryGet(serverEncoding, out var encoding));
+        var bytes = new byte[] { 0xA4, (byte)'"', (byte)'x' };
+
+        var decoded = PgBinaryTailText.DecodeWhole(bytes, encoding);
+
+        Assert.Contains('"', decoded);
+        var parts = decoded.Split('"');
+        Assert.Equal(2, parts.Length);
+        Assert.Equal("x", parts[1]);
+    }
+
+    /// <summary>Same case through the escape()-reversal route: the lead byte arrives as an octal escape
+    /// and the quote arrives literal (escape() never octal-escapes 0x22).</summary>
+    [Theory]
+    [InlineData("EUC_JP")]
+    [InlineData("EUC_CN")]
+    [InlineData("EUC_KR")]
+    public void UnescapeAndDecode_PlantedDbcsLeadByteBeforeQuote_DoesNotSwallowTheQuote(string serverEncoding)
+    {
+        Assert.True(PgServerEncoding.TryGet(serverEncoding, out var encoding));
+
+        var decoded = PgBinaryTailText.UnescapeAndDecode("\\244\"x", encoding);
+
+        Assert.Contains('"', decoded);
+        var parts = decoded.Split('"');
+        Assert.Equal(2, parts.Length);
+        Assert.Equal("x", parts[1]);
+    }
 }
