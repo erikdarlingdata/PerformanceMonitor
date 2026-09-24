@@ -417,14 +417,11 @@ public sealed class SqlServerStoreTileBehaviourTests
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
             Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
             Assert.Equal(2.0, fact.Metadata["tiles_fired"]);
-            // RED (T4172-2): PgAnomalyDetector.DetectWaitAnomalies never stamps "fire_threshold" on ANY arm —
-            // every other tiled family (CPU, I/O) does, from decision.ThresholdUsed, but the wait detector's
-            // metadata dictionary literal (around the "current_ms_per_sec"/"avg_ms_per_sec" keys) has no such
-            // entry, so this key is always missing from an ANOMALY_WAIT_PROFILE fact. That is a real gap, not a
-            // fixture problem: the fact still fires correctly with the right worst tile and counts (asserted
-            // above), and this is left as a documented product bug rather than an assertion this lane bends to
-            // fit. See the PR body's "Behaviour tests" section.
-            Assert.False(fact.Metadata.ContainsKey("fire_threshold"), "RED: ANOMALY_WAIT_PROFILE never stamps fire_threshold (product bug, not this test's fixture)");
+            // T4172-3: the missing fire_threshold key (documented as a RED product gap by T4172-2) is now
+            // fixed by the coordinator's ruling. On this scenario the robust-z arm's tiled decision fires,
+            // so the stamp is the heavy-tail modified-z cutoff, exactly like every sibling tiled family.
+            Assert.True(fact.Metadata.ContainsKey("fire_threshold"), "ANOMALY_WAIT_PROFILE should now stamp fire_threshold");
+            Assert.Equal(AnomalyThresholds.HeavyTailModifiedZThreshold, fact.Metadata["fire_threshold"], 0.001);
 
             bodySucceeded = true;
         }

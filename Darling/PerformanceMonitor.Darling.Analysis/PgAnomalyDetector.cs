@@ -701,6 +701,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             double scoredAvgRate = avgRate;
             var scoredBaseline = baseline;
             Dictionary<string, double>? tileMetadata = null;
+            double fireThreshold;
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
                 isNew = false;
@@ -732,6 +733,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                         window: window);
                 }
                 if (!decision.Fire) return;
+                fireThreshold = decision.ThresholdUsed;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
@@ -739,12 +741,14 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ratio = peakRate / baseline.Mean;
                 var meanRatio = avgRate / baseline.Mean;
                 if (ratio < DefaultRatioThreshold || meanRatio < DefaultRatioThreshold) return;
+                fireThreshold = DefaultRatioThreshold;
             }
             else
             {
                 isNew = true;
                 ratio = peakRate >= WaitProfileFallbackMsPerSec ? NoBaselineRatio : 0;
                 if (ratio < DefaultRatioThreshold) return;
+                fireThreshold = 0;
             }
 
             var modifiedZ = BaselineMath.ModifiedZScore(scoredBaseline, scoredPeakRate);
@@ -768,6 +772,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 ["modified_z"] = modifiedZ,
                 ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0,
+                ["fire_threshold"] = fireThreshold,
                 /* #3871 rider: the DefaultRatioThreshold this detector gates on is measured now (its own
                    distribution, 3,655 windows / 14 d / p99 3.14), and the stamp is how a reader tells a
                    measured bar from an inherited one without opening the source. The frozen Dashboard
