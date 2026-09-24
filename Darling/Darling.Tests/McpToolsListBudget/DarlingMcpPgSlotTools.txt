@@ -1,5 +1,5 @@
 # DarlingMcpPgSlotTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_pg_replication_slots 803
+tool get_pg_replication_slots 599
 param get_pg_replication_slots.as_of 167
 param get_pg_replication_slots.hours_back 76
 param get_pg_replication_slots.server_name 28
