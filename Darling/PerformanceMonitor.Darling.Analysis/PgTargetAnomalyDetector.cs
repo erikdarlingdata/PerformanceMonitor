@@ -455,7 +455,7 @@ LIMIT 6";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.PgTps, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            var tiles = await ReadTilesAsync(TpsTileWindowSql, context, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
+            var tiles = await ReadTilesAsync(TpsTileWindowSql, context, map, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
             var whole = WindowTiles.WholeWindow(tiles);
             if (whole.Samples == 0) return;
 
@@ -537,7 +537,7 @@ LIMIT 6";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.PgSessionCount, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            var tiles = await ReadTilesAsync(SessionTileWindowSql, context, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
+            var tiles = await ReadTilesAsync(SessionTileWindowSql, context, map, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3, peakTimeOrdinal: 4);
             var whole = WindowTiles.WholeWindow(tiles);
             if (whole.Samples == 0) return;
 
@@ -616,7 +616,7 @@ LIMIT 6";
             /* CpuTileWindowSql's own SELECT list: local_hour(0), peak_capacity_pct(1), avg_capacity_pct(2),
                sample_count(3), peak_time(4), peak_cpu_percent(5) — the raw cpu_percent window scalar rides
                beside the tile read, per tile (design's "extra window scalars" rule: report the worst tile's). */
-            var (tiles, peakCpuPercentByTile) = await ReadCpuTilesAsync(context);
+            var (tiles, peakCpuPercentByTile) = await ReadCpuTilesAsync(context, map);
             var whole = WindowTiles.WholeWindow(tiles);
             if (whole.Samples == 0) return;
 
@@ -837,7 +837,12 @@ LIMIT 6";
                collection count(5), peak_time(6) — WindowTiles.ReadTile reads 0/1/2/4/6; the extra collection-count
                and total scalars ride beside the tile, keyed by LocalHour, exactly as the CPU detector's raw
                cpu_percent does. */
-            var (tiles, totalWaitMsByTile, collectionCountByTile) = await ReadWaitRateTilesAsync(context);
+            /* The tile read's $4..$6 need the ANALYSIS window's clock on every arm, so the map is fetched before the
+               read, not only on arm 1. It is the same cached compute GetBaselineAsync just used (same metric, same
+               TimeRangeStart), so this costs no second baseline read. */
+            var tileMap = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+            var (tiles, totalWaitMsByTile, collectionCountByTile) = await ReadWaitRateTilesAsync(context, tileMap);
             var whole = WindowTiles.WholeWindow(tiles);
             var totalCollectionCount = collectionCountByTile.Values.Sum();
             /* No rows: this flavour does not write pg_wait_stats (stock) — sit out. Rows but no rated collection:
@@ -857,8 +862,7 @@ LIMIT 6";
                    shared AnomalyGate.EvaluateTiles scores each tile against its own bucket with the Šidák-raised
                    mean clause; null (no tile scored at all) falls back to today's whole-window EvaluateZScore
                    pair against the start bucket, unchanged. */
-                map = await _baselineProvider.GetBucketMapAsync(
-                    context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+                map = tileMap;
 
                 tv = AnomalyGate.EvaluateTiles(
                     tiles, map,
@@ -1019,6 +1023,19 @@ LIMIT 6";
     }
 
     /// <summary>
+    /// #3653 A8 option B: binds <c>$4..$6</c> of <see cref="WindowTiles.LocalHourSql"/> from the ANALYSIS window's clock
+    /// (<see cref="BaselineBucketMap.WindowClock"/>), after <see cref="WindowCommand"/>'s <c>$1..$3</c>. It has the same
+    /// form as the baseline provider's clock bind. Without it, every tiled read fails with "no value for $4", and the
+    /// detector's catch turns that into silence.
+    /// </summary>
+    private static void BindTileClock(NpgsqlCommand cmd, BaselineBucketMap map)
+    {
+        cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+        cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+        cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
+    }
+
+    /// <summary>
     /// #3653 A8 option B (lane L3a): runs one tiled window SQL and reads every row through
     /// <see cref="WindowTiles.ReadTile"/> — local hour at ordinal 0 (every tiled const in this file selects it
     /// first, per the recipe), then <paramref name="peakOrdinal"/>/<paramref name="meanOrdinal"/>/
@@ -1026,11 +1043,12 @@ LIMIT 6";
     /// them. <paramref name="peakTimeOrdinal"/> defaults to -1 (no peak time) for a family that has none.
     /// </summary>
     private async Task<List<WindowTile>> ReadTilesAsync(
-        string sql, AnalysisContext context, int peakOrdinal, int meanOrdinal, int samplesOrdinal, int peakTimeOrdinal = -1)
+        string sql, AnalysisContext context, BaselineBucketMap map, int peakOrdinal, int meanOrdinal, int samplesOrdinal, int peakTimeOrdinal = -1)
     {
         var tiles = new List<WindowTile>();
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
         using var cmd = WindowCommand(sql, connection, context);
+        BindTileClock(cmd, map);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -1046,12 +1064,13 @@ LIMIT 6";
     /// slot for, so it is read alongside the tile and keyed by the tile's own <c>LocalHour</c> for the caller to
     /// look up by whichever tile (worst-tile or whole-window fallback) ends up reporting.
     /// </summary>
-    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> PeakCpuPercentByTile)> ReadCpuTilesAsync(AnalysisContext context)
+    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> PeakCpuPercentByTile)> ReadCpuTilesAsync(AnalysisContext context, BaselineBucketMap map)
     {
         var tiles = new List<WindowTile>();
         var peakCpuPercentByTile = new Dictionary<DateTime, double>();
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
         using var cmd = WindowCommand(CpuTileWindowSql, connection, context);
+        BindTileClock(cmd, map);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -1069,13 +1088,14 @@ LIMIT 6";
     /// per tile (<c>total_wait_ms</c> ordinal 3, <c>collection_count</c> ordinal 5) that <see cref="WindowTiles.ReadTile"/>'s
     /// fixed shape has no slot for, keyed by the tile's own <c>LocalHour</c> for the caller.
     /// </summary>
-    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> TotalWaitMsByTile, Dictionary<DateTime, long> CollectionCountByTile)> ReadWaitRateTilesAsync(AnalysisContext context)
+    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> TotalWaitMsByTile, Dictionary<DateTime, long> CollectionCountByTile)> ReadWaitRateTilesAsync(AnalysisContext context, BaselineBucketMap map)
     {
         var tiles = new List<WindowTile>();
         var totalWaitMsByTile = new Dictionary<DateTime, double>();
         var collectionCountByTile = new Dictionary<DateTime, long>();
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
         using var cmd = WindowCommand(WaitRateTileWindowSql, connection, context);
+        BindTileClock(cmd, map);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {

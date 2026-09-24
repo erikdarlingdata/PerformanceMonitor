@@ -1499,9 +1499,19 @@ CROSS JOIN (VALUES (3, 300001::bigint, 'Lock', 'relation'), (0, 1::bigint, 'CPU'
             var shifted = await detector.DetectAnomaliesAsync(WaitGateContext(ShiftedWaitServerId, ShiftedWaitServerName, windowStart, end));
             var fact = Assert.Single(shifted, a => a.Key == PgTargetFactKeys.AnomalyWaitProfile);
             Assert.Equal(3_200.0, fact.Metadata["current_ms_per_sec"], precision: 3);
-            Assert.Equal((240 * 1_500.0 + 3_200.0) / 241, fact.Metadata["mean_ms_per_sec"], precision: 3);
+            /* #3653 A8 option B: the fact reports the WORST TILE, the target-local hour holding the 3,200 ms/s collection,
+               not the whole window. So the mean is that hour's (its n − 1 collections at 1,500 plus the spike), and
+               window_samples is that hour's count. The whole window's 241 collections ride in window_samples_total, and
+               its peak in window_peak. */
+            var tileSamples = fact.Metadata["window_samples"];
+            Assert.InRange(tileSamples, 3, 61);
+            Assert.Equal(((tileSamples - 1) * 1_500.0 + 3_200.0) / tileSamples, fact.Metadata["mean_ms_per_sec"], precision: 3);
+            Assert.Equal(241, fact.Metadata["window_samples_total"]);
+            Assert.Equal(3_200.0, fact.Metadata["window_peak"], precision: 3);
+            Assert.True(fact.Metadata["tiles_scored"] >= 4, "a 4 h window scores at least four hour tiles");
+            /* The shift to 1,500 ms/s runs the whole window, so every scored hour fires; the spike only picks the worst. */
+            Assert.Equal(fact.Metadata["tiles_scored"], fact.Metadata["tiles_fired"]);
             Assert.Equal(0, fact.Metadata["is_new"]);
-            Assert.Equal(241, fact.Metadata["window_samples"]);
             Assert.True(fact.Metadata["modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold);
             Assert.True(fact.Metadata["mean_modified_z"] >= AnomalyThresholds.HeavyTailModifiedZThreshold, "a fired fact's mean cleared the same cutoff");
             Assert.True(fact.Metadata["mean_modified_z"] < fact.Metadata["modified_z"]);
