@@ -143,9 +143,12 @@ public sealed class HostHeaderGuardTests
 
         var source = File.ReadAllText(path);
         /* Guard the guard: if the host were renamed or restructured past recognition, the assertions below
-           could pass vacuously on an empty/mismatched parse. Pin the anchors they all key off. */
+           could pass vacuously on an empty/mismatched parse. Pin the anchors they all key off. "app.Use("
+           (not "_app.Use(") matches both hosts: the MCP host still calls the field directly (_app.Use), while
+           the web host's gates were extracted (#4128) into ConfigurePipeline(WebApplication app, ...), which
+           calls app.Use — "app.Use(" is a substring of "_app.Use(" too, so this anchor covers both shapes. */
         Assert.Contains("_app = builder.Build();", source, StringComparison.Ordinal);
-        Assert.Contains("_app.Use(", source, StringComparison.Ordinal);
+        Assert.Contains("app.Use(", source, StringComparison.Ordinal);
         return source;
     }
 
@@ -153,13 +156,13 @@ public sealed class HostHeaderGuardTests
     private static string FirstMiddlewareAfterBuild(string source)
     {
         var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
-        var firstUse = afterBuild.IndexOf("_app.Use(", StringComparison.Ordinal);
+        var firstUse = afterBuild.IndexOf("app.Use(", StringComparison.Ordinal);
         Assert.True(firstUse >= 0, "no middleware is registered after builder.Build()");
 
         /* The first Use's lambda body — long enough to cover the guard's if/return, short enough that a
            SECOND Use's body cannot bleed in and satisfy the assertion by accident. */
         var body = afterBuild[firstUse..];
-        var nextUse = body.IndexOf("_app.Use(", 1, StringComparison.Ordinal);
+        var nextUse = body.IndexOf("app.Use(", 1, StringComparison.Ordinal);
         return nextUse > 0 ? body[..nextUse] : body;
     }
 
@@ -188,10 +191,16 @@ public sealed class HostHeaderGuardTests
         var afterBuild = source[(source.IndexOf("_app = builder.Build();", StringComparison.Ordinal) + 1)..];
 
         var guard = afterBuild.IndexOf("IsAllowedHost(context.Request.Host.Host", StringComparison.Ordinal);
-        var networkOnly = afterBuild.IndexOf("if (networkMode)", StringComparison.Ordinal);
-
         Assert.True(guard >= 0, "the Host-header guard middleware is missing");
-        Assert.True(networkOnly >= 0, "expected a network-mode-only middleware block to exist after Build()");
+
+        /* #4128: the web host's gates were extracted into ConfigurePipeline, a method the file defines
+           AFTER TryStartServerAsync's own unrelated "if (networkMode)" (its post-start logging branch) —
+           so the FIRST "if (networkMode)" after Build() is no longer necessarily the one that gates the
+           auth middleware. Searching from the guard's own position finds the auth-gating conditional that
+           actually follows it in the same method, which is the invariant this test claims either way. */
+        var networkOnly = afterBuild.IndexOf("if (networkMode)", guard, StringComparison.Ordinal);
+
+        Assert.True(networkOnly >= 0, "expected a network-mode-only middleware block to exist after the guard");
         Assert.True(
             guard < networkOnly,
             "the Host-header guard must be registered BEFORE the network-mode-only block — inside it, the " +
