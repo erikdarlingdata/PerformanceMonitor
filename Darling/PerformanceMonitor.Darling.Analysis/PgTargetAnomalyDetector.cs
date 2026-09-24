@@ -827,8 +827,11 @@ LIMIT 6";
         try
         {
             var window = context.TimeRangeEnd - context.TimeRangeStart;
-            var map = await _baselineProvider.GetBucketMapAsync(
-                context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
+            /* Coordinator ruling (#3653 A8 option B, "families with more than one gate arm"): the arm choice
+               stays exactly as dev's whole-window body decides it, from the START-hour bucket. */
+            var baseline = await _baselineProvider.GetBaselineAsync(
+                context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
 
             /* WaitRateTileWindowSql's ordinals: local_hour(0), peak(1), mean(2), total(3), sample count(4),
                collection count(5), peak_time(6) — WindowTiles.ReadTile reads 0/1/2/4/6; the extra collection-count
@@ -840,81 +843,106 @@ LIMIT 6";
             /* No rows: this flavour does not write pg_wait_stats (stock) — sit out. Rows but no rated collection:
                every collection a restart — nothing to judge. */
             if (totalCollectionCount == 0 || whole.Samples == 0) return;
+            if (baseline.SampleCount == 0) return;
 
-            /* #3653 A8 option B (lane L3a): this family's own three-armed trust rule (robust pair / classical
-               ratio pair / absolute fallback) does not map onto AnomalyGate.EvaluateTiles's z-only model, so each
-               tile is decided through the SAME three arms below, and the worst FIRING tile (largest peak-vs-
-               baseline reading; ties to the later local hour) is reported — the design's own "fire rule and worst
-               tile" (§1), applied by hand for this one family. When no tile scores (every tile under
-               MinTileSamples, or every tile's bucket empty), the never-blind fallback below runs today's
-               whole-window logic unchanged. */
-            WaitProfileTileDecision? worst = null;
-            var tilesScored = 0;
-            var tilesFired = 0;
-            foreach (var tile in tiles)
+            bool isNew, isTiled;
+            double peakRate, meanRate, ratio, meanRatio, fallbackExceedance, fireThreshold;
+            BaselineBucket scoredBucket;
+            AnomalyGate.TileVerdict? tv = null;
+            BaselineBucketMap? map = null;
+
+            if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
-                if (tile.Samples < AnomalyThresholds.MinTileSamples)
-                    continue;
+                /* Arm 1 (trusted, robust sigma > 0) is the ONLY arm that moves onto tiles, per the ruling: the
+                   shared AnomalyGate.EvaluateTiles scores each tile against its own bucket with the Šidák-raised
+                   mean clause; null (no tile scored at all) falls back to today's whole-window EvaluateZScore
+                   pair against the start bucket, unchanged. */
+                map = await _baselineProvider.GetBucketMapAsync(
+                    context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-                var tileBaseline = map.For(tile.LocalHour.Hour, (int)tile.LocalHour.DayOfWeek);
-                if (tileBaseline.SampleCount == 0)
-                    continue;
+                tv = AnomalyGate.EvaluateTiles(
+                    tiles, map,
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                    window);
 
-                tilesScored++;
-                var tileDecision = DecideWaitProfileTile(tileBaseline, tile, window);
-                if (tileDecision.Fire)
-                    tilesFired++;
-
-                if (tileDecision.Fire && (worst is null || tileDecision.CompareSigma > worst.Value.CompareSigma ||
-                    (tileDecision.CompareSigma == worst.Value.CompareSigma && tile.LocalHour >= worst.Value.Tile.LocalHour)))
+                AnomalyGate.ZDecision decision;
+                if (tv is null)
                 {
-                    worst = tileDecision;
+                    peakRate = whole.Peak;
+                    meanRate = whole.Mean;
+                    scoredBucket = baseline;
+                    decision = AnomalyGate.EvaluateZScore(
+                        baseline, peakRate, meanRate,
+                        HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                        window: window);
+                    isTiled = false;
                 }
+                else
+                {
+                    peakRate = tv.Value.Tile.Peak;
+                    meanRate = tv.Value.Tile.Mean;
+                    scoredBucket = tv.Value.Bucket;
+                    decision = tv.Value.Decision;
+                    isTiled = true;
+                }
+
+                if (!decision.Fire) return;
+
+                isNew = false;
+                ratio = scoredBucket.Mean > 0 ? peakRate / scoredBucket.Mean : 0;
+                meanRatio = scoredBucket.Mean > 0 ? meanRate / scoredBucket.Mean : 0;
+                fallbackExceedance = 0;
+                fireThreshold = HeavyTailModifiedZThreshold;
             }
-
-            WaitProfileTileDecision result;
-            BaselineBucket baseline;
-            bool isTiled;
-
-            if (tilesScored == 0)
+            else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
-                /* Never-blind fallback (design §1): whole-window logic, unchanged from before this lane. */
-                baseline = await _baselineProvider.GetBaselineAsync(
-                    context.ServerId, MetricNames.PgWaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
-                if (baseline.SampleCount == 0) return;
-
-                result = DecideWaitProfileTile(baseline, whole, window);
-                if (!result.Fire) return;
+                /* Arms 2 and 3 stay whole-window and unchanged (ruling), fed from WholeWindow(tiles)'s Peak and
+                   Mean — outside B's scope. */
+                isNew = false;
                 isTiled = false;
+                peakRate = whole.Peak;
+                meanRate = whole.Mean;
+                scoredBucket = baseline;
+                ratio = peakRate / baseline.Mean;
+                meanRatio = meanRate / baseline.Mean;
+                fallbackExceedance = 0;
+                fireThreshold = PgRatioAnomalyThreshold;
+                if (ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgWaitProfileFallbackMsPerSec) return;
             }
             else
             {
-                if (worst is null) return; // scored, but none fired
-                result = worst.Value;
-                baseline = result.Baseline;
-                isTiled = true;
+                isNew = true;
+                isTiled = false;
+                peakRate = whole.Peak;
+                meanRate = whole.Mean;
+                scoredBucket = baseline;
+                ratio = 0;
+                meanRatio = 0;
+                fallbackExceedance = peakRate / PgWaitProfileFallbackMsPerSec;
+                fireThreshold = 0;
+                if (fallbackExceedance < 1.0) return;
             }
 
-            var peakRate = result.Tile.Peak;
-            var meanRate = result.Tile.Mean;
-            var sampleCount = result.Tile.Samples;
-            var totalWaitMs = isTiled && totalWaitMsByTile.TryGetValue(result.Tile.LocalHour, out var tw) ? tw : totalWaitMsByTile.Values.Sum();
+            var modifiedZ = BaselineMath.ModifiedZScore(scoredBucket, peakRate);
+            var meanModifiedZ = BaselineMath.ModifiedZScore(scoredBucket, meanRate);
+            var sampleCount = isTiled ? tv!.Value.Tile.Samples : whole.Samples;
+            var totalWaitMs = isTiled && totalWaitMsByTile.TryGetValue(tv!.Value.Tile.LocalHour, out var tw) ? tw : totalWaitMsByTile.Values.Sum();
 
             var metadata = new Dictionary<string, double>
             {
                 ["current_ms_per_sec"] = peakRate,
                 ["mean_ms_per_sec"] = meanRate,
-                ["baseline_mean"] = baseline.Mean,
-                ["baseline_samples"] = baseline.SampleCount,
+                ["baseline_mean"] = scoredBucket.Mean,
+                ["baseline_samples"] = scoredBucket.SampleCount,
                 ["total_wait_ms"] = totalWaitMs,
                 ["window_samples"] = sampleCount,
-                ["ratio"] = result.Ratio,
-                ["mean_ratio"] = result.MeanRatio,
-                ["modified_z"] = result.ModifiedZ,
-                ["mean_modified_z"] = result.MeanModifiedZ,
-                ["is_new"] = result.IsNew ? 1 : 0,
-                ["fallback_exceedance"] = result.FallbackExceedance,
-                ["fire_threshold"] = result.FireThreshold,
+                ["ratio"] = ratio,
+                ["mean_ratio"] = meanRatio,
+                ["modified_z"] = modifiedZ,
+                ["mean_modified_z"] = meanModifiedZ,
+                ["is_new"] = isNew ? 1 : 0,
+                ["fallback_exceedance"] = fallbackExceedance,
+                ["fire_threshold"] = fireThreshold,
                 /* 0, not 1: the magnitude bar is measured (2026-09-19) and the ratio multiple was read (2026-09-20:
                    routine ALONE at 3.0 — ≈ p93 of wait-rate ratios, 7.1 % of samples at or above it — so the floor
                    and the peak-AND-mean gate are what decide, not the multiple), but the heavy-tail cutoff is the SQL
@@ -922,17 +950,9 @@ LIMIT 6";
                    flag at 0. */
                 ["threshold_lineage"] = 0,
             };
-            AddBaselineContext(metadata, baseline);
+            AddBaselineContext(metadata, scoredBucket);
             if (isTiled)
-            {
-                metadata["tile_local_hour"] = result.Tile.LocalHour.Hour;
-                metadata["tile_day_of_week"] = (int)result.Tile.LocalHour.DayOfWeek;
-                metadata["tile_start_ticks"] = WindowTiles.LocalHourToUtc(result.Tile.LocalHour, map.WindowClock).Ticks;
-                metadata["tiles_scored"] = tilesScored;
-                metadata["tiles_fired"] = tilesFired;
-                metadata["window_peak"] = whole.Peak;
-                metadata["window_samples_total"] = whole.Samples;
-            }
+                WindowTiles.AddTileMetadata(metadata, tv!.Value, tiles, map!.WindowClock);
 
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
             using (var contribCmd = WindowCommand(WaitContribWindowSql, connection, context))
@@ -960,69 +980,6 @@ LIMIT 6";
         {
             _logger?.LogError("[PgTargetAnomalyDetector] Wait-profile anomaly detection failed: {Message}", ex.Message);
         }
-    }
-
-    /// <summary>One tile's (or the whole-window fallback's) verdict from <see cref="DecideWaitProfileTile"/> —
-    /// enough of the source statistic and the decision for <see cref="DetectWaitProfileAnomalies"/> to pick the
-    /// worst firing tile and build the fired fact's metadata. <see cref="CompareSigma"/> is what the worst-tile
-    /// pick orders on: the modified z on the robust/ratio arms, the fallback exceedance on the absolute arm — the
-    /// same statistic each arm already reports as its "how far out" figure.</summary>
-    private readonly record struct WaitProfileTileDecision(
-        bool Fire, WindowTile Tile, BaselineBucket Baseline, bool IsNew, double Ratio, double MeanRatio,
-        double ModifiedZ, double MeanModifiedZ, double FallbackExceedance, double FireThreshold, double CompareSigma);
-
-    /// <summary>
-    /// #3653 A8 option B (lane L3a): the wait-profile family's own three-armed trust rule
-    /// (<see cref="DetectWaitProfileAnomalies"/>'s pre-tile body, verbatim), run against ONE tile's peak/mean and
-    /// its own bucket instead of the whole window's — every cutoff, floor and bar unchanged; only the source
-    /// statistic (tile vs. whole window) and bucket (per-tile vs. start-of-window) move.
-    /// </summary>
-    private static WaitProfileTileDecision DecideWaitProfileTile(BaselineBucket baseline, WindowTile tile, TimeSpan window)
-    {
-        var peakRate = tile.Peak;
-        var meanRate = tile.Mean;
-        var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
-        var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, meanRate);
-
-        bool isNew, fire;
-        double ratio, meanRatio, fallbackExceedance, fireThreshold, compareSigma;
-
-        if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
-        {
-            isNew = false;
-            ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
-            meanRatio = baseline.Mean > 0 ? meanRate / baseline.Mean : 0;
-            fallbackExceedance = 0;
-            fireThreshold = HeavyTailModifiedZThreshold;
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakRate, meanRate,
-                HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgWaitProfileFallbackMsPerSec, PgWaitProfileFallbackMsPerSec, SigmaDisplayCap,
-                window: window);
-            fire = decision.Fire;
-            compareSigma = modifiedZ;
-        }
-        else if (baseline.IsTrustworthy && baseline.Mean > 0)
-        {
-            isNew = false;
-            ratio = peakRate / baseline.Mean;
-            meanRatio = meanRate / baseline.Mean;
-            fallbackExceedance = 0;
-            fireThreshold = PgRatioAnomalyThreshold;
-            fire = ratio >= PgRatioAnomalyThreshold && meanRatio >= PgRatioAnomalyThreshold && peakRate >= PgWaitProfileFallbackMsPerSec;
-            compareSigma = ratio;
-        }
-        else
-        {
-            isNew = true;
-            ratio = 0;
-            meanRatio = 0;
-            fallbackExceedance = peakRate / PgWaitProfileFallbackMsPerSec;
-            fireThreshold = 0;
-            fire = fallbackExceedance >= 1.0;
-            compareSigma = fallbackExceedance;
-        }
-
-        return new WaitProfileTileDecision(fire, tile, baseline, isNew, ratio, meanRatio, modifiedZ, meanModifiedZ, fallbackExceedance, fireThreshold, compareSigma);
     }
 
     /* ── Shared pieces. ── */
