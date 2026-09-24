@@ -85,6 +85,10 @@ public sealed class RdsLogSource
 
     private readonly Dictionary<string, string> _markers = new(StringComparer.Ordinal);
 
+    /// <summary>Test-only visibility into which marker keys survive a commit (#4053 review round 2, item 3):
+    /// whether <paramref name="key"/> (an "instance|file" pair) still holds a marker.</summary>
+    internal bool HasMarkerForKey(string key) => _markers.ContainsKey(key);
+
     private readonly Func<string, IAmazonRDS> _clientFactory;
 
     private readonly Func<DateTime> _clock;
@@ -156,6 +160,85 @@ public sealed class RdsLogSource
         /* Keyed by FILE as well as instance, so a log rotation starts a fresh marker instead of resuming a
            new file at an old file's offset. */
         _markers[resume.Key] = resume.Marker;
+
+        /* #4053 review round 2 (item 3): once THIS file's marker has committed, every other key this same
+           instance holds under the same KIND (csv vs non-csv, going by the file name's own ".csv" suffix)
+           is dead weight — a rotation never resumes the old file, so its entry would otherwise sit in this
+           dictionary forever. Pruned here, on the NEW file's first commit, rather than inside
+           <see cref="ReadNewestAsync"/>, because <see cref="HasAnyMarkerForInstance"/> has to still see the
+           previous csv file's key at the moment the rotation is DETECTED — which happens earlier in the same
+           cycle, before this commit ever runs — or the very read this commit belongs to would never have been
+           given <c>StartsAtFileStart</c> in the first place.
+
+           A csv → stderr → csv switch (csvlog toggled off and back on) is the one case this still leaves
+           imperfect: the middle stderr commit prunes only the instance's other STDERR keys, so the original
+           csv key survives it, and the csv route resumes that OLD key rather than starting fresh — accepted,
+           because HasAnyMarkerForInstance then sees a real prior csv key under a name that is no longer the
+           newest, reads the new file from Marker "0", and can duplicate whatever events the stderr route
+           already stored for the same window. */
+        var instanceId = InstanceKey(resume.Key);
+        var isCsv = IsCsvFileName(ResumeFileName(resume.Key));
+
+        if (instanceId is null)
+        {
+            return;
+        }
+
+        var prefix = instanceId + "|";
+        List<string>? toRemove = null;
+
+        foreach (var existingKey in _markers.Keys)
+        {
+            if (string.Equals(existingKey, resume.Key, StringComparison.Ordinal)
+                || !existingKey.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (IsCsvFileName(existingKey[prefix.Length..]) == isCsv)
+            {
+                (toRemove ??= new List<string>()).Add(existingKey);
+            }
+        }
+
+        if (toRemove is not null)
+        {
+            foreach (var key in toRemove)
+            {
+                _markers.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>Whether a log file name is the <c>.csv</c> kind rather than the stderr kind —
+    /// <see cref="CommitResume"/>'s own marker-pruning check (#4053 review round 2, item 3).</summary>
+    private static bool IsCsvFileName(string? fileName)
+        => !string.IsNullOrEmpty(fileName) && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The instance half of a marker key ("instance|file"), or null when the key itself is
+    /// null/empty — <see cref="CommitResume"/>'s own copy of the same split
+    /// <see cref="RdsLogEventIngestor"/> keeps privately for its carry key.</summary>
+    private static string? InstanceKey(string? resumeKey)
+    {
+        if (string.IsNullOrEmpty(resumeKey))
+        {
+            return null;
+        }
+
+        var separator = resumeKey.IndexOf('|');
+        return separator < 0 ? resumeKey : resumeKey[..separator];
+    }
+
+    /// <summary>The file half of a marker key, or null when the key itself is null/empty.</summary>
+    private static string? ResumeFileName(string? resumeKey)
+    {
+        if (string.IsNullOrEmpty(resumeKey))
+        {
+            return null;
+        }
+
+        var separator = resumeKey.IndexOf('|');
+        return separator < 0 ? null : resumeKey[(separator + 1)..];
     }
 
     /// <summary>

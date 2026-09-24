@@ -535,6 +535,56 @@ public class RdsLogSourceTests
     }
 
     /// <summary>
+    /// #4053 review round 2 (item 3): once a rotation's new csv file's first marker commits, the OLD csv
+    /// key for the same instance is gone — the dictionary holds at most one csv key per instance, instead of
+    /// leaking one entry per rotation forever.
+    /// </summary>
+    [Fact]
+    public async Task ARotationsFirstCommit_PrunesTheOldCsvKey()
+    {
+        var (source, _) = Build(new FakeRds { LogFileShape = "csv-rotation" });
+
+        var oldKey = "solo|error/postgresql.log.2026-08-24-18.csv";
+        source.CommitResume(new RdsLogSource.ResumeMarker(oldKey, "OLD-MARKER"));
+        Assert.True(source.HasMarkerForKey(oldKey));
+
+        var chunk = await source.ReadNewestAsync(
+            "solo.abc123.us-east-1.rds.amazonaws.com", RdsLogSource.LogFileKind.Csv);
+
+        Assert.True(chunk!.Value.StartsAtFileStart);
+
+        source.CommitResume(chunk.Value.Resume);
+
+        Assert.False(source.HasMarkerForKey(oldKey));
+        Assert.True(source.HasMarkerForKey(chunk.Value.Resume.Key!));
+    }
+
+    /// <summary>
+    /// #4053 review round 2 (item 3): pruning is scoped to the same KIND — a csv commit for one instance
+    /// must not remove that instance's own stderr marker, and vice versa. Both keys survive across a csv
+    /// commit.
+    /// </summary>
+    [Fact]
+    public void ACommitForOneKind_LeavesTheOtherKindsMarkerForTheSameInstanceAlone()
+    {
+        var (source, _) = Build();
+
+        var stderrKey = "solo|error/postgresql.log.2026-08-25-18";
+        var csvKey = "solo|error/postgresql.log.2026-08-25-18.csv";
+
+        source.CommitResume(new RdsLogSource.ResumeMarker(stderrKey, "STDERR-MARKER"));
+        source.CommitResume(new RdsLogSource.ResumeMarker(csvKey, "CSV-MARKER-1"));
+
+        Assert.True(source.HasMarkerForKey(stderrKey));
+        Assert.True(source.HasMarkerForKey(csvKey));
+
+        source.CommitResume(new RdsLogSource.ResumeMarker(csvKey, "CSV-MARKER-2"));
+
+        Assert.True(source.HasMarkerForKey(stderrKey));
+        Assert.True(source.HasMarkerForKey(csvKey));
+    }
+
+    /// <summary>
     /// The SDK contract the guards above exist for, pinned rather than remembered: a response
     /// collection is <c>null</c> when the service omits it, and LINQ over one names only <c>source</c>.
     /// An SDK upgrade that went back to empty collections would make the guards look like dead defence;
