@@ -83,7 +83,11 @@ public sealed class DailySummaryStitchedRangeTests
         var windowStart = DaysAgo(10);
         var sql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, windowStart);
 
-        var literal = $"TIMESTAMP '{successorFloor:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        /* successorFloor lands mid-day (Now is 12:00:00), so the boundary literal actually spliced into the SQL
+           is DAY-ALIGNED: the first whole day at or after F, never F's own hour (the fix for #4182's CI failure
+           — see DailySummarySql.QueriesCteForStitchedCagg's remarks). */
+        var boundaryDay = successorFloor.Date.AddDays(1);
+        var literal = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
 
         /* The two rollup-half members, one per relation, each restricted to its own side of F. Matched by
            substring on the individually meaningful fragments rather than a whole multi-line block, so the
@@ -103,11 +107,15 @@ public sealed class DailySummaryStitchedRangeTests
         Assert.Contains($"WHERE server_id = $1 AND bucket < {literal}", sql, StringComparison.Ordinal);
         Assert.Contains($"WHERE server_id = $1 AND bucket >= {literal}", sql, StringComparison.Ordinal);
 
-        /* And the split agrees, boundary for boundary, with what StitchedRelationSql would splice into the
-           FROM clause for the same coverage and window — the two must never disagree (the class doc's own
-           requirement on RangeSqlFor). */
+        /* StitchedRelationSql's own FROM-clause split stays at F's actual hour (every row is examined on its
+           own there, with no GROUP BY day, so a mid-day split costs it nothing); this probe instead needs the
+           DAY F falls in, because its CTE groups by date_trunc('day', bucket) and a mid-day split would hand
+           one calendar day two partial rows — the #4182 bug this fix corrects. So the two must agree only that
+           this probe's boundary DAY is the first whole day at or after StitchedRelationSql's own F, not that
+           the literals are identical. */
         var fromClause = coverage.StitchedRelationSql(Legacy, "f", windowStart, RollupCoverage.StitchTier.Hourly);
-        Assert.Contains(literal, fromClause, StringComparison.Ordinal);
+        Assert.Contains($"TIMESTAMP '{successorFloor:yyyy-MM-dd HH:mm:ss.ffffff}'", fromClause, StringComparison.Ordinal);
+        Assert.Equal(boundaryDay, successorFloor.Date.AddDays(1));
     }
 
     [Fact]

@@ -29,6 +29,10 @@ namespace Darling.Tests;
 /// or after F, with no gap and no overlap — and the daily summary's not-carried probe must report correctly on
 /// each side.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. The live test reaches DARLING_TEST_PG only to
+   CREATE and DROP its own database through ScratchPostgres, then works entirely inside it: the pass sweeps whole
+   tables, so it must not meet another class's rows, and it cannot race the live collection. Leave it out; this
+   comment is here so the next sweep does not "fix" it. */
 public sealed class DailySummaryAndComposeStitchedLiveTests
 {
     private const int ServerId = -936541;
@@ -99,10 +103,11 @@ VALUES ($1, $2, $3, $4, $5, 'RESTART', 'RESTARTHANDLE', 0, 0, 0, 0)", connection
             await restart.ExecuteNonQueryAsync(ct);
         }
 
-        /* One planted hour per DAY, deliberately, so the boundary F lands EXACTLY at a day start: D0/D1
-           legacy-only, D2/D3/D4 at-or-after F. Splitting a single calendar day mid-day between the two
-           relations is a separate, sharper shape (the fan-out this lane's report flags as RED) — this proof
-           is the ordinary "F on a day boundary" case decision 3 describes. */
+        /* One planted hour per DAY, deliberately, so F (the successor's first materialized bucket) lands at
+           D2 10:00 — mid-day. StitchedRelationSql's FROM-clause split still runs at F's own hour (it examines
+           every row on its own, with no GROUP BY day); the DAILY SUMMARY's not-carried probe (#4182's fix)
+           day-aligns its own boundary to D3 00:00, so D2 as a whole reads from the LEGACY, not split between
+           the two relations. */
         DateTime Hour(int n) => d0.AddDays(n).AddHours(10);
 
         await PlantHourAsync(Hour(0), "HASH0", 1000);
@@ -141,17 +146,18 @@ VALUES ($1, $2, $3, $4, $5, 'RESTART', 'RESTARTHANDLE', 0, 0, 0, 0)", connection
         }
         await reader.CloseAsync();
 
-        /* Five calendar days, no day missing from EITHER side of F, and no day duplicated by the two-sided
-           UNION ALL — the not-carried probe found nothing missing on either side. The legacy-side days (D0,
-           D1) count TWO distinct hashes: the planted query AND the restart row, which the legacy admits (its
-           own not-carried source filter is empty). The successor-side days (D2, D3, D4) count ONE: the
-           restart row is filtered by the successor's own WHERE (the source filter its CREATE carries),
-           exactly the interval-honest distinction IntervalHonestHourlyRollupLiveTests measures directly on
-           the rollups themselves. */
+        /* Five calendar days, no day missing from EITHER side of the daily summary's own (day-aligned)
+           boundary, and no day duplicated by the two-sided UNION ALL — the not-carried probe found nothing
+           missing on either side. The legacy-side days (D0, D1, AND D2 — D2's boundary day-aligns to D3, so
+           D2 stays whole on the legacy side even though F itself falls inside D2) count TWO distinct hashes:
+           the planted query AND the restart row, which the legacy admits (its own not-carried source filter
+           is empty). The successor-side days (D3, D4) count ONE: the restart row is filtered by the
+           successor's own WHERE (the source filter its CREATE carries), exactly the interval-honest
+           distinction IntervalHonestHourlyRollupLiveTests measures directly on the rollups themselves. */
         Assert.Equal(5, rows.Count);
         Assert.Equal(new[] { d0, d0.AddDays(1), d0.AddDays(2), d0.AddDays(3), d0.AddDays(4) }, rows.Select(r => r.Day).OrderBy(d => d).ToArray());
         Assert.All(rows, r => Assert.NotNull(r.Unique));
-        Assert.Equal(new long?[] { 2, 2, 1, 1, 1 }, rows.OrderBy(r => r.Day).Select(r => r.Unique).ToArray());
+        Assert.Equal(new long?[] { 2, 2, 2, 1, 1 }, rows.OrderBy(r => r.Day).Select(r => r.Unique).ToArray());
 
         /* ── step 3: one Compose panel over the SAME stitched pair, per-bucket totals split at F ── */
         var json = JsonNode.Parse(
@@ -245,6 +251,109 @@ VALUES ($1, $2, $3, $4, $5, 'RESTART', 'RESTARTHANDLE', 0, 0, 0, 0)", connection
         Assert.Single(atOrAboveF.Points);
         Assert.Equal(Hour(4), atOrAboveF.Points[0].CollectionTime);
         Assert.Equal(5000, atOrAboveF.Points[0].DeltaCpuUs);
+    }
+
+    /// <summary>
+    /// #4182 (this fix): the split boundary the daily summary's not-carried probe uses must be DAY-aligned, not
+    /// F's own hour. A mid-day F used to split the FLOOR DAY between the legacy half (its early hours) and the
+    /// successor half (its later hours), and because each half's <c>queries</c> member groups by
+    /// <c>date_trunc('day', bucket)</c> independently, the calendar printed TWO rows for that one day with split
+    /// distinct counts instead of one. This test plants a floor day with hashes on both sides of a mid-day F and
+    /// pins there is exactly one row for it, holding the correct whole-day distinct count.
+    /// </summary>
+    [Fact]
+    public async Task DailySummary_MidDayFloor_PrintsExactlyOneCalendarRow_NotTwo()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 mid-day-floor test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled,
+            "The live A6 mid-day-floor test needs TimescaleDB: the legacy/successor split exists only between materializations.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+        const int midDayServerId = -936542;
+        const string midDayServerName = "a6-la7-midday-floor";
+        await DarlingMcpTestData.RegisterServerAsync(connection, midDayServerId, midDayServerName, ct);
+
+        var legacy = TimescaleSupport.QueryStatsHourlyView;
+        var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
+
+        var d0 = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddDays(-10), DateTimeKind.Unspecified);
+        const string db = "MidDayFloorDb";
+        var collectionId = 1L;
+
+        async Task PlantHourAsync(DateTime hour, string hash)
+        {
+            await using var insert = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES ($1, $2, $3, $4, $5, $6, $7, 1000, 1000, 10, 300)", connection);
+            insert.Parameters.AddWithValue(collectionId++);
+            insert.Parameters.AddWithValue(hour.AddMinutes(5));
+            insert.Parameters.AddWithValue(midDayServerId);
+            insert.Parameters.AddWithValue(midDayServerName);
+            insert.Parameters.AddWithValue(db);
+            insert.Parameters.AddWithValue(hash);
+            insert.Parameters.AddWithValue("0x" + hash);
+            await insert.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The floor day (D0) gets TWO hashes: one before the mid-day F, one at/after it. D1 gets one more hash,
+           entirely on the successor side, so a correctly split calendar prints two rows total, not three. */
+        DateTime FloorHourBefore() => d0.AddHours(2);
+        DateTime FloorHourAtOrAfter() => d0.AddHours(14); /* F itself: mid-day, the successor's first bucket */
+        DateTime NextDayHour() => d0.AddDays(1).AddHours(2);
+
+        await PlantHourAsync(FloorHourBefore(), "MIDDAY0");
+        await PlantHourAsync(FloorHourAtOrAfter(), "MIDDAY1");
+        await PlantHourAsync(NextDayHour(), "MIDDAY2");
+
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var f = FloorHourAtOrAfter(); /* mid-day, deliberately not aligned to a day start */
+
+        await RefreshAsync(connection, legacy, d0, d0.AddDays(2), ct);
+        await RefreshAsync(connection, successor, f, d0.AddDays(2), ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+        Assert.True(rollups.QueryGrainIntervalHourly);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
+        Assert.Equal(f, coverage.FloorOf(successor));
+        Assert.NotEqual(f, f.Date); /* the floor really is mid-day, not a day boundary */
+
+        var sql = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, coverage, d0);
+        await using var read = new NpgsqlCommand(sql, connection);
+        read.Parameters.Add(new NpgsqlParameter<int> { TypedValue = midDayServerId });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = d0 });
+        read.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = d0.AddDays(2) });
+        var rows = new List<(DateTime Day, long? Unique)>();
+        await using var reader = await read.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add((reader.GetDateTime(0), reader.IsDBNull(3) ? (long?)null : reader.GetInt64(3)));
+        }
+        await reader.CloseAsync();
+
+        /* EXACTLY ONE row for the floor day (D0), holding the WHOLE day's distinct count (2), never two rows
+           with the count split 1-and-1 across the F seam. */
+        Assert.Equal(2, rows.Count);
+        var floorDayRows = rows.Where(r => r.Day == d0).ToArray();
+        Assert.Single(floorDayRows);
+        Assert.Equal(2, floorDayRows[0].Unique);
+        var nextDayRows = rows.Where(r => r.Day == d0.AddDays(1)).ToArray();
+        Assert.Single(nextDayRows);
+        Assert.Equal(1, nextDayRows[0].Unique);
     }
 
     private static async Task RefreshAsync(NpgsqlConnection connection, string view, DateTime from, DateTime to, CancellationToken ct)

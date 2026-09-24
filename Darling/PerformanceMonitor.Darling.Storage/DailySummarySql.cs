@@ -416,6 +416,17 @@ public static class DailySummarySql
     /// Each side keeps its own not-carried source probe (the legacy's has no filter; the successor's carries
     /// its restart-row exclusion, per <see cref="RangeSqlFor(RetentionTier, string)"/>'s own note) — a day's
     /// hole is judged against whichever relation actually owns that day's bucket.
+    ///
+    /// <para>The split boundary used everywhere below is DAY-ALIGNED, not F itself: <c>boundaryDay</c> is the
+    /// first whole day at or after F (F unchanged if F already falls on a day start, else F's date plus one day
+    /// — the same rule the daily tier uses for its own F_d). F can land mid-day (production: the successor's
+    /// first bucket is whatever hour it started), and every member of this CTE partitions on the boundary DAY,
+    /// never on the hour: if the split ran at F's hour, the floor day would supply a row from EACH side
+    /// (legacy for its early hours, successor for its later ones) and the calendar would print that day twice
+    /// with split counts, since a COUNT(DISTINCT) computed separately on each half cannot be summed across
+    /// halves without double-counting hashes seen on both sides of the same day. Aligning to the day means the
+    /// legacy alone supplies every hour of the floor day (it is live and holds that day whole, before LC
+    /// freezes it), and the successor's first live day is the NEXT calendar day.</para>
     /// </summary>
     private static string QueriesCteForStitchedCagg(string legacy, string successor, DateTime successorFloor)
     {
@@ -441,7 +452,8 @@ public static class DailySummarySql
         var legacySourceFilter = legacyFilter.Length == 0 ? string.Empty : $"\n          AND {legacyFilter}";
         var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(successorTarget.CreateSql);
         var successorSourceFilter = successorFilter.Length == 0 ? string.Empty : $"\n          AND {successorFilter}";
-        var boundary = $"TIMESTAMP '{successorFloor:yyyy-MM-dd HH:mm:ss.ffffff}'";
+        var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
+        var boundary = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
 
         return $"""
         queries_ceiling_legacy AS (
