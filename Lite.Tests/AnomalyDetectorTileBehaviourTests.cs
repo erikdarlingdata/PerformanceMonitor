@@ -13,13 +13,15 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// issue-3653 A8 option B (lane T4169): behaviour tests for Lite's per-hour tile gate
-/// (<see cref="AnomalyGate.EvaluateTiles"/>) on the CPU, wait-profile and I/O anomaly detectors — each now
-/// scores every target-local hour of the analysis window against its OWN hour-of-week baseline instead of
+/// (<see cref="AnomalyGate.EvaluateTiles"/>) on the CPU and wait-profile anomaly detectors — each now scores
+/// every target-local hour of the analysis window against its OWN hour-of-week baseline instead of
 /// collapsing the whole window to one peak/mean pair. Every scenario runs through the REAL
 /// <see cref="AnomalyDetector.DetectAnomaliesAsync"/>, never a hand-copied tile call, and reads the fired
 /// fact's own metadata (<c>tile_local_hour</c>, <c>tiles_scored</c>, <c>tiles_fired</c>, <c>fire_threshold</c>).
+/// Lite I/O's tiled fire path is covered by <see cref="AnomalyDetectorTests"/>'s
+/// <c>DetectIoAnomalies_…ASustainedWindowDoes</c> instead (#3653 B), not by a test in this class.
 ///
-/// <para><b>Scope-trimmed to scenario 1 (the 4 h shift) for CPU, waits and I/O</b>, per the coordinator's
+/// <para><b>Scope-trimmed to scenario 1 (the 4 h shift) for CPU and waits</b>, per the coordinator's
 /// SCOPE TRIM ruling (issue-3653 A8 option B): the 24 h cutoff, the lone spike and the fallback are already
 /// covered by the gate's unit tests and B's acceptance harness. Each test asserts only that the shift fires
 /// through the tile path with the right metadata (per a later coordinator ruling, the in-test "whole-window
@@ -36,7 +38,6 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
     private readonly DuckDbInitializer _duckDb;
     private readonly BaselineProvider _baselineProvider;
     private readonly AnomalyDetector _detector;
-    private readonly ITestOutputHelper _output;
     private DuckDBConnection? _seedConn;
 
     private const int ServerId = -998;
@@ -55,13 +56,12 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
 
     private long _nextId = -2_000_000;
 
-    public AnomalyDetectorTileBehaviourTests(SharedDuckDbFixture fixture, ITestOutputHelper output)
+    public AnomalyDetectorTileBehaviourTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
         _duckDb = fixture.DuckDb;
         _baselineProvider = new BaselineProvider(_duckDb);
         _detector = new AnomalyDetector(_duckDb, _baselineProvider);
-        _output = output;
         BaselineProvider.CacheTtl = TimeSpan.FromMilliseconds(1);
     }
 
@@ -157,49 +157,6 @@ public class AnomalyDetectorTileBehaviourTests : IClassFixture<SharedDuckDbFixtu
     }
 
     // ── I/O (read latency): scenario 1 only ──
-
-    private const long IoBaseReads = 10;
-    private const double IoMuMs = 15.0; // per-read ms; above ReadLatencyFloorMs (10)
-    private const double IoSigmaMs = 2.5; // above AbsStdDevFloorFor(IoLatency) = 2.5
-    private const double IoShiftMs = IoMuMs + 6 * IoSigmaMs; // 30
-
-    /// <summary>
-    /// Scenario 1 for read latency: a 4 h window whose first two hours sit at baseline and whose last two
-    /// hours run the whole hour at a sustained read-latency shift. Fires through the tile path where the
-    /// whole-window pair, judged against the start bucket alone, would stay quiet.
-    /// </summary>
-    [Fact]
-    public async Task ReadLatency_TwoHourShiftInFourHourWindow_FiresPerTile_WhereTheWholeWindowGateWouldStayQuiet()
-    {
-        await SeedIoBaseline21Days(_windowStart, hours: 4, IoMuMs, IoSigmaMs);
-        await SeedIoWindow(_windowStart, hours: 4, shiftFromHour: 2, IoMuMs, IoSigmaMs, IoShiftMs);
-
-        var startBucket = await _baselineProvider.GetBaselineAsync(ServerId, MetricNames.IoLatency, _windowStart);
-        Assert.True(startBucket.IsTrustworthy, "the start-hour I/O bucket must be trustworthy");
-
-        // Evidence for CI (this test cannot run on the Mac host): the bucket map's per-hour tiles and
-        // the whole-window mean/peak the fixture seeded, so a red run's log shows what was actually
-        // scored without re-running locally.
-        var map = await _baselineProvider.GetBucketMapAsync(
-            ServerId, MetricNames.IoLatency, _windowStart, _windowStart.AddHours(4));
-        for (var h = 0; h < 4; h++)
-        {
-            var hourStart = _windowStart.AddHours(h);
-            var bucket = map.For(hourStart.Hour, (int)hourStart.DayOfWeek);
-            _output.WriteLine($"hour {h} ({hourStart:HH:00} dow {(int)hourStart.DayOfWeek}): Tier={bucket.Tier} SampleCount={bucket.SampleCount} DistinctDays={bucket.DistinctDays} IsTrustworthy={bucket.IsTrustworthy} Median={bucket.Median} EffectiveRobustSigma={bucket.EffectiveRobustSigma}");
-        }
-        _output.WriteLine($"seeded whole-window mean/peak: mu={IoMuMs} sigma={IoSigmaMs} shift={IoShiftMs}");
-
-        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext(_windowStart, _windowStart.AddHours(4)));
-        _output.WriteLine($"fact count: {anomalies.Count}");
-        var fact = Assert.Single(anomalies, f => f.Key == "ANOMALY_READ_LATENCY");
-
-        Assert.True(fact.Metadata.ContainsKey("tile_local_hour"), "the sustained read-latency shift should have scored through the tile path");
-        Assert.InRange(fact.Metadata["tile_local_hour"], _windowStart.AddHours(2).Hour, _windowStart.AddHours(3).Hour);
-        Assert.Equal(4, fact.Metadata["tiles_scored"]);
-        Assert.Equal(2, fact.Metadata["tiles_fired"]);
-        Assert.Equal(AnomalyThresholds.ModifiedZThresholdFor(MetricNames.IoLatency), fact.Metadata["fire_threshold"], precision: 6);
-    }
 
     // ── Helpers: 21-day baselines and shifted windows, set-based per family ──
 
@@ -307,48 +264,4 @@ CROSS JOIN generate_series(0, 11) AS t2(i)");
         _nextId -= (long)hours * 12 + 1000;
     }
 
-    /// <summary>21 days of file_io_stats history for the window's hours of week, ~12 samples/hour: a
-    /// read-bearing row per sample at IoBaseReads reads and a per-read stall latency of μ + σ·sin(i) ms.</summary>
-    private async Task SeedIoBaseline21Days(DateTime windowStart, int hours, double muMs, double sigmaMs)
-    {
-        await ExecuteSeedAsync("BEGIN TRANSACTION");
-        await ExecuteSeedAsync($@"
-INSERT INTO file_io_stats
-    (collection_id, collection_time, server_id, server_name,
-     database_name, file_name, file_type, physical_name, size_mb,
-     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
-     delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
-SELECT {_nextId} - (d * 10000 + h * 100 + i),
-       TIMESTAMP '{windowStart:yyyy-MM-dd HH:mm:ss}' - (d * INTERVAL 1 DAY) + (h * INTERVAL 1 HOUR) + (i * INTERVAL 5 MINUTE),
-       {ServerId}, '{ServerName}', 'AppDb', 'AppDb_data', 'ROWS', 'D:\AppDb.mdf', 100,
-       {IoBaseReads}, 0, 81920, 0,
-       ROUND(({muMs} + {sigmaMs} * sin(d * 4 + h * 12 + i)) * {IoBaseReads}),
-       0, 60
-FROM generate_series(1, 21) AS t1(d)
-CROSS JOIN generate_series(0, {hours - 1}) AS t2(h)
-CROSS JOIN generate_series(0, 11) AS t3(i)");
-        await ExecuteSeedAsync("COMMIT");
-        _nextId -= 21L * hours * 12 + 1000;
-    }
-
-    private async Task SeedIoWindow(DateTime windowStart, int hours, int shiftFromHour, double muMs, double sigmaMs, double shiftMs)
-    {
-        await ExecuteSeedAsync("BEGIN TRANSACTION");
-        await ExecuteSeedAsync($@"
-INSERT INTO file_io_stats
-    (collection_id, collection_time, server_id, server_name,
-     database_name, file_name, file_type, physical_name, size_mb,
-     delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
-     delta_stall_read_ms, delta_stall_write_ms, sample_interval_seconds)
-SELECT {_nextId} - (h * 100 + i),
-       TIMESTAMP '{windowStart:yyyy-MM-dd HH:mm:ss}' + (h * INTERVAL 1 HOUR) + (i * INTERVAL 5 MINUTE),
-       {ServerId}, '{ServerName}', 'AppDb', 'AppDb_data', 'ROWS', 'D:\AppDb.mdf', 100,
-       {IoBaseReads}, 0, 81920, 0,
-       ROUND((CASE WHEN h >= {shiftFromHour} THEN {shiftMs} ELSE {muMs} + {sigmaMs} * sin(h * 12 + i) END) * {IoBaseReads}),
-       0, 60
-FROM generate_series(0, {hours - 1}) AS t1(h)
-CROSS JOIN generate_series(0, 11) AS t2(i)");
-        await ExecuteSeedAsync("COMMIT");
-        _nextId -= (long)hours * 12 + 1000;
-    }
 }
