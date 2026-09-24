@@ -171,9 +171,13 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
            shape (DatabaseCounterWindowSql still runs directly, for the deadlock-rate arm — not excluded).
            SCOPED to PgTargetAnomalyDetector only: PgAnomalyDetector's own SessionWindowSql/CpuWindowSql/
            WaitRateWindowSql (same names, SQL Server family) still run directly and must stay covered there.
-           A NAMED exclusion, not a name-pattern one: each entry is the const superseded by its own tile twin. */
+           #3653 A8 option B lane L3c added CpuBurnWindowSql/WalVolumeWindowSql the same way L3a added the
+           first three: declared only so the census (this file, PgTargetAnomalyTests) keeps seeing the same
+           SQL text the fact collector uses, never called by the detector directly since CpuBurnTileWindowSql/
+           WalVolumeTileWindowSql took over. A NAMED exclusion, not a name-pattern one: each entry is the const
+           superseded by its own tile twin. */
         var supersededByTile = detectorType == typeof(PgTargetAnomalyDetector)
-            ? new HashSet<string> { "SessionWindowSql", "CpuWindowSql", "WaitRateWindowSql" }
+            ? new HashSet<string> { "SessionWindowSql", "CpuWindowSql", "WaitRateWindowSql", "CpuBurnWindowSql", "WalVolumeWindowSql" }
             : new HashSet<string>();
 
         var windowSqlFields = detectorType
@@ -244,11 +248,6 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
         return true;
     }
 
-    /// <summary>
-    /// One row in every table a SQL Server–store family's <c>*WindowSql</c> const reads (grepped from the
-    /// consts' FROM clauses), plus the baseline gate's canary (wait_stats / cpu_utilization_stats — already
-    /// covered below) and the <see cref="PgAnomalyDetector.HasBaselineDataAsync"/> 30-day window.
-    /// </summary>
     /// <summary>History rows for the SQL Server baseline gate: 12 same-hour/same-day-of-week rows, one
     /// per week going back 12 weeks, plus the current-window row for each table a
     /// <c>*WindowSql</c> const reads. 12 clears <see cref="BaselineMath.CollapseThreshold"/> (10) for the
@@ -346,10 +345,6 @@ public sealed class AnomalyDetectorErrorGuardLiveTests
         }
     }
 
-    /// <summary>
-    /// One row in every table a PgTarget family's window read touches, plus a background history row well
-    /// outside the tested window so <see cref="PgTargetAnomalyDetector.HasBaselineDataAsync"/> passes.
-    /// </summary>
     /// <summary>History rows for the PgTarget baseline gate: 12 same-hour/same-day-of-week rows, one per
     /// week going back 12 weeks, for every table a PgTarget <c>*WindowSql</c> const's baseline arm reads,
     /// plus the current-window row set every window read touches. See
