@@ -54,18 +54,20 @@ public sealed class McpToolGuideHeadsDeadlocksTests
         }
     }
 
-    /// <summary>The dedup_key parameter description was over the D2 200-char cap (406, now 185). Its "BEFORE
-    /// limit" scan-order sentence stays on the parameter, because <see cref="McpPageContractTests"/>' existing
-    /// pin <c>FingerprintReaders_NameTheScanCeilingFields</c> reads it straight off the parameter attribute; the
-    /// two other original sentences moved verbatim into the tool's own tail rather than being dropped or
-    /// reworded.</summary>
+    /// <summary>The dedup_key parameter description was over the D2 200-char cap (406, now 191): the same shape
+    /// PR #4108 (get_blocking) already uses, kept for consistency within this file. Its "BEFORE limit" and
+    /// "display name" scoping sentences both stay on the parameter, because two existing pins read them straight
+    /// off the parameter attribute (<see cref="McpPageContractTests"/>'s <c>FingerprintReaders_NameTheScanCeilingFields</c>
+    /// and <c>DarlingMcpBlockingToolsSurfaceAndSqlTests.ParamContract_DedupKeyDescription_AdvertisesItsScoping</c>);
+    /// the full original parameter text (minus its issue ref) is also repeated verbatim in the tool's own tail,
+    /// labeled "dedup_key:", so nothing the parameter used to say is lost.</summary>
     [Fact]
     public void DedupKeyParam_OverflowMovedVerbatim_IntoTheTail()
     {
         var served = McpToolGuideTests.Served("get_deadlocks");
         Assert.Contains(served.ParameterDescriptionLengths, p => p.Parameter == "dedup_key" && p.Length <= 200);
         Assert.Contains(
-            "dedup_key parameter: when supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.",
+            "dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.",
             served.Tail!, StringComparison.Ordinal);
     }
 }
