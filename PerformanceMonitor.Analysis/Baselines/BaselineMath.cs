@@ -45,8 +45,7 @@ public static class BaselineMath
     /// maps without sentinels (a provider not yet migrated, or a cached pre-#1743 map): its
     /// buckets read Median=0/Mad=0, which EffectiveRobustSigma reports as zero-activity, and the
     /// detector's robust path degrades to the classical one rather than misfiring.</para>
-    /// </summary>
-    /// <summary>
+    /// <para>
     /// #3653 A8 option B: a young target's Full (hour+dow) bucket clears its sample floor (10-14 at a
     /// 5-minute cadence) on day one, but Full's day floor is 3 DISTINCT same-weekday dates — one per
     /// calendar week — so <see cref="BaselineBucket.IsTrustworthy"/> stays false for about three weeks
