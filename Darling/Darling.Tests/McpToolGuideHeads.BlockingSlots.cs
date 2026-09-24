@@ -46,7 +46,7 @@ public sealed class McpToolGuideHeadsBlockingSlotsTests
         ("get_pg_replication_slots", "not_collected: engine is not PostgreSQL"),
         ("get_pg_replication_slots", "no_slots: none sampled in hours_back, none exist or none collected"),
         ("get_pg_replication_slots", "a replica's no_slots doesn't clear the writer"),
-        ("get_pg_replication_slots", "slots_present is the normal case"),
+        ("get_pg_replication_slots", "slots_present: slots in window; read worst_severity"),
         ("get_pg_replication_slots", "null on the collector's -1 sentinel"),
         ("get_pg_replication_slots", "no ceiling by default isn't a gap"),
         ("get_pg_replication_slots", "retained_wal_growth_bytes is 0 when flat (measured), null when unmeasurable"),
