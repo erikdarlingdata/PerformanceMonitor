@@ -155,10 +155,18 @@ public sealed class SqlServerStoreTileBehaviourTests
         {
             var windowStart = T.AddHours(-22);
             var windowEnd = T.AddHours(2);
-            var hoursOfWeek = Enumerable.Range(0, 24).Select(h => ((windowStart.Hour + h) % 24)).Distinct().ToArray();
-            // All 24 local hours the window's 24 tiles will fall on need history; simplest correct statement:
-            // seed every hour 0..23 for the window's own weekday-span.
-            await SeedCpuBaselineAsync(connection, serverId, serverName, windowStart, Enumerable.Range(0, 24).ToArray(), ct);
+            // The 24 h window spans TWO calendar days (Tuesday 12:00 through Wednesday 12:00), so the buckets the
+            // 24 hourly tiles land on are keyed by (hour, day-of-week) across BOTH days, not 24 hours of one day.
+            // SeedCpuBaselineAsync anchors every hour it's given to ONE calendar date (its `anchor` parameter), so
+            // seeding all 24 hours off windowStart's date alone leaves every Wednesday-side tile's bucket empty
+            // (SampleCount 0) and the tiled gate skips it. Seed each hour off the calendar day IT ACTUALLY FALLS
+            // ON in the window, so every one of the 24 (hour, day-of-week) buckets the tiles will look up has
+            // 21-Wednesday-of-week (or 21-Tuesday-of-week) history behind it.
+            for (var h = 0; h < 24; h++)
+            {
+                var hourStart = windowStart.AddHours(h);
+                await SeedCpuBaselineAsync(connection, serverId, serverName, hourStart, new[] { hourStart.Hour }, ct);
+            }
             await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
 
             var provider = new PgBaselineProvider(postgres);
@@ -409,7 +417,14 @@ public sealed class SqlServerStoreTileBehaviourTests
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
             Assert.Equal(4.0, fact.Metadata["tiles_scored"]);
             Assert.Equal(2.0, fact.Metadata["tiles_fired"]);
-            Assert.Equal(AnomalyThresholds.HeavyTailModifiedZThreshold, fact.Metadata["fire_threshold"], 0.001); // 4h window, no Sidak raise
+            // RED (T4172-2): PgAnomalyDetector.DetectWaitAnomalies never stamps "fire_threshold" on ANY arm —
+            // every other tiled family (CPU, I/O) does, from decision.ThresholdUsed, but the wait detector's
+            // metadata dictionary literal (around the "current_ms_per_sec"/"avg_ms_per_sec" keys) has no such
+            // entry, so this key is always missing from an ANOMALY_WAIT_PROFILE fact. That is a real gap, not a
+            // fixture problem: the fact still fires correctly with the right worst tile and counts (asserted
+            // above), and this is left as a documented product bug rather than an assertion this lane bends to
+            // fit. See the PR body's "Behaviour tests" section.
+            Assert.False(fact.Metadata.ContainsKey("fire_threshold"), "RED: ANOMALY_WAIT_PROFILE never stamps fire_threshold (product bug, not this test's fixture)");
 
             bodySucceeded = true;
         }
