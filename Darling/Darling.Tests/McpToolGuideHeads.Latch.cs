@@ -25,12 +25,11 @@ public sealed class McpToolGuideHeadsLatchTests
     /// <summary>The per-tool guardrail phrases the shared head must state.</summary>
     private static readonly string[] HeadFacts =
     [
-        "Darling sums waits over the whole hours_back window and ranks by that total",
-        "Lite returns only the newest snapshot in hours_back, paged to limit, heaviest last-interval wait first",
-        "High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE means TempDB allocation contention",
+        "Darling sums waits over the whole hours_back window and returns the top classes by that total",
+        "Lite: LATEST IS A TIME, only the newest snapshot within hours_back, paged to limit, heaviest last-interval wait first",
         "interval_seconds, both per-second rates and (on Darling) severity come from the LATEST interval only",
         "they are null, never 0 or LOW",
-        "Zero rows: not_collected off SQL Server engines, else unavailable, never empty",
+        "Zero rows: not_collected on a non-SQL Server target, else unavailable, never empty",
     ];
 
     [Fact]
@@ -74,5 +73,17 @@ public sealed class McpToolGuideHeadsLatchTests
         Assert.Contains("TWO CLOCKS PER ROW, NAMED: total_delta_* SUM every collection in the window", tail, StringComparison.Ordinal);
         Assert.Contains("A LOW severity beside a large window total is a class that was hot earlier in the window and is quiet now, not a contradiction.", tail, StringComparison.Ordinal);
         Assert.Contains("never a quiet 0.00 or a LOW banded from a zero nobody measured; the window totals beside them still stand.", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>The latch classes keep Microsoft's meaning (sys.dm_os_latch_stats): ACCESS_METHODS_DATASET_PARENT
+    /// synchronizes parallel operations, and FGCB_ADD_REMOVE covers file add, drop, grow and shrink. The old reading
+    /// of them as TempDB allocation contention must not come back, in the head or the tail.</summary>
+    [Fact]
+    public void LatchClasses_KeepMicrosoftsMeaning_NotATempDbReading()
+    {
+        var served = McpToolGuideTests.Served("get_latch_stats");
+        var whole = served.Served + " " + served.Tail;
+        Assert.DoesNotContain("TempDB allocation contention", whole, StringComparison.Ordinal);
+        Assert.Contains("ACCESS_METHODS_DATASET_PARENT synchronizes child dataset access to the parent dataset during parallel operations, and FGCB_ADD_REMOVE synchronizes", served.Tail!, StringComparison.Ordinal);
     }
 }

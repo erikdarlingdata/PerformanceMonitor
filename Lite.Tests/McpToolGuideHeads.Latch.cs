@@ -20,12 +20,11 @@ public sealed class McpToolGuideHeadsLatchTests
 {
     private static readonly string[] HeadFacts =
     [
-        "Darling sums waits over the whole hours_back window and ranks by that total",
-        "Lite returns only the newest snapshot in hours_back, paged to limit, heaviest last-interval wait first",
-        "High LATCH_EX on ACCESS_METHODS_DATASET_PARENT or FGCB_ADD_REMOVE means TempDB allocation contention",
+        "Darling sums waits over the whole hours_back window and returns the top classes by that total",
+        "Lite: LATEST IS A TIME, only the newest snapshot within hours_back, paged to limit, heaviest last-interval wait first",
         "interval_seconds, both per-second rates and (on Darling) severity come from the LATEST interval only",
         "they are null, never 0 or LOW",
-        "Zero rows: not_collected off SQL Server engines, else unavailable, never empty",
+        "Zero rows: not_collected on a non-SQL Server target, else unavailable, never empty",
     ];
 
     [Fact]
@@ -70,5 +69,18 @@ public sealed class McpToolGuideHeadsLatchTests
         Assert.Contains("LATEST IS A TIME: this is the newest snapshot found within hours_back of as_of, not an aggregate over those hours", tail, StringComparison.Ordinal);
         Assert.Contains("THE PAGE IS BOUNDED BY limit: latches_returned is how many latch classes you got, heaviest last-interval wait first", tail, StringComparison.Ordinal);
         Assert.Contains("null, never 0, so a restart cannot read as a quiet latch; interval_seconds is also null, with the deltas standing, on a row collected before the interval was stored.", tail, StringComparison.Ordinal);
+    }
+
+    /// <summary>The latch classes keep Microsoft's meaning (sys.dm_os_latch_stats): ACCESS_METHODS_DATASET_PARENT
+    /// synchronizes parallel operations, and every page latch reports under BUFFER. The old reading of them as
+    /// allocation contention "(often TempDB)" must not come back, in the head or the tail.</summary>
+    [Fact]
+    public void LatchClasses_KeepMicrosoftsMeaning_NotATempDbReading()
+    {
+        var served = McpToolGuideTests.Served("get_latch_stats");
+        var whole = served.Served + " " + served.Tail;
+        Assert.DoesNotContain("TempDB allocation contention", whole, StringComparison.Ordinal);
+        Assert.DoesNotContain("(often TempDB)", whole, StringComparison.Ordinal);
+        Assert.Contains("ACCESS_METHODS_DATASET_PARENT synchronizes child dataset access to the parent dataset during parallel operations, and every page latch reports under the one BUFFER class", served.Tail!, StringComparison.Ordinal);
     }
 }
