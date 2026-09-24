@@ -567,12 +567,22 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
         if ($serviceAccount -eq 'LocalSystem') { $serviceAccount = 'NT AUTHORITY\SYSTEM' }
         $serviceAccount = $serviceAccount -replace '^\.\\', "$env:COMPUTERNAME\"
         $serviceSid = (New-Object System.Security.Principal.NTAccount($serviceAccount)).Translate($sidType)
-        $trusted += $serviceSid
-        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)M")
+        # NOT added to $trusted here (#4052): the service is only trusted to write under $serviceWritePaths,
+        # below, once that list is known - a write grant it holds anywhere else in the tree is a stranger's.
+        # Read & Execute on the root only - the service still has to run its own exe and load its own DLLs -
+        # not Modify: that goes only on the specific directories below, so a write anywhere else in the tree
+        # is a stranger's, even from the service account itself.
+        $grants += @('/grant', "*$($serviceSid.Value):(OI)(CI)RX")
     }
     $rights = [System.Security.AccessControl.FileSystemRights]
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $open = @()
+    # The directories the service actually writes to: pg-runtime\ and pg-runtime-prev\ always, plus whatever
+    # $extraServiceDirectories names (the BYO-Postgres log-hash-key folder, when that mode is configured).
+    # Each is created ahead of time if missing - best-effort, since a directory this lock cannot create is a
+    # directory the first extraction would have had to create itself, root-owned, which is no better - and
+    # then granted Modify with its own icacls call, so a failure on one directory does not lose the others.
+    $serviceWriteDirectories = @('pg-runtime', 'pg-runtime-prev') + @($extraServiceDirectories | Where-Object { $_ })
 
     # icacls, not Set-Acl: Set-Acl on what Get-Acl read writes the SACL too, which needs SeSecurityPrivilege, and
     # icacls is what the warnings tell an operator to run by hand, so the fix and the remediation are the same
@@ -589,10 +599,30 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
     }
     $output = & icacls.exe $root /setowner "*$($adminsSid.Value)" /T /C /L /Q 2>&1
     if ($LASTEXITCODE -ne 0) { $open += "$root (could not make Administrators the owner of everything below it; run elevated: $($output | Select-Object -First 1))" }
+    $serviceWritePaths = @()
     if ($serviceSid) {
         foreach ($secret in @(Get-ChildItem -LiteralPath $root -Force -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'darling.json' -or $_.Name -like 'darling.json.bak-*' })) {
             $null = & icacls.exe $secret.FullName /setowner "*$($serviceSid.Value)" /L /Q 2>&1
         }
+        foreach ($dir in $serviceWriteDirectories) {
+            $dirPath = Join-Path $root $dir
+            if (-not (Test-Path -LiteralPath $dirPath)) {
+                try { $null = New-Item -ItemType Directory -Path $dirPath -Force -ErrorAction Stop }
+                catch { $open += "$dirPath (could not create this directory to grant the service Modify on it: $($_.Exception.Message))"; continue }
+            }
+            $grantOutput = & icacls.exe $dirPath /grant "*$($serviceSid.Value):(OI)(CI)M" 2>&1
+            if ($LASTEXITCODE -ne 0) { $open += "$dirPath (icacls /grant Modify for the service failed: $($grantOutput -join ' '))"; continue }
+            $serviceWritePaths += (Get-Item -LiteralPath $dirPath -Force).FullName.TrimEnd('\')
+        }
+    }
+    # A write grant to the service SID is only trusted under one of $serviceWritePaths (path-prefix match,
+    # case-insensitive as Windows paths are); everywhere else in the tree it is treated like a stranger's and
+    # closed, same as any other untrusted grant, by the walk below.
+    function Test-DarlingServiceWritePath([string]$candidate) {
+        foreach ($allowed in $serviceWritePaths) {
+            if ($candidate -ieq $allowed -or $candidate.StartsWith("$allowed\", [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        }
+        return $false
     }
 
     # VERIFY rather than assume (#1957), and close what a folder lock cannot: every directory and file is read
@@ -610,25 +640,35 @@ function Lock-DarlingInstallTree([string]$root, [string]$serviceAccount, [string
             $open += "$path (a junction or link)"
             continue
         }
+        # The service SID is trusted here only if $path is $root itself (its RX grant) or falls under one of
+        # $serviceWritePaths (its Modify grant) - everywhere else its write grant is a stranger's, same as any
+        # other untrusted account, even though the SID is the same one the tree hands its own real access to.
+        $trustedHere = $trusted
+        $isServiceWritePath = $serviceSid -and (Test-DarlingServiceWritePath $path)
+        if ($serviceSid -and ($path.TrimEnd('\') -ieq $root.TrimEnd('\') -or $isServiceWritePath)) { $trustedHere += $serviceSid }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
         $explicit = @($acl.GetAccessRules($true, $false, $sidType) | Where-Object {
-            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         if ($explicit.Count -gt 0) {
             if ($target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*') {
                 foreach ($rule in $explicit) { $null = & icacls.exe $path /remove:g "*$($rule.IdentityReference.Value)" /L /Q 2>&1 }
             }
             else {
                 $null = & icacls.exe $path /reset /L /Q 2>&1
+                # /reset drops the directory's OWN explicit Modify grant along with a planted ACE, since both are
+                # explicit ACEs on the same object - so a service write directory gets its real grant put straight
+                # back, rather than left open until the next lock run.
+                if ($isServiceWritePath) { $null = & icacls.exe $path /grant "*$($serviceSid.Value):(OI)(CI)M" 2>&1 }
             }
         }
         try { $acl = Get-Acl -LiteralPath $path -ErrorAction Stop }
         catch { $open += "$path (its permissions could not be read)"; continue }
         $writers = @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
-            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+            $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trustedHere -notcontains $_.IdentityReference })
         $owner = $acl.GetOwner($sidType)
         if ($writers.Count -gt 0) { $open += $path }
-        elseif ($trusted -notcontains $owner) { $open += "$path (owned by $($owner.Value))" }
+        elseif ($trustedHere -notcontains $owner) { $open += "$path (owned by $($owner.Value))" }
     }
     return $open
 }
