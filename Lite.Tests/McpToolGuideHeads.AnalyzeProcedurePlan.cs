@@ -24,12 +24,12 @@ public sealed class McpToolGuideHeadsAnalyzeProcedurePlanTests
 
     private static readonly string[] HeadFacts =
     [
-        "keyed by sql_handle (Darling) or plan_handle (Lite)",
-        "not_collected: procedure_stats unsupported on this engine.",
-        "unavailable: no stored plan for that handle, not captured or no longer available.",
-        "create_statement is corroboration only, never a diagnosis",
-        "impact_basis is a per-statement estimate, not additive",
-        "top_operators: a fixed operators_cap cut ranked by actual_elapsed_ms, or cost_percent without runtime stats.",
+        "by sql_handle (Darling) or plan_handle (Lite)",
+        "No plan: not_collected if the engine can't collect procedure_stats, else unavailable.",
+        "labelled impact_basis",
+        "corroboration for a statement already measured slow, never a diagnosis",
+        "every row carries the fixed caveat (regression risk for other plans, write cost)",
+        "top_operators by operators_ranked_by, with operators_returned / total_operators / truncated.",
     ];
 
     [Fact]

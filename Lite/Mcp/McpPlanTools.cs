@@ -43,9 +43,10 @@ public sealed class McpPlanTools
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
-        "Analyzes a stored plan for a procedure from procedure_stats: keyed by sql_handle (Darling) or plan_handle (Lite), from get_top_procedures_by_cpu. " +
-        "not_collected: procedure_stats unsupported on this engine. unavailable: no stored plan for that handle, not captured or no longer available. " +
-        "Returns warnings, missing indexes (create_statement is corroboration only, never a diagnosis; impact_basis is a per-statement estimate, not additive), parameters, memory grants, and top_operators: a fixed operators_cap cut ranked by actual_elapsed_ms, or cost_percent without runtime stats. " +
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected if the engine can't collect procedure_stats, else unavailable. " +
+        "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
+        "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
         "<<GUIDE>> " +
         "Analyzes an execution plan from procedure stats by plan_handle. " +
         "Use after get_top_procedures_by_cpu to understand why a procedure is expensive. " +

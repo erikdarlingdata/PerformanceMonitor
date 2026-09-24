@@ -23,17 +23,18 @@ public sealed class McpToolGuideHeadsAnalyzeProcedurePlanTests
     private const string Tool = "analyze_procedure_plan";
 
     /// <summary>The guardrail facts the head must state: the differing key (D6), the two miss statuses in the
-    /// order <c>AnalyzeProcedurePlan</c> checks them (not_collected before unavailable — see the tool body), and
-    /// the missing-index caveat's two load-bearing clauses (never a diagnosis; impact is per-statement, not
-    /// additive across statements).</summary>
+    /// order <c>AnalyzeProcedurePlan</c> checks them (not_collected before unavailable — see the tool body), the
+    /// missing-index guardrails the plan-tool truth pins keep in every plan tool's head (the impact_basis label;
+    /// corroboration, never a diagnosis; the fixed caveat's regression-risk clause), and the operator cut's basis
+    /// and counts.</summary>
     private static readonly string[] HeadFacts =
     [
-        "keyed by sql_handle (Darling) or plan_handle (Lite)",
-        "not_collected: procedure_stats unsupported on this engine.",
-        "unavailable: no stored plan for that handle, not captured or no longer available.",
-        "create_statement is corroboration only, never a diagnosis",
-        "impact_basis is a per-statement estimate, not additive",
-        "top_operators: a fixed operators_cap cut ranked by actual_elapsed_ms, or cost_percent without runtime stats.",
+        "by sql_handle (Darling) or plan_handle (Lite)",
+        "No plan: not_collected if the engine can't collect procedure_stats, else unavailable.",
+        "labelled impact_basis",
+        "corroboration for a statement already measured slow, never a diagnosis",
+        "every row carries the fixed caveat (regression risk for other plans, write cost)",
+        "top_operators by operators_ranked_by, with operators_returned / total_operators / truncated.",
     ];
 
     [Fact]
