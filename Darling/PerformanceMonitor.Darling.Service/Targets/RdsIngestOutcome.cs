@@ -46,8 +46,14 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <param name="CsvRecordsDiscarded">#4053 part c1: records the csv parser discarded as a resync fragment or a
 /// bad shape, the managed-route twin of
 /// <see cref="PerformanceMonitor.Collectors.PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>. Always 0 for
-/// every transport but the csvlog-aware log-event ingestor, and for a cycle that read the stderr file instead.</param>
-public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0)
+/// every transport but the csvlog-aware ingestors, and for a cycle that read the stderr file instead.</param>
+/// <param name="ForgedCaptures">#4053 part c3: captures the plan ingestor's csvlog route skipped as a query id or
+/// duration that did not match the guarded shape a real <c>auto_explain</c> capture always has, the
+/// managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgPlanCaptureCollector.ForgedCaptureMeasurement"/>. Always 0 for every
+/// transport but the csvlog-aware plan ingestor.</param>
+public readonly record struct RdsIngestOutcome(
+    int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0, int ForgedCaptures = 0)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -59,6 +65,7 @@ public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached, int
     /// The source was read and held <paramref name="rows"/> rows worth storing — including zero, which here
     /// is a genuine all-clear bounded by the read's own window rather than an absence of information.
     /// </summary>
-    public static RdsIngestOutcome Read(int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0)
-        => new(rows, true, foreignZoneLines, csvRecordsDiscarded);
+    public static RdsIngestOutcome Read(
+        int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0, int forgedCaptures = 0)
+        => new(rows, true, foreignZoneLines, csvRecordsDiscarded, forgedCaptures);
 }

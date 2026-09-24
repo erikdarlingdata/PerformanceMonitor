@@ -43,6 +43,14 @@ public sealed class RdsPlanIngestor
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
 
+    /// <summary>
+    /// The csvlog partial-record carry (#4053 part c3), the same <see cref="RdsCsvlogCarryBook"/>
+    /// <see cref="RdsDeadlockIngestor"/> and <see cref="RdsLogEventIngestor"/> each keep — this ingestor's
+    /// own book, never shared with another, for the reason <see cref="RdsLogSource"/>'s own marker remark
+    /// gives.
+    /// </summary>
+    private readonly RdsCsvlogCarryBook _csvCarry = new();
+
     public RdsPlanIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -56,17 +64,33 @@ public sealed class RdsPlanIngestor
     /// <returns>Rows stored and whether the log was reached at all. Reaching it and finding nothing is a
     /// real statement about the log; not reaching it is not, and
     /// <see cref="RdsIngestOutcome.SourceReached"/> is what keeps the runner from making one.</returns>
+    /// <param name="pgLogUsesCsvlog">#4053 part c3: whether the target's <c>log_destination</c> includes
+    /// <c>csvlog</c>, read by the caller the same way <see cref="RdsDeadlockIngestor"/>'s own
+    /// <c>pgLogUsesCsvlog</c> parameter is (#4053 part c2) — this ingestor reaches the log through the AWS
+    /// API, so it has no connection of its own to probe with. True reads the newest <c>.csv</c> file
+    /// through the shared <see cref="RdsCsvlogCarry"/> carry instead of the stderr file; false is today's
+    /// stderr route, unchanged.</param>
     public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
+        bool pgLogUsesCsvlog = false,
         CancellationToken cancellationToken = default)
     {
         RdsLogSource.LogChunk? chunk;
 
+        var kind = pgLogUsesCsvlog ? RdsLogSource.LogFileKind.Csv : RdsLogSource.LogFileKind.Stderr;
+
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
+        }
+        catch (PgNoCsvlogFileException)
+        {
+            /* #4053 part c1's own arm, mirrored here and on RdsDeadlockIngestor: propagated UNWRAPPED so
+               DarlingWorker's PgNoCsvlogFileException arm invalidates PgLogFormatCapability's cached verdict
+               for this server, the same fix a stale "csvlog is on" cache needs on this route too. */
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -97,7 +121,13 @@ public sealed class RdsPlanIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+        var (carry, carryKey, droppedByRotation, currentFileName) = pgLogUsesCsvlog
+            ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
+            : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
+
+        var (written, csvRecordsDiscarded, forgedCaptures, nextCarry) = await StoreAsync(
+            serverId, storageName, chunk.Value.Text, pgLogUsesCsvlog, carry, chunk.Value.MoreAvailable,
+            cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE — the same order, and for the same reason, as
            RdsDeadlockIngestor (#3008). Reaching this line means everything the chunk held is either in the
@@ -105,10 +135,18 @@ public sealed class RdsPlanIngestor
            was, so the next cycle asks RDS for the same window again rather than resuming past it.
 
            Plan rows dedup on (queryid, plan_hash), so the repeat this can cause costs a re-store of shapes
-           the store already has. The loss it replaces was unbounded and silent. */
+           the store already has. The loss it replaces was unbounded and silent. The csvlog carry moves
+           alongside it for the same reason RdsDeadlockIngestor's own commit does (#4053 part c3). */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return RdsIngestOutcome.Read(written);
+        var resumeAdvanced = !string.IsNullOrEmpty(chunk.Value.Resume.Marker);
+
+        if (carryKey is not null && resumeAdvanced)
+        {
+            csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
+        }
+
+        return RdsIngestOutcome.Read(written, csvRecordsDiscarded: csvRecordsDiscarded, forgedCaptures: forgedCaptures);
     }
 
     /// <summary>
@@ -117,15 +155,47 @@ public sealed class RdsPlanIngestor
     /// threshold was crossed in — is a legitimate zero that loses nothing, and every way it can FAIL leaves
     /// via an exception rather than a zero the caller would have to tell apart from those.
     /// </summary>
-    private async Task<int> StoreAsync(
+    private async Task<(int Written, int CsvRecordsDiscarded, int ForgedCaptures, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
+        bool pgLogUsesCsvlog,
+        RdsCsvlogCarry.CsvCarry carry,
+        bool additionalDataPending,
         CancellationToken cancellationToken)
     {
+        var csvRecordsDiscarded = 0;
+        var forgedCaptures = 0;
+        var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
+        List<PgPlanCaptureCollector.Row> rows;
+
+        if (pgLogUsesCsvlog)
+        {
+            if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
+            {
+                return (0, 0, 0, carry);
+            }
+
+            var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
+            csvRecordsDiscarded = portion.RecordsDiscarded;
+            nextCarry = portion.Next;
+
+            rows = PgPlanCaptureCollector.PlanRowsFromCsvEntries(portion.Entries, out forgedCaptures);
+
+            if (rows.Count == 0)
+            {
+                /* A csv portion with no plan in it is the ordinary case on a server whose threshold nothing
+                   crossed. Not worth a log line every cycle. */
+                return (0, csvRecordsDiscarded, forgedCaptures, nextCarry);
+            }
+
+            var written = await WriteAsync(serverId, storageName, rows, cancellationToken);
+            return (written, csvRecordsDiscarded, forgedCaptures, nextCarry);
+        }
+
         if (string.IsNullOrEmpty(text))
         {
-            return 0;
+            return (0, csvRecordsDiscarded, forgedCaptures, nextCarry);
         }
 
         var plans = PgPlanLogParser.Extract(text);
@@ -134,10 +204,10 @@ public sealed class RdsPlanIngestor
         {
             /* A log slab with no plans in it is the ordinary case on a server whose threshold nothing
                crossed. Not worth a log line every cycle. */
-            return 0;
+            return (0, csvRecordsDiscarded, forgedCaptures, nextCarry);
         }
 
-        var rows = new List<PgPlanCaptureCollector.Row>(plans.Count);
+        rows = new List<PgPlanCaptureCollector.Row>(plans.Count);
 
         foreach (var plan in plans)
         {
@@ -150,7 +220,8 @@ public sealed class RdsPlanIngestor
                 PlanJson: plan.PlanJson));
         }
 
-        return await WriteAsync(serverId, storageName, rows, cancellationToken);
+        var stderrWritten = await WriteAsync(serverId, storageName, rows, cancellationToken);
+        return (stderrWritten, csvRecordsDiscarded, forgedCaptures, nextCarry);
     }
 
     /// <summary>
