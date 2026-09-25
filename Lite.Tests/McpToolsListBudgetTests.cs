@@ -83,10 +83,14 @@ public sealed class McpToolsListBudgetTests
     /* #4199 (M2b): +162 bytes for get_collection_log's fleet-form server_name/limit descriptions, after
        trimming both to the D2 200-char parameter cap and moving the rest to the tool's tail (get_tool_guide),
        which is not served in tools/list and so is not counted here. Matches Darling's twin change exactly. */
-    /* #4198: get_query_store_regressions gained full_text (its own preview opt-in, +84 bytes) and its
-       limit description grew to explain the new lower default (+78 bytes over the old 86). +203 bytes net;
-       Darling's own total differs because its head text carries the #4195/#4198 issue numbers Lite's doesn't. */
-    private const int TotalCeilingBytes = 90_084;
+    /* #4198 (lane TB): +253 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). Darling's twin grew by a different amount (+364): Darling's description also
+       covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
+    /* #4198 (lane TR): +203 bytes for get_query_store_regressions gaining full_text (its own preview
+       opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
+       over the old 86). */
+    private const int TotalCeilingBytes = 90_337;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

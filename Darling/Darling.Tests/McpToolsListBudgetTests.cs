@@ -91,9 +91,13 @@ public sealed class McpToolsListBudgetTests
        tools/list and so is not counted here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
-    /* #4198: get_query_store_regressions gained full_text (its own preview opt-in, +84 bytes) and its
-       limit description grew to explain the new lower default (+78 bytes over the old 86). +214 bytes net. */
-    private const int TotalCeilingBytes = 171_933;
+    /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). */
+    /* #4198 (lane TR): +214 bytes for get_query_store_regressions gaining full_text (its own preview
+       opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
+       over the old 86). */
+    private const int TotalCeilingBytes = 172_297;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

@@ -1527,6 +1527,8 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
+        ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
         ("query_text_truncated", ["DarlingMcpQueryStoreRegressionTools.cs", "McpQueryTools.cs"],
             "#4198: get_query_store_regressions' own wide field — query_text is a 240-character preview by default (a busy production store measured 211 KB at default arguments, the worst of every #4198 offender), full_text opts back in"),
     ];
