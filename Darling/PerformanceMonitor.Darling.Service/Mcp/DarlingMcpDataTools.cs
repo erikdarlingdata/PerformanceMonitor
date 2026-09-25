@@ -753,8 +753,20 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints." + McpHelpers.WindowTruncatedDescription)]
-    public static async Task<string> GetQueryStoreTop(
+    /// <summary>
+    /// #4198: the default page's <c>query_text</c> preview length -- the wide FIELD, not the row count (top
+    /// stays 20 here; unlike get_plan_corrections and get_query_store_regressions, this row is narrow enough
+    /// on its own that only the text needed cutting). At the old blanket 2,000-character truncation with no
+    /// opt-in, twenty rows on a busy production store measured 48 KB, over the shared 32 KB budget
+    /// (<see cref="McpResponseBudget.DefaultBytes"/>). Unlike get_deadlock_detail's deadlock_graph_xml, this
+    /// field already HAD a cap (2,000) before #4198, so the web viewer's <c>/api/read</c> mirror keeps that
+    /// exact number through the <paramref name="previewLength"/> overload below rather than switching to
+    /// full text.
+    /// </summary>
+    private const int QueryTextPreviewLength = 400;
+
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -762,7 +774,19 @@ public sealed class DarlingMcpDataTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
-        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null)
+        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false) =>
+        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength);
+
+    /// <summary>
+    /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
+    /// <see cref="QueryTextPreviewLength"/>, the web viewer's <c>/api/read</c> mirror passes 2000 -- the cap
+    /// query_text already had before this opt-in existed, so the viewer's page does not change. Same overload
+    /// shape #3897's trend tools use <c>TrendBudget.Chart</c> for.
+    /// </summary>
+    internal static async Task<string> GetQueryStoreTop(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
+        string? execution_type, string? module_name, bool full_text, int previewLength)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -854,7 +878,8 @@ public sealed class DarlingMcpDataTools
                 avg_physical_reads = r.AvgPhysicalReads,
                 avg_rowcount = r.AvgRowcount,
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
-                query_text = McpHelpers.Truncate(r.QueryText, 2000),
+                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, previewLength),
+                query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > previewLength,
                 /* Emitted because it is a grouping key: on a 2022+ AG the same query can appear once per
                    replica role, and without this the caller would see duplicate-looking rows with no way
                    to tell them apart. NULL when the server did not attribute the row. */
