@@ -1664,6 +1664,60 @@ public sealed class DarlingWorker : BackgroundService
             RefusedNotYetValid: snapshot?.RefusedNotYetValid ?? false);
 
     /// <summary>
+    /// The once-per-start store host/settings profile log (#4214 ruling 9): logs the host facts and a
+    /// verdict for every sizing-relevant setting, then one <c>LogWarning</c> per
+    /// <see cref="HostSettingVerdict.StaleAfterHardwareChange"/> setting. Read-only and best-effort — never
+    /// throws except on the caller's own <paramref name="stoppingToken"/> (real shutdown) — because ruling 9
+    /// requires this to "never fail or delay startup": a bad conf file, a permission problem, or a store
+    /// that is merely slow to answer must degrade to "no log line this start," not to a delayed or failed
+    /// one. <see cref="ServiceCommandDeadlines.StartupHostProfileSeconds"/> is what bounds "slow" the same
+    /// way <see cref="DarlingStoreHostProfile.GatherStoreFactsAsync"/>'s store-size read is deliberately
+    /// NEVER reached from here — see <see cref="DarlingStoreHostProfile.GatherStartupProfileAsync"/>.
+    /// </summary>
+    private async Task LogStoreHostProfileAsync(DarlingConfig config, NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.StartupHostProfileSeconds));
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(budget.Token);
+            var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(config.Postgres, connection, budget.Token);
+
+            _logger.LogInformation("Store host profile:\n{Profile}", DarlingStoreHostProfile.FormatStartupProfileText(profile));
+
+            foreach (var setting in profile.Settings)
+            {
+                if (setting.Verdict == HostSettingVerdict.StaleAfterHardwareChange)
+                {
+                    _logger.LogWarning(
+                        "{Setting} is stale-after-hardware-change: current {Current}, this host would now " +
+                        "derive {Derived} ({Source}). Run --check-settings for the full picture.",
+                        setting.Name, setting.CurrentValueDisplay, setting.DerivedValueDisplay, setting.SourceDescription);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            /* Shutdown — quiet and expected. */
+        }
+        catch (Exception ex)
+        {
+            /* Never fails or delays startup (ruling 9's own words) — RunCollectionLoopAsync proceeds to role
+               provisioning and the collection loop whether this logged a profile or not. The budget CTS
+               surfaces as OperationCanceledException here too (with the SERVICE token untripped, the arm
+               above already ruled that out), so it gets the same "did not finish" wording the CLI verb's
+               own store-read backstop uses. */
+            var reason = ex is OperationCanceledException && budget.IsCancellationRequested
+                ? $"did not finish within {ServiceCommandDeadlines.StartupHostProfileSeconds}s"
+                : ex.Message;
+            _logger.LogWarning(
+                "Store host profile check failed at startup ({Reason}) — collection continues; run " +
+                "--check-settings to retry.", reason);
+        }
+    }
+
+    /// <summary>
     /// Everything after the (optional) managed-Postgres bootstrap: store connection, migration,
     /// Timescale adoption, delta seeding, and the collection/alert/analysis loop. Split from
     /// <see cref="ExecuteAsync"/> so the bootstrap's finally can stop the bundled server after
@@ -1759,6 +1813,12 @@ public sealed class DarlingWorker : BackgroundService
                 return;
             }
         }
+
+        /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
+           the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
+           read own. Its own short deadline and its own catch: a bad conf file, a permission problem or a
+           slow store here must never fail or delay the collection start immediately below it. */
+        await LogStoreHostProfileAsync(config, postgres, stoppingToken);
 
         /* Least-privilege role provisioning (V8 security hardening), managed mode only: create /
            refresh the admin + viewer login roles and their per-role DPAPI credentials, and grant the
