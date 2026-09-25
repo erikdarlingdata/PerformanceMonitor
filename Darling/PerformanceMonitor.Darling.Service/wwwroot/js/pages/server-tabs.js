@@ -349,6 +349,12 @@ export function topQueriesPanel(server, ctx) {
           "before it reports non-zero values.",
       }),
     ];
+    /* #4231: this composite calls VIZ.table directly rather than going through table()/renderPanel, so it
+       misses loadPanel's automatic noteKey handling (#3278) and has to render `truncation_note` itself —
+       same field, same meaning, as the plain table() panels below it on this page. */
+    if (typeof res.data.truncation_note === "string" && res.data.truncation_note.trim()) {
+      parts.unshift(noticeStrip(res.data.truncation_note));
+    }
 
     /* get_query_trend keys on both values, so a row carrying neither cannot be trended and is not offered.
        That is a real case rather than defensive coding: rows collected before a column existed read as null,
@@ -761,6 +767,9 @@ export const SERVER_TABS = [
         emptyText: "No CPU samples in this window.",
       }),
       stat("Scheduler Pressure", "get_cpu_scheduler_pressure", { server }, SCHEDULER_STATS, SNAPSHOT, 2),
+      /* #4231: `noteKey` (#3278) carries `truncation_note` — raw query_stats/procedure_stats are dropped at
+         4 days once the rollups are armed, and a window asking further back than that silently served less
+         than it asked for. Null when the floor did not bite, the same as every other noteKey panel. */
       table(
         "Top Queries by CPU",
         "get_top_queries_by_cpu",
@@ -768,7 +777,9 @@ export const SERVER_TABS = [
         "queries",
         TOP_QUERY_COLUMNS,
         ctx.label,
-        "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values."
+        "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes) before it reports non-zero values.",
+        2,
+        "truncation_note"
       ),
       table(
         "Top Procedures by CPU",
@@ -777,7 +788,9 @@ export const SERVER_TABS = [
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
-        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes)."
+        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+        2,
+        "truncation_note"
       ),
     ],
   },
@@ -1132,6 +1145,7 @@ export const SERVER_TABS = [
          plain table — the drill-down belongs where the second question gets asked, and two of these would
          mean two fetches of get_top_queries_by_cpu for one page's worth of the same twenty rows. */
       topQueriesPanel(server, ctx),
+      /* #4231: same `truncation_note` disclosure as the CPU tab's plain tables. */
       table(
         "Top Procedures by CPU",
         "get_top_procedures_by_cpu",
@@ -1139,7 +1153,9 @@ export const SERVER_TABS = [
         "procedures",
         TOP_PROC_COLUMNS,
         ctx.label,
-        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes)."
+        "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+        2,
+        "truncation_note"
       ),
       table(
         "Query Store",
@@ -1148,7 +1164,9 @@ export const SERVER_TABS = [
         "queries",
         QUERY_STORE_COLUMNS,
         ctx.label,
-        "No Query Store rows in this window."
+        "No Query Store rows in this window.",
+        2,
+        "truncation_note"
       ),
       /* #2484: the Query Store Regressions tab -- the only tab in the per-server page that was entirely
          unreachable from a browser rather than merely reduced. Built with table(), not an object literal:

@@ -512,7 +512,7 @@ public sealed class DarlingMcpDataTools
 
     /* ═══════════════════════════ query performance ═══════════════════════════ */
 
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means only rows predating the text dimension). 'host_object' rolls all of a procedure's statements into one row — use it when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Ad-hoc statements have no host object and stay grouped per hash in both modes. distinct_query_hashes reports how many hashes a row rolled up. Set group_by='host_object' to roll all of a procedure's statements into one row — necessary when dynamic SQL with per-value literals fragments one statement across many hashes, which no top-N-by-hash ranking can surface. Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. " + McpHelpers.WindowTruncatedDescription + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopQueriesByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -557,8 +557,18 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = windowEnd;
+            var requestedStart = now.AddHours(-hours_back);
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop);
+                postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop);
+
+            /* #4231: what the raw tier actually held, beside what was asked for. Rows above are top-N by CPU,
+               not by time, so their timestamps say nothing about how far back the window reached — raw
+               query_stats is dropped at 4 days on a store with the rollups armed, and a 7-day ask silently
+               got ~4. Same probe and the same #2364 disclosure get_query_store_top already makes. */
+            var floor = await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+
             if (rows.Count == 0)
             {
                 /* A filtered miss is not a collection miss: with the floor in the query, an empty page under
@@ -580,14 +590,14 @@ public sealed class DarlingMcpDataTools
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
                ratio is omitted rather than invented when a denominator piece is missing. The two reads
                are independent, so they run concurrently (review catch). */
-            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now);
             var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
-                now.AddHours(-hours_back), now,
+                requestedStart, now,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
@@ -646,6 +656,10 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4231: what was served, beside what was asked for — the same disclosure get_query_store_top
+                   makes (#2364), over query_stats instead of query_store_stats. */
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* #2235: echoed so a stored or pasted payload cannot be misread as the other grouping —
                    the two answer different questions and the rows look alike. */
                 group_by = rollUp ? "host_object" : "query_hash",
@@ -658,6 +672,14 @@ public sealed class DarlingMcpDataTools
                     attributed_cpu_ratio = attribution.AttributedCpuRatio,
                     note = attribution.Note
                 },
+                /* #4231: the WINDOW floor, spelled the way #3653 item 17 fixed the vocabulary — never bare
+                   `truncated`, which on every paged tool in this file means a limit bit. Nothing the caller
+                   sends changes it: the raw tier is where the rows were, and it stops where it stops. */
+                window_truncated = windowTruncated,
+                truncation_note = windowTruncated
+                    ? "The window reaches further back than this server's raw query_stats retains (or this "
+                      + "server has been monitored for less time than that), so the older part of it was not read."
+                    : null,
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -667,7 +689,7 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. " + McpHelpers.WindowTruncatedDescription + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
     public static async Task<string> GetTopProceduresByCpu(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -687,23 +709,30 @@ public sealed class DarlingMcpDataTools
         try
         {
             var now = windowEnd;
-            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, database_name);
+            var requestedStart = now.AddHours(-hours_back);
+            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name);
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats")
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
+            /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
+               get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats. */
+            var floor = await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
+            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
-            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now);
             var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
-                now.AddHours(-hours_back), now,
+                requestedStart, now,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
@@ -737,6 +766,9 @@ public sealed class DarlingMcpDataTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4231: what was served, beside what was asked for. */
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 cpu_attribution = new
                 {
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
@@ -744,6 +776,12 @@ public sealed class DarlingMcpDataTools
                     attributed_cpu_ratio = attribution.AttributedCpuRatio,
                     note = attribution.Note
                 },
+                /* #4231: the WINDOW floor (#3653 item 17 vocabulary) — never bare `truncated`. */
+                window_truncated = windowTruncated,
+                truncation_note = windowTruncated
+                    ? "The window reaches further back than this server's raw procedure_stats retains (or this "
+                      + "server has been monitored for less time than that), so the older part of it was not read."
+                    : null,
                 procedures = result
             }, McpHelpers.JsonOptions);
         }
@@ -753,8 +791,20 @@ public sealed class DarlingMcpDataTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints." + McpHelpers.WindowTruncatedDescription)]
-    public static async Task<string> GetQueryStoreTop(
+    /// <summary>
+    /// #4198: the default page's <c>query_text</c> preview length -- the wide FIELD, not the row count (top
+    /// stays 20 here; unlike get_plan_corrections and get_query_store_regressions, this row is narrow enough
+    /// on its own that only the text needed cutting). At the old blanket 2,000-character truncation with no
+    /// opt-in, twenty rows on a busy production store measured 48 KB, over the shared 32 KB budget
+    /// (<see cref="McpResponseBudget.DefaultBytes"/>). Unlike get_deadlock_detail's deadlock_graph_xml, this
+    /// field already HAD a cap (2,000) before #4198, so the web viewer's <c>/api/read</c> mirror keeps that
+    /// exact number through the <paramref name="previewLength"/> overload below rather than switching to
+    /// full text.
+    /// </summary>
+    private const int QueryTextPreviewLength = 400;
+
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Reads the raw tier only (the corrected rollups carry no query_id or plan_id), which on a store with the rollups armed is dropped at 4 days. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
+    public static Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
@@ -762,7 +812,19 @@ public sealed class DarlingMcpDataTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
-        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null)
+        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false) =>
+        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength);
+
+    /// <summary>
+    /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
+    /// <see cref="QueryTextPreviewLength"/>, the web viewer's <c>/api/read</c> mirror passes 2000 -- the cap
+    /// query_text already had before this opt-in existed, so the viewer's page does not change. Same overload
+    /// shape #3897's trend tools use <c>TrendBudget.Chart</c> for.
+    /// </summary>
+    internal static async Task<string> GetQueryStoreTop(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
+        string? execution_type, string? module_name, bool full_text, int previewLength)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -795,7 +857,8 @@ public sealed class DarlingMcpDataTools
                that was served rather than echo the one that was asked for. */
             var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
             var effectiveStart = floor ?? requestedStart;
-            var truncated = floor is DateTime f && f > requestedStart.AddMinutes(90);
+            /* #4231: the shared helper's own boundary, not a bare 90-minute literal restated here. */
+            var truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
 
             if (rows.Count == 0)
             {
@@ -854,7 +917,8 @@ public sealed class DarlingMcpDataTools
                 avg_physical_reads = r.AvgPhysicalReads,
                 avg_rowcount = r.AvgRowcount,
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
-                query_text = McpHelpers.Truncate(r.QueryText, 2000),
+                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, previewLength),
+                query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > previewLength,
                 /* Emitted because it is a grouping key: on a 2022+ AG the same query can appear once per
                    replica role, and without this the caller would see duplicate-looking rows with no way
                    to tell them apart. NULL when the server did not attribute the row. */

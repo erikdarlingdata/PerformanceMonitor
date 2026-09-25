@@ -181,6 +181,10 @@ export const DASHBOARD_TEMPLATES = [
             span: 2,
             rowsKey: "queries",
             emptyText: "No query stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+            /* #4231: raw query_stats is dropped at 4 days once the rollups are armed; `noteKey` (#3278)
+               surfaces the read's own `truncation_note` when this panel's 24-hour default (or an edited,
+               wider one) outran what the raw tier still holds. */
+            noteKey: "truncation_note",
             columns: [
               { key: "database_name", label: "Database" },
               { key: "query_text", label: "Query", wrap: true },
@@ -199,6 +203,7 @@ export const DASHBOARD_TEMPLATES = [
             span: 2,
             rowsKey: "procedures",
             emptyText: "No procedure stats in this window. Delta-based collection needs at least two cycles (~30 minutes).",
+            noteKey: "truncation_note",
             columns: [
               { key: "full_name", label: "Procedure" },
               { key: "database_name", label: "Database" },

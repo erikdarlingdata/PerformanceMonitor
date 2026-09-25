@@ -1539,8 +1539,8 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_analysis_findings' advice.investigation / advice.remediation — free prose repeated on every finding — preview to 160 characters by default; full_text returns both whole. remediation_command is never previewed at any setting, so it carries no *_truncated key of its own"),
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
-            "#4198: query_text is previewed at read time by three tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("query_text_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
+            "#4198: query_text is previewed at read time by four tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped), get_query_store_top at 400 chars (full_text gets the whole text; query_store_stats.query_text is not collector-capped either). get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does"),
         ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
         ("blocked_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
@@ -1754,9 +1754,11 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        /* Two: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
-           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer holds. */
-        ("DarlingMcpDataTools.cs", "initializer", 2),
+        /* Four: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer
+           holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
+           disclosure over query_stats and procedure_stats. */
+        ("DarlingMcpDataTools.cs", "initializer", 4),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
@@ -1766,6 +1768,8 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string File, string Tool)[] WindowFloorTools =
     [
         ("DarlingMcpDataTools.cs", "get_query_store_top"),
+        ("DarlingMcpDataTools.cs", "get_top_procedures_by_cpu"),
+        ("DarlingMcpDataTools.cs", "get_top_queries_by_cpu"),
         ("DarlingMcpQueryStoreClutterTools.cs", "get_query_store_clutter"),
         ("DarlingMcpTrendTools.cs", "get_procedure_duration_trend"),
         ("DarlingMcpTrendTools.cs", "get_query_duration_trend"),
@@ -1999,8 +2003,23 @@ public sealed class McpPayloadContractCensusTests
                is a guardrail and must be served in the head. Unconverted, the head is the whole description. */
             Assert.Contains(clause, description!, StringComparison.Ordinal);
             var head = McpToolGuide.Split(description!).Head;
-            Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
-            Assert.Contains("not a page cut", head, StringComparison.Ordinal);
+            if (tool is "get_top_queries_by_cpu" or "get_top_procedures_by_cpu")
+            {
+                /* #4231: these two are shared with Lite, and D6's twin pin
+                   (McpToolGuideTests.EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads)
+                   requires their served head stay byte-identical to Lite's until Lite's own #4279 ships the
+                   same disclosure — a Darling-only head guardrail would fail that pin regardless of merge
+                   order. Both facts still ride the wire today, in the tail's WindowTruncatedDescription
+                   clause, so read them from the full description here rather than the head. A follow-up PR
+                   can move one identical sentence into both SKUs' heads once #4279 merges. */
+                Assert.Contains(WindowFloorKey, description!, StringComparison.Ordinal);
+                Assert.Contains("not a page cut", description!, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
+                Assert.Contains("not a page cut", head, StringComparison.Ordinal);
+            }
             Assert.DoesNotContain("read truncated", description!, StringComparison.Ordinal);
         }
     }
