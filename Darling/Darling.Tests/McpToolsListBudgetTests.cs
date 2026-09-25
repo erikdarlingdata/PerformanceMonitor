@@ -84,7 +84,10 @@ public sealed class McpToolsListBudgetTests
        get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
        parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
        tools/list and so is not counted here. */
-    private const int TotalCeilingBytes = 171_637;
+    /* #4198 (lane TH): +305 bytes for get_active_queries' default-preview note in its served description,
+       its new full_query_text opt-in parameter, and its limit description's #4198 note (query_text, the
+       wide field, is now a 500-char preview by default; limit is 25, down from 50). */
+    private const int TotalCeilingBytes = 171_942;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

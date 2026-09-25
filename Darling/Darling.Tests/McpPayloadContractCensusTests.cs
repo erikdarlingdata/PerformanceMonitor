@@ -1475,6 +1475,12 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
+    /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
+    /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
+    /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
+    /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
+    /// <c>full_graph</c>, <c>get_active_queries</c>' <c>full_query_text</c>, the same shape
+    /// <c>get_store_query_stats</c>' <c>full_text</c> already used).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1517,6 +1523,12 @@ public sealed class McpPayloadContractCensusTests
             "the prose beside chain_may_be_truncated — what the depth cap is and why the root shown may not be the root"),
         ("query_text_may_be_truncated", ["DarlingMcpPgBlockingTools.cs"],
             "the statement text cut at COLLECTION to the collector's per-row text cap (track_activity_query_size on the target is the other cutter) — the store never held the rest"),
+    ];
+
+    public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
+    [
+        ("query_text_truncated", ["DarlingMcpSessionTools.cs", "McpSessionTools.cs"],
+            "#4198: get_active_queries' own wide field — query_text is a 500-character preview by default (a synthetic 50-row page shaped like a busy server measured 81,489 bytes), full_query_text gets the whole text"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
@@ -1567,6 +1579,7 @@ public sealed class McpPayloadContractCensusTests
         SecondBoundCutKeys.Select(k => (k.Key, k.Files))
             .Concat(CutNoteKeys.Select(k => (k.Key, k.Files)))
             .Concat(SourceSideCutKeys.Select(k => (k.Key, k.Files)))
+            .Concat(FieldPreviewCutKeys.Select(k => (k.Key, k.Files)))
             .Concat(WithheldSummaryKeys.Select(k => (k.Key, k.Files)))
             .Concat(PageCountsUnderANeutralNoun.Select(k => (k.Key, k.Files)))
             .Concat(CutHomonyms.Select(k => (k.Key, k.Files)));

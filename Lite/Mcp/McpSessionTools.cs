@@ -9,7 +9,14 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpSessionTools
 {
-    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name and blocking_only are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks), flagged is_head_blocker. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocked_process_reports has its input buffer from the blocked-process report), filtered (your database_name filter excluded it), or past_page (it is in the filtered population but beyond limit).")]
+    /// <summary>#4198: see Darling's <c>DarlingMcpSessionTools.QueryTextPreviewLength</c> twin for the
+    /// measured bytes both defaults come down from.</summary>
+    private const int QueryTextPreviewLength = 500;
+
+    /// <inheritdoc cref="QueryTextPreviewLength"/>
+    private const int DefaultLimit = 25;
+
+    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. query_text is a preview by default (query_text_truncated: true) — pass full_query_text for the whole text. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name and blocking_only are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks), flagged is_head_blocker. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocked_process_reports has its input buffer from the blocked-process report), filtered (your database_name filter excluded it), or past_page (it is in the filtered population but beyond limit).")]
     public static async Task<string> GetActiveQueries(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -17,7 +24,8 @@ public sealed class McpSessionTools
         [Description("Hours of data to retrieve. Default 1.")] int hours_back = 1,
         [Description("Filter to a specific database. Applied in SQL; a head blocker in ANOTHER database is then not on the page, and its victims say blocker_not_shown = filtered.")] string? database_name = null,
         [Description("Show only queries involved in blocking: rows with blocking_session_id > 0, plus the head blockers those rows name in the same capture.")] bool blocking_only = false,
-        [Description("Maximum number of rows to return. Default 50. The page is bounded by limit, not by hours_back — truncated says whether the filtered window held more.")] int limit = 50,
+        [Description("Maximum number of rows to return. Default 25 (#4198, down from 50 — sized to fit the response budget). The page is bounded by limit, not hours_back — truncated says whether the window held more.")] int limit = DefaultLimit,
+        [Description("Return each row's full query text instead of a 500-character preview. Default false.")] bool full_query_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -86,7 +94,8 @@ public sealed class McpSessionTools
                 login_name = r.LoginName,
                 host_name = r.HostName,
                 program_name = r.ProgramName,
-                query_text = McpHelpers.Truncate(r.QueryText, 2000)
+                query_text = full_query_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, QueryTextPreviewLength),
+                query_text_truncated = !full_query_text && (r.QueryText?.Length ?? 0) > QueryTextPreviewLength
             }).ToList();
 
             return JsonSerializer.Serialize(new
