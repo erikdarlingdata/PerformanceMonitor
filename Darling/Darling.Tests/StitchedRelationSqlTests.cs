@@ -152,9 +152,36 @@ public sealed class StitchedRelationSqlTests
     /* ─────────────────────────── daily tier ─────────────────────────── */
 
     [Fact]
-    public void DailyStitch_IsInertWhenSuccessorDailyIsAbsent()
+    public void DailyStitch_SuccessorAbsentFromAvailability_IsLegacyOnly_ByteIdenticalToToday()
     {
-        /* No successor daily registered/available at all (today's shipped shape, before LB): legacy-only. */
+        /* Pre-LB shape (RollupAvailability.WithoutIntervalDailies): the successor daily's name is not in
+           RollupAvailability at all, so Has() answers false — legacy-only, even though BOTH the successor
+           daily's and its successor hourly's floors happen to be cached (a store whose store-schema probe
+           predates LB but whose floor dictionary was seeded anyway; Has() is the authoritative gate, never the
+           floor). Both floors are seeded so that, absent the gate, StitchedRelationSql would have enough to
+           build a stitch instead of falling through some other null check — this proves the gate itself, not a
+           side effect of a missing floor. Byte-identical to today's un-stitched single-relation text
+           (#3653 A6 design v2 §2). */
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsDailyView] = DaysAgo(200),
+                ["query_stats_interval_daily"] = DaysAgo(5),
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = DaysAgo(5),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.WithoutIntervalDailies);
+
+        var sql = coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", DaysAgo(10), RollupCoverage.StitchTier.Daily);
+
+        Assert.Equal($"collect.{TimescaleSupport.QueryStatsDailyView} AS f", sql);
+    }
+
+    [Fact]
+    public void DailyStitch_SuccessorPresentButEmpty_IsLegacyOnly()
+    {
+        /* The successor daily is registered and available (Has() true) but has never been refreshed or
+           backfilled — no floor. Empty never wins while the legacy holds rows (#3653 A6 design v2 §2). */
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [TimescaleSupport.QueryStatsDailyView] = DaysAgo(200) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
