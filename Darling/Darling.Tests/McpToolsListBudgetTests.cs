@@ -99,6 +99,7 @@ public sealed class McpToolsListBudgetTests
        so neither counts here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
+
     /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
        limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
        limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
@@ -109,8 +110,13 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
-    private const int TotalCeilingBytes = 172_554;
-
+    /* #4198 (per-tool lane, get_object_locking): +79 bytes for the new limit parameter (default lowered from
+       a 200-row hard cap to 75, measured under McpResponseBudget.DefaultBytes on a seeded fixture). Merged
+       with origin/dev's own #4192/#4195/#4193/#4217 bump above; the constant below is the measured total
+       with both changes applied, not the two deltas added by hand. */
+    /* #4198 (lane TH, merge with get_object_locking): re-measured after merging origin/dev; combined total
+       of active_queries (#4261) + object_locking (#4258) changes on top of dev. */
+    private const int TotalCeilingBytes = 172_632;
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
 

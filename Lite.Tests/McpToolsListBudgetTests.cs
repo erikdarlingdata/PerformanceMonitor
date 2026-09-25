@@ -90,6 +90,9 @@ public sealed class McpToolsListBudgetTests
        matches Darling's twin change. Lowered to the measured total, banking the saving. */
     /* #4198 (get_query_heatmap): +147 bytes for the new full_text opt-in parameter, matching Darling's twin
        change exactly. */
+    /* #4198 (per-tool lane, get_object_locking): +79 bytes for the new limit parameter (default lowered from
+       a 200-row hard cap to 75, measured under McpResponseBudget.DefaultBytes on a seeded fixture). Matches
+       Darling's twin change exactly. */
 /* #4198 (get_plan_corrections): +137 bytes, matching Darling's twin change exactly — the new full_text
        opt-in parameter only (the head is unchanged; the preview explanation lives in the tail get_tool_guide
        serves). Default row limit dropped 50 -> 25 and the preview 2,000 chars -> 150; neither is a served
@@ -98,7 +101,7 @@ public sealed class McpToolsListBudgetTests
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
        covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
-    private const int TotalCeilingBytes = 90_594;
+    private const int TotalCeilingBytes = 90_672;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
