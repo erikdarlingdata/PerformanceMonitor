@@ -84,7 +84,10 @@ public sealed class McpToolsListBudgetTests
        get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
        parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
        tools/list and so is not counted here. */
-    private const int TotalCeilingBytes = 171_637;
+    /* #4198 (get_query_heatmap): +147 bytes for the new full_text opt-in parameter (94 bytes of description
+       plus its JSON schema property scaffolding), part of shrinking the default cell cap and preview width
+       under the shared response budget. */
+    private const int TotalCeilingBytes = 171_784;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

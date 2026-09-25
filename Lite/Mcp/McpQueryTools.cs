@@ -492,8 +492,9 @@ public sealed class McpQueryTools
         [Description("Which per-execution metric to bucket by: duration, cpu, logical_reads, logical_writes or execution_count. Default duration.")] string? metric = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = LocalDataService.ViewerHeatmapBucketMinutes,
-        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultHeatmapCellLimit,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum CELLS to return, most recent bins first. Default 100. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultHeatmapCellLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -531,8 +532,9 @@ public sealed class McpQueryTools
                after the call returned, so the two disagreed by however long the read took — on the one
                read whose entire output is a time axis (review catch). One instant now decides both. */
             var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var previewLength = full_text ? FullTextHeatmapPreviewLength : DefaultHeatmapPreviewLength;
             var rows = await dataService.GetQueryHeatmapCellsAsync(
-                resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases, asOfUtc: windowEnd);
+                resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases, asOfUtc: windowEnd, previewLength);
 
             if (rows.Count == 0)
                 return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
@@ -579,6 +581,10 @@ public sealed class McpQueryTools
                 /* The same bin width the desktop viewer hardcodes, so the two surfaces cannot disagree
                    about the same server over the same window. */
                 bucket_minutes_matches_desktop_viewer = bucket_minutes == LocalDataService.ViewerHeatmapBucketMinutes,
+                /* Echoed rather than left implicit in the cell-level flags alone (#4198): a caller who never
+                   looks at an individual cell still learns, from this one field, that a second call with
+                   full_text=true gets more than what came back. */
+                full_text,
                 /* A bare bucket_index is unreadable, and the labels differ by metric family: duration and
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
@@ -600,6 +606,9 @@ public sealed class McpQueryTools
                     query_count = c.QueryCount,
                     top_query_hash = c.TopQueryHash,
                     top_query_text = c.TopQueryText,
+                    /* #4198: honest about the preview it just spent bytes on. True whenever the stored
+                       statement is longer than this call's preview width, at either preview length. */
+                    top_query_text_truncated = c.TopQueryTextTruncated,
                 }),
             }, McpHelpers.JsonOptions);
         }
@@ -609,9 +618,20 @@ public sealed class McpQueryTools
         }
     }
 
-    /// <summary>The web panel's cap and this tool's default: 500 cells, which is a full day of 5-minute
-    /// bins on a server whose queries land in two or three magnitude buckets per bin.</summary>
-    private const int DefaultHeatmapCellLimit = 500;
+    /// <summary>This tool's default cell cap (#4198, down from the web panel's own 500): at 500 cells the
+    /// fixed per-cell fields alone (time bin, bucket, count, hash) ran to roughly 75 KB before one byte of
+    /// query text, already more than double the shared 32 KB response budget
+    /// (<see cref="McpResponseBudget.DefaultBytes"/>) — so the cap had to fall regardless of the text width
+    /// chosen. Darling twin: <c>DarlingMcpQueryHeatmapTools.DefaultCellLimit</c>.</summary>
+    private const int DefaultHeatmapCellLimit = 100;
+
+    /// <summary>The default <c>top_query_text</c> preview width, in characters (#4198). Darling twin:
+    /// <c>DarlingMcpQueryHeatmapTools.DefaultPreviewLength</c>.</summary>
+    private const int DefaultHeatmapPreviewLength = 80;
+
+    /// <summary>What <c>full_text = true</c> asks for: a generous bound, not a literally unbounded fetch.
+    /// Darling twin: <c>DarlingMcpQueryHeatmapTools.FullTextPreviewLength</c>.</summary>
+    private const int FullTextHeatmapPreviewLength = 32_000;
 
     /// <summary>The seven log-magnitude rows of the grid — the viewer's, not a new banding.</summary>
     private const int HeatmapBucketCount = 7;
