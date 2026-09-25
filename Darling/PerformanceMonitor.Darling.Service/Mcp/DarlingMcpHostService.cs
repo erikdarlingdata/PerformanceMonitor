@@ -933,19 +933,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                are language models, a silently dropped key is a confidently wrong answer. Shared with
                Lite from PerformanceMonitor.Common so both SKUs refuse identically.
 
-               McpResponseBudgetCallToolFilter (#4198) runs next: the shared default response-size
-               budget, trimming any tool's oversized JSON result down to a byte budget with an
-               explicit truncated marker, never silently. Shared with Lite from
-               PerformanceMonitor.Common so both SKUs enforce the same budget.
-
                Optional GCF (Graph Compact Format) output runs LAST: when DARLING_OUTPUT_FORMAT=gcf
                it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
-               never larger than the JSON (see GcfCallToolFilter / GcfOutput). It has to run after
-               the budget filter, not before, so it re-encodes the ALREADY-trimmed JSON rather than
-               carrying an untrimmed payload's size straight through. */
+               never larger than the JSON (see GcfCallToolFilter / GcfOutput). #4198 ruled out a
+               post-hoc trim-to-budget filter here (it would make a tool's own truncated/*_returned
+               fields wrong, cut calls that explicitly asked for more rows, and drop the newest rows
+               of anything sorted oldest-first) in favor of sizing each tool's own defaults to fit —
+               see McpResponseBudget.DefaultBytes, which stays as the one shared size target. */
             .WithRequestFilters(filters => filters
                 .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
-                .AddCallToolFilter(McpResponseBudgetCallToolFilter.Instance)
                 .AddCallToolFilter(GcfCallToolFilter.Instance));
     }
 

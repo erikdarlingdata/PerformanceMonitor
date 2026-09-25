@@ -139,13 +139,13 @@ public sealed class McpHostService : BackgroundService
                    The SAME filter object Darling's host registers (shared from
                    PerformanceMonitor.Common), so the two SKUs cannot refuse differently.
 
-                   McpResponseBudgetCallToolFilter (#4198) runs next, after the guard: the shared
-                   default response-size budget, trimming any tool's oversized JSON result down to a
-                   byte budget with an explicit truncated marker, never silently. The SAME filter
-                   object Darling's host registers, so the two SKUs enforce the same budget. */
+                   #4198 ruled out a second filter here that trimmed any oversized result after the
+                   fact: it would make a tool's own truncated/*_returned fields wrong, cut calls that
+                   explicitly asked for more rows, and drop the newest rows of anything sorted
+                   oldest-first. Each tool sizes its own defaults to fit instead — see
+                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read. */
                 .WithRequestFilters(filters => filters
-                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
-                    .AddCallToolFilter(McpResponseBudgetCallToolFilter.Instance));
+                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance));
 
             _app = builder.Build();
 
