@@ -919,7 +919,7 @@ public sealed class DarlingStoreUpgradeTests
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
             var result = await upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
 
             Assert.Empty(result.CarriedNames);
             Assert.Contains("myext.auth_token", result.RejectedNames);
