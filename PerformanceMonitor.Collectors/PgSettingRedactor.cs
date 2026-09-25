@@ -80,18 +80,18 @@ public static class PgSettingRedactor
     /// or an unquoted run of non-whitespace.</summary>
     private static readonly Regex LibpqPasswordKeyword = new(
         @"(?<=^|\s)(?<kw>sslpassword|password)\s*=\s*(?:'(?:\\.|[^'\\])*'|\S*)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>The password half of a URI's user info: <c>scheme://user:secret@host</c>. A bare
     /// <c>user@host</c>, with no password, does not match and the username is left alone.</summary>
     private static readonly Regex UriUserInfoPassword = new(
         @"://(?<user>[^:@/\s]+):[^@/\s]*@",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A <c>password</c> query parameter in a URI's query string.</summary>
     private static readonly Regex UriQueryPassword = new(
         @"(?<=[?&])(?<key>password)=[^&#\s'""]*",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A shell-style or option-style assignment (<c>NAME=value</c>, <c>--name=value</c>) whose name
     /// contains PASSWORD, PASSWD, SECRET or TOKEN. Covers <c>PGPASSWORD=x</c>, <c>AWS_SECRET_ACCESS_KEY=x</c>,
@@ -100,7 +100,7 @@ public static class PgSettingRedactor
     /// quoted value with an <c>=</c> or space inside it is not mistaken for the start of the next token.</summary>
     private static readonly Regex AssignmentSecretName = new(
         @"(?<name>[\w.-]*(?:PASSWORD|PASSWD|SECRET|TOKEN)[\w.-]*)=(?:""(?:\\.|[^""\\])*""|'(?:\\.|[^'\\])*'|\S*)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Masks the secret out of <paramref name="value"/> per the rules on this type, given the setting's

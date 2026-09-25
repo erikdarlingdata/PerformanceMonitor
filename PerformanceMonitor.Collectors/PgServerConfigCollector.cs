@@ -217,16 +217,24 @@ CROSS JOIN LATERAL (
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var name = reader.GetString(0);
+
+            /* #4348: pg_monitor includes pg_read_all_settings, so this connection sees GUC_SUPERUSER_ONLY
+               settings too — primary_conninfo on a standby carries a replication password in plain text.
+               Every value that can hold a secret is redacted here, before a Row is ever built, in BOTH
+               arms of the UNION ALL (they share this one read loop): setting, boot_val and reset_val. The
+               query text and every other column are untouched — this is the only place a stored row is
+               shaped, so it is the only place that needs to change. */
             rows.Add(new Row(
-                Name: reader.GetString(0),
-                Setting: reader.IsDBNull(1) ? null : reader.GetString(1),
+                Name: name,
+                Setting: PgSettingRedactor.Redact(name, reader.IsDBNull(1) ? null : reader.GetString(1)),
                 Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
                 Category: reader.IsDBNull(3) ? null : reader.GetString(3),
                 Context: reader.IsDBNull(4) ? null : reader.GetString(4),
                 VarType: reader.IsDBNull(5) ? null : reader.GetString(5),
                 Source: reader.IsDBNull(6) ? null : reader.GetString(6),
-                BootValue: reader.IsDBNull(7) ? null : reader.GetString(7),
-                ResetValue: reader.IsDBNull(8) ? null : reader.GetString(8),
+                BootValue: PgSettingRedactor.Redact(name, reader.IsDBNull(7) ? null : reader.GetString(7)),
+                ResetValue: PgSettingRedactor.Redact(name, reader.IsDBNull(8) ? null : reader.GetString(8)),
                 SourceFile: reader.IsDBNull(9) ? null : reader.GetString(9),
                 SourceLine: reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
                 PendingRestart: !reader.IsDBNull(11) && reader.GetBoolean(11),
