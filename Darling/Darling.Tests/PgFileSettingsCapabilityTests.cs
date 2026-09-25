@@ -10,6 +10,8 @@ using System;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -130,6 +132,15 @@ public sealed class PgFileSettingsCapabilityTests : IDisposable
             public override object SyncRoot => new();
         }
     }
+
+    /// <summary>#4251 round-2 review: no backslash anywhere in the probe. Under standard_conforming_strings =
+    /// off (server-wide, or ALTER ROLE/DATABASE ... SET) PostgreSQL reads a backslash-plus in a plain literal as
+    /// a bare plus, the regex becomes "visual c++", and it fails to compile (2201B, quantifier operand invalid)
+    /// on every cycle, uncached, so pg_server_config never collects on that target. A bracket expression reads
+    /// the same under either setting.</summary>
+    [Fact]
+    public void TheProbeCarriesNoBackslash_SoItParsesTheSameUnderEitherStringSetting()
+        => Assert.DoesNotContain('\\', PgFileSettingsCapability.ProbeSql);
 
     /// <summary>
     /// #4251 round-1 review, H1(a): the regex embedded in <see cref="PgFileSettingsCapability.ProbeSql"/>,
@@ -322,5 +333,37 @@ public sealed class PgFileSettingsCapabilityTests : IDisposable
             context, "pg_server_config", connection, Runtime("sql-target", CollectorTargetEngine.SqlServer), logger: null, CancellationToken.None);
         Assert.False(context.PgFileSettingsReadable);
         Assert.Equal(0, connection.ExecuteCount);
+    }
+
+    /// <summary>#4251 round-2 review: a pg_server_config 42501 classifies PERMISSIONS, so it lands on the
+    /// worker's PostgreSQL PERMISSIONS arm and never reaches the general handler. The tests above prove the
+    /// method; this pins the call on the arm that actually fires, which nothing else would miss.</summary>
+    [Fact]
+    public void APgServerConfig42501_LandsOnThePermissionsArm_AndThatArmForgetsTheVerdict()
+    {
+        Assert.Equal("PERMISSIONS", DarlingWorker.PostgresFaultOutcome(Pg("42501"), "pg_server_config").Status);
+
+        var worker = File.ReadAllText(Path.Combine(
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var arm = worker.IndexOf("is { Status: not \"ERROR\" } outcome)", StringComparison.Ordinal);
+        Assert.True(arm >= 0, "the PostgreSQL PERMISSIONS arm moved; re-point this pin");
+        var nextCatch = worker.IndexOf("catch (", arm, StringComparison.Ordinal);
+        /* Anchored at the start of a line, so a commented-out call does not satisfy it. */
+        Assert.Matches(
+            new Regex(@"^\s*DarlingCollectorRunner\.ForgetStaleFileSettingsVerdict\(collectorName, ex, runtime\);",
+                RegexOptions.Multiline),
+            worker[arm..nextCatch]);
+    }
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile);
+        while (dir is not null && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 }

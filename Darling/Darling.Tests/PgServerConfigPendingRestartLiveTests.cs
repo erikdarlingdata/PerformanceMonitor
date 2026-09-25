@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
@@ -90,7 +91,7 @@ public sealed class PgServerConfigPendingRestartLiveTests
            values, and the pending flag is not among them. On a non-Windows target a fresh connection sees the
            flag correctly, so the assertion below would fail rather than confirm anything. */
         var versionText = (string)(await new NpgsqlCommand("SELECT version()", setup).ExecuteScalarAsync(ct))!;
-        Assert.SkipWhen(!versionText.Contains("Windows", StringComparison.OrdinalIgnoreCase),
+        Assert.SkipWhen(!Regex.IsMatch(versionText, "(windows|visual c[+][+]|msvc|mingw)", RegexOptions.IgnoreCase),
             "This #4251 repro only reproduces on Windows (EXEC_BACKEND); the target's version() does not say Windows.");
 
         await AlterSystemAndReloadAsync(setup, "ALTER SYSTEM RESET shared_buffers", ct);

@@ -61,7 +61,7 @@ public static class PgFileSettingsCapability
     /// <para><b>#4251 round-1 review, H1(a).</b> A second fact rides in the same round trip, joined onto the
     /// readable text with <c>:</c> — the same shape <see cref="PgReadBinaryFileCapability"/> uses to carry an
     /// encoding alongside its own verdict: whether <c>pg_catalog.version()</c> matches
-    /// <c>(windows|visual c\+\+|msvc|mingw)</c>, case-insensitively. Up to PostgreSQL 16 that string reads
+    /// <c>(windows|visual c[+][+]|msvc|mingw)</c>, case-insensitively. Up to PostgreSQL 16 that string reads
     /// "...compiled by Visual C++ build ..."; 17 and later reads "...on x86_64-windows, compiled by msvc-...".
     /// Windows is the only platform where the stale <c>pending_restart</c> this capability exists for can
     /// happen at all — see <see cref="PgFileSettingsCapability"/>'s own remarks — so a non-Windows target's
@@ -73,7 +73,7 @@ public static class PgFileSettingsCapability
         + "pg_catalog.to_regclass('pg_catalog.pg_file_settings'), 'SELECT') "
         + "AND pg_catalog.has_function_privilege(current_user, "
         + "pg_catalog.to_regprocedure('pg_catalog.pg_show_all_file_settings()'), 'EXECUTE'), false)::text "
-        + "|| ':' || (pg_catalog.version() ~* '(windows|visual c\\+\\+|msvc|mingw)')::text";
+        + "|| ':' || (pg_catalog.version() ~* '(windows|visual c[+][+]|msvc|mingw)')::text";
 
     /// <summary>
     /// The line <c>get_pg_server_config</c> and <c>get_pg_logging_audit</c> attach to their answer when this
