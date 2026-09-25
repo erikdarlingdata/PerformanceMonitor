@@ -1669,7 +1669,14 @@ public static class FactAdvice
             inv.Append($" ({Micros(latest.Value)} vs {Micros(best.Value)} of CPU per execution)");
         if (offenders is > 0)
             inv.Append($"; {Plural(offenders.Value, "query")} regressed this window");
-        inv.Append(". Query Store has the faster plan on record, so this is a plan choice that got worse — not a query that inherently costs more.");
+        /* #3953: the window reaches a full 14 days, so the faster plan can be two weeks old; say how old. */
+        var bestAge = FactMeta(facts, "PLAN_REGRESSION", "best_plan_age_days");
+        var bestAgeText = bestAge is null
+            ? ""
+            : bestAge.Value < 1
+                ? " (it last ran within the past day)"
+                : $" (it last ran {Plural(Math.Floor(bestAge.Value), "day")} ago)";
+        inv.Append($". Query Store has the faster plan on record{bestAgeText}, so this is a plan choice that got worse — not a query that inherently costs more.");
         if (forceFailing && forceFails is not null)
             inv.Append($" A forced plan is in place but failing to apply ({Plural(forceFails.Value, "failure")}), so SQL Server is silently falling back to the regressed plan — the force is not actually protecting you.");
 

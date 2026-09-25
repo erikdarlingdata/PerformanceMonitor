@@ -130,13 +130,12 @@ public sealed class ViewerCollectionCaveatsGateTests
         var method = typeof(ViewerDataService)
             .GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
+        var collectionCaveatsOrdinal = Array.FindIndex(method.GetParameters(), p => p.Name == "hasCollectionCaveats");
+        Assert.True(collectionCaveatsOrdinal >= 0, "hasCollectionCaveats is gone from the signature");
 
-        /* Every sentinel through V140 true, the V141 one (ordinal 116) and everything after it (V142's
-           ordinal 117, and any later one) false: the gate must not report 141 for a store that lacks the
-           table GetCollectionCaveatsAsync depends on. Pinned to ordinal 116 rather than "arity - 1" since
-           V142 (#4196) appended its own parameter after V141's — "the last parameter" stopped being V141's
-           sentinel the moment it did. */
-        const int collectionCaveatsOrdinal = 116;
+        /* Every sentinel through V140 true, the V141 one and everything after it false: the gate must not
+           report 141 for a store that lacks the table GetCollectionCaveatsAsync depends on. Found by name
+           rather than arity - 1 because V142 (#4196) appended its own parameter after V141's. */
         var throughV140 = Enumerable.Range(0, arity).Select(i => (object)(i < collectionCaveatsOrdinal)).ToArray();
         var result = (int)method.Invoke(null, throughV140)!;
         Assert.True(result < 141, $"expected below 141 with the V141 sentinel absent, got {result}");

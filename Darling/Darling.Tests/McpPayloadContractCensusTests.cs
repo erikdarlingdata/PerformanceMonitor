@@ -1528,8 +1528,10 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
-        ("query_text_truncated", ["DarlingMcpSessionTools.cs", "McpSessionTools.cs"],
-            "#4198: get_active_queries' own wide field — query_text is a 500-character preview by default (a synthetic 50-row page shaped like a busy server measured 81,489 bytes), full_text (renamed from full_query_text) gets the whole text"),
+        ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpSessionTools.cs"],
+            "#4198: query_text is previewed at read time by two tools: get_active_queries previews at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_plan_corrections previews at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
@@ -1624,7 +1626,7 @@ public sealed class McpPayloadContractCensusTests
 
         var unclassified = found.Keys.Where(k => k != "truncated" && !classified.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
         Assert.True(unclassified.Count == 0,
-            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a homonym joins CutHomonyms with what it actually is: "
+            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a wide field's own preview cut joins FieldPreviewCutKeys as <field>_truncated; a homonym joins CutHomonyms with what it actually is: "
             + string.Join("; ", unclassified.Select(k => $"{k} on {string.Join(", ", found[k])}")));
 
         var gone = classified.Keys.Where(k => !found.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();

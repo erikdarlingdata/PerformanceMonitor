@@ -204,7 +204,9 @@ public sealed class ViewerFinOpsSqlTests
     public void DatabaseSizeReads_ReadColumnsThatExistInTheGeneratedTable()
     {
         Assert.Contains("FROM v_database_size_stats", ViewerDataService.DatabaseSizeLatestSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $2", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
+        /* #4245: topN moved from $2 to $3 - $2 is now the resolved snapshot's collection_time, the windowed
+           probe-then-fallback bound that replaced the unbounded correlated MAX subquery. */
+        Assert.Contains("LIMIT $3", ViewerDataService.DatabaseSizeSummarySql, StringComparison.Ordinal);
 
         var ddl = PgSchemaGenerator.CreateTable(DatabaseSizeStatsCollector.Instance);
         Assert.Equal("database_size_stats", DatabaseSizeStatsCollector.Instance.TargetTable);
@@ -223,8 +225,12 @@ public sealed class ViewerFinOpsSqlTests
     public void StorageGrowthSql_ComparesLatestTo7dAnd30dAgo()
     {
         var sql = ViewerDataService.StorageGrowthSql;
-        Assert.Contains("collection_time <= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
+        /* #4245: all three CTEs bind a literal collection_time now ($2 latest, $3 at-or-before-7d,
+           $4 at-or-before-30d), each resolved by GetDatabaseSizeSnapshotAtOrBeforeAsync before this statement
+           runs, rather than each CTE re-deriving its own bound-free "<= cutoff" MAX subquery. */
+        Assert.Contains("collection_time = $2", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time = $3", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time = $4", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY growth_30d_mb DESC", sql, StringComparison.Ordinal);
     }
 
@@ -451,6 +457,10 @@ public sealed class ViewerFinOpsSqlTests
     [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeSummarySql))]
     [InlineData(nameof(ViewerDataService.StorageGrowthSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeSnapshotWindowedProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeSnapshotFallbackProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSnapshotWindowedProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSnapshotFallbackProbeSql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthBoundsSql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSummarySql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSeriesSql))]

@@ -50,11 +50,15 @@ public sealed class PlanRegressionReadShapeTests
         /* The comparison carries the key the drill-down restricts on. */
         Assert.Contains("l.database_name", sql, StringComparison.Ordinal);
 
-        /* Appended LAST, at ordinal 8, which is where the collector reads it: the eight columns before it are
-           read by ordinal and must not move. */
+        /* Appended at ordinal 8, which is where the collector reads it: the eight columns before it are read by
+           ordinal and must not move. #3953 appended the best plan's last run after it, at ordinal 9, for the same
+           reason, and both PLAN_REGRESSION reads share the text (the interval-table twin's suffix). */
         Assert.Matches(
-            new Regex(@"regression_factor,\s+database_name\s+FROM compared", RegexOptions.Singleline),
+            new Regex(@"regression_factor,\s+database_name,\s+best_last_exec\s+FROM compared", RegexOptions.Singleline),
             sql);
+        Assert.Matches(
+            new Regex(@"regression_factor,\s+database_name,\s+best_last_exec\s+FROM compared", RegexOptions.Singleline),
+            StripComments(PgFactCollector.PlanRegressionTableSql));
     }
 
     [Fact]
