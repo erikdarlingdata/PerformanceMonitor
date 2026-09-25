@@ -923,11 +923,11 @@ public sealed class DarlingWebHostService : BackgroundService
     /// therefore safe with what this host serves today; an endpoint added later that echoes request input
     /// beside a secret in one body would need to opt out.</para>
     ///
-    /// <para>MIME types: the framework defaults (already <c>text/html</c>/<c>text/css</c>/JS/etc.) plus
-    /// <c>application/json</c>, the shape of every <c>/api/*</c> read. Both providers run at
-    /// <see cref="CompressionLevel.Fastest"/> — #4188 measured JSON reads up to 618 KB, and the CPU compressing
-    /// them is the STORE's host, not a dedicated web tier, so trading ratio for latency is the right side of
-    /// that line here.</para>
+    /// <para>MIME types: the framework defaults (<c>text/html</c>/<c>text/css</c>/JS/etc.). Both providers
+    /// run at <see cref="CompressionLevel.Fastest"/>. JSON (<c>application/json</c>) is NOT added — the
+    /// <c>/api/*</c> routes carry the session cookie alongside attacker-readable paths, so compressing JSON
+    /// beside a fixed secret would open a BREACH oracle. The <c>/api/*</c> responses also carry
+    /// <c>Cache-Control: no-store</c>, which further limits exposure.</para>
     /// </summary>
     internal static void ConfigureResponseCompression(IServiceCollection services)
     {
@@ -936,7 +936,6 @@ public sealed class DarlingWebHostService : BackgroundService
             options.EnableForHttps = true;
             options.Providers.Add<BrotliCompressionProvider>();
             options.Providers.Add<GzipCompressionProvider>();
-            options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Append("application/json");
         });
 
         services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
@@ -1731,6 +1730,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
@@ -1745,6 +1745,7 @@ public sealed class DarlingWebHostService : BackgroundService
     {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
@@ -1757,6 +1758,7 @@ public sealed class DarlingWebHostService : BackgroundService
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(BuildLoginPageHtml(oidcEnabled));
     }
 

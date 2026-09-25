@@ -97,28 +97,29 @@ public sealed class DarlingWebResponseCompressionTests
         });
     }
 
+    /// <summary>#4202 removed <c>application/json</c> from the compression MIME list (BREACH: a fixed secret
+    /// in a response body alongside attacker-controlled input can be recovered via size observation). JSON API
+    /// responses are NOT compressed, but still carry <c>Cache-Control: no-store</c> from the pipeline
+    /// middleware.</summary>
     [Fact]
-    public async Task JsonApi_AcceptEncodingGzip_RespondsGzipCompressed_WithNoStore()
+    public async Task JsonApi_AcceptEncodingGzip_IsNotCompressed_ButNoStore()
     {
         using var server = await BuildServer();
         var ctx = await Send(server, "/api/ping", "gzip");
 
-        Assert.Equal("gzip", ctx.Response.Headers.ContentEncoding.ToString());
+        Assert.Equal(string.Empty, ctx.Response.Headers.ContentEncoding.ToString());
         Assert.Equal("no-store", ctx.Response.Headers.CacheControl.ToString());
     }
 
     [Fact]
-    public async Task JsonApi_AcceptEncodingBrotli_RespondsBrotliCompressed()
+    public async Task JsonApi_AcceptEncodingBrotli_IsNotCompressed()
     {
         using var server = await BuildServer();
         var ctx = await Send(server, "/api/ping", "br");
 
-        Assert.Equal("br", ctx.Response.Headers.ContentEncoding.ToString());
+        Assert.Equal(string.Empty, ctx.Response.Headers.ContentEncoding.ToString());
     }
 
-    /// <summary>Without an <c>Accept-Encoding</c> the middleware must not compress — the "when the request
-    /// accepts it" half of #4188's ask, and proof the two tests above are seeing the middleware's real
-    /// negotiation rather than an unconditional wrap.</summary>
     [Fact]
     public async Task JsonApi_NoAcceptEncoding_IsNotCompressed()
     {
