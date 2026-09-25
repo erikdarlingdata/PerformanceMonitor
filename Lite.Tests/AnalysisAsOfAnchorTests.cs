@@ -93,7 +93,7 @@ public sealed class AnalysisAsOfAnchorTests : IClassFixture<SharedDuckDbFixture>
         Assert.DoesNotContain(HistoricHash, defaultWindow, StringComparison.Ordinal);
 
         var anchored = await McpAnalysisTools.GetAnalysisFindings(
-            service, _serverManager, null, 4, false, historicRun.AddMinutes(30).ToString("o"));
+            service, _serverManager, null, hours_back: 4, include_drilldown: false, as_of: historicRun.AddMinutes(30).ToString("o"));
         Assert.Contains(HistoricHash, anchored, StringComparison.Ordinal);
         Assert.DoesNotContain(RecentHash, anchored, StringComparison.Ordinal);
         Assert.Equal(1, JsonDocument.Parse(anchored).RootElement.GetProperty("finding_count").GetInt32());
@@ -125,7 +125,7 @@ public sealed class AnalysisAsOfAnchorTests : IClassFixture<SharedDuckDbFixture>
         Assert.DoesNotContain(
             RecentHash,
             await McpAnalysisTools.GetAnalysisFindings(
-                service, _serverManager, null, 4, false, DateTime.UtcNow.AddHours(-29.5).ToString("o")),
+                service, _serverManager, null, hours_back: 4, include_drilldown: false, as_of: DateTime.UtcNow.AddHours(-29.5).ToString("o")),
             StringComparison.Ordinal);
     }
 

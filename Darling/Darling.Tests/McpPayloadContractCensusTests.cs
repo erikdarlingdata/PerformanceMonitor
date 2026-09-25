@@ -1475,12 +1475,13 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
-        /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
+    /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
     /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
-    /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
-    /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
-    /// <c>full_graph</c>, the same shape <c>get_store_query_stats</c>' <c>full_text</c> already used) or by
-    /// narrowing the page to one named thing (a <c>dedup_key</c> call always gets the whole field).</item>
+    /// one wide field (query text, a plan fragment, a deadlock graph, an error message) rather than the page —
+    /// unlike a source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
+    /// <c>full_graph</c>; <c>get_active_queries</c> and <c>get_store_query_stats</c> both take
+    /// <c>full_text</c>, the same name — get_active_queries' own was renamed from <c>full_query_text</c> to
+    /// match; <c>get_collection_log</c> uses <c>full_text</c> for its <c>error_message</c> preview).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1505,13 +1506,18 @@ public sealed class McpPayloadContractCensusTests
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
             "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack"),
+        ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
         ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier)"),
+        ("findings_truncated_note", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: the prose beside findings_truncated — how many diagnostic chains were active in the window and that raising limit or narrowing hours_back would show more of them"),
     ];
+
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
     [
@@ -1527,10 +1533,20 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
+        ("confidence_basis_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: get_analysis_findings' confidence_basis — a near-fixed methodology sentence repeated on every finding (StoryConfidence.DescribeBasis) — previews to 160 characters (FindingTextPreviewLength) by default; full_text returns it whole"),
+        ("advice_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: get_analysis_findings' advice.investigation / advice.remediation — free prose repeated on every finding — preview to 160 characters by default; full_text returns both whole. remediation_command is never previewed at any setting, so it carries no *_truncated key of its own"),
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
-            "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
+            "#4198: query_text is previewed at read time by three tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
+            "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
+        ("blocked_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_blocking/get_blocked_process_reports' blocked_sql_text previewed to SqlTextPreviewLength (150 chars) — the default row LIMIT also halved (30 -> 15), because the row's other ~37 fields, not this column alone, were most of the default page's weight; full_text or a dedup_key call (Darling only) gets the whole text"),
+        ("blocking_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_blocking/get_blocked_process_reports' blocking_sql_text, previewed the same way as blocked_sql_text_truncated"),
         ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
             "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
     ];
