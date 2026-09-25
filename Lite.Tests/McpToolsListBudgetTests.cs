@@ -86,7 +86,9 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TH): +182 bytes for get_active_queries' new full_query_text opt-in parameter and its
        limit description's #4198 note; the preview note itself moved after <<GUIDE>> to stay under the
        head's own 620-char target, so the served head is unchanged. Matches Darling's twin change. */
-    private const int TotalCeilingBytes = 90_063;
+    /* #4198 (lane W2): -6 bytes for renaming get_active_queries' full_query_text opt-in to full_text —
+       matches Darling's twin change. Lowered to the measured total, banking the saving. */
+    private const int TotalCeilingBytes = 90_057;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

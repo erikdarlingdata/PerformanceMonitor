@@ -101,8 +101,9 @@ public sealed class DarlingMcpSessionTools
     /// bytes; a synthetic 50-row page shaped like a busy server (every optional field populated, a fifth of
     /// the rows carrying a long literal list) measured 81,489. So both come down: the default row limit to
     /// <see cref="DefaultLimit"/>, and query_text previews to <see cref="QueryTextPreviewLength"/>
-    /// (<c>full_query_text</c> opts back in, the shape <c>get_store_query_stats</c>' <c>full_text</c> and
-    /// <c>get_deadlock_detail</c>'s <c>full_graph</c> already use). <c>truncated</c> / <c>total_snapshots</c>
+    /// (<c>full_text</c> opts back in — #4198 renamed this from <c>full_query_text</c> to match
+    /// <c>get_store_query_stats</c>' <c>full_text</c> and <c>get_deadlock_detail</c>'s <c>full_graph</c>,
+    /// the shape those already use). <c>truncated</c> / <c>total_snapshots</c>
     /// already tell a caller who wants more to raise limit or narrow hours_back. The web viewer is not this
     /// budget's caller (#4198 lane W2): its <c>/api/read</c> mirror keeps the pre-#4198 2,000-character
     /// preview every caller got before this tool's default fell to 500, through the internal overload below
@@ -113,7 +114,7 @@ public sealed class DarlingMcpSessionTools
     /// <inheritdoc cref="QueryTextPreviewLength"/>
     private const int DefaultLimit = 25;
 
-    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> query_text is a preview by default (query_text_truncated: true) — pass full_query_text for the whole text. Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name and blocking_only are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks), flagged is_head_blocker. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocking has its input buffer from the blocked-process report), filtered (your database_name filter excluded it), or past_page (it is in the filtered population but beyond limit).")]
+    [McpServerTool(Name = "get_active_queries"), Description("Active query snapshots (sys.dm_exec_requests) in a window ending at as_of: query text, wait, CPU/elapsed ms, blocking, DOP, memory grant GB. database_name/blocking_only filter IN SQL: total_snapshots is the filtered count; truncated means over limit. wait_time_ms, dop, granted_query_memory_gb, open_transaction_count: null = zero or not applicable. Head blockers are never stripped (is_head_blocker); a victim's blocker_not_shown is not_captured, filtered, or past_page. Empty: no snapshot in the window, or none matching filters; not_collected (unfiltered only): engine can't run it. <<GUIDE>> query_text is a preview by default (query_text_truncated: true) — pass full_text for the whole text. Gets active query snapshots captured from sys.dm_exec_requests. Shows what queries were running at each collection point: session ID, query text, wait type, CPU time, elapsed time, blocking info, DOP, and memory grants. Use hours_back to look at a specific time window — critical for finding what was running during a CPU spike or blocking event. EVERY FILTER IS PART OF THE QUERY: database_name and blocking_only are applied in SQL before the page is cut, total_snapshots is the count of snapshot rows in the window that pass your filters, snapshots_returned is how many you got, and truncated says the filtered population held more than limit — raise limit or narrow hours_back when it is true (NEWEST CAPTURE FIRST, highest CPU first within a capture; oldest_returned_collection_time / newest_returned_collection_time bound the page). Applied in SQL, so total_snapshots counts the blocking population and truncated is measured against it. HEAD BLOCKERS ARE NEVER STRIPPED: a session another row in the same capture names as its blocker is on the page whatever its text (including a WAITFOR shell holding locks), flagged is_head_blocker. A victim whose blocker is NOT on the page says why in blocker_not_shown: not_captured (the blocker held no running request at that capture — an idle open transaction is the classic case; get_blocking has its input buffer from the blocked-process report), filtered (your database_name filter excluded it), or past_page (it is in the filtered population but beyond limit).")]
     public static Task<string> GetActiveQueries(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -121,15 +122,16 @@ public sealed class DarlingMcpSessionTools
         [Description("Filter to a specific database. Applied in SQL; a head blocker in ANOTHER database is then not on the page, and its victims say blocker_not_shown = filtered.")] string? database_name = null,
         [Description("Show only queries involved in blocking: rows with blocking_session_id > 0, plus the head blockers those rows name in the same capture.")] bool blocking_only = false,
         [Description("Maximum number of rows to return. Default 25 (#4198, down from 50 — sized to fit the response budget). The page is bounded by limit, not hours_back — truncated says whether the window held more.")] int limit = DefaultLimit,
-        [Description("Return each row's full query text instead of a 500-character preview. Default false.")] bool full_query_text = false,
+        [Description("Return each row's full query text instead of a 500-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null) =>
         GetActiveQueries(postgres, server_name, hours_back, database_name, blocking_only, limit,
-            full_query_text ? null : QueryTextPreviewLength, as_of);
+            full_text ? null : QueryTextPreviewLength, as_of);
 
     /// <summary>
     /// get_active_queries under an explicit query-text preview length (#4198 lane W2): the MCP tool above
-    /// passes <see cref="QueryTextPreviewLength"/>, or null when its full_query_text opt-in asks for the
-    /// whole text, and the web viewer's <c>/api/read</c> mirror passes 2000 (the pre-#4198 budget every
+    /// passes <see cref="QueryTextPreviewLength"/>, or null when its full_text opt-in (#4198, renamed from
+    /// full_query_text to match get_store_query_stats' full_text and the rest of the #4198 tools) asks for
+    /// the whole text, and the web viewer's <c>/api/read</c> mirror passes 2000 (the pre-#4198 budget every
     /// caller got, sized for a page that redraws every 30 seconds rather than a model's context). One body,
     /// so the two surfaces differ only in preview length; null means no truncation at all, not "unbounded
     /// preview length" — the ternary below never truncates on a null budget.

@@ -95,7 +95,10 @@ public sealed class McpToolsListBudgetTests
        limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
        limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
        own 620-char target, so the served head is unchanged at 616. */
-    private const int TotalCeilingBytes = 171_912;
+    /* #4198 (lane W2): -6 bytes for renaming get_active_queries' full_query_text opt-in to full_text — the
+       shorter property name in the served schema, not a description change (the param's own description
+       byte count is unchanged at 84). Lowered to the measured total, banking the saving. */
+    private const int TotalCeilingBytes = 171_906;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

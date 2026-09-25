@@ -27,7 +27,8 @@ namespace Darling.Tests;
 /// program_name) add up across the page too. Plants 50 rows with realistic field widths — most query_text
 /// around 700 characters (a parameterized statement with a modest literal list), ten near 2,800 characters
 /// (a big IN-list, the realistic cause of an outsized capture) — and asserts the default call stays under
-/// <see cref="McpResponseBudget.DefaultBytes"/>, that <c>full_query_text: true</c> opts back into the whole
+/// <see cref="McpResponseBudget.DefaultBytes"/>, that <c>full_text: true</c> (renamed from
+/// <c>full_query_text</c> to match <c>get_store_query_stats</c>) opts back into the whole
 /// text. New file (not the shared seeding in <c>DarlingMcpSessionToolsTests.cs</c>) because #4198 ran a
 /// dozen lanes against this store tonight.
 /// </summary>
@@ -100,8 +101,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
                 "the default call's widest row should preview shorter than the planted text.");
             Assert.True(wideRow.GetProperty("query_text_truncated").GetBoolean());
 
-            /* full_query_text opts back into the whole text for every row, including the newest (widest) one. */
-            var fullJson = await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, full_query_text: true);
+            /* full_text opts back into the whole text for every row, including the newest (widest) one. */
+            var fullJson = await DarlingMcpSessionTools.GetActiveQueries(postgres, ServerName, full_text: true);
             Assert.DoesNotContain("\"query_text_truncated\": true", fullJson, StringComparison.Ordinal);
             using var fullParsed = JsonDocument.Parse(fullJson);
             Assert.Equal(wideText, fullParsed.RootElement.GetProperty("queries")[0].GetProperty("query_text").GetString());

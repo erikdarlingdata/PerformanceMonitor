@@ -567,7 +567,8 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
     /// literal list) — this tool has TWENTY-THREE fields per row rather than one dominant wide field, so the
     /// fixed columns add up across the page even before query_text is counted. Plants the same shape and
     /// asserts the default call (limit down to 25) stays under <see cref="McpResponseBudget.DefaultBytes"/>,
-    /// and that <c>full_query_text: true</c> opts back into the whole text.
+    /// and that <c>full_text: true</c> (renamed from <c>full_query_text</c> to match
+    /// <c>get_store_query_stats</c>) opts back into the whole text.
     /// </summary>
     [Fact]
     public async Task GetActiveQueries_Default_StaysUnderResponseBudget_WithFiftyRealisticRows()
@@ -614,7 +615,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
         Assert.True(wideRow.GetProperty("query_text").GetString()!.Length < wideText.Length);
         Assert.True(wideRow.GetProperty("query_text_truncated").GetBoolean());
 
-        var fullJson = await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, full_query_text: true);
+        var fullJson = await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, full_text: true);
         var fullRoot = Parse(fullJson);
         Assert.False(fullRoot.GetProperty("queries")[0].GetProperty("query_text_truncated").GetBoolean());
         Assert.Equal(wideText, fullRoot.GetProperty("queries")[0].GetProperty("query_text").GetString());

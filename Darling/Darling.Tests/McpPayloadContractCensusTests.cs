@@ -1479,8 +1479,9 @@ public sealed class McpPayloadContractCensusTests
     /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
     /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
     /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
-    /// <c>full_graph</c>, <c>get_active_queries</c>' <c>full_query_text</c>, the same shape
-    /// <c>get_store_query_stats</c>' <c>full_text</c> already used).</item>
+    /// <c>full_graph</c>; <c>get_active_queries</c> and <c>get_store_query_stats</c> both take
+    /// <c>full_text</c>, the same name — get_active_queries' own was renamed from <c>full_query_text</c> to
+    /// match).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1528,7 +1529,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
         ("query_text_truncated", ["DarlingMcpSessionTools.cs", "McpSessionTools.cs"],
-            "#4198: get_active_queries' own wide field — query_text is a 500-character preview by default (a synthetic 50-row page shaped like a busy server measured 81,489 bytes), full_query_text gets the whole text"),
+            "#4198: get_active_queries' own wide field — query_text is a 500-character preview by default (a synthetic 50-row page shaped like a busy server measured 81,489 bytes), full_text (renamed from full_query_text) gets the whole text"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =

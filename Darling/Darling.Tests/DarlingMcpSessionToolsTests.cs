@@ -69,7 +69,7 @@ public sealed class DarlingMcpSessionToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_session_stats", "server_name")]
-    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit,full_query_text,as_of")]
+    [InlineData("get_active_queries", "server_name,hours_back,database_name,blocking_only,limit,full_text,as_of")]
     [InlineData("get_waiting_tasks", "server_name,hours_back,limit,as_of")]
     public void ParamContract_MatchesLite(string toolName, string expectedCsv)
     {
