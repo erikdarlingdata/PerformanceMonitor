@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -71,15 +72,23 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
 
     /// <summary>
     /// Gets file I/O latency trend data broken down by file for charting (top 10 files by I/O activity).
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
+    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>). The top-10 ranking (<c>top_files</c>) stays an
+    /// unbucketed scan of the whole call window, exactly as before — only the per-collection SELECT beneath it
+    /// buckets. Latency is a ratio (summed stall over summed operations), not a rate, so unlike throughput it
+    /// needs no interval arithmetic; a <c>rated</c> row is simply one whose stored interval is not the #3540
+    /// sentinel 0, nulled (not filtered) so an unrated row still counts toward <c>collection_count</c> — the
+    /// same reason <see cref="WaitTrendsSql"/> keeps its unrated rows in its CTE instead of excluding them
+    /// outright. <c>HAVING</c> drops a bucket with no rated row, so it stays absent, not 0. When EVERY bucket
+    /// the whole call returned holds exactly one physical collection, each point is stamped at its bucket's raw
+    /// <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged bucket
+    /// anywhere (any file) keeps <c>bucket_start</c> throughout.</para>
     /// </summary>
-    public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-
-        command.CommandText = @"
+    /// <summary>
+    /// The bucketed statement text (#4234), pulled out of <see cref="GetFileIoLatencyTrendAsync"/> so its shape
+    /// is checkable without a live DuckDB.
+    /// </summary>
+    internal static readonly string FileIoLatencyTrendSql = $@"
 WITH top_files AS (
     SELECT database_name, file_name
     FROM v_file_io_stats
@@ -90,53 +99,95 @@ WITH top_files AS (
     GROUP BY database_name, file_name
     ORDER BY SUM(delta_reads + delta_writes) DESC
     LIMIT 10
+),
+rated AS (
+    SELECT
+        f.database_name,
+        f.file_name,
+        f.collection_time,
+        /* #3540: a stored interval of 0 is the calculator's no-delta-knowable marker — nulled here (not
+           filtered in the WHERE) so an unrated row still counts toward collection_count below. IS DISTINCT
+           FROM 0 keeps pre-v60 rows (NULL: interval never recorded), which carry on reading exactly as they
+           always did. */
+        CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN f.delta_reads END AS rated_reads,
+        CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN f.delta_writes END AS rated_writes,
+        CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(f.delta_stall_read_ms AS DOUBLE PRECISION) END AS rated_stall_read_ms,
+        CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(f.delta_stall_write_ms AS DOUBLE PRECISION) END AS rated_stall_write_ms,
+        CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(COALESCE(f.delta_stall_queued_read_ms, 0) AS DOUBLE PRECISION) END AS rated_queued_read_ms,
+        CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(COALESCE(f.delta_stall_queued_write_ms, 0) AS DOUBLE PRECISION) END AS rated_queued_write_ms
+    FROM v_file_io_stats f
+    JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
+    WHERE f.server_id = $1
+    AND   f.collection_time >= $2
+    AND   f.collection_time <= $3
 )
 SELECT
-    f.collection_time,
-    f.database_name,
-    f.file_name,
-    CASE WHEN SUM(f.delta_reads) > 0
-         THEN SUM(CAST(f.delta_stall_read_ms AS DOUBLE PRECISION)) / SUM(f.delta_reads)
-         ELSE 0 END AS avg_read_latency_ms,
-    CASE WHEN SUM(f.delta_writes) > 0
-         THEN SUM(CAST(f.delta_stall_write_ms AS DOUBLE PRECISION)) / SUM(f.delta_writes)
-         ELSE 0 END AS avg_write_latency_ms,
-    CASE WHEN SUM(f.delta_reads) > 0
-         THEN SUM(CAST(COALESCE(f.delta_stall_queued_read_ms, 0) AS DOUBLE PRECISION)) / SUM(f.delta_reads)
-         ELSE 0 END AS avg_queued_read_latency_ms,
-    CASE WHEN SUM(f.delta_writes) > 0
-         THEN SUM(CAST(COALESCE(f.delta_stall_queued_write_ms, 0) AS DOUBLE PRECISION)) / SUM(f.delta_writes)
-         ELSE 0 END AS avg_queued_write_latency_ms
-FROM v_file_io_stats f
-JOIN top_files tf ON tf.database_name = f.database_name AND tf.file_name = f.file_name
-WHERE f.server_id = $1
-AND   f.collection_time >= $2
-AND   f.collection_time <= $3
-/* #3540: a stored interval of 0 is the calculator's no-delta-knowable marker (first sighting,
-   counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
-   confident 0.00 ms a restart used to render. IS DISTINCT FROM 0 keeps pre-v60 rows (NULL: interval
-   never recorded), which carry on reading exactly as they always did. */
-AND   f.sample_interval_seconds IS DISTINCT FROM 0
-GROUP BY f.collection_time, f.database_name, f.file_name
-ORDER BY f.collection_time, f.database_name, f.file_name";
+    database_name,
+    file_name,
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    CASE WHEN SUM(rated_reads) > 0 THEN SUM(rated_stall_read_ms) / SUM(rated_reads) ELSE 0 END AS avg_read_latency_ms,
+    CASE WHEN SUM(rated_writes) > 0 THEN SUM(rated_stall_write_ms) / SUM(rated_writes) ELSE 0 END AS avg_write_latency_ms,
+    CASE WHEN SUM(rated_reads) > 0 THEN SUM(rated_queued_read_ms) / SUM(rated_reads) ELSE 0 END AS avg_queued_read_latency_ms,
+    CASE WHEN SUM(rated_writes) > 0 THEN SUM(rated_queued_write_ms) / SUM(rated_writes) ELSE 0 END AS avg_queued_write_latency_ms,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY database_name, file_name, 3
+HAVING COUNT(rated_reads) > 0
+ORDER BY database_name, file_name, 3";
+
+    public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var _q = TimeQuery("GetFileIoLatencyTrendAsync", "v_file_io_stats top-10 files, bucketed");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = FileIoLatencyTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<FileIoTrendPoint>();
+        var rows = new List<(string DatabaseName, string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency, double QueuedReadLatency, double QueuedWriteLatency)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            if (reader.GetInt64(8) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.GetDateTime(2),
+                reader.GetDateTime(7),
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
+                reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6))));
+        }
+
+        var items = new List<FileIoTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new FileIoTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                FileName = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                AvgReadLatencyMs = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                AvgWriteLatencyMs = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                AvgQueuedReadLatencyMs = reader.IsDBNull(5) ? 0 : ToDouble(reader.GetValue(5)),
-                AvgQueuedWriteLatencyMs = reader.IsDBNull(6) ? 0 : ToDouble(reader.GetValue(6))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                DatabaseName = row.DatabaseName,
+                FileName = row.FileName,
+                AvgReadLatencyMs = row.ReadLatency,
+                AvgWriteLatencyMs = row.WriteLatency,
+                AvgQueuedReadLatencyMs = row.QueuedReadLatency,
+                AvgQueuedWriteLatencyMs = row.QueuedWriteLatency
             });
         }
 
@@ -170,21 +221,19 @@ LIMIT 1";
     /// Divides by each row's stored sample_interval_seconds; a pre-v60 row that never recorded one falls
     /// back to the LAG() over collection_time this read always used (#3540).
     /// <para>#3653 (#3540 rule 1, readers NULL-not-0 on unknowable): the two rate arms end at <c>END</c>,
-    /// not <c>ELSE 0</c>. The outer <c>WHERE interval_seconds IS NOT NULL AND interval_seconds &gt; 0</c>
-    /// already excludes every row the ELSE could have run on, so this is the honest spelling of the arm and
-    /// not a behaviour change — the day the WHERE moves, a row with no knowable interval yields a NULL rate
-    /// rather than a measured 0.00 MB/s. The reader's <c>IsDBNull ? 0</c> on the two rate columns is a
-    /// DBNull-safe belt that the WHERE keeps unreachable. Twin of the Darling Viewer's
-    /// <c>FileIoThroughputTrendSql</c>, edited in the same PR.</para>
+    /// not <c>ELSE 0</c>.</para>
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES. The LAG-derived
+    /// interval is computed once over the RAW per-collection rows (<c>with_interval</c>), before bucketing —
+    /// a bucket's rate is summed bytes over summed rated seconds (time-weighted, never an average of
+    /// per-collection rates), and a bucket with no rated collection is dropped (<c>HAVING</c>), same as the
+    /// per-collection read always dropped that collection. Singleton stamping follows
+    /// <see cref="WaitTrendsSql"/>'s rule.</para>
     /// </summary>
-    public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
-
-        command.CommandText = @"
+    /// <summary>
+    /// The bucketed statement text (#4234), pulled out of <see cref="GetFileIoThroughputTrendAsync"/> so its
+    /// shape is checkable without a live DuckDB.
+    /// </summary>
+    internal static readonly string FileIoThroughputTrendSql = $@"
 WITH top_files AS (
     SELECT database_name, file_name
     FROM v_file_io_stats
@@ -203,8 +252,7 @@ with_interval AS (
         f.delta_read_bytes,
         f.delta_write_bytes,
         /* #3540: the STORED interval where the row has one — 0 (no delta knowable) becomes NULL through
-           NULLIF and the outer WHERE drops the row, exactly as it always dropped the first row per file.
-           NULL (a pre-v60 row that never recorded one) falls back to the LAG this read always used. */
+           NULLIF. NULL (a pre-v60 row that never recorded one) falls back to the LAG this read always used. */
         CASE WHEN f.sample_interval_seconds IS NULL
              THEN EXTRACT(EPOCH FROM (f.collection_time - LAG(f.collection_time) OVER (
                       PARTITION BY f.server_id, f.database_name, f.file_name
@@ -217,34 +265,76 @@ with_interval AS (
     WHERE f.server_id = $1
     AND   f.collection_time >= $2
     AND   f.collection_time <= $3
+),
+rated AS (
+    SELECT
+        collection_time,
+        file_label,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_read_bytes AS DOUBLE PRECISION) END AS rated_read_bytes,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_write_bytes AS DOUBLE PRECISION) END AS rated_write_bytes,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+    FROM with_interval
 )
 SELECT
-    collection_time,
     file_label,
-    CASE WHEN interval_seconds > 0
-         THEN CAST(delta_read_bytes AS DOUBLE PRECISION) / interval_seconds / 1048576.0
-    END AS read_mb_per_sec,
-    CASE WHEN interval_seconds > 0
-         THEN CAST(delta_write_bytes AS DOUBLE PRECISION) / interval_seconds / 1048576.0
-    END AS write_mb_per_sec
-FROM with_interval
-WHERE interval_seconds IS NOT NULL AND interval_seconds > 0
-ORDER BY collection_time, file_label";
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_read_bytes) / SUM(rated_seconds) / 1048576.0 AS read_mb_per_sec,
+    SUM(rated_write_bytes) / SUM(rated_seconds) / 1048576.0 AS write_mb_per_sec,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY file_label, 2
+HAVING COUNT(rated_seconds) > 0
+ORDER BY file_label, 2";
+
+    public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var _q = TimeQuery("GetFileIoThroughputTrendAsync", "v_file_io_stats top-10 files by bytes, bucketed");
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = FileIoThroughputTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<FileIoThroughputPoint>();
+        var rows = new List<(string FileLabel, DateTime BucketStart, DateTime FirstCollectionTime, double ReadMbPerSec, double WriteMbPerSec)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            if (reader.GetInt64(5) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(4),
+                /* ToDouble, not GetDouble: a SUM over bytes can come back as a boxed DuckDB HUGEINT — see
+                   GetWaitStatsTrendsByTypesAsync's own sum columns for the same guard. */
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))));
+        }
+
+        var items = new List<FileIoThroughputPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new FileIoThroughputPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                FileLabel = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ReadMbPerSec = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                WriteMbPerSec = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                FileLabel = row.FileLabel,
+                ReadMbPerSec = row.ReadMbPerSec,
+                WriteMbPerSec = row.WriteMbPerSec
             });
         }
 
@@ -253,47 +343,91 @@ ORDER BY collection_time, file_label";
 
     /// <summary>
     /// Gets file I/O latency trend data for tempdb files only, broken down by file name.
+    /// <para>#4234: bucketed the same way as <see cref="GetFileIoLatencyTrendAsync"/> — see that method's doc
+    /// for the rated/HAVING/singleton-stamping rules; this read has no top-10 ranking pass (tempdb's own file
+    /// count is already small) and no queued-latency columns (this table's caller chart never drew them).
+    /// <c>DatabaseName</c> carries the FILE name here, not the database (always <c>tempdb</c>) — preserved
+    /// exactly as the pre-#4234 reader mapped it, since <c>ServerTab.Charts.UpdateTempDbFileIoChart</c> groups
+    /// its series on that field.</para>
     /// </summary>
+    /// <summary>
+    /// The bucketed statement text (#4234), pulled out of <see cref="GetTempDbFileIoTrendAsync"/> so its shape
+    /// is checkable without a live DuckDB.
+    /// </summary>
+    internal static readonly string TempDbFileIoTrendSql = $@"
+WITH rated AS (
+    SELECT
+        file_name,
+        collection_time,
+        /* #3540: see GetFileIoLatencyTrendAsync's rated CTE for why this nulls rather than filters. */
+        CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN delta_reads END AS rated_reads,
+        CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN delta_writes END AS rated_writes,
+        CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(delta_stall_read_ms AS DOUBLE PRECISION) END AS rated_stall_read_ms,
+        CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN CAST(delta_stall_write_ms AS DOUBLE PRECISION) END AS rated_stall_write_ms
+    FROM v_file_io_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   database_name = 'tempdb'
+)
+SELECT
+    file_name,
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    CASE WHEN SUM(rated_reads) > 0 THEN SUM(rated_stall_read_ms) / SUM(rated_reads) ELSE 0 END AS avg_read_latency_ms,
+    CASE WHEN SUM(rated_writes) > 0 THEN SUM(rated_stall_write_ms) / SUM(rated_writes) ELSE 0 END AS avg_write_latency_ms,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY file_name, 2
+HAVING COUNT(rated_reads) > 0
+ORDER BY file_name, 2";
+
     public async Task<List<FileIoTrendPoint>> GetTempDbFileIoTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
+        using var _q = TimeQuery("GetTempDbFileIoTrendAsync", "v_file_io_stats tempdb files, bucketed");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
-        command.CommandText = @"
-SELECT
-    collection_time,
-    file_name,
-    CASE WHEN SUM(delta_reads) > 0 THEN SUM(CAST(delta_stall_read_ms AS DOUBLE PRECISION)) / SUM(delta_reads) ELSE 0 END AS avg_read_latency_ms,
-    CASE WHEN SUM(delta_writes) > 0 THEN SUM(CAST(delta_stall_write_ms AS DOUBLE PRECISION)) / SUM(delta_writes) ELSE 0 END AS avg_write_latency_ms
-FROM v_file_io_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   database_name = 'tempdb'
-/* #3540: a stored interval of 0 is the calculator's no-delta-knowable marker (first sighting,
-   counter reset, a gap past the policy) — the row is dropped so the point is ABSENT rather than the
-   confident 0.00 ms a restart used to render. IS DISTINCT FROM 0 keeps pre-v60 rows (NULL: interval
-   never recorded), which carry on reading exactly as they always did. */
-AND   sample_interval_seconds IS DISTINCT FROM 0
-GROUP BY collection_time, file_name
-ORDER BY collection_time, file_name";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = TempDbFileIoTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<FileIoTrendPoint>();
+        var rows = new List<(string FileName, DateTime BucketStart, DateTime FirstCollectionTime, double ReadLatency, double WriteLatency)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            if (reader.GetInt64(5) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(4),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))));
+        }
+
+        var items = new List<FileIoTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new FileIoTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                AvgReadLatencyMs = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                AvgWriteLatencyMs = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                DatabaseName = row.FileName,
+                AvgReadLatencyMs = row.ReadLatency,
+                AvgWriteLatencyMs = row.WriteLatency
             });
         }
 

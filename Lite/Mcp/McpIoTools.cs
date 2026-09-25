@@ -89,8 +89,9 @@ public sealed class McpIoTools
 
             /* #3897: two reads, as on Darling. The ranking's length decides the bucket width — five lines and an
                "(other)" line need coarser buckets than two lines do to stay inside the same budget — and the
-               bucketed read charts exactly the series the ranking counted. The desktop chart's per-collection
-               read (GetFileIoLatencyTrendAsync) is untouched: a chart wants every collection. */
+               bucketed read charts exactly the series the ranking counted. The desktop chart's own read
+               (GetFileIoLatencyTrendAsync) is ALSO bucketed now (#4234), to its own per-call budget — a
+               separate read, on a separate clock, from this tool's ranking-driven GetFileIoTrendAsync. */
             var scope = string.IsNullOrWhiteSpace(database_name) ? null : database_name.Trim();
             var series = await dataService.GetFileIoSeriesAsync(resolved.ServerId, hours_back, asOfUtc: windowEnd, scope);
 
