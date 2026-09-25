@@ -923,11 +923,14 @@ public sealed class DarlingWebHostService : BackgroundService
     /// therefore safe with what this host serves today; an endpoint added later that echoes request input
     /// beside a secret in one body would need to opt out.</para>
     ///
-    /// <para>MIME types: the framework defaults (<c>text/html</c>/<c>text/css</c>/JS/etc.). Both providers
-    /// run at <see cref="CompressionLevel.Fastest"/>. JSON (<c>application/json</c>) is NOT added — the
-    /// <c>/api/*</c> routes carry the session cookie alongside attacker-readable paths, so compressing JSON
-    /// beside a fixed secret would open a BREACH oracle. The <c>/api/*</c> responses also carry
-    /// <c>Cache-Control: no-store</c>, which further limits exposure.</para>
+    /// <para>MIME types: the framework defaults (<c>text/html</c>/<c>text/css</c>/JS/etc.) minus
+    /// <c>application/json</c> and <c>text/json</c>. Both providers run at
+    /// <see cref="CompressionLevel.Fastest"/>. JSON is excluded explicitly because
+    /// <see cref="ResponseCompressionDefaults.MimeTypes"/> already includes it — just omitting the
+    /// <c>Append</c> call is not enough. The <c>/api/*</c> routes carry the session cookie alongside
+    /// attacker-readable paths, so compressing JSON beside a fixed secret would open a BREACH oracle.
+    /// The <c>/api/*</c> responses also carry <c>Cache-Control: no-store</c>, which further limits
+    /// exposure.</para>
     /// </summary>
     internal static void ConfigureResponseCompression(IServiceCollection services)
     {
@@ -936,6 +939,11 @@ public sealed class DarlingWebHostService : BackgroundService
             options.EnableForHttps = true;
             options.Providers.Add<BrotliCompressionProvider>();
             options.Providers.Add<GzipCompressionProvider>();
+            // Exclude JSON — BREACH: the /api/* routes reflect attacker-controlled paths alongside the session
+            // cookie. ResponseCompressionDefaults.MimeTypes includes application/json and text/json, so we
+            // must explicitly override the list rather than simply omitting the Append call.
+            options.MimeTypes = ResponseCompressionDefaults.MimeTypes
+                .Except(new[] { "application/json", "text/json" }, StringComparer.OrdinalIgnoreCase);
         });
 
         services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
