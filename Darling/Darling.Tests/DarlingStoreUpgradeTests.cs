@@ -509,6 +509,95 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// The carry step alone (#4253), on this machine, using the current runtime for both the "old" and
+    /// "new" roles — the pairing the second live test in the issue's Ruled comment calls for, distinct from
+    /// the gated real-pg_upgrade test below which needs a genuinely older runtime. Builds an old data
+    /// directory, sets one real value with ALTER SYSTEM, and hand-appends one setting no binaries would
+    /// accept (an unqualified unknown name — ALTER SYSTEM itself refuses that outright, so the only way to
+    /// reproduce a stale cross-major setting is to write the line directly, the way pg_upgrade's untouched
+    /// old file would carry one). Runs <see cref="DarlingStoreUpgrade.CarryAutoConfAsync"/> against a
+    /// separate new data directory, then starts THAT cluster for real and reads the good value back with
+    /// SHOW: the rejected setting cost nothing but itself, and the store starts.
+    /// </summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_CarriesAGoodSetting_LeavesOutOneTheNewBinariesReject_AndTheStoreStarts()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        var bin = Path.Combine(runtimeRoot!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-carry-");
+        var oldDataDirectory = Path.Combine(root.FullName, "old");
+        var newDataDirectory = Path.Combine(root.FullName, "new");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        string? runningDataDirectory = null;
+
+        try
+        {
+            var (oldInitExit, oldInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{oldDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(oldInitExit == 0, $"initdb (old) failed: {oldInitOutput}");
+
+            var oldPort = FindFreeTcpPort();
+            runningDataDirectory = oldDataDirectory;
+            await StartDirectAsync(bin, oldDataDirectory, oldPort, quiesced: false, timeout.Token);
+            var oldOwner = $"Host=127.0.0.1;Port={oldPort};Username=darling;Database=postgres;Pooling=false";
+            await ExecuteOnAsync(oldOwner, "ALTER SYSTEM SET work_mem = '199MB'", timeout.Token);
+            await StopDirectAsync(bin, oldDataDirectory, timeout.Token);
+            runningDataDirectory = null;
+
+            await File.AppendAllTextAsync(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "darling_4253_unknown_setting = 'on'\n", timeout.Token);
+
+            var (newInitExit, newInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{newDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
+
+            var log = new CapturingLogger();
+            var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, bin, timeout.Token);
+
+            Assert.Contains("work_mem", result.CarriedNames);
+            Assert.Contains("darling_4253_unknown_setting", result.RejectedNames);
+
+            var logText = log.ToString();
+            Assert.Contains("Carried work_mem", logText);
+            Assert.Contains("NOT carried: darling_4253_unknown_setting", logText);
+
+            var preUpgradeCopy = Path.Combine(root.FullName, DarlingStoreUpgrade.PreUpgradeAutoConfFileName);
+            Assert.True(File.Exists(preUpgradeCopy), $"expected the pre-upgrade file at {preUpgradeCopy}");
+            Assert.Contains("darling_4253_unknown_setting", await File.ReadAllTextAsync(preUpgradeCopy, timeout.Token));
+
+            var newAutoConf = await File.ReadAllTextAsync(Path.Combine(newDataDirectory, "postgresql.auto.conf"), timeout.Token);
+            Assert.DoesNotContain("darling_4253_unknown_setting", newAutoConf);
+
+            var newPort = FindFreeTcpPort();
+            runningDataDirectory = newDataDirectory;
+            await StartDirectAsync(bin, newDataDirectory, newPort, quiesced: false, timeout.Token);
+            var newOwner = $"Host=127.0.0.1;Port={newPort};Username=darling;Database=postgres;Pooling=false";
+            Assert.Equal("199MB", await ScalarOnAsync(newOwner, "SHOW work_mem", timeout.Token));
+        }
+        finally
+        {
+            if (runningDataDirectory is not null)
+            {
+                await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     private static async Task<string> StartDirectAsync(string binDirectory, string dataDirectory, int port, bool quiesced, CancellationToken cancellationToken)
     {
         var options = $"-p {port} -c listen_addresses=127.0.0.1" + (quiesced ? " -c timescaledb.max_background_workers=0" : string.Empty);
@@ -1599,8 +1688,12 @@ public sealed class DarlingStoreUpgradeTests
                 File.ReadAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory)).Trim());
             var oldConnection = DarlingManagedPostgres.BuildConnectionString(config.Port, password);
 
-            /* ---- 2. Measure the store BEFORE, through the old binaries. ---- */
+            /* ---- 2. Measure the store BEFORE, through the old binaries. An ALTER SYSTEM value here (#4253)
+                    is the operator tuning the upgrade must not silently discard — written straight to
+                    postgresql.auto.conf, so no reload is needed for it to be on disk for the carry step to
+                    find once this cluster stops. ---- */
             await StartWithRuntimeAsync(runtimeRoot, dataDirectory, config.Port, timeout.Token);
+            await ExecuteOnAsync(oldConnection, "ALTER SYSTEM SET work_mem = '199MB'", timeout.Token);
             var before = await MeasureStoreAsync(oldConnection, timeout.Token);
             await StopWithRuntimeAsync(runtimeRoot, dataDirectory, timeout.Token);
 
@@ -1640,6 +1733,10 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.Equal(before.PlanRows, after.PlanRows);
                 Assert.Equal(before.PlanXmlLength, after.PlanXmlLength);
                 Assert.Equal(before.LogChecksum, after.LogChecksum);
+
+                /* #4253: the operator's ALTER SYSTEM value from step 2 survived the real pg_upgrade, read
+                   back through the upgraded store itself rather than just the isolated carry-step test. */
+                Assert.Equal("199MB", await ScalarOnAsync(connectionString, "SHOW work_mem", timeout.Token));
 
                 /* The continuous aggregate is not merely present — it still ANSWERS, which means the
                    TimescaleDB catalog, the materialization hypertable and its chunks all came across. */
