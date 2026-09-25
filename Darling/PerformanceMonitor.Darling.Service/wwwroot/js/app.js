@@ -324,15 +324,15 @@ function refresh() {
 /* The session-expired takeover (#4187): the FIRST read anywhere on the page to report the session is gone (an
    expired/rotated session cookie, no token — see util.js's classifyResponse) replaces the whole shell with a
    sign-in prompt, once, instead of leaving every open panel to separately render its own "signed out" guess
-   that looks like an unrelated failure. `login` is the path the server named (always "/" today — see
-   WriteApiUnauthorizedAsync); falling back to "/" here is only for a body classifyResponse could not parse. */
-function showSignedOutState(message, login) {
+   that looks like an unrelated failure. The sign-in link always navigates to "/" — never the server's 401 body
+   value — so a future proxy or misconfiguration cannot inject an off-site or javascript: URL. */
+function showSignedOutState(message, _login) {
   mount(serverList, []);
   mount(viewList, []);
   mount(statusbar, el("span", { class: "sb-item muted", text: "Signed out" }));
   mount(main, el("div", { class: "strip error", role: "alert" }, [
     (message || "Your session is no longer valid.") + " ",
-    el("a", { href: login || "/", text: "Sign in again" }),
+    el("a", { href: "/", text: "Sign in again" }),
   ]));
 }
 
