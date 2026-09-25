@@ -97,7 +97,13 @@ internal readonly record struct HostStoreFacts(
     int UncompressedChunkCount);
 
 /// <summary>One row of the <c>--check-settings</c> table: a setting's live value, where it came from, what
-/// this host would derive for it right now, and the verdict those two facts collapse to.</summary>
+/// this host would derive for it right now, and the verdict those two facts collapse to.
+/// <see cref="SourceFile"/>/<see cref="SourceLine"/> (round-1 review, Medium 1) are the same file/line
+/// <see cref="SourceDescription"/> already embeds as text for the CLI/local-log surfaces; they exist
+/// separately so <see cref="DarlingStoreHostProfile.FormatSourceForMcp"/> can redact the path for a
+/// remote MCP/web caller without touching <see cref="SourceDescription"/> itself. Default to null/0 —
+/// only the managed-attribution branch of <see cref="DarlingStoreHostProfile.GatherSettingProfilesAsync"/>
+/// ever sets them.</summary>
 internal readonly record struct HostSettingProfile(
     string Name,
     string CurrentValueDisplay,
@@ -105,7 +111,9 @@ internal readonly record struct HostSettingProfile(
     string SourceDescription,
     string DerivedValueDisplay,
     long DerivedValueNormalized,
-    HostSettingVerdict Verdict);
+    HostSettingVerdict Verdict,
+    string? SourceFile = null,
+    int SourceLine = 0);
 
 /// <summary>The whole host/store/settings snapshot one <c>--check-settings</c> run or one service-start log
 /// line reports (#4214).</summary>
@@ -310,6 +318,22 @@ internal static class DarlingStoreHostProfile
     }
 
     /// <summary>
+    /// The managed data directory, refused when it resolves to a UNC path (round-1 review, Low 4): a remote
+    /// MCP/web caller has no way to set <c>postgres.dataDirectory</c> today, but if it is ever configured to a
+    /// UNC path, this process would otherwise reach out to that share AS ITS OWN IDENTITY purely to read a conf
+    /// file for attribution or to stat the volume — an NTLM-relay vector, not just an unwanted network hop.
+    /// Deliberately NOT a change to <see cref="DarlingManagedPostgres.ResolveDataDirectory"/> itself — that
+    /// helper is shared by the writer/provisioning path too, where a UNC data directory is a different, out of
+    /// scope question. Mirrors <c>DarlingManagedPostgres.TryResolveConfPath</c>'s own UNC refusal for an include
+    /// directive.
+    /// </summary>
+    internal static string? TryResolveProfileDataDirectory(PostgresConfig postgres)
+    {
+        var resolved = DarlingManagedPostgres.ResolveDataDirectory(postgres);
+        return resolved.StartsWith(@"\\", StringComparison.Ordinal) ? null : resolved;
+    }
+
+    /// <summary>
     /// The BYO fallback anchor for the "data volume" fact (#4214): a bring-your-own store has no data
     /// directory this process necessarily knows about — <c>postgres.connectionString</c> may point at a
     /// different host entirely. The smallest reasonable call, made explicitly rather than left unhandled:
@@ -317,10 +341,12 @@ internal static class DarlingStoreHostProfile
     /// service's disk rather than the store's. A co-located BYO deployment (Docker Compose, same VM — the
     /// common case) gets a real, useful answer; a genuinely remote store gets a labelled figure instead of a
     /// missing one. Part 2 (get_store_host / the web panel) can revisit this once it has a place to say "this
-    /// may not be the store's own disk" beyond a CLI comment.
+    /// may not be the store's own disk" beyond a CLI comment. A managed store whose data directory resolves to
+    /// a UNC path (Low 4) takes the SAME fallback as BYO — <see cref="TryResolveProfileDataDirectory"/> refuses
+    /// it rather than reaching out to the share.
     /// </summary>
     internal static string ResolveVolumeAnchor(PostgresConfig postgres)
-        => postgres.Managed ? DarlingManagedPostgres.ResolveDataDirectory(postgres) : AppContext.BaseDirectory;
+        => postgres.Managed ? (TryResolveProfileDataDirectory(postgres) ?? AppContext.BaseDirectory) : AppContext.BaseDirectory;
 
     /* ======================================== Store facts (SQL) ========================================== */
 
@@ -549,6 +575,54 @@ WHERE NOT is_compressed";
         }
     }
 
+    /// <summary>The MCP/web-safe rendering of one setting's source (round-1 review, Medium 1). The CLI/local
+    /// surfaces (<see cref="FormatProfileText"/>, <see cref="FormatStartupProfileText"/>, the stale-setting
+    /// warning in <c>DarlingWorker</c>) print <see cref="HostSettingProfile.SourceDescription"/> verbatim,
+    /// which for a managed block or an operator override is a full local filesystem path — fine on a shell the
+    /// operator already has, not fine handed to a remote MCP/web caller. <paramref name="dataDirectory"/> is
+    /// the SAME managed data directory <see cref="GatherSettingProfilesAsync"/> resolved for this call; pass it
+    /// once from the caller and reuse it for every row rather than re-resolving per setting.</summary>
+    internal static string FormatSourceForMcp(HostSettingProfile setting, string? dataDirectory)
+    {
+        if (setting.SourceFile is null)
+        {
+            /* not-managed, unreadable, and bring-your-own sources are already a kind word (pg_settings.source,
+               or one of the fixed unreadable/not-visible/no-block strings) — never a path, so nothing to
+               redact. */
+            return setting.SourceDescription;
+        }
+
+        var kind = setting.Verdict is HostSettingVerdict.Matches or HostSettingVerdict.StaleAfterHardwareChange
+            ? "managed block"
+            : "operator override";
+
+        return FormattableString.Invariant($"{kind} ({SanitizeSourcePathForMcp(setting.SourceFile, dataDirectory)}:{setting.SourceLine})");
+    }
+
+    /// <summary>Redacts a conf file's absolute path to a data-directory-relative path when it lives inside
+    /// <paramref name="dataDirectory"/>, or to the bare file name when it does not (an include living outside
+    /// the data directory, or <paramref name="dataDirectory"/> unresolved) — never a raw absolute path, and
+    /// never a leading <c>..\</c>/<c>../</c> from <see cref="Path.GetRelativePath"/> for an outside file, which
+    /// would still leak the parent directory tree.</summary>
+    private static string SanitizeSourcePathForMcp(string file, string? dataDirectory)
+    {
+        var fullFile = Path.GetFullPath(file);
+        if (dataDirectory is not null)
+        {
+            var fullDataDirectory = Path.GetFullPath(dataDirectory);
+            var withSeparator = fullDataDirectory.EndsWith(Path.DirectorySeparatorChar)
+                ? fullDataDirectory
+                : fullDataDirectory + Path.DirectorySeparatorChar;
+
+            if (fullFile.StartsWith(withSeparator, StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetRelativePath(fullDataDirectory, fullFile);
+            }
+        }
+
+        return Path.GetFileName(fullFile);
+    }
+
     /// <summary>Converts a <c>pg_settings</c> (setting, unit) pair to the normalized unit each row of the
     /// table compares in: whole MB for a memory/WAL setting, the bare count for a connection/worker setting.
     /// Null for an unrecognized unit — the caller reports the row as unreadable rather than guessing.</summary>
@@ -620,7 +694,10 @@ WHERE NOT is_compressed";
             }
         }
 
-        var dataDirectory = postgres.Managed ? DarlingManagedPostgres.ResolveDataDirectory(postgres) : null;
+        /* Round-1 review, Low 4: TryResolveProfileDataDirectory refuses a UNC-resolved data directory (null),
+           which falls through to the dataDirectory-is-null branch below exactly like a bring-your-own store —
+           every setting reports not-managed, and this method never reads a file off the share. */
+        var dataDirectory = postgres.Managed ? TryResolveProfileDataDirectory(postgres) : null;
         var results = new List<HostSettingProfile>(targets.Length);
 
         foreach (var (name, derivedValue, unit) in targets)
@@ -650,7 +727,9 @@ WHERE NOT is_compressed";
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValue);
-            results.Add(new HostSettingProfile(name, currentDisplay, currentValue ?? 0, sourceDescription, derivedDisplay, derivedValue, verdict));
+            results.Add(new HostSettingProfile(
+                name, currentDisplay, currentValue ?? 0, sourceDescription, derivedDisplay, derivedValue, verdict,
+                attribution.File, attribution.Line));
         }
 
         return results;

@@ -31,6 +31,9 @@
     <!-- AN3: the ported PgDrillDownCollector renders plan warnings through McpHelpers.Truncate,
          exactly like both apps' drill-down collectors. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Analysis" />
+    <!-- #4234: the WPF viewer's Wait Stats / Perfmon trend charts bucket in SQL using TrendBudget / TrendBuckets,
+         the same sizing contract Lite (below) already uses for its own MCP-twin reads. -->
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Viewer" />
     <!-- AN4: the Darling service's analysis MCP tools use McpHelpers (Status envelope,
          ValidateHoursBack, JsonOptions, FormatError) exactly like both apps' tools. -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
