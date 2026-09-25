@@ -223,6 +223,7 @@ public static class PgMigrations
         new Migration(141, "collection-caveats", V141Sql),
         new Migration(142, "index-object-stats-server-time", V142Sql),
         new Migration(143, "query-store-interval-latest", V143Sql),
+        new Migration(144, "query-store-interval-wide", V144Sql),
     };
 
     /// <summary>
@@ -2040,6 +2041,129 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
     recorded_at timestamp NOT NULL,
     failure text,
     CONSTRAINT pk_query_store_interval_latest_pending PRIMARY KEY (server_id, collection_time, database_name)
+);";
+
+    /// <summary>
+    /// V144 — the wide latest-snapshot-per-interval table beside V143's (#3953, review D4R + F1 measurement,
+    /// ruled issuecomment-5836972848): every outcome (Regular, Aborted, Exception), every raw column the three new
+    /// reads need except <c>collection_id</c>, <c>server_name</c> and <c>query_plan_text</c> (57 columns). V143's
+    /// own table, coverage and pending tables are untouched — this is three MORE tables, the same shape as V143's
+    /// three, engine-plain, with no backfill. Kept 9 days (F1: the 7-day preset plus a day of margin for an
+    /// interval that can span a day) by the service's retention sweep, on <c>first_execution_time</c>, not this
+    /// migration's concern.
+    ///
+    /// <para><b><c>collect.query_store_interval_wide</c></b>: identity is V143's identity plus
+    /// <c>execution_type_desc</c>, because two outcomes can share every other key. <c>first_execution_time</c>
+    /// stays <c>NOT NULL</c> (M2, ruled) even though this table carries every outcome. <c>fillfactor = 50</c>,
+    /// same as V143's and measured the same way. NO secondary index: F1 measured a window index on this shape
+    /// taking HOT updates to 0%, and every read that would use one is slower on it than the split's plain scan.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_wide_coverage</c></b> and
+    /// <b><c>collect.query_store_interval_wide_pending</c></b>: column-for-column copies of V143's coverage and
+    /// pending tables, so a later gate can parametrize V143's own decision on the table rather than duplicate it
+    /// (ruling, item 5).</para>
+    /// </summary>
+    private const string V144Sql = @"
+/* One row per Query Store interval identity, every outcome. Types and nullability mirror query_store_stats except
+   first_execution_time, which stays NOT NULL here (M2, ruled): the writer's IS NOT NULL filter and coverage-reset
+   safeguard mean the table never silently drops a row raw accepted. fillfactor 50 keeps the open interval's
+   refreshes HOT, as V143's. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide
+(
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    execution_type_desc text,
+    first_execution_time timestamp NOT NULL,
+    last_execution_time timestamp,
+    module_name text,
+    query_text text,
+    query_hash text,
+    execution_count bigint,
+    avg_duration_us bigint,
+    min_duration_us bigint,
+    max_duration_us bigint,
+    avg_cpu_time_us bigint,
+    min_cpu_time_us bigint,
+    max_cpu_time_us bigint,
+    avg_logical_io_reads bigint,
+    min_logical_io_reads bigint,
+    max_logical_io_reads bigint,
+    avg_logical_io_writes bigint,
+    min_logical_io_writes bigint,
+    max_logical_io_writes bigint,
+    avg_physical_io_reads bigint,
+    min_physical_io_reads bigint,
+    max_physical_io_reads bigint,
+    avg_clr_time_us bigint,
+    min_clr_time_us bigint,
+    max_clr_time_us bigint,
+    min_dop bigint,
+    max_dop bigint,
+    avg_query_max_used_memory bigint,
+    min_query_max_used_memory bigint,
+    max_query_max_used_memory bigint,
+    avg_rowcount bigint,
+    min_rowcount bigint,
+    max_rowcount bigint,
+    avg_num_physical_io_reads bigint,
+    min_num_physical_io_reads bigint,
+    max_num_physical_io_reads bigint,
+    avg_log_bytes_used bigint,
+    min_log_bytes_used bigint,
+    max_log_bytes_used bigint,
+    avg_tempdb_space_used bigint,
+    min_tempdb_space_used bigint,
+    max_tempdb_space_used bigint,
+    plan_type text,
+    plan_forcing_type text,
+    is_forced_plan boolean,
+    force_failure_count bigint,
+    last_force_failure_reason text,
+    compatibility_level integer,
+    query_plan_hash text,
+    replica_role text,
+    runtime_stats_interval_id bigint,
+    interval_start_time_utc timestamp
+)
+WITH (fillfactor = 50);
+
+/* NULLS NOT DISTINCT, same reason as V143's: replica_role is NULL off an availability group. execution_type_desc
+   joins the identity because this table, unlike V143's, holds every outcome. No secondary index (F1, measured). */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_wide
+ON collect.query_store_interval_wide
+(
+    server_id,
+    database_name,
+    runtime_stats_interval_id,
+    plan_id,
+    query_id,
+    replica_role,
+    first_execution_time,
+    execution_type_desc
+)
+NULLS NOT DISTINCT;
+
+/* Column-for-column copy of V143's coverage table: this table's own claim, independent of V143's. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_coverage
+(
+    server_id integer NOT NULL,
+    filled_since timestamp NOT NULL,
+    applied_through timestamp NOT NULL,
+    CONSTRAINT pk_query_store_interval_wide_coverage PRIMARY KEY (server_id)
+);
+
+/* Column-for-column copy of V143's pending table: one row per raw batch whose apply to THIS table failed. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
+(
+    server_id integer NOT NULL,
+    collection_time timestamp NOT NULL,
+    database_name text NOT NULL,
+    recorded_at timestamp NOT NULL,
+    failure text,
+    CONSTRAINT pk_query_store_interval_wide_pending PRIMARY KEY (server_id, collection_time, database_name)
 );";
 
     /// <summary>

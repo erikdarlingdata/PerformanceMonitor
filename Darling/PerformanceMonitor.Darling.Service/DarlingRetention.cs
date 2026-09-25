@@ -180,6 +180,17 @@ public static class DarlingRetention
     internal const int QueryStoreIntervalLatestRetentionDays = 15;
 
     /// <summary>
+    /// #3953 (V144): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
+    /// <see cref="QueryStoreIntervalLatestRetentionDays"/> because the two tables serve different readers at
+    /// different windows. Ruled (issuecomment-5836972848, item 2): the table serves windows up to the 7-day preset,
+    /// a Query Store interval can span a day, and the purge keys on <c>first_execution_time</c> — so 8 days is
+    /// exactly the edge for an interval that starts just past the horizon and closes inside a 7-day window; 9 days
+    /// gives a day of margin. Like <see cref="QueryStoreIntervalLatestRetentionDays"/> this is a named constant,
+    /// not a knob, and in no collector schedule.
+    /// </summary>
+    internal const int QueryStoreIntervalWideRetentionDays = 9;
+
+    /// <summary>
     /// #3466 (lane 2): the fleet-sweep tables' horizon — the base data horizon, deliberately, because a
     /// sweep document is a summary OF the base data and a sweep outliving the rows it summarized explains
     /// nothing: its drill-downs dangle and its diffs cite evidence no reader can re-check. Runs and their
@@ -655,6 +666,32 @@ public static class DarlingRetention
                 TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.PendingTableName, "recorded_at"),
                 utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken);
             foreach (var deleted in new[] { intervalLatestDeleted, intervalPendingDeleted })
+            {
+                if (deleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += deleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
+            /* #3953 (V144): the WIDE interval table beside V143's, at its own 9-day horizon
+               (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
+               days (ruled: the wide table serves only the 7-day preset and shorter). Same batched-DELETE shape,
+               same pending-replay horizon reasoning, failure-isolated like every sibling. The table floor the
+               read gate checks (MIN(first_execution_time)) advances automatically as this purge runs. */
+            var intervalWideDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalWide.TableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.TableName, "first_execution_time"),
+                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken);
+            var intervalWidePendingDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalWide.PendingTableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalWide.PendingTableName, "recorded_at"),
+                utcNow.AddDays(-QueryStoreIntervalWideRetentionDays), logger, cancellationToken);
+            foreach (var deleted in new[] { intervalWideDeleted, intervalWidePendingDeleted })
             {
                 if (deleted is not null)
                 {
