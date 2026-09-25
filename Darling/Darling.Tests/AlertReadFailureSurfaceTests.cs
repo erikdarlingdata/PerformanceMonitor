@@ -382,6 +382,12 @@ public sealed class AlertReadFailureSurfaceTests
 
         var counter = new AlertReadFailureCounter();
 
+        /* Seeded before the writers start, as TheNewestFailuresFactsAreNeverABlendOfTwo seeds its bucket
+           (#4312): every observation then sees both parts nonzero, so the liveness check below cannot fail on
+           a reader the scheduler starved until the writers had finished. */
+        counter.RecordReadFailure(Key, "deadlocks", 10);
+        counter.RecordReadFailure(null, "deadlocks", 20);
+
         var writers = new[] { "deadlocks", "mute-rule reload" }
             .Select(name => Task.Factory.StartNew(
                 () =>
@@ -428,9 +434,10 @@ public sealed class AlertReadFailureSurfaceTests
         await Task.WhenAll(writers);
 
         /* The do makes the first observation certain, so a silent pass on that count cannot be the
-           reader never running. observedBothParts stays a liveness check: the subtraction has to have
-           been exercised over two NONZERO parts, which is the only state in which a wrong sampling
-           order can show. */
+           reader never running. The seed above makes every observation, including that first one, see
+           both parts nonzero, so observedBothParts cannot fail on a reader the scheduler starves until
+           the writers finish: the subtraction has been exercised over two NONZERO parts on every
+           observation, which is the only state in which a wrong sampling order can show. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             observedBothParts > 0,
@@ -446,8 +453,8 @@ public sealed class AlertReadFailureSurfaceTests
            population is empty. An exact equality here is what proves the total is the sum of the parts and
            not an independently-maintained number that happens to track them. */
         var settled = counter.ReadFor(Key);
-        Assert.Equal(2 * WritesPerWriter, settled.ServerReadFailures);
-        Assert.Equal(2 * WritesPerWriter, settled.FleetReadFailures);
+        Assert.Equal(2 * WritesPerWriter + 1, settled.ServerReadFailures);
+        Assert.Equal(2 * WritesPerWriter + 1, settled.FleetReadFailures);
         Assert.Equal(
             settled.ServerReadFailures + settled.FleetReadFailures,
             settled.InstanceReadFailures);
