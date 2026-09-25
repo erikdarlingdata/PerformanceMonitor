@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -1460,7 +1461,14 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
         var bodySucceeded = false;
         try
         {
-            var end = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            /* #4274: anchored on the hour, not on the raw minute. The spike sits at the window's LAST
+               collection (n == minutes, below), so the worst-scoring tile it lands in (#3653 A8 option B)
+               is the target-local hour ending at `end`. A raw `TruncateToMinutes(UtcNow)` anchor let that
+               hour's tile hold as few as 1 sample when `UtcNow`'s minute was :00 or :01 — under
+               AnomalyThresholds.MinTileSamples (3) — so EvaluateTiles skipped it and the worst SCORED tile
+               came from the flat 1,500 stretch instead, reporting current_ms_per_sec 1,500, not 3,200. See
+               AnchorEndUtc's doc comment for the fix and the proof matrix in PR #4274's description. */
+            var end = AnchorEndUtc();
             const int minutes = 31 * 24 * 60;
             var start = end.AddMinutes(-minutes);
             var windowStart = end.AddHours(-4);
@@ -1588,6 +1596,29 @@ CROSS JOIN (VALUES (3, 300001::bigint, 'Lock', 'relation'), (0, 1::bigint, 'CPU'
 
     private static DateTime TruncateToMinutes(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
+
+    private static DateTime TruncateToHour(DateTime value) =>
+        DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerHour)), DateTimeKind.Unspecified);
+
+    /// <summary>#4274's test-only clock seam: <c>DARLING_TEST_NOW_UTC</c> (ISO-8601, e.g.
+    /// <c>2026-09-25T00:15:00Z</c>) stands in for <c>DateTime.UtcNow</c> when set, so the wall-clock proof
+    /// matrix in PR #4274 can drive <see cref="AnchorEndUtc"/> at chosen instants without waiting for real
+    /// clock minutes to land there. Unset in every normal run (CI included) — falls through to the real clock.</summary>
+    private static DateTime SimulatedUtcNow()
+    {
+        var raw = Environment.GetEnvironmentVariable("DARLING_TEST_NOW_UTC");
+        return string.IsNullOrEmpty(raw)
+            ? DateTime.UtcNow
+            : DateTime.Parse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+    }
+
+    /// <summary>#4274: the window's END, pinned to the hour instead of the raw minute. Truncating to the
+    /// CURRENT hour and stepping back one minute always lands on :59 of the PRIOR hour — deterministic
+    /// regardless of what minute <see cref="SimulatedUtcNow"/> (or the real clock) happens to read, unlike
+    /// the old <c>TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1)</c>, whose minute-of-hour varied with
+    /// wall-clock time and could land the spike's tile (or, in the blocking test, <c>windowStart</c>'s tile)
+    /// at 1-2 samples — under <c>AnomalyThresholds.MinTileSamples</c> (3) — on roughly a 2-in-60 draw.</summary>
+    private static DateTime AnchorEndUtc() => TruncateToHour(SimulatedUtcNow()).AddMinutes(-1);
 
     private static async Task PlantSeriesAsync(NpgsqlConnection connection, string sql, DateTime start, int spikeFrom, int deadlocksFrom, int minutes, CancellationToken ct)
     {
