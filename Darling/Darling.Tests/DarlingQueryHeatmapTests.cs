@@ -76,7 +76,7 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
             .ToArray();
 
         Assert.Equal(
-            new[] { "server_name", "hours_back", "metric", "database_name", "bucket_minutes", "limit", "as_of" },
+            new[] { "server_name", "hours_back", "metric", "database_name", "bucket_minutes", "limit", "as_of", "full_text" },
             p.Select(x => x.Item1).ToArray());
         Assert.All(p, x => Assert.True(x.Item2, $"{x.Item1} must be optional"));
 
@@ -126,11 +126,13 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
     }
 
     /// <summary>
-    /// The viewer's magnitude CASE, its filters and its 120-character preview, kept verbatim. These decide
-    /// which cell a query lands in, so they are the other half of "the two surfaces agree".
+    /// The viewer's magnitude CASE and its filters, kept verbatim. These decide which cell a query lands in,
+    /// so they are the other half of "the two surfaces agree". The preview WIDTH is not verbatim (#4198): the
+    /// viewer's chart still hardcodes 120, but this read's preview is a bound parameter so the tool can size
+    /// its default under the shared response budget and still offer full_text back up to it.
     /// </summary>
     [Fact]
-    public void HeatmapSql_KeepsTheViewersMagnitudeBands_Filters_AndPreview()
+    public void HeatmapSql_KeepsTheViewersMagnitudeBands_AndFilters()
     {
         var sql = DarlingQueryHeatmapReader.BuildQueryHeatmapSql(HeatmapMetric.Duration);
 
@@ -149,7 +151,9 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
         }
 
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(query_text, 120) AS query_preview", sql, StringComparison.Ordinal);
+        /* Bound, not a literal 120 (#4198) — see HeatmapSql_PreviewWidthIsABoundParameter below. */
+        Assert.Contains("LEFT(query_text, $7) AS query_preview", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("LEFT(query_text, 120)", sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
 
         /* DuckDB's ARG_MAX has no Postgres equivalent; the viewer's replacement is a top-1 window over the

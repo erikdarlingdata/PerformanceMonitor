@@ -31,7 +31,7 @@ public sealed class AvailabilityGroupCountReadTests
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>Plants TWO distinct AGs under one server, so a count/topology pair that "agree" by both
-    /// landing on 0 or both landing on 1 does not pass this — <see cref="DarlingAgReader.AvailabilityGroupCountSql"/>'s
+    /// landing on 0 or both landing on 1 does not pass this — <see cref="PerformanceMonitor.Darling.Storage.DarlingAgStatesReader.ReplicaGroupCountSql"/>'s
     /// doc explains why the database grain and the ORDER BY the topology read carries cannot change the
     /// number either read reports.</summary>
     [Fact]
