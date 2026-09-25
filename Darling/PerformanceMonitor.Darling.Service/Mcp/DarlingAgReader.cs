@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -16,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -34,10 +34,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>Latest collection per server.</b> Each server contributes only the rows from its newest AG collection
 /// (the <c>JOIN ... MAX(collection_time) GROUP BY server_id</c> shape <c>DarlingFleetReader</c> uses for its
-/// latest-snapshot reads). Because the collectors write NO row when a server has no AGs, a server whose AGs were
-/// dropped keeps returning its last non-empty snapshot — so every group carries its
-/// <see cref="AvailabilityGroupView.CollectionTime"/> and the UI shows it, rather than the reader guessing a
-/// staleness threshold.</para>
+/// latest-snapshot reads, now floor-bounded — see <see cref="DarlingAgStatesReader"/>, #4228). Because the
+/// collectors write NO row when a server has no AGs, a server whose AGs were dropped keeps returning its last
+/// non-empty snapshot no matter how old — so every group carries its <see cref="AvailabilityGroupView.CollectionTime"/>
+/// and the UI shows it. <see cref="DarlingAgStatesReader.StalenessHorizon"/> only picks HOW that server's row gets
+/// fetched (its own point read instead of feeding the shared floor); it never gates WHETHER the row comes back.</para>
 ///
 /// <para><b>Banding lives here (R1).</b> Every severity below is derived server-side and serialized with the
 /// result; the browser only maps a severity NAME to a CSS class and never re-derives a threshold. The mappings are
@@ -66,108 +67,14 @@ internal static class DarlingAgReader
         Converters = { new JsonStringEnumConverter() },
     };
 
-    /* ─────────────────────────── SQL (public for dialect pinning) ─────────────────────────── */
+    /* ─────────────────────────── SQL ─────────────────────────── */
 
-    /// <summary>Every replica row from each server's NEWEST AG collection. The inner aggregate picks the latest
-    /// instant per server and the join keeps ALL rows at that instant (not <c>DISTINCT ON</c>, which would keep
-    /// only one replica). Joined to the ENABLED registry, like every other fleet read — a server disabled in the
-    /// control plane leaves the fleet surfaces at once instead of showing stale AG cards until its rows age out.
-    /// $1 an optional server_id filter — NULL means the whole fleet.</summary>
-    public const string ReplicaStatesSql = @"
-SELECT
-    r.server_id,
-    r.server_name,
-    r.collection_time,
-    r.ag_name,
-    r.replica_server_name,
-    r.role_desc,
-    r.is_local,
-    r.operational_state_desc,
-    r.connected_state_desc,
-    r.recovery_health_desc,
-    r.synchronization_health_desc,
-    r.availability_mode_desc,
-    r.failover_mode_desc,
-    r.endpoint_url
-FROM collect.ag_replica_states AS r
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM collect.ag_replica_states
-    WHERE ($1::integer IS NULL OR server_id = $1)
-    GROUP BY server_id
-) AS latest
-    ON r.server_id = latest.server_id
-    AND r.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = r.server_id
-    AND s.is_enabled
-WHERE ($1::integer IS NULL OR r.server_id = $1)
-ORDER BY r.server_name, r.ag_name, r.replica_server_name";
-
-    /// <summary>Every database-grain row from each server's NEWEST AG collection, same latest-snapshot shape as
-    /// <see cref="ReplicaStatesSql"/>. Windowed independently of the replica read: the two collectors run as
-    /// separate sweeps, so their newest instants need not coincide. $1 an optional server_id filter — NULL means
-    /// the whole fleet.</summary>
-    public const string DatabaseReplicaStatesSql = @"
-SELECT
-    d.server_id,
-    d.server_name,
-    d.collection_time,
-    d.ag_name,
-    d.database_name,
-    d.replica_server_name,
-    d.is_local,
-    d.synchronization_state_desc,
-    d.last_hardened_lsn,
-    d.last_commit_lsn,
-    d.log_send_queue_size,
-    d.redo_queue_size,
-    d.log_send_rate,
-    d.redo_rate,
-    d.is_suspended,
-    d.suspend_reason_desc,
-    d.availability_mode_desc,
-    d.secondary_lag_seconds
-FROM collect.ag_database_replica_states AS d
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM collect.ag_database_replica_states
-    WHERE ($1::integer IS NULL OR server_id = $1)
-    GROUP BY server_id
-) AS latest
-    ON d.server_id = latest.server_id
-    AND d.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = d.server_id
-    AND s.is_enabled
-WHERE ($1::integer IS NULL OR d.server_id = $1)
-ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
-
-    /// <summary>The nav-gate probe's query (#4189): the SAME (server, ag) groups <see cref="GetAgHealthAsync"/>
-    /// would build, counted server-side instead of assembled into rows. Only the replica grain — <see cref="Build"/>'s
-    /// group set is defined entirely by the replica rows (a database row whose group has no replica row is
-    /// dropped), so the database-grain table never changes this count and this query does not join it.
-    /// <c>UPPER(COALESCE(r.ag_name, ''))</c> mirrors <see cref="Key"/>'s case fold and its NULL-to-empty-string
-    /// mapping exactly, so this can never disagree with <c>AvailabilityGroupCount</c> for the same snapshot —
-    /// pinned by <c>DarlingAgReaderTests</c>. $1 an optional server_id filter — NULL means the whole fleet.</summary>
-    public const string AvailabilityGroupCountSql = @"
-SELECT COUNT(DISTINCT (r.server_id, UPPER(COALESCE(r.ag_name, ''))))
-FROM collect.ag_replica_states AS r
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM collect.ag_replica_states
-    WHERE ($1::integer IS NULL OR server_id = $1)
-    GROUP BY server_id
-) AS latest
-    ON r.server_id = latest.server_id
-    AND r.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = r.server_id
-    AND s.is_enabled
-WHERE ($1::integer IS NULL OR r.server_id = $1)";
+    /// <summary>The statement text and the two-step, floor-bounded read live in
+    /// <see cref="DarlingAgStatesReader"/> (#4228) — the Viewer's AG tab, <c>/api/ag</c> and this tool all call
+    /// the SAME implementation now, so there is one place, not three, that can disagree about what "the newest
+    /// snapshot" means. <see cref="ReadReplicasAsync"/> / <see cref="ReadDatabasesAsync"/> below map its raw rows
+    /// into this file's <see cref="ReplicaRow"/> / <see cref="DatabaseRow"/>, unchanged from before the move, so
+    /// <see cref="Build"/> and everything downstream of it needed no edit.</summary>
 
     /* ─────────────────────────── the read ─────────────────────────── */
 
@@ -182,36 +89,31 @@ WHERE ($1::integer IS NULL OR r.server_id = $1)";
         DateTime? nowUtc = null,
         CancellationToken cancellationToken = default)
     {
-        var replicas = await ReadReplicasAsync(postgres, serverIdFilter, cancellationToken);
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var replicas = await ReadReplicasAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
         /* Short-circuit: no replica rows means no AGs anywhere in scope, and the database-grain table cannot
            hold rows for an AG that has no replicas. The common case (a fleet with no Always On at all) therefore
            costs exactly one indexed read that returns nothing — this read runs on every dashboard poll. */
         var databases = replicas.Count == 0
             ? new List<DatabaseRow>()
-            : await ReadDatabasesAsync(postgres, serverIdFilter, cancellationToken);
+            : await ReadDatabasesAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
-        return Build(replicas, databases, nowUtc ?? DateTime.UtcNow);
+        return Build(replicas, databases, effectiveNow);
     }
 
     /// <summary>
     /// The nav-gate probe (#4189): "how many availability groups does this scope have", without building a
     /// single <see cref="AvailabilityGroupView"/> to answer it — no per-replica columns, no ORDER BY, no
-    /// database-grain read. One aggregate query (<see cref="AvailabilityGroupCountSql"/>) in place of the
+    /// database-grain read. <see cref="DarlingAgStatesReader.GetReplicaGroupCountAsync"/> in place of the
     /// topology read <see cref="GetAgHealthAsync"/> runs; that read's own <c>AvailabilityGroupCount</c> is
     /// exactly this number for the same scope and instant.
     /// </summary>
-    public static async Task<int> GetAvailabilityGroupCountAsync(
+    public static Task<int> GetAvailabilityGroupCountAsync(
         NpgsqlDataSource postgres,
         int? serverIdFilter = null,
-        CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(AvailabilityGroupCountSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddServerFilter(command, serverIdFilter);
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        return Convert.ToInt32(result ?? 0L);
-    }
+        CancellationToken cancellationToken = default) =>
+        DarlingAgStatesReader.GetReplicaGroupCountAsync(postgres, serverIdFilter, DateTime.UtcNow, cancellationToken);
 
     /// <summary>
     /// Assembles the raw rows into per-(server, AG) groups — pure, so the grouping and every band unit-test
@@ -507,87 +409,42 @@ WHERE ($1::integer IS NULL OR r.server_id = $1)";
 
     /* ─────────────────────────── reads ─────────────────────────── */
 
+    /// <summary>Maps <see cref="DarlingAgStatesReader"/>'s raw rows (#4228) into this file's own
+    /// <see cref="ReplicaRow"/>, field for field, so <see cref="Build"/> and every banding rule below it needed
+    /// no change when the read moved.</summary>
     private static async Task<List<ReplicaRow>> ReadReplicasAsync(
-        NpgsqlDataSource postgres, int? serverIdFilter, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int? serverIdFilter, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new List<ReplicaRow>();
-        await using var command = postgres.CreateCommand(ReplicaStatesSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddServerFilter(command, serverIdFilter);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var raw = await DarlingAgStatesReader.GetReplicaStatesAsync(postgres, serverIdFilter, nowUtc, cancellationToken);
+        var rows = new List<ReplicaRow>(raw.Count);
+        foreach (var row in raw)
         {
             rows.Add(new ReplicaRow(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.GetDateTime(2),
-                Text(reader, 3),
-                Text(reader, 4),
-                Text(reader, 5),
-                Flag(reader, 6),
-                Text(reader, 7),
-                Text(reader, 8),
-                Text(reader, 9),
-                Text(reader, 10),
-                Text(reader, 11),
-                Text(reader, 12),
-                Text(reader, 13)));
+                row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.ReplicaServerName, row.RoleDesc,
+                row.IsLocal, row.OperationalStateDesc, row.ConnectedStateDesc, row.RecoveryHealthDesc,
+                row.SynchronizationHealthDesc, row.AvailabilityModeDesc, row.FailoverModeDesc, row.EndpointUrl));
         }
 
         return rows;
     }
 
+    /// <summary>Same mapping as <see cref="ReadReplicasAsync"/>, for the database grain.</summary>
     private static async Task<List<DatabaseRow>> ReadDatabasesAsync(
-        NpgsqlDataSource postgres, int? serverIdFilter, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int? serverIdFilter, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new List<DatabaseRow>();
-        await using var command = postgres.CreateCommand(DatabaseReplicaStatesSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddServerFilter(command, serverIdFilter);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var raw = await DarlingAgStatesReader.GetDatabaseReplicaStatesAsync(postgres, serverIdFilter, nowUtc, cancellationToken);
+        var rows = new List<DatabaseRow>(raw.Count);
+        foreach (var row in raw)
         {
             rows.Add(new DatabaseRow(
-                reader.GetInt32(0),
-                reader.GetString(1),
-                reader.GetDateTime(2),
-                Text(reader, 3),
-                Text(reader, 4),
-                Text(reader, 5),
-                Flag(reader, 6),
-                Text(reader, 7),
-                Text(reader, 8),
-                Text(reader, 9),
-                Count(reader, 10),
-                Count(reader, 11),
-                Count(reader, 12),
-                Count(reader, 13),
-                Flag(reader, 14),
-                Text(reader, 15),
-                Text(reader, 16),
-                Count(reader, 17)));
+                row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.DatabaseName, row.ReplicaServerName,
+                row.IsLocal, row.SynchronizationStateDesc, row.LastHardenedLsn, row.LastCommitLsn, row.LogSendQueueSize,
+                row.RedoQueueSize, row.LogSendRate, row.RedoRate, row.IsSuspended, row.SuspendReasonDesc,
+                row.AvailabilityModeDesc, row.SecondaryLagSeconds));
         }
 
         return rows;
     }
-
-    /// <summary>Binds the optional server filter as a nullable integer — NULL means the whole fleet, which is what
-    /// the SQL's <c>$1::integer IS NULL OR ...</c> guard reads.</summary>
-    private static void AddServerFilter(NpgsqlCommand command, int? serverIdFilter) =>
-        command.Parameters.Add(new NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer,
-            Value = (object?)serverIdFilter ?? DBNull.Value,
-        });
-
-    private static string? Text(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static bool? Flag(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetBoolean(ordinal);
-
-    private static long? Count(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : Convert.ToInt64(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
 
     /* ─────────────────────────── raw-read carriers ─────────────────────────── */
 
