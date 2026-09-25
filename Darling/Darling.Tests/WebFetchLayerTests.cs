@@ -101,7 +101,7 @@ public sealed class WebFetchLayerTests
     {
         var app = AppJs;
 
-        Assert.Contains("function showSignedOutState(message, login) {", app, StringComparison.Ordinal);
+        Assert.Contains("function showSignedOutState(message, _login) {", app, StringComparison.Ordinal);
         Assert.Contains("onSessionExpired(showSignedOutState);", app, StringComparison.Ordinal);
 
         // route() and refresh() each check the latch as their own first act.
