@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -386,6 +387,18 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// #4231: the raw floor for <c>query_stats</c> over [<paramref name="startUtc"/>, <paramref name="endUtc"/>]
+    /// — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied floor query. The
+    /// Queries tab's <c>LoadTopQueriesAsync</c> reads this beside
+    /// <see cref="GetTopQueriesByCpuAsync"/> so the grid header can disclose a window the raw tier no longer
+    /// fully holds, the same fact <c>get_top_queries_by_cpu</c> reports over MCP.
+    /// </summary>
+    public Task<DateTime?> GetQueryStatsWindowFloorAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Top-Queries comparison — Lite's <c>GetQueryStatsComparisonAsync</c> ported. Unions the top-100

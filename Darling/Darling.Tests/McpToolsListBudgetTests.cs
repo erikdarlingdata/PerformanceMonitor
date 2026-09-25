@@ -142,6 +142,14 @@ public sealed class McpToolsListBudgetTests
        of active_queries (#4261) + object_locking (#4258) changes on top of dev. */
     /* #4198 (collection_log, merge): re-measured after merging origin/dev (dev now includes #4261+#4258);
        combined total with collection_log (#4265) changes on top. */
+    /* #4231: get_top_queries_by_cpu and get_top_procedures_by_cpu gained window_truncated / effective_start /
+       effective_hours_back, but unlike get_query_store_top's #2364 disclosure, the served head is unchanged:
+       these two are shared with Lite, and McpToolGuideTests's twin pin
+       (EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads) requires their served
+       heads stay byte-identical to Lite's until Lite's own #4279 ships the same disclosure — a Darling-only
+       head sentence would fail that pin on this side regardless of merge order. The full clause
+       (McpHelpers.WindowTruncatedDescription) lands in each tool's get_tool_guide tail instead, which this
+       ceiling does not count. Net zero bytes here; the per-tool lines below are unchanged from dev. */
     /* #4198 (blocking, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265);
        combined total with blocking (#4267) changes on top. */
     /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
@@ -159,6 +167,10 @@ public sealed class McpToolsListBudgetTests
        shared 32 KB budget and is not a served description either. */
     /* #4198 (qs-top, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266+#4268+#4272);
        combined total with qs-top (#4273) changes on top. */
+    /* #4231 (merge): re-measured after merging origin/dev (dev now includes #4267+#4264 on top of the base
+       #4231 branched from); combined total unchanged from the merge base since #4231 added no head bytes. */
+    /* #4231 (merge after #4273): re-measured after merging origin/dev (dev now includes #4272+#4273); #4231
+       still adds no head bytes, so the total is dev's own. */
     private const int TotalCeilingBytes = 174_373;
 
 
