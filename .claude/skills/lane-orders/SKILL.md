@@ -136,12 +136,11 @@ census, one of them introduced by that night's own wave).
    - `listen_addresses = '127.0.0.1'`
    - `timescaledb.max_background_workers` and `max_worker_processes`, as CI's `darling-pg` job sets them.
    - `timezone = 'UTC'` and `log_timezone = 'UTC'`. initdb takes the machine's time zone, but CI's runners run
-     in UTC, and a rig must match CI. On 2026-09-25, `ServerListAndSummaryPlanShapeTests` failed on two rigs
-     in America/New_York and passed on a rig switched to UTC and in CI. `CaptureDownChunkOrderTests` failed on
-     local rigs even in UTC and passes in CI, cause unknown. A rig in UTC does not excuse a failure: CI still
-     decides whose it is.
+     in UTC, and a rig must match CI. On 2026-09-25, time-sensitive live tests failed on rigs in
+     America/New_York, and a clean full run on a UTC rig passed all of them. A rig in UTC does not excuse a
+     failure: CI still decides whose it is.
    - Change `postgresql.conf` before you start the server. A restart during a running suite breaks that run's
-     results.
+     results, and so does a re-run on the database that run left behind.
 4. Check the port is free. Start the server in the background, because `pg_ctl -w start` hangs a tool call, and
    confirm "ready to accept connections" in the log.
 5. Create `darlingtest` for the suite, and a separate `probe` database for hand-run SQL. A suite database reused
