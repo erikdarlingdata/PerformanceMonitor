@@ -610,6 +610,48 @@ public sealed class FleetSweepWebFeedTests
             host, StringComparison.Ordinal);
     }
 
+    /* ---- #4283: the two sweep GETs carry no local catch; the #4281 backstop answers instead ------------- */
+
+    /// <summary>
+    /// #4283 supersedes #4286 round-1 review, Low 3: rather than <c>/api/sweeps/latest</c> and
+    /// <c>/api/sweeps/{id}</c> each carrying its own <c>DarlingWebFailureLog</c> catch, #4283 removes every
+    /// route's local catch project-wide, so the #4281 top-of-pipeline backstop
+    /// (<c>ReadDispatchCatch_AnswersTheRuledBodyAndStatus_NotFormatError</c> in
+    /// <see cref="DarlingWebFailureHandlingTests"/> pins the dispatcher's twin of this same backstop) answers
+    /// every unhandled throw from these two GETs the same ruled way. Neither handler may reach for
+    /// <c>ex.Message</c> on its own, because neither has an <c>ex</c> to reach for. Source pin, not a
+    /// TestServer test: producing a genuine store fault needs a broken NpgsqlDataSource this file otherwise
+    /// never builds.
+    /// </summary>
+    [Fact]
+    public void TheSweepReads_HaveNoLocalCatch_NotExMessage()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingFleetSweepEndpoints.cs");
+
+        AssertNoLocalCatch(raw, "/api/sweeps/latest", "\"/api/sweeps/latest\"");
+        AssertNoLocalCatch(raw, "/api/sweeps/{id:long}", "\"/api/sweeps/{id:long}\"");
+    }
+
+    /// <summary>Slices ONE MapGet's body out of the endpoint file (from its route literal to the next
+    /// MapGet, or end of file for the last one) and asserts it has no local catch and never writes
+    /// <c>ex.Message</c> to the wire -- the shape #4283 leaves so the #4281 backstop is the only thing that
+    /// answers an unhandled throw here. Boundaries are found in RAW source, because the route literal itself
+    /// is plain string CONTENT that <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> blanks; the
+    /// slice is then stripped before the content assertions, so a doc comment mentioning "catch" or
+    /// "ex.Message" (this file's own review-note comments do) cannot produce a false failure.</summary>
+    private static void AssertNoLocalCatch(string raw, string routeForMessage, string routeLiteral)
+    {
+        var start = raw.IndexOf(routeLiteral, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{routeForMessage}'s MapGet was not found; this pin is reading nothing.");
+
+        var nextMapGet = raw.IndexOf("app.MapGet(", start + routeLiteral.Length, StringComparison.Ordinal);
+        var end = nextMapGet >= 0 ? nextMapGet : raw.Length;
+        var body = CSharpSourceWalker.StripCommentsAndStrings(raw[start..end]);
+
+        Assert.DoesNotContain("catch", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ex.Message", body, StringComparison.Ordinal);
+    }
+
     /* ---- helpers --------------------------------------------------------------------------------------- */
 
     /// <summary>Parses a flat <c>key: "value",</c> object literal out of frontend source — the

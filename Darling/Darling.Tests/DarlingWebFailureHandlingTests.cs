@@ -231,6 +231,20 @@ public sealed class DarlingWebFailureHandlingTests
             return Task.CompletedTask;
         });
 
+        app.MapGet("/api/__test/bad-request", (HttpContext _) =>
+            throw new BadHttpRequestException("Request body too large.", StatusCodes.Status413PayloadTooLarge));
+
+        app.MapGet("/api/__test/abort-io", (HttpContext context) =>
+        {
+            /* #4286 review, Low 2: the OTHER shape Kestrel gives for a client abort during a body read --
+               not OperationCanceledException, but an IOException (a TCP reset, or "The client reset the
+               request stream." on HTTP/2). context.Abort() is what actually cancels RequestAborted here (a
+               real reset would too), so the filter under test sees a cancelled token, exactly like the
+               #4276 handler's OperationCanceledException case above. */
+            context.Abort();
+            throw new IOException("The client reset the request stream.");
+        });
+
         await app.StartAsync();
         return (app.GetTestServer(), capturing.Inner);
     }
@@ -313,6 +327,130 @@ public sealed class DarlingWebFailureHandlingTests
 
         using var reader = new StreamReader(ctx.Response.Body);
         Assert.Equal(string.Empty, await reader.ReadToEndAsync());
+    }
+
+    /// <summary>
+    /// #4286 review, Low 2: Kestrel does not always report a client abort as OperationCanceledException -- a
+    /// TCP reset or an HTTP/2 stream reset during a body read surfaces as IOException instead, and the old
+    /// filter (OperationCanceledException only) let that fall to the generic Exception arm, which used to
+    /// write an unthrottled Error line for a caller who was already gone. The route aborts the connection
+    /// itself (cancelling RequestAborted, the same signal a real reset gives) and then throws IOException --
+    /// the filter must take it the same way it takes OperationCanceledException.
+    ///
+    /// <para>TestServer surfaces context.Abort() as its OWN OperationCanceledException out of SendAsync --
+    /// the harness's client-side reaction to the connection it simulates being torn down, independent of how
+    /// the SERVER-side pipeline (the backstop under test) handled the IOException the route threw right
+    /// after aborting. That fault is expected and swallowed here; what this test actually checks is the
+    /// logger the host and the backstop share, which reflects what the pipeline did regardless of what the
+    /// client saw.</para>
+    /// </summary>
+    [Fact]
+    public async Task BrowserAbort_AsIOException_WritesNoErrorLine()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        try
+        {
+            await Send(server, "/api/__test/abort-io");
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected -- see the summary above. */
+        }
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal("(no log lines captured)", logger.Joined);
+    }
+
+    /* ═══════════════════════════ the wired pipeline: BadHttpRequestException (#4281 review, finding 3) ═══════════════════════════ */
+
+    /// <summary>
+    /// Kestrel throws BadHttpRequestException for a malformed or oversized request body -- a client can
+    /// trigger it on purpose at no cost. Before this fix it fell into the generic catch and cost a 500 plus
+    /// an Error line per request. It must answer its OWN status code, write no body beyond what Kestrel
+    /// itself would have written, and log at Debug only -- never Error or Warning.
+    /// </summary>
+    [Fact]
+    public async Task BadHttpRequestException_AnswersItsOwnStatus_WritesNoBody_LogsAtDebugNeverError()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/__test/bad-request");
+
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, ctx.Response.StatusCode);
+
+        using var reader = new StreamReader(ctx.Response.Body);
+        Assert.Equal(string.Empty, await reader.ReadToEndAsync());
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Debug));
+    }
+
+    /* ═══════════════════════════ WebApplicationOptions.EnvironmentName (#4281 review, finding 4; #4286 review, Low 1 + Low 6) ═══════════════════════════ */
+
+    /// <summary>
+    /// #4286 review, Low 6: the test this replaced built its OWN WebApplicationOptions with
+    /// EnvironmentName = Environments.Production -- it proved the framework's override mechanism, not this
+    /// service's code, and stayed green even if the real call site's EnvironmentName line were deleted. It
+    /// also set ASPNETCORE_ENVIRONMENT/DOTNET_ENVIRONMENT process-wide with no test-collection guard (this
+    /// project does not disable parallel test execution), which could flip another class's host to
+    /// Development mid-run -- for example DarlingWebHostGateLiveTests or DarlingMcpHostGateLiveTests, which
+    /// build hosts with no environment set of their own -- and its `finally` set both variables to null
+    /// rather than restoring whatever they held before the test ran.
+    ///
+    /// <para>A source pin instead, reading the ACTUAL CreateBuilder call each host runs: with no
+    /// EnvironmentName set, an ASPNETCORE_ENVIRONMENT or DOTNET_ENVIRONMENT of "Development" left set
+    /// anywhere on the machine -- a leftover from testing something unrelated -- would add the developer
+    /// exception page ahead of the Host guard on the dashboard port, or ahead of the Host guard and the
+    /// bearer check on the MCP port (#4286 review, Low 1), handing a caller with NO credentials the exception
+    /// message and stack trace for any throw that escapes. Both hosts must pin it independently -- one
+    /// pinning only the dashboard host leaves the MCP port exposed, which is exactly the gap Low 1 reports.</para>
+    /// </summary>
+    [Fact]
+    public void BothWebHosts_PinEnvironmentNameToProduction_OnTheirOwnCreateBuilderCall()
+    {
+        var webHost = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs"));
+        Assert.Contains(
+            "EnvironmentName = Environments.Production,", webHost, StringComparison.Ordinal);
+
+        var mcpHost = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs"));
+        Assert.Contains(
+            "EnvironmentName = Environments.Production,", mcpHost, StringComparison.Ordinal);
+    }
+
+    /* ═══════════════════════════ source pin: the /api/read/* dispatcher catch (#4281 review, finding 2) ═══════════════════════════ */
+
+    /// <summary>
+    /// The /api/read/* dispatcher's own catch (a binding-layer throw, not a tool's own swallowed exception --
+    /// those still answer through ToHttpResult's ServerError arm, #4283) used to fall through to
+    /// McpHelpers.FormatError(name, ex), putting the exception text on the wire. It must answer the same
+    /// ruled body and status the top-of-pipeline backstop gives. Source pin, not an HTTP test: every real read
+    /// defensively TryParse's its own query params, so there is no natural binding-layer throw to send a
+    /// request at.
+    /// </summary>
+    [Fact]
+    public void ReadDispatchCatch_AnswersTheRuledBodyAndStatus_NotFormatError()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs"));
+
+        var loopStart = code.IndexOf("foreach (var (name, handler) in BuildReadDispatch", StringComparison.Ordinal);
+        Assert.True(loopStart >= 0, "MapAll no longer builds the /api/read/* dispatch loop this pin is reading.");
+
+        var loopEnd = code.IndexOf("return ToHttpResult(result,", loopStart, StringComparison.Ordinal);
+        Assert.True(loopEnd >= 0, "The dispatch loop no longer falls through to ToHttpResult; this pin is reading nothing.");
+
+        var catchBlock = code[loopStart..loopEnd];
+
+        Assert.Contains("DarlingWebFailureLog.Body(ex)", catchBlock, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebFailureLog.StatusCode(ex)", catchBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("McpHelpers.FormatError(name, ex)", catchBlock, StringComparison.Ordinal);
     }
 
     /* ═══════════════════════════ source pin: registered ahead of every /api/* route ═══════════════════════════ */

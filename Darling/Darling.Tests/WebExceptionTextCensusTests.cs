@@ -34,8 +34,12 @@ namespace Darling.Tests;
 /// census that the web host never builds an HTTP answer from a caught exception's own text (an allow-list of
 /// the two sites where the text is either safely contained or genuinely needed), unit tests for the new
 /// sentence-based half of <see cref="DarlingWebFailureLog"/> and <see cref="DarlingWebEndpoints.ToHttpResult"/>,
-/// and one live test proving a REAL tool-caught statement_timeout answers 503 with no exception text.
+/// and one live test proving a REAL tool-caught statement_timeout answers 503 with no exception text. The live
+/// test opens DARLING_TEST_PG directly (no ScratchPostgres, no own cluster), so the class carries
+/// <c>[Collection("live-postgres")]</c> alongside every other class that reaches the shared store
+/// (<see cref="LivePostgresCollectionHygieneTests"/>'s own census).
 /// </summary>
+[Collection("live-postgres")]
 public sealed class WebExceptionTextCensusTests
 {
     /* ═══════════════════════════ the census ═══════════════════════════ */

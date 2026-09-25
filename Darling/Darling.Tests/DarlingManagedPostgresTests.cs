@@ -427,8 +427,8 @@ public sealed class DarlingManagedPostgresTests
            assertion below vacuously true, and a reflection filter that stopped matching is exactly the
            silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
            thirteen as of #3899 (v13 statement statistics); fourteen as of #3909 (v14 PostgreSQL 17
-           maintenance_work_mem limit). */
-        Assert.Equal(14, markers.Length);
+           maintenance_work_mem limit); fifteen as of #4246 (v15 WAL compression). */
+        Assert.Equal(15, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -1919,6 +1919,78 @@ public sealed class DarlingManagedPostgresTests
         }
     }
 
+    /* ===================== v15 WAL compression (#4246) ===================== */
+
+    /// <summary>
+    /// The v15 block (#4246): <c>wal_compression = lz4</c> only. See
+    /// <see cref="DarlingManagedPostgres.ConfMarkerV15"/> for why the checkpoint interval is held rather than
+    /// shipped here, and why the block deliberately says nothing about <c>max_wal_size</c>.
+    /// </summary>
+    [Fact]
+    public void WalVolumeConfAppend_PinsV15Marker_AndSetsCompression()
+    {
+        var block = DarlingManagedPostgres.BuildWalVolumeConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV15, block, StringComparison.Ordinal);
+        Assert.Equal("lz4", LastSettingValue(block, "wal_compression"));
+
+        /* No fingerprint or stamp line, or the v8/v12 staleness checks would misread what they scan. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, block, StringComparison.Ordinal);
+
+        /* v12 (#3802) is still the only thing that ever sets these: this block leaves the disk-derived
+           ceiling exactly where it is. checkpoint_timeout stays out too -- the interval is held, not shipped
+           (#4246's amended ruling), so this pin catches either one landing here by accident. */
+        Assert.Null(LastSettingValue(block, "max_wal_size"));
+        Assert.Null(LastSettingValue(block, "min_wal_size"));
+        Assert.Null(LastSettingValue(block, "checkpoint_completion_target"));
+        Assert.Null(LastSettingValue(block, "checkpoint_timeout"));
+    }
+
+    /// <summary>The generic per-setting source scan (#4214) walks every marker in this list; a block absent
+    /// from it would be invisible to that scan even though it is live.</summary>
+    [Fact]
+    public void ConfMarkerV15_IsInAllManagedConfMarkers()
+        => Assert.Contains(DarlingManagedPostgres.ConfMarkerV15, DarlingManagedPostgres.AllManagedConfMarkers);
+
+    /// <summary>
+    /// The heal on real files (#4246): a cluster whose conf carries every earlier marker but not v15 gains
+    /// exactly one v15 block, with <c>wal_compression</c> live in the file, and a second start appends nothing
+    /// more -- the same once-only shape v9-v11 and v13 prove elsewhere (<see
+    /// cref="FreshConfHeal_KeepsTimescaleInThePreloadList_AndASecondHealAppendsNoSecondV13"/>), exercised here
+    /// through the real <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string
+    /// concatenation.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_AppendsV15Once_AndNotAgainOnANextStart()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v15-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5994));
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5994, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var first = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV15));
+            Assert.Equal("lz4", LastSettingValue(first, "wal_compression"));
+
+            pg.EnsureConfAppended(dataDirectory);
+            var second = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV15));
+            Assert.Equal("lz4", LastSettingValue(second, "wal_compression"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     /* ===================== v12 wal sizing (#3802) ===================== */
 
     private const long OneGb = 1024L * 1024 * 1024;
@@ -2522,7 +2594,8 @@ public sealed class DarlingManagedPostgresTests
                 await connection.OpenAsync(timeout.Token);
                 using var current = new NpgsqlCommand(
                     "SELECT current_database(), current_user, current_setting('max_worker_processes'), current_setting('work_mem'), current_setting('shared_buffers'), " +
-                    "pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(@confMaintenance)",
+                    "pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(@confMaintenance), " +
+                    "current_setting('wal_compression')",
                     connection);
                 current.Parameters.AddWithValue("confMaintenance", confMaintenanceWorkMem);
                 using var reader = await current.ExecuteReaderAsync(timeout.Token);
@@ -2545,6 +2618,13 @@ public sealed class DarlingManagedPostgresTests
                    the same setting and a failed string compare (seen live on a large-RAM runner). */
                 Assert.Equal(reader.GetInt64(6), reader.GetInt64(5));
                 Assert.NotEqual(64L * 1024 * 1024, reader.GetInt64(5));
+
+                /* #4246: the v15 block is LIVE, not merely written -- wal_compression takes effect from
+                   postgresql.conf on a reload (superuser-context, not sighup, but reload-eligible all the
+                   same) and this is the very start that appended it, so a fresh cluster proves it without a
+                   separate reload. Not the PostgreSQL stock default (off). checkpoint_timeout is untouched:
+                   the interval is held, not shipped (#4246's amended ruling). */
+                Assert.Equal("lz4", reader.GetString(7));
             }
 
             /* Second EnsureRunning against the live server: idempotent — no re-init (credential
