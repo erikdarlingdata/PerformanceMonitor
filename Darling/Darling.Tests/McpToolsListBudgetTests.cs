@@ -91,10 +91,10 @@ public sealed class McpToolsListBudgetTests
        tools/list and so is not counted here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
-    /* #4198: +495 bytes for get_analysis_findings' new limit/full_text parameters, plus its head sentence
-       noting the default page cap and text previews; both parameter descriptions are under the D2 200-char
-       cap and the rest of the guidance moved to the tool's tail (get_tool_guide), not counted here. */
-    private const int TotalCeilingBytes = 172_214;
+    /* #4198: +364 bytes for get_analysis_findings' new limit/full_text parameters (the head is unchanged —
+       both parameter descriptions are under the D2 200-char cap and the guidance moved to the tool's tail,
+       get_tool_guide, which is not served in tools/list and so is not counted here). */
+    private const int TotalCeilingBytes = 172_083;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
