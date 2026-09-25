@@ -124,7 +124,10 @@ FROM generate_series(0, $5) AS n", connection) { CommandTimeout = 300 })
                 {
                     Assert.Equal("vacuum", entry.GetProperty("family").GetString());
                     Assert.Equal("missing_schema", entry.GetProperty("outcome").GetString());
-                    Assert.Contains("pg_autovacuum_stats", entry.GetProperty("message").GetString(), StringComparison.Ordinal);
+                    Assert.DoesNotContain("pg_autovacuum_stats", entry.GetProperty("message").GetString(), StringComparison.Ordinal);
+                    Assert.Equal(
+                        "PostgresException, SQLSTATE 42P01; a table or column the read needs is missing, logged only at Debug level",
+                        entry.GetProperty("message").GetString());
                 });
                 Assert.Contains(entries, entry => entry.GetProperty("read").GetString() == "ReadAutovacuumBacklogAsync");
 
