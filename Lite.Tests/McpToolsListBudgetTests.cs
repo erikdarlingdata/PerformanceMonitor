@@ -85,7 +85,15 @@ public sealed class McpToolsListBudgetTests
        which is not served in tools/list and so is not counted here. Matches Darling's twin change exactly. */
     /* #4198: +353 bytes for get_analysis_findings' new limit/full_text parameters (the head is unchanged).
        Matches Darling's twin change (minus the small per-SKU serialization difference). */
-    private const int TotalCeilingBytes = 90_234;
+/* #4198 (get_plan_corrections): +137 bytes, matching Darling's twin change exactly — the new full_text
+       opt-in parameter only (the head is unchanged; the preview explanation lives in the tail get_tool_guide
+       serves). Default row limit dropped 50 -> 25 and the preview 2,000 chars -> 150; neither is a served
+       description, so neither counts here. */
+    /* #4198 (lane TB): +253 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). Darling's twin grew by a different amount (+364): Darling's description also
+       covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
+    private const int TotalCeilingBytes = 90_624;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

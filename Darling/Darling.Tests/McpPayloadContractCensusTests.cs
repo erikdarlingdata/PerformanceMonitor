@@ -1523,6 +1523,10 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_analysis_findings' confidence_basis — a near-fixed methodology sentence repeated on every finding (StoryConfidence.DescribeBasis) — previews to 160 characters (FindingTextPreviewLength) by default; full_text returns it whole"),
         ("advice_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' advice.investigation / advice.remediation — free prose repeated on every finding — preview to 160 characters by default; full_text returns both whole. remediation_command is never previewed at any setting, so it carries no *_truncated key of its own"),
+        ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
+            "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
@@ -1536,6 +1540,8 @@ public sealed class McpPayloadContractCensusTests
         ("query_text_may_be_truncated", ["DarlingMcpPgBlockingTools.cs"],
             "the statement text cut at COLLECTION to the collector's per-row text cap (track_activity_query_size on the target is the other cutter) — the store never held the rest"),
     ];
+
+
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
     [
@@ -1629,7 +1635,7 @@ public sealed class McpPayloadContractCensusTests
 
         var unclassified = found.Keys.Where(k => k != "truncated" && !classified.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
         Assert.True(unclassified.Count == 0,
-            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a homonym joins CutHomonyms with what it actually is: "
+            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a wide field's own preview cut joins FieldPreviewCutKeys as <field>_truncated; a homonym joins CutHomonyms with what it actually is: "
             + string.Join("; ", unclassified.Select(k => $"{k} on {string.Join(", ", found[k])}")));
 
         var gone = classified.Keys.Where(k => !found.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();

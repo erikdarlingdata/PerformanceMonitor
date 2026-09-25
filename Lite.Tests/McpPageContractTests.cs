@@ -122,6 +122,66 @@ public sealed class McpPageContractTests : IClassFixture<SharedDuckDbFixture>, I
         AssertPage(cut, "deadlocks", "deadlocks_returned", returned: 1, truncated: true);
     }
 
+    /// <summary>
+    /// #4198: deadlock_graph_xml is the wide field here — Darling's twin
+    /// (<c>DarlingMcpDeadlockDetailBudgetLiveTests</c>) measured 120,454 bytes for 3 real production graphs
+    /// (about 40 KB/graph). Plants five graphs near that width (the worst realistic default page, limit's
+    /// default) and asserts the default call previews them under <see cref="McpResponseBudget.DefaultBytes"/>,
+    /// and that <c>full_graph: true</c> opts back into the whole XML.
+    /// </summary>
+    [Fact]
+    public async Task GetDeadlockDetail_Default_StaysUnderResponseBudget_WithFiveWideGraphs()
+    {
+        var now = WholeSecondsNow();
+        var graphXml = BuildWideDeadlockGraphXml(approxLength: 42_000);
+        for (var i = 0; i < 5; i++)
+        {
+            await ExecAsync(@"
+INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                _nextId--, Naive(now.AddMinutes(-i)), _serverId, ServerName, Naive(now.AddMinutes(-i)), $"process{i}", "DELETE FROM Posts", graphXml);
+        }
+
+        var defaultJson = await McpBlockingTools.GetDeadlockDetail(_dataService, _serverManager, ServerName);
+        var root = Parse(defaultJson);
+        AssertPage(root, "deadlocks", "deadlocks_returned", returned: 5, truncated: false);
+        Assert.All(root.GetProperty("deadlocks").EnumerateArray(), d =>
+        {
+            Assert.True(d.GetProperty("deadlock_graph_xml_truncated").GetBoolean());
+            Assert.True(d.GetProperty("deadlock_graph_xml").GetString()!.Length < graphXml.Length);
+        });
+
+        var defaultBytes = System.Text.Encoding.UTF8.GetByteCount(defaultJson);
+        Assert.True(defaultBytes < McpResponseBudget.DefaultBytes,
+            $"get_deadlock_detail's default call is {defaultBytes:N0} bytes over five planted {graphXml.Length:N0}-char graphs, at or over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+
+        var fullJson = await McpBlockingTools.GetDeadlockDetail(_dataService, _serverManager, ServerName, 24, 5, full_graph: true);
+        var fullRoot = Parse(fullJson);
+        Assert.All(fullRoot.GetProperty("deadlocks").EnumerateArray(), d =>
+        {
+            Assert.False(d.GetProperty("deadlock_graph_xml_truncated").GetBoolean());
+            Assert.Equal(graphXml, d.GetProperty("deadlock_graph_xml").GetString());
+        });
+    }
+
+    /// <summary>Builds an XML string near <paramref name="approxLength"/> characters, ASCII only so its
+    /// length and its UTF-8 byte count stay close (production deadlock graphs are almost entirely ASCII:
+    /// object names, wait-resource strings, T-SQL).</summary>
+    private static string BuildWideDeadlockGraphXml(int approxLength)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("<deadlock><victim-list><victimProcess id=\"process0\"/></victim-list><process-list>");
+        var i = 0;
+        while (sb.Length < approxLength)
+        {
+            sb.Append($"<process id=\"process{i}\" waitresource=\"KEY: 5:72057594057{i:D8}\"><inputbuf>UPDATE dbo.Posts SET Score = Score + 1 WHERE Id = {i};</inputbuf></process>");
+            i++;
+        }
+
+        sb.Append("</process-list><resource-list><keylock objectname=\"StackOverflow.dbo.Posts\"/></resource-list></deadlock>");
+        return sb.ToString();
+    }
+
     [Fact]
     public async Task GetBlockedProcessReports_TruncationIsObservedAtTheBoundary()
     {
