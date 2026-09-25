@@ -120,13 +120,13 @@ public sealed partial class ViewerDataService
                 "database resource usage");
 
     /// <summary>
-    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the HOURLY relation <paramref name="coverage"/>
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the relation <paramref name="coverage"/>
     /// resolves for <paramref name="windowStartUtc"/> (#3653 A6): <see cref="RollupCoverage.StitchedRelationSql"/>
-    /// stitches the legacy <c>query_stats_db_hourly</c> to its interval-honest successor
-    /// <c>query_stats_db_interval_hourly</c> at the successor's floor, or names the legacy alone where there is no
-    /// successor — the SAME single-relation text the one-argument overload builds, with an <c>AS f</c> alias the
-    /// stitch needs (harmless: neither CTE qualifies a column, so the alias changes no result). The daily is not
-    /// stitched because it has no successor yet (<see cref="TimescaleSupport.SupersededHourlyRollups"/>).
+    /// stitches the legacy <c>query_stats_db_hourly</c>/<c>query_stats_db_daily</c> to its interval-honest
+    /// successor at the successor's floor (F for hourly, F_d for daily), or names the legacy alone where there is
+    /// no successor — the SAME single-relation text the one-argument overload builds, with an <c>AS f</c> alias
+    /// the stitch needs (harmless: neither CTE qualifies a column, so the alias changes no result). The tier
+    /// CHOICE stays on the legacy pair; only the relation within the chosen tier can stitch.
     /// </summary>
     public static string DatabaseResourceUsageSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
@@ -136,7 +136,7 @@ public sealed partial class ViewerDataService
                 WorkloadCteRaw,
                 WorkloadCteForCagg(tier == RetentionTier.Hourly
                     ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
-                    : $"collect.{TimescaleSupport.QueryStatsDbDailyView} AS f"),
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "database resource usage");
 
     /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy hourly, unstitched.</summary>
@@ -148,7 +148,7 @@ public sealed partial class ViewerDataService
                 ConsumerCteForCagg($"collect.{(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView)} AS f"),
                 "top consumers by total");
 
-    /// <summary>Top consumers (by total) over the stitched hourly relation (#3653 A6) — see
+    /// <summary>Top consumers (by total) over the stitched relation (#3653 A6) — see
     /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
     public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
@@ -158,7 +158,7 @@ public sealed partial class ViewerDataService
                 ConsumerCteRaw,
                 ConsumerCteForCagg(tier == RetentionTier.Hourly
                     ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
-                    : $"collect.{TimescaleSupport.QueryStatsDailyView} AS f"),
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "top consumers by total");
 
     /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy hourly, unstitched.</summary>
@@ -170,7 +170,7 @@ public sealed partial class ViewerDataService
                 ConsumerCteForCagg($"collect.{(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView)} AS f"),
                 "top consumers by average");
 
-    /// <summary>Top consumers (by average) over the stitched hourly relation (#3653 A6) — see
+    /// <summary>Top consumers (by average) over the stitched relation (#3653 A6) — see
     /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
     public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
@@ -180,7 +180,7 @@ public sealed partial class ViewerDataService
                 ConsumerCteRaw,
                 ConsumerCteForCagg(tier == RetentionTier.Hourly
                     ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
-                    : $"collect.{TimescaleSupport.QueryStatsDailyView} AS f"),
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "top consumers by average");
 
     public const string DatabaseResourceUsageSql = @"
