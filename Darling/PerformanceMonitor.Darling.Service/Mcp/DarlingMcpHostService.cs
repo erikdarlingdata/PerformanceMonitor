@@ -22,6 +22,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -403,7 +404,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
                scope — the supervisor may keep the app running across many poll ticks. */
-            var postgres = NpgsqlDataSource.Create(storeConnectionString);
+            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
             _appDataSource = postgres;
 
             /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
