@@ -169,6 +169,27 @@ public partial class DuckDbFactCollector : IFactCollector
         return facts;
     }
 
+    /// <summary>
+    /// audit_config's own collection (#4192, Darling parity): exactly the config, hardware, memory and
+    /// database-size families — CONFIG_CTFP/MAXDOP/MAX_MEMORY_MB/MAX_WORKER_THREADS, SERVER_EDITION,
+    /// SERVER_HARDWARE, MEMORY_TOTAL_PHYSICAL_MB, DATABASE_TOTAL_SIZE_MB — none of the other families
+    /// <see cref="CollectFactsAsync"/> runs, and no anomaly detector or scorer after it. No coverage witness
+    /// runs here either: every fact below is a latest-snapshot read, which is why audit_config already
+    /// discards WindowCoverage. <see cref="LatestValueBounds.EnsureAsync"/> still runs, so the two
+    /// latest-value reads bind the same per-collector cadence bound the full pass gives them.
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(AnalysisContext context)
+    {
+        var facts = new List<Fact>();
+        await LatestValueBounds.EnsureAsync(_duckDb, _collectorFrequencyMinutes, context);
+        await CollectServerConfigFactsAsync(context, facts);
+        await CollectServerMetadataFactsAsync(context, facts);
+        await CollectServerPropertiesFactsAsync(context, facts);
+        await CollectMemoryFactsAsync(context, facts);
+        await CollectDatabaseSizeFactAsync(context, facts);
+        return facts;
+    }
+
     // Single BigInteger-tolerant impl lives in BlockingPairRowQuery (shared with the pair-row reader);
     // delegate so the check isn't duplicated.
     private static long ToInt64(object value) => BlockingPairRowQuery.ToInt64(value);
