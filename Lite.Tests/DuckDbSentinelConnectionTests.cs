@@ -7,9 +7,11 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -451,6 +453,82 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         await readerTask;
 
         File.Open(_dbPath, FileMode.Open, FileAccess.Read, FileShare.None).Dispose();
+    }
+
+    /// <summary>
+    /// #4262 round 4. Before this fix, <c>Dispose</c>'s <c>using var trimTimerStopped</c> disposed the wait
+    /// handle the instant its 1s <c>WaitOne</c> timed out, even though the tick it was waiting on was still
+    /// running. When that tick later finished, the runtime signals the SAME handle from a thread-pool thread
+    /// (<c>TimerQueueTimer.SignalNoCallbacksRunning</c>), which throws <see cref="ObjectDisposedException"/>
+    /// against the closed <c>SafeWaitHandle</c> there. Holds a real trim tick past the 1s wait with
+    /// <see cref="DuckDbInitializer.TestTrimTickHoldGate"/>, disposes, confirms <c>Dispose</c> returned
+    /// promptly instead of hanging behind the still-running tick, then releases the tick and confirms that
+    /// exact exception never fires once the runtime signals the handle.
+    ///
+    /// <para><b>Confirmed failing on the old <c>using var trimTimerStopped</c> shape</b> — reverting to it
+    /// and running this test alone reproduced precisely the failure this fix exists to prevent: a
+    /// <see cref="AppDomain.CurrentDomain"/>-level <c>[FATAL ERROR] System.ObjectDisposedException</c>
+    /// ("Object name: 'Microsoft.Win32.SafeHandles.SafeWaitHandle'") from
+    /// <c>System.Threading.TimerQueueTimer.SignalNoCallbacksRunning()</c> on a thread-pool worker thread —
+    /// the exact stack the finding describes. On this runtime it did not tear down the whole test process
+    /// (the exception surfaces as a first-chance event rather than terminating), which is why this test
+    /// hooks <see cref="AppDomain.FirstChanceException"/> rather than <see cref="AppDomain.UnhandledException"/>
+    /// (that event never fired against the old shape either) — the first-chance hook is what actually
+    /// observed the bug when this test was written and run against the reverted code.</para>
+    /// </summary>
+    [Fact]
+    public async Task Dispose_TrimTickStillRunningPastTheWait_ReturnsPromptlyAndNeverSignalsADisposedHandle()
+    {
+        var originalInterval = DuckDbInitializer.TrimInterval;
+        DuckDbInitializer.TrimInterval = TimeSpan.FromMilliseconds(20);
+        DuckDbInitializer.TestTrimTickEntered = new ManualResetEventSlim(false);
+        DuckDbInitializer.TestTrimTickHoldGate = new ManualResetEventSlim(false);
+
+        var safeWaitHandleDisposedExceptions = new ConcurrentBag<Exception>();
+        void OnFirstChance(object? sender, FirstChanceExceptionEventArgs e)
+        {
+            if (e.Exception is ObjectDisposedException ode &&
+                ode.ObjectName == typeof(Microsoft.Win32.SafeHandles.SafeWaitHandle).FullName)
+            {
+                safeWaitHandleDisposedExceptions.Add(e.Exception);
+            }
+        }
+        AppDomain.CurrentDomain.FirstChanceException += OnFirstChance;
+
+        var initializer = new DuckDbInitializer(_dbPath);
+        try
+        {
+            Assert.True(DuckDbInitializer.TestTrimTickEntered.Wait(TimeSpan.FromSeconds(5)),
+                "Trim tick never started");
+
+            var stopwatch = Stopwatch.StartNew();
+            var ex = Record.Exception(() => initializer.Dispose());
+            stopwatch.Stop();
+
+            Assert.Null(ex);
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+                $"Dispose took {stopwatch.Elapsed} — it should give up on the still-running tick after ~1s, not hang");
+
+            /* The tick is still parked on the gate; only now does it finish and the runtime signal the
+               handle Dispose left open for it. */
+            DuckDbInitializer.TestTrimTickHoldGate.Set();
+
+            /* Give the thread pool a moment to run the tick's completion, including the runtime's own
+               signal of the handle Dispose decided not to dispose. */
+            await Task.Delay(TimeSpan.FromSeconds(1));
+
+            Assert.Empty(safeWaitHandleDisposedExceptions);
+        }
+        finally
+        {
+            AppDomain.CurrentDomain.FirstChanceException -= OnFirstChance;
+            DuckDbInitializer.TestTrimTickHoldGate?.Set();
+            DuckDbInitializer.TestTrimTickEntered?.Dispose();
+            DuckDbInitializer.TestTrimTickEntered = null;
+            DuckDbInitializer.TestTrimTickHoldGate?.Dispose();
+            DuckDbInitializer.TestTrimTickHoldGate = null;
+            DuckDbInitializer.TrimInterval = originalInterval;
+        }
     }
 
     /// <summary>

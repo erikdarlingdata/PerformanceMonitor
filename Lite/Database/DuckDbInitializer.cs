@@ -85,6 +85,16 @@ public class DuckDbInitializer : IDisposable
     internal static TimeSpan TrimInterval = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// Test-only hooks for holding a trim tick "in flight" past <see cref="Dispose"/>'s 1s wait (#4262
+    /// round 4), so a test can force that exact race deterministically instead of needing real timing luck.
+    /// Both null in production. <see cref="TestTrimTickEntered"/> is set the moment a tick starts, so a test
+    /// knows it is safe to call <see cref="Dispose"/>; <see cref="TestTrimTickHoldGate"/> is waited on before
+    /// the tick returns, so a test controls exactly when the tick finishes.
+    /// </summary>
+    internal static ManualResetEventSlim? TestTrimTickEntered;
+    internal static ManualResetEventSlim? TestTrimTickHoldGate;
+
+    /// <summary>
     /// Coordinates every DuckDB caller in the process against MAINTENANCE — CHECKPOINT, the archive
     /// export and its DELETEs, compaction, the in-place parquet swap, schema migration — each of which
     /// reorganizes the database file, or the paths under it, while other statements are running. Read
@@ -357,6 +367,7 @@ public class DuckDbInitializer : IDisposable
 
     private void OnTrimTimerTick(object? state)
     {
+        TestTrimTickEntered?.Set();
         try
         {
             RunMemoryTrimCycle();
@@ -367,6 +378,10 @@ public class DuckDbInitializer : IDisposable
         }
         finally
         {
+            /* Test-only (#4262 round 4): block here until a test releases the gate, so Dispose's 1s wait
+               can be made to time out on a real, still-running tick on demand. No-op in production. */
+            TestTrimTickHoldGate?.Wait();
+
             /* Self-reschedule rather than a repeating period — see _trimTimer's doc comment. Dispose may
                have already disposed the timer from another thread while this tick was running. */
             try
@@ -589,9 +604,13 @@ public class DuckDbInitializer : IDisposable
            either, same reason as the rest of Dispose. */
         try
         {
-            using var trimTimerStopped = new ManualResetEvent(false);
-            _trimTimer.Dispose(trimTimerStopped);
-            trimTimerStopped.WaitOne(TimeSpan.FromSeconds(1));
+            var trimTimerStopped = new ManualResetEvent(false);
+            if (_trimTimer.Dispose(trimTimerStopped) && trimTimerStopped.WaitOne(TimeSpan.FromSeconds(1)))
+            {
+                trimTimerStopped.Dispose();
+            }
+            /* else: a tick outlived the wait (or the timer was already disposed) - the runtime still signals
+               this handle when the tick ends, so it must stay open; the finalizer reclaims it (#4262). */
         }
         catch (Exception ex)
         {
