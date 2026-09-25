@@ -3200,6 +3200,54 @@ public sealed class DarlingManagedPostgresTests
         Assert.True(runningCheck > orphanStop, "the orphan stop must run BEFORE IsRunningAsync, or a leftover trial server is read as the store already running");
     }
 
+    /// <summary>
+    /// #4280 item 1: the real-start fallback exists for a "trial-passed" carry alone, and never for a
+    /// cancellation the caller itself requested — a service stop during the first real start after an
+    /// upgrade must not read as "the start failed" and fall back to dropping settings that already passed
+    /// their trial. <see cref="DarlingManagedPostgres.ShouldFallBackToHeaderOnly"/> is the catch clause's own
+    /// <c>when</c> filter, tested directly because a live cancelled start needs a running cluster the source
+    /// pin below cannot exercise.
+    /// </summary>
+    [Theory]
+    [InlineData(DarlingStoreUpgrade.AutoConfCarryStateTrialPassed, false, true)]
+    [InlineData(DarlingStoreUpgrade.AutoConfCarryStateTrialPassed, true, false)]
+    [InlineData(DarlingStoreUpgrade.AutoConfCarryStateCarrying, false, false)]
+    public void ShouldFallBackToHeaderOnly_TrialPassedAndNotCancelled_IsTheOnlyTrueCase(string state, bool cancelled, bool expected)
+    {
+        var marker = new DarlingStoreUpgrade.AutoConfCarryMarker(state, Array.Empty<string>());
+        using var cts = new CancellationTokenSource();
+        if (cancelled)
+        {
+            cts.Cancel();
+        }
+
+        Assert.Equal(expected, DarlingManagedPostgres.ShouldFallBackToHeaderOnly(marker, cts.Token));
+    }
+
+    /// <summary>A null marker (no carry in progress — the overwhelmingly common start) is never a fallback
+    /// case, same as before this fix.</summary>
+    [Fact]
+    public void ShouldFallBackToHeaderOnly_NullMarker_IsFalse()
+    {
+        Assert.False(DarlingManagedPostgres.ShouldFallBackToHeaderOnly(null, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// #4280 item 1: pins that the real-start fallback's own filter is
+    /// <see cref="DarlingManagedPostgres.ShouldFallBackToHeaderOnly"/> and not a restated inline condition —
+    /// a future edit to the condition has one place to change, so the catch clause and the behavioral tests
+    /// above can never drift apart.
+    /// </summary>
+    [Fact]
+    public void EnsureRunningAsync_RealStartFallback_FiltersThroughShouldFallBackToHeaderOnly()
+    {
+        var source = ReadManagedPostgresSource();
+
+        Assert.Contains(
+            "catch (Exception) when (ShouldFallBackToHeaderOnly(autoConfCarryMarker, cancellationToken))",
+            source, StringComparison.Ordinal);
+    }
+
     private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")
     {
         var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");

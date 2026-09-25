@@ -2482,6 +2482,13 @@ public sealed class DarlingManagedPostgres
         return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
     }
 
+    /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested
+    /// cancellation. A service stop during the first real start after an upgrade must not drop settings that passed
+    /// their trial.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static bool ShouldFallBackToHeaderOnly(DarlingStoreUpgrade.AutoConfCarryMarker? marker, CancellationToken cancellationToken) =>
+        marker is { State: DarlingStoreUpgrade.AutoConfCarryStateTrialPassed } && !cancellationToken.IsCancellationRequested;
+
     /// <summary>
     /// The whole first-run story, idempotent: locate/unpack the runtime, initdb if the data
     /// directory has no cluster, self-heal the conf append, start the server if nothing is
@@ -2640,15 +2647,18 @@ public sealed class DarlingManagedPostgres
             {
                 await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
             }
-            catch (Exception) when (autoConfCarryMarker is { State: DarlingStoreUpgrade.AutoConfCarryStateTrialPassed })
+            catch (Exception) when (ShouldFallBackToHeaderOnly(autoConfCarryMarker, cancellationToken))
             {
                 /* #4280 item 2: the trial proved these names alone, on a private port with its own SSL
                    options — the real start can still fail for a reason outside that scope (the configured
                    port, the actual network exposure, timing). One retry on an empty postgresql.auto.conf,
                    the same recovery the trial's own combined check uses; a second failure throws as-is,
                    unwrapped, same as before this fallback existed. */
+                /* autoConfCarryMarker! — ShouldFallBackToHeaderOnly above already proved this non-null (its
+                   whole first clause is a null-checking pattern match on it); the compiler cannot see that
+                   through the opaque method call the way it narrows an inline `is {...}` pattern. */
                 await _storeUpgrade.ResetAutoConfCarryAsync(
-                    _dataDirectory, autoConfCarryMarker.Value,
+                    _dataDirectory, autoConfCarryMarker!.Value,
                     "the real start failed even though these settings passed an isolated trial");
                 await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
             }
