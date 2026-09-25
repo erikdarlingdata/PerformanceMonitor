@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -36,6 +37,44 @@ public class DuckDbInitializer : IDisposable
     /// no caller can open in the gap between the file coming down and the sentinel reflecting it.</para>
     /// </summary>
     private DuckDBConnection? _sentinel;
+
+    /// <summary>
+    /// Trims the sentinel's memory back down periodically (#4262 round 1 finding 1). The sentinel keeps
+    /// DuckDB's buffer pool resident for the app's life — up to <c>memory_limit</c> in <see cref="ConnectionString"/>
+    /// — where a pre-sentinel <see cref="CreateConnection"/> released it back to the OS on every close.
+    /// Measured on a 1,049 MB store: one full-width 7-day read left the process at 1,074 MB, still 1,067 MB
+    /// after 60s idle, versus 56 MB with no sentinel. Self-rescheduling (<c>Change</c> at the end of each
+    /// tick, not a repeating period) so a slow cycle can never overlap the next one and touch the shared
+    /// <see cref="_sentinel"/> connection from two threads at once. Created in the constructor so
+    /// <see cref="Dispose"/> can always stop it, whether or not <see cref="InitializeAsync"/> ever ran.
+    /// </summary>
+    private readonly Timer _trimTimer;
+
+    /// <summary>
+    /// The sentinel's memory usage, in bytes, above which the trim timer takes the write lock and cycles
+    /// <c>memory_limit</c> down and back up (#4262 round 1 finding 1). Not const — a test lowers this so a
+    /// database with only a few MB of real data still crosses it, instead of needing to manufacture 256 MB
+    /// of actual buffer-pool pressure. Mutable, process-wide state: a test that lowers it must restore the
+    /// original value when done.
+    /// </summary>
+    internal static long TrimThresholdBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// What the trim cycle sets <c>memory_limit</c> to before setting it back to the value parsed out of
+    /// <see cref="ConnectionString"/> (#4262 round 1 finding 1) — low enough that DuckDB's buffer manager
+    /// actually evicts pages rather than merely capping future growth. The review's own repro used 32MB and
+    /// measured 169ms round-trip; 64MB is used here to leave more headroom for a database with genuinely
+    /// large working metadata.
+    /// </summary>
+    internal const string TrimTargetMemoryLimit = "64MB";
+
+    /// <summary>
+    /// How often the trim timer checks the sentinel's memory usage (#4262 round 1 finding 1). Not const —
+    /// read fresh by the constructor, so a test can lower it before constructing a
+    /// <see cref="DuckDbInitializer"/>; most tests instead call <see cref="RunMemoryTrimCycle"/> directly
+    /// rather than waiting on the real timer.
+    /// </summary>
+    internal static TimeSpan TrimInterval = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// Coordinates every DuckDB caller in the process against MAINTENANCE — CHECKPOINT, the archive
@@ -152,9 +191,11 @@ public class DuckDbInitializer : IDisposable
         }
         catch (LockRecursionException)
         {
-            /* The current thread already owns a read lock — likely leaked by an unhandled
-               exception that prevented Dispose(). Since we're already protected by a read lock,
-               return a no-op disposable so the caller can proceed normally. */
+            /* The current thread already owns a read lock — likely leaked by an unhandled exception
+               that prevented Dispose() — OR already owns the write lock (#4262 round 1 finding 3): a
+               writer already has every guarantee a reader would get, so this is the same "already
+               protected" case, not a bug to surface. Either way, return a no-op disposable so the caller
+               proceeds normally. */
             return NoOpDisposable.Instance;
         }
         return new LockReleaser(s_dbLock, write: false);
@@ -299,6 +340,169 @@ public class DuckDbInitializer : IDisposable
         _databasePath = databasePath;
         _logger = logger;
         _archivePath = Path.Combine(Path.GetDirectoryName(databasePath) ?? ".", "archive");
+
+        /* #4262 round 1 finding 1. The callback no-ops while _sentinel is null (before InitializeAsync,
+           or after Dispose), so starting this here rather than in ReopenSentinel costs nothing and keeps
+           Dispose's "stop the timer" guarantee unconditional. */
+        _trimTimer = new Timer(OnTrimTimerTick, null, TrimInterval, Timeout.InfiniteTimeSpan);
+    }
+
+    private void OnTrimTimerTick(object? state)
+    {
+        try
+        {
+            RunMemoryTrimCycle();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle failed");
+        }
+        finally
+        {
+            /* Self-reschedule rather than a repeating period — see _trimTimer's doc comment. Dispose may
+               have already disposed the timer from another thread while this tick was running. */
+            try
+            {
+                _trimTimer.Change(TrimInterval, Timeout.InfiniteTimeSpan);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Checks the sentinel's current memory usage and, if it is over <see cref="TrimThresholdBytes"/>,
+    /// cycles <c>memory_limit</c> down to <see cref="TrimTargetMemoryLimit"/> and back up to force DuckDB's
+    /// buffer manager to release cached pages (#4262 round 1 finding 1). Internal so a test can call this
+    /// directly instead of waiting on <see cref="_trimTimer"/>'s real interval.
+    /// </summary>
+    internal void RunMemoryTrimCycle()
+    {
+        /* Snapshot rather than repeated field reads: a concurrent ResetDatabaseAsync/Dispose can set
+           _sentinel to null (or a new instance) between any two reads here, and ObjectDisposedException
+           from a torn read is expected, not a bug — this cycle just skips and tries again in
+           TrimInterval. */
+        var sentinel = _sentinel;
+        if (sentinel is null)
+            return;
+
+        double? beforeBytes;
+        try
+        {
+            beforeBytes = ReadSentinelMemoryUsageBytes(sentinel);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle: could not read sentinel memory usage");
+            return;
+        }
+
+        if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
+            return;
+
+        /* Never wait — a reader must never block behind the trim (#4262 round 1 finding 1). If the write
+           lock is busy, skip this cycle; the next one TrimInterval later gets another try. */
+        if (!s_dbLock.TryEnterWriteLock(0))
+        {
+            _logger?.LogDebug(
+                "Trim cycle: skipped, write lock unavailable ({BeforeMb:F0} MB in use)",
+                beforeBytes.Value / (1024.0 * 1024.0));
+            return;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            /* Re-read under the lock: _sentinel can't change underneath us now (s_dbLock is exclusive),
+               but Dispose could have released it between the unlocked read above and taking this lock. */
+            var lockedSentinel = _sentinel;
+            if (lockedSentinel is null)
+                return;
+
+            var configuredMemoryLimit = ConfiguredMemoryLimit;
+
+            using (var cmd = lockedSentinel.CreateCommand())
+            {
+                cmd.CommandText = $"SET memory_limit='{TrimTargetMemoryLimit}'";
+                cmd.ExecuteNonQuery();
+            }
+            using (var cmd = lockedSentinel.CreateCommand())
+            {
+                cmd.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
+                cmd.ExecuteNonQuery();
+            }
+
+            stopwatch.Stop();
+            var afterBytes = ReadSentinelMemoryUsageBytes(lockedSentinel);
+            _logger?.LogDebug(
+                "Trim cycle: {BeforeMb:F0} MB -> {AfterMb:F0} MB in {ElapsedMs}ms (memory_limit {Target} -> {Configured})",
+                beforeBytes.Value / (1024.0 * 1024.0),
+                (afterBytes ?? 0) / (1024.0 * 1024.0),
+                stopwatch.ElapsedMilliseconds,
+                TrimTargetMemoryLimit,
+                configuredMemoryLimit);
+        }
+        finally
+        {
+            s_dbLock.ExitWriteLock();
+        }
+    }
+
+    /// <summary>
+    /// Reads the sentinel's current memory usage in bytes (#4262 round 1 finding 1). Prefers
+    /// <c>duckdb_memory()</c>, which reports raw bytes; falls back to <c>pragma_database_size()</c>'s
+    /// <c>memory_usage</c> column if the first fails (an older bundled DuckDB without the table function).
+    /// Returns null if neither can be read — a busy or torn connection is a "skip this cycle", not an error.
+    /// </summary>
+    private double? ReadSentinelMemoryUsageBytes(DuckDBConnection connection)
+    {
+        try
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT sum(memory_usage_bytes) FROM duckdb_memory()";
+            var result = cmd.ExecuteScalar();
+            if (result != null && result != DBNull.Value)
+                return Convert.ToDouble(result);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle: duckdb_memory() unavailable, falling back to pragma_database_size()");
+        }
+
+        try
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT memory_usage FROM pragma_database_size()";
+            var result = cmd.ExecuteScalar();
+            if (result != null && result != DBNull.Value)
+                return Convert.ToDouble(result);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Trim cycle: could not read sentinel memory usage");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The <c>memory_limit</c> the trim cycle restores after trimming — parsed out of
+    /// <see cref="ConnectionString"/> rather than repeated as a second "1GB" literal, so the two can never
+    /// drift apart (#4262 round 1 finding 1).
+    /// </summary>
+    private string ConfiguredMemoryLimit
+    {
+        get
+        {
+            foreach (var part in ConnectionString.Split(';'))
+            {
+                var eq = part.IndexOf('=');
+                if (eq > 0 && part[..eq].Trim().Equals("memory_limit", StringComparison.OrdinalIgnoreCase))
+                    return part[(eq + 1)..].Trim();
+            }
+            return "1GB"; // unreachable — ConnectionString always sets memory_limit
+        }
     }
 
     /// <summary>
@@ -331,11 +535,82 @@ public class DuckDbInitializer : IDisposable
     /// Closes the sentinel connection so the database file is free to move or delete once the app is
     /// shutting down (#4262). Safe to call more than once and safe to call before the sentinel was ever
     /// opened — both collapse to <see cref="ReleaseSentinel"/>'s existing no-op cases.
+    ///
+    /// <para><b>Never throws, and never waits unboundedly (#4262 round 1 finding 2).</b> This runs on the
+    /// UI thread from <c>MainWindow_Closing</c>, so the old unbounded <c>AcquireWriteLock()</c> could hang
+    /// the window close behind an in-flight archival or compaction. Bounded to
+    /// <see cref="DisposeWriteLockTimeout"/>, and on a timeout the sentinel is released anyway — a closing
+    /// app has nobody left to protect from a torn read, and a leaked handle would block the file from ever
+    /// being deleted or moved. Calls <see cref="s_dbLock"/> directly rather than <see cref="AcquireWriteLock"/>,
+    /// which throws <see cref="TimeoutException"/> on its own timeout path — exactly what Dispose must not do.</para>
     /// </summary>
     public void Dispose()
     {
-        using var writeLock = AcquireWriteLock();
-        ReleaseSentinel();
+        /* Stop the trim timer (#4262 round 1) unconditionally, before the lock attempt below — even if
+           that attempt times out, nothing should still be checking memory on a sentinel this call is
+           trying to close. Timer.Dispose is safe to call more than once. */
+        _trimTimer?.Dispose();
+
+        try
+        {
+            /* If this thread already holds a read lock, TryEnterWriteLock does not return false — it
+               throws LockRecursionException immediately, since s_dbLock is NoRecursion. Check first and
+               release without the lock in that case: nothing else can be reorganizing the file while this
+               thread holds a read lock, because a write can't be in flight at the same time. */
+            if (s_dbLock.IsReadLockHeld)
+            {
+                ReleaseSentinelWithoutLock();
+                return;
+            }
+
+            if (s_dbLock.TryEnterWriteLock(DisposeWriteLockTimeout))
+            {
+                try
+                {
+                    ReleaseSentinel();
+                }
+                finally
+                {
+                    s_dbLock.ExitWriteLock();
+                }
+            }
+            else
+            {
+                _logger?.LogWarning(
+                    "Dispose timed out after {Timeout} waiting for the write lock; releasing the sentinel without it",
+                    DisposeWriteLockTimeout);
+                ReleaseSentinelWithoutLock();
+            }
+        }
+        catch (Exception ex)
+        {
+            /* Dispose must never throw — this runs on the UI thread's Closing handler, where an exception
+               would abort shutdown (#4262 round 1 finding 2). */
+            _logger?.LogError(ex, "Dispose failed while releasing the DuckDB sentinel");
+        }
+    }
+
+    /// <summary>
+    /// How long <see cref="Dispose"/> waits for the write lock before giving up and releasing the sentinel
+    /// unprotected (#4262 round 1 finding 2). Short and fixed: unlike <see cref="LocalDataService"/>'s
+    /// configurable write-lock budget, there is no host to declare a different number for — this is the
+    /// one caller that runs on a UI thread during shutdown, where the app is going away either way.
+    /// </summary>
+    private static readonly TimeSpan DisposeWriteLockTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Releases the sentinel without the write lock (#4262 round 1 finding 2) — used when this thread
+    /// already holds the read lock, or when the write lock wait timed out. <see cref="Interlocked"/> rather
+    /// than the plain null-then-dispose <see cref="ReleaseSentinel"/> uses, because without the write lock
+    /// excluding other threads, a plain check-then-dispose could race a concurrent <see cref="ReopenSentinel"/>
+    /// and dispose the wrong connection. This path only runs at shutdown or on a rare read-lock-held
+    /// re-entry, so the residual race (this thread and a reset both touching <see cref="_sentinel"/>
+    /// without a shared lock) is accepted rather than engineered away.
+    /// </summary>
+    private void ReleaseSentinelWithoutLock()
+    {
+        var connection = Interlocked.Exchange(ref _sentinel, null);
+        connection?.Dispose();
     }
 
     /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files.
@@ -481,7 +756,10 @@ public class DuckDbInitializer : IDisposable
             _logger?.LogInformation("Database initialization complete. Schema version: {Version}", CurrentSchemaVersion);
         }
 
-        await CreateArchiveViewsAsync();
+        /* CreateArchiveViewsCoreAsync, not CreateArchiveViewsAsync: this thread already holds the write
+           lock (#4262 round 1 finding 3), and s_dbLock's NoRecursion policy makes a nested read lock
+           throw. */
+        await CreateArchiveViewsCoreAsync();
 
         await InitializeAnalysisSchemaAsync();
     }
@@ -523,7 +801,16 @@ public class DuckDbInitializer : IDisposable
                 _logger?.LogWarning(
                     "DuckDB database is locked (attempt {Attempt}/{Max}); retrying in {Delay}ms. {Error}",
                     attempt, maxLockRetries, lockRetryDelayMs, ex.Message);
-                await Task.Delay(lockRetryDelayMs);
+                /* Thread.Sleep, not await Task.Delay (#4262 round 1 finding 4): this loop runs inside
+                   InitializeCoreAsync while the caller's write lock is held, and that lock is thread-affine
+                   (ReaderWriterLockSlim). On a thread with no SynchronizationContext — the archive reset
+                   path is one — an awaited Task.Delay is free to resume on a different pool thread, and
+                   ExitWriteLock from a thread that never entered throws SynchronizationLockException,
+                   leaking the lock for the rest of the process's life. This was already true before #4262;
+                   the sentinel didn't create it. A blocking sleep keeps the same thread the whole way
+                   through, at the cost of tying up one pool thread for the retry delay — affordable for a
+                   five-retry, one-second-apart file-lock retry. */
+                Thread.Sleep(lockRetryDelayMs);
             }
             catch
             {
@@ -2025,8 +2312,33 @@ public class DuckDbInitializer : IDisposable
     /// <summary>
     /// Creates or refreshes views that UNION hot DuckDB tables with archived parquet files.
     /// Call at startup and after each archive cycle so newly archived data is queryable.
+    ///
+    /// <para>Takes the READ lock (#4262 round 1 finding 3). <c>ArchiveService</c> and
+    /// <c>DataImportService</c> call this with no lock of their own, and now that the sentinel pins one
+    /// native handle open per connection string, a connection this method opened could outlive a
+    /// concurrent <see cref="ResetDatabaseAsync"/> — keeping the pre-reset instance alive so the reopened
+    /// sentinel attached to the OLD handle instead of the fresh file. The read lock makes
+    /// <see cref="ResetDatabaseAsync"/>'s write lock wait for this connection to close first, same as
+    /// every other reader. A caller that already holds the write lock (<see cref="InitializeCoreAsync"/>,
+    /// and <c>QueryStoreSliceRepairService.PromoteRewrittenFileAsync</c>) must call
+    /// <see cref="CreateArchiveViewsCoreAsync"/> directly instead — <see cref="s_dbLock"/> is
+    /// <see cref="LockRecursionPolicy.NoRecursion"/>, so entering the read lock here would throw for
+    /// them; <see cref="AcquireReadLock()"/>'s recursion catch backstops any caller that does not.</para>
     /// </summary>
     public async Task CreateArchiveViewsAsync()
+    {
+        using var readLock = AcquireReadLock();
+        await CreateArchiveViewsCoreAsync();
+    }
+
+    /// <summary>
+    /// The lock-free body of <see cref="CreateArchiveViewsAsync"/> (#4262 round 1 finding 3), split out so
+    /// a caller that already holds the write lock can call it directly rather than nesting a read lock —
+    /// <see cref="InitializeCoreAsync"/> (already under the write lock via <see cref="InitializeAsync"/> or
+    /// <see cref="ResetDatabaseAsync"/>) and <c>QueryStoreSliceRepairService.PromoteRewrittenFileAsync</c>
+    /// (already under the write lock its caller takes for the file swap) both do.
+    /// </summary>
+    internal async Task CreateArchiveViewsCoreAsync()
     {
         using var connection = CreateConnection();
         await connection.OpenAsync();
