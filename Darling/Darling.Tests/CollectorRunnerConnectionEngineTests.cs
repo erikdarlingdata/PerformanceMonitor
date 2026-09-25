@@ -177,7 +177,7 @@ public sealed class CollectorRunnerConnectionEngineTests
     /// resolves the engine set from the registry's <c>engine_kind</c> on every call — the only place that can
     /// decide it, because two of the service's three construction sites are process-wide singletons that
     /// never see a target. This pin holds both halves: the worker no longer tests the engine or names the
-    /// tombstone anywhere, and the service resolves the engine at every one of its three entry points.</para>
+    /// tombstone anywhere, and the service resolves the engine at every one of its four entry points.</para>
     /// </summary>
     [Fact]
     public void TheScheduledAnalysisPassRoutesByRegistryEngine()
@@ -198,11 +198,12 @@ public sealed class CollectorRunnerConnectionEngineTests
         Assert.True(callAt > tickAt, "the scheduled analysis call must follow the tick's rationale");
         Assert.DoesNotContain("CollectorTargetEngine.PostgreSql", source[tickAt..callAt], StringComparison.Ordinal);
 
-        /* And the service resolves the engine at every entry point — the pass, the facts read and the
-           period comparison — so no consumer of the singleton can reach a collector without the registry's
-           answer. Exactly three call sites: one per entry point, none cached in a field. */
+        /* And the service resolves the engine at every entry point — the pass, the facts read, the period
+           comparison and audit_config's own narrow read (#4192) — so no consumer of the singleton can reach
+           a collector without the registry's answer. Exactly four call sites: one per entry point, none
+           cached in a field. */
         var service = File.ReadAllText(AnalysisServiceSourcePath());
-        Assert.Equal(3, Regex.Matches(service, @"await ResolveEngineAsync\(").Count);
+        Assert.Equal(4, Regex.Matches(service, @"await ResolveEngineAsync\(").Count);
         Assert.DoesNotMatch(new Regex(@"private\s+(?:readonly\s+)?AnalysisEngineSet\??\s+_resolved"), service);
     }
 

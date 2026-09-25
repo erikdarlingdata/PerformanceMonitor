@@ -36,6 +36,24 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingQueryStoreRegressionReader
 {
+    /// <summary>
+    /// The baseline's own lookback (#4195): a fixed 7 days ending at the recent window's start, so the
+    /// comparison period stops moving with retention. Before this the baseline was every retained row before
+    /// the window with NO lower bound, so its cost tracked how much history the store still held rather than
+    /// the window asked for — on a store with weeks of retained Query Store snapshots this read the whole
+    /// retained history on every call. A regression against a baseline OLDER than 7 days is no longer caught
+    /// (the difference this bound makes): a query that was slow 3 weeks ago, got fast, then regressed back to
+    /// that same speed 2 days ago no longer flags, because its baseline window no longer reaches 3 weeks back.
+    /// A store retaining less than 7 days of Query Store history is unaffected — the bound never reaches
+    /// further back than the unbounded read already stopped.
+    ///
+    /// <para>Spelled out as "7 days" in <c>DarlingMcpQueryStoreRegressionTools</c>'s <c>Description</c> text
+    /// too, rather than interpolated: an attribute argument must be a compile-time constant, and C# does not
+    /// treat an interpolated string as one even when every placeholder is. Keep the two in sync by hand.</para>
+    /// </summary>
+    public const int BaselineLookbackDays = 7;
+
+
     /// <summary>One regression row - the viewer's <c>ViewerQueryStoreRegressionRow</c>, without the
     /// display-formatting members. Durations and CPU are ms (converted from the stored microseconds);
     /// reads are raw pages; the percents are plain deltas.
@@ -68,8 +86,9 @@ internal static class DarlingQueryStoreRegressionReader
         DateTime? LastExecutionTime);
 
     /// <summary>
-    /// The viewer's regression read. $1 server_id, $2 window start (the baseline is everything &lt; $2),
-    /// $3 window end, $4 database filter (text[] or NULL), $5 row cap.
+    /// The viewer's regression read. $1 server_id, $2 window start (the baseline is $6 up to $2 - #4195,
+    /// <see cref="BaselineLookbackDays"/> by default), $3 window end, $4 database filter (text[] or NULL),
+    /// $5 row cap, $6 baseline start.
     /// </summary>
     public const string QueryStoreRegressionsSql = """
         WITH deduped_baseline AS (
@@ -92,6 +111,7 @@ internal static class DarlingQueryStoreRegressionReader
                 ) AS rn
             FROM query_store_stats
             WHERE server_id = $1
+            AND   collection_time >= $6
             AND   collection_time < $2
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         ),
@@ -197,7 +217,7 @@ internal static class DarlingQueryStoreRegressionReader
     /// collected history sits inside the requested window can never show a regression however bad it got.
     /// Reporting that as "no regressions" is the failure this exists to prevent.</para>
     /// <para>Probes the base <c>query_store_stats</c> table, the same source the read itself uses.
-    /// $1 server_id, $2 window start, $3 window end.</para>
+    /// $1 server_id, $2 window start, $3 window end, $4 baseline start (#4195).</para>
     /// </summary>
     public const string RegressionCoverageSql = """
         SELECT
@@ -205,6 +225,7 @@ internal static class DarlingQueryStoreRegressionReader
                 SELECT 1
                 FROM query_store_stats
                 WHERE server_id = $1
+                AND   collection_time >= $4
                 AND   collection_time < $2
             ) AS has_baseline,
             EXISTS (
@@ -216,10 +237,14 @@ internal static class DarlingQueryStoreRegressionReader
             ) AS has_recent
         """;
 
-    /// <summary>Runs <see cref="QueryStoreRegressionsSql"/>.</summary>
+    /// <summary>Runs <see cref="QueryStoreRegressionsSql"/>. <paramref name="baselineStartUtc"/> is the
+    /// baseline's lower bound (#4195) - <paramref name="startUtc"/> minus <see cref="BaselineLookbackDays"/> for
+    /// every caller today, but taken as a parameter rather than computed in the SQL so the bound stays a plain
+    /// timestamp (an interval computed inside the statement would cost TimescaleDB its plan-time chunk
+    /// exclusion).</summary>
     public static async Task<List<RegressionRow>> GetQueryStoreRegressionsAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        string? databaseName, int limit, CancellationToken cancellationToken = default)
+        string? databaseName, int limit, DateTime baselineStartUtc, CancellationToken cancellationToken = default)
     {
         var rows = new List<RegressionRow>();
         await using var command = postgres.CreateCommand(QueryStoreRegressionsSql);
@@ -231,6 +256,7 @@ internal static class DarlingQueryStoreRegressionReader
             Value = string.IsNullOrWhiteSpace(databaseName) ? DBNull.Value : new[] { databaseName },
         });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -262,12 +288,13 @@ internal static class DarlingQueryStoreRegressionReader
 
     /// <summary>Runs <see cref="RegressionCoverageSql"/>.</summary>
     public static async Task<(bool HasBaseline, bool HasRecent)> GetCoverageAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DateTime baselineStartUtc,
         CancellationToken cancellationToken = default)
     {
         await using var command = postgres.CreateCommand(RegressionCoverageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(baselineStartUtc, DateTimeKind.Unspecified) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
             return (false, false);
