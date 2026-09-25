@@ -479,7 +479,7 @@ public partial class ServerTab : UserControl
                         UpdateMemoryChart(memTrend, memGrantTrend, hoursBack, fromDate, toDate);
                         break;
                     case 1: // Memory Clerks
-                        var clerkTypes = await Task.Run(() => _dataService.GetDistinctMemoryClerkTypesAsync(_serverId, hoursBack, fromDate, toDate));
+                        var clerkTypes = await Task.Run(() => _dataService.GetDistinctMemoryClerkTypesForPickerAsync(_serverId, hoursBack, fromDate, toDate));
                         PopulateMemoryClerkPicker(clerkTypes);
                         await UpdateMemoryClerksChartFromPickerAsync();
                         break;
@@ -498,7 +498,7 @@ public partial class ServerTab : UserControl
             /* Full refresh: load all sub-tabs */
             var memoryTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryStats", () => Task.Run(() => _dataService.GetLatestMemoryStatsAsync(_serverId)));
             var memoryTrendTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryTrend", () => Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate)));
-            var memoryClerkTypesTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryClerks", () => Task.Run(() => _dataService.GetDistinctMemoryClerkTypesAsync(_serverId, hoursBack, fromDate, toDate)));
+            var memoryClerkTypesTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryClerks", () => Task.Run(() => _dataService.GetDistinctMemoryClerkTypesForPickerAsync(_serverId, hoursBack, fromDate, toDate)));
             var memoryGrantTrendTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryGrantTrend", () => Task.Run(() => _dataService.GetMemoryGrantTrendAsync(_serverId, hoursBack, fromDate, toDate)));
             var memoryGrantChartTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryGrants", () => Task.Run(() => _dataService.GetMemoryGrantChartDataAsync(_serverId, hoursBack, fromDate, toDate)));
             var memoryPressureEventsTask = Helpers.MethodProfiler.TimeAsync("Memory.MemoryPressureEvents", () => Task.Run(() => _dataService.GetMemoryPressureEventsAsync(_serverId, hoursBack, fromDate, toDate)));

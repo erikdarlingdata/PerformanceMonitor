@@ -107,9 +107,13 @@ public sealed class WebExceptionTextCensusTests
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "snapshot.Detail",
-            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — today it is the raw " +
-            "ex.Message of a startup failure, verbatim (round-1 H4, tracked in #4316, fixed by PR #4326); " +
-            "remove this entry once #4326 lands."
+            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — #4316 (round-1 H4) " +
+            "replaced the raw ex.Message here with a fixed sentence per startup step (FailureDetailFor), the " +
+            "joined DarlingConfig.Validate problem list (PublishConfigurationProblems), or the fixed " +
+            "Windows-only sentence (ManagedStoreNeedsWindowsDetail) — never exception text again. This entry " +
+            "STAYS regardless: the pattern's .Detail alternation matches any identifier.Detail syntactically, " +
+            "whatever the value holds, so snapshot.Detail keeps matching a scan built to catch an exception's " +
+            "own .Detail even though nothing here reads one."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebFailureLog.cs"),
@@ -549,6 +553,29 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
         Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
         Assert.DoesNotContain("store.internal", json.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    /// <summary>#4315 round 1, Low 3: the <c>/api/read</c> body on a <c>get_sweep_reports</c> store fault,
+    /// built exactly as the tool's own catch builds it (<see cref="McpHelpers.FormatError"/> from a
+    /// <see cref="PostgresException"/> with SqlState 42P01, the undefined_table code a dropped relation
+    /// raises) and fed through the same <see cref="DarlingWebEndpoints.ToHttpResult"/> the dispatcher
+    /// uses. No database: the envelope is hand-built, so this pins the wire shape without a live store.</summary>
+    [Fact]
+    public void ToHttpResult_ToolCaughtUndefinedTable_MapsTo500_NoRelationOrSqlStateText_OneError()
+    {
+        var logger = new CapturingTestLogger();
+        var ex = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
+        var envelope = McpHelpers.FormatError("get_sweep_reports", ex);
+
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        var body = json.RootElement.GetProperty("error").GetString();
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, body);
+        Assert.DoesNotContain("42P01", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("relation", body, StringComparison.Ordinal);
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
     }
 

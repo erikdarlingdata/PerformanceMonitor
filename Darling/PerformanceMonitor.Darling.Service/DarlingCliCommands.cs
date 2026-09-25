@@ -3557,6 +3557,9 @@ public static class DarlingCliCommands
             targets.Add(new(Path.Combine(storeRoot, "pg-credential.dpapi"), false, false, "the store credential"));
             targets.Add(new(Path.Combine(storeRoot, "pg-admin-credential.dpapi"), false, false, "the admin credential"));
             targets.Add(new(Path.Combine(storeRoot, DarlingLogHashKeyFile.WindowsFileName), AllowInteractive: false, IsDirectory: false, "the log-hash key"));
+            /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
+               not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
+            targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeAutoConfFileName), false, false, "the pre-upgrade postgresql.auto.conf"));
         }
 
         /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the

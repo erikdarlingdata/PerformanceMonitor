@@ -1278,19 +1278,20 @@ public sealed class DarlingWorker : BackgroundService
                 && StartupFailureTriage.IsRetryable(ex))
             {
                 _logger.LogWarning(
+                    ex,
                     "Cannot load configuration yet ({Message}) — attempt {Attempt} of {Total}, retrying in " +
                     "{Delay}s. A file another process is mid-write recovers on its own; a missing, malformed " +
                     "or unreadable one does not and is not retried.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Configuration, ex.Message, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Configuration, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, ex.Message);
+                _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
             }
         }
@@ -1311,9 +1312,11 @@ public sealed class DarlingWorker : BackgroundService
 
             /* #2953: every problem, joined, rather than the first — Validate is all-fatal and reports the whole
                set, so a ping body carrying one of several would send an operator to fix a config that still
-               does not start. */
-            _collectorState.PublishStopped(
-                CollectorRuntimeState.StartupStep.Configuration, string.Join("; ", problems));
+               does not start. PublishConfigurationProblems takes the config, not this `problems` list — it
+               calls Validate itself, so there is no string/list parameter here for a future caller to hand
+               exception text instead (#4316 round 1 B1, round 2 L1-r2 a). `problems` above stays local, for
+               the per-problem critical log lines just above. */
+            _collectorState.PublishConfigurationProblems(config);
             return;
         }
 
@@ -1376,10 +1379,7 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
-                _collectorState.PublishStopped(
-                    CollectorRuntimeState.StartupStep.ManagedStore,
-                    "postgres.managed = true requires Windows; set postgres.managed = false and point "
-                    + "postgres.connectionString at your own PostgreSQL instead.");
+                _collectorState.PublishManagedStoreNeedsWindows();
                 return;
             }
 
@@ -1421,6 +1421,7 @@ public sealed class DarlingWorker : BackgroundService
                     && StartupFailureTriage.IsRetryable(ex))
                 {
                     _logger.LogWarning(
+                        ex,
                         "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
                         "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
                         "up recovers on its own; a broken package or a stale credential does not and is " +
@@ -1428,13 +1429,13 @@ public sealed class DarlingWorker : BackgroundService
                         ex.Message, attempt, StartupFailureTriage.Attempts,
                         (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                     _collectorState.PublishRetrying(
-                        CollectorRuntimeState.StartupStep.ManagedStore, ex.Message, attempt, StartupFailureTriage.Attempts);
+                        CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts);
                     await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
-                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore, ex.Message);
+                    _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
+                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
                 }
             }
@@ -1796,6 +1797,7 @@ public sealed class DarlingWorker : BackgroundService
                    this BackgroundService, and StopHost then takes the process down - a retry path that
                    kills the service harder than the failure it was retrying. */
                 _logger.LogWarning(
+                    ex,
                     "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
                     "coming up recovers on its own; after the last attempt this becomes a critical line " +
@@ -1803,16 +1805,16 @@ public sealed class DarlingWorker : BackgroundService
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Store, ex.Message, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogCritical("Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store, ex.Message);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
                 return;
             }
         }
@@ -2345,7 +2347,7 @@ public sealed class DarlingWorker : BackgroundService
            connection factory — because phase 1 has no write path at all; the store it writes to is
            the monitoring store, never a monitored server. */
         _planForceBot = new PlanForceBot(
-            new PgPlanForceActionStore(postgres),
+            new PgPlanForceActionStore(postgres, _loggerFactory.CreateLogger<PgPlanForceActionStore>()),
             config.ForcePlanBot.ToSettings(),
             _loggerFactory.CreateLogger<PlanForceBot>());
 
@@ -7779,6 +7781,75 @@ LIMIT 1";
            CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
         await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
         await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+
+        /* #4211: the raw hypertable chunk-interval reconcile. Rides the daily purge tick like every other
+           maintenance chore above — first pass after startup (TryStartScheduledPurge's own MinValue seed),
+           then every 24h. TimescaleDB-only (chunk_time_interval has no meaning on plain PostgreSQL) and
+           behind its own off switch; never throws — a bad reading on one run degrades to "no changes" on the
+           next, the same failure shape as the AN3 cleanup just above. */
+        if (_timescaleAvailable && config.RawChunkIntervalReconcileEnabled)
+        {
+            try
+            {
+                var budgetBytes = await ResolveRawChunkIntervalBudgetBytesAsync(postgres, config, stoppingToken);
+                if (budgetBytes is double resolvedBudget)
+                {
+                    await using var reconcileConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                    await RawChunkIntervalReconciler.ReconcileAsync(
+                        reconcileConnection, resolvedBudget, DateTime.UtcNow, _logger, stoppingToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown drain. */
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "raw chunk interval reconcile failed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Budget B for <see cref="RawChunkIntervalReconciler.ReconcileAsync"/> (#4211 ruling decision 2). A
+    /// managed store reads the SAME raw RAM figure <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>
+    /// sizes Postgres itself from — <see cref="DarlingStoreHostProfile.GatherHostFacts"/>'s
+    /// <c>Memory.TotalBytes</c>, which on Windows is already the reused
+    /// <see cref="DarlingManagedPostgres.TryReadWindowsPhysicalMemoryBytes"/> read (ruling 2's "reuse the
+    /// authoritative read", never a second <c>GlobalMemoryStatusEx</c>), quantized the same way — NOT
+    /// <see cref="DarlingManagedPostgres.MemorySettings.SharedBuffersMb"/>, which is capped at 1 GB for the
+    /// co-located / Windows 487 mitigation (#1559) and is a real setting, not a sizing ceiling (see
+    /// <see cref="RawChunkIntervalPlanner.ManagedBudgetBytes"/>'s remarks). A bring-your-own store instead reads
+    /// <c>shared_buffers</c>/<c>effective_cache_size</c> live off <c>pg_settings</c>, through
+    /// <c>pg_size_bytes(current_setting(...))</c> so the GUC's storage unit (blocks, kB, whatever) never has to
+    /// be parsed by hand. Returns null only when the BYO read fails (an unreachable store on this tick) —
+    /// the caller then skips the whole reconcile pass rather than plan against a made-up budget.
+    ///
+    /// <para>Internal, not private, so a live test can drive the bring-your-own <c>pg_settings</c> path against
+    /// a real connection without constructing the whole worker — the same reach
+    /// <see cref="DarlingManagedPostgres.TryReadWindowsPhysicalMemoryBytes"/> is internal for.</para>
+    /// </summary>
+    internal static async Task<double?> ResolveRawChunkIntervalBudgetBytesAsync(
+        NpgsqlDataSource postgres, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (config.Postgres.Managed)
+        {
+            var hostFacts = DarlingStoreHostProfile.GatherHostFacts();
+            return RawChunkIntervalPlanner.ManagedBudgetBytes(DarlingManagedPostgres.QuantizeRam(hostFacts.Memory.TotalBytes));
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('effective_cache_size'))",
+            connection)
+        { CommandTimeout = 30 };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return RawChunkIntervalPlanner.BringYourOwnBudgetBytes(reader.GetInt64(0), reader.GetInt64(1));
+        }
+
+        return null;
     }
 
     /// <summary>

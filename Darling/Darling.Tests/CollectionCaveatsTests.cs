@@ -117,10 +117,15 @@ public sealed class CollectionCaveatsTests
         Assert.Empty(context.CollectionFailures);
         Assert.Equal(0, context.CollectionFamilyCount);
 
-        context.RecordCollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.MissingSchema, "42P01: relation does not exist");
+        var ex = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
+        context.RecordCollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.MissingSchema, ex);
 
         var only = Assert.Single(context.CollectionFailures);
-        Assert.Equal(new CollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.MissingSchema, "42P01: relation does not exist"), only);
+        Assert.Equal(
+            new CollectionFailure(
+                "write", "CollectWriteFactsAsync", CollectionFailureOutcome.MissingSchema,
+                CollectionFailure.Describe(ex, CollectionFailureOutcome.MissingSchema)),
+            only);
     }
 
     [Fact]
@@ -149,9 +154,12 @@ public sealed class CollectionCaveatsTests
     public void AFailingPass_AppendsTheBlockLast_AndLeavesEveryByteBeforeItUnchanged()
     {
         var context = new AnalysisContext { CollectionFamilyCount = 16 };
-        context.RecordCollectionFailure("vacuum", "ReadAutovacuumBacklogAsync", CollectionFailureOutcome.MissingSchema, "42P01: relation \"pg_autovacuum_stats\" does not exist");
-        context.RecordCollectionFailure("vacuum", "ReadXminHoldAsync", CollectionFailureOutcome.Timeout, "57014: canceling statement due to user request");
-        context.RecordCollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.Error, "boom");
+        var missingSchemaEx = new PostgresException("relation \"pg_autovacuum_stats\" does not exist", "ERROR", "ERROR", "42P01");
+        var timeoutEx = new PostgresException("canceling statement due to user request", "ERROR", "ERROR", "57014");
+        var errorEx = new InvalidOperationException("boom");
+        context.RecordCollectionFailure("vacuum", "ReadAutovacuumBacklogAsync", CollectionFailureOutcome.MissingSchema, missingSchemaEx);
+        context.RecordCollectionFailure("vacuum", "ReadXminHoldAsync", CollectionFailureOutcome.Timeout, timeoutEx);
+        context.RecordCollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.Error, errorEx);
         var state = CollectionCaveatState.From(context);
 
         var payload = new { status = "empty", message = "No significant findings.", coverage = new { partial = false, observed_fraction = 1.0 } };
@@ -175,7 +183,7 @@ public sealed class CollectionCaveatsTests
         Assert.Equal("timeout", entries[1]!["outcome"]!.GetValue<string>());
         Assert.Equal("write", entries[2]!["family"]!.GetValue<string>());
         Assert.Equal("error", entries[2]!["outcome"]!.GetValue<string>());
-        Assert.Equal("boom", entries[2]!["message"]!.GetValue<string>());
+        Assert.Equal(CollectionFailure.Describe(errorEx, CollectionFailureOutcome.Error), entries[2]!["message"]!.GetValue<string>());
 
         var sentence = state.Describe();
         Assert.NotNull(sentence);
@@ -190,7 +198,7 @@ public sealed class CollectionCaveatsTests
     public void AnUnstampedTotal_IsSaidToBeUnknown_NotZero()
     {
         var context = new AnalysisContext();
-        context.RecordCollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.Error, "boom");
+        context.RecordCollectionFailure("write", "CollectWriteFactsAsync", CollectionFailureOutcome.Error, new InvalidOperationException("boom"));
         var sentence = CollectionCaveatState.From(context).Describe();
         Assert.StartsWith("1 of an unknown number of fact families could not be read", sentence, StringComparison.Ordinal);
     }
