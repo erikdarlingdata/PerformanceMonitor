@@ -1249,9 +1249,15 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         /* Two REAL views, because the converge is scoped by membership of HourlyRefreshPhaseOrder and a
-           throwaway name would be skipped — which is a property worth having, and is asserted at the end. */
-        const string Hourly = TimescaleSupport.QueryStatsHourlyView;
-        const string Daily = TimescaleSupport.QueryStatsDailyView;
+           throwaway name would be skipped — which is a property worth having, and is asserted at the end.
+           #3653 LC: query_stats_hourly/query_stats_daily are two of the frozen six now — LEFT
+           HourlyRefreshPhaseOrder entirely, and EnsureContinuousAggregatesAsync actively strips any refresh
+           policy off a frozen view every start, so this test's whole "converge a drifted policy" premise can
+           no longer run against them at all (AddHourlyRefreshPolicySql(Hourly) throws before ever reaching
+           Postgres). query_stats_interval_hourly/query_stats_interval_daily are still on the grid and still
+           refreshing the same way the legacy pair used to, so they stand in as the example. */
+        const string Hourly = TimescaleSupport.QueryStatsIntervalHourlyView;
+        const string Daily = TimescaleSupport.QueryStatsIntervalDailyView;
 
         /* This test MUTATES the shared fixture's shape (creating the hourly/daily CAGGs changes compose's tier
            routing), so it restores it: snapshot what already exists and drop only what it creates. */

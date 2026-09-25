@@ -560,16 +560,18 @@ public sealed class TimescaleAggregateCompressionTests
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
                targets (no compression band slot) — so the created count is the targets plus those.
-               #3653 A6 lane LB-2 (live-measured): the three interval-honest successor DAILIES are ALSO created by
-               this sweep but held OUT of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane
-               LC frees their band slots — so "created" is HourlyAggregates + DailyAggregates + BaselineAggregates
-               + OffGridAggregates (every registered aggregate), not AggregateCompressionTargets + OffGridAggregates
-               (only the ones with a compression policy). The two counts were equal before lane LB added a
-               registered-but-deferred daily tier; this assertion still read the old, now-coincidentally-wrong,
-               formula. */
+               #3653 LC: the sweep's unified aggregates list also concats FrozenRollupAggregates — the six frozen
+               legacy rollups still get CREATEd on a fresh store (WITH NO DATA, no refresh policy ever attached)
+               — so "created" is HourlyAggregates + DailyAggregates + BaselineAggregates + OffGridAggregates +
+               FrozenRollupAggregates (every registered aggregate), not AggregateCompressionTargets +
+               OffGridAggregates (only the ones with a compression policy). The three interval-honest successor
+               dailies that lane LB registered are counted in DailyAggregates already and are no longer held out
+               of AggregateCompressionTargets either — LC removed that deferral once the legacy trio's move to
+               FrozenRollupAggregates freed their band slots. */
             Assert.Equal(
                 TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
-                    + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
+                    + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length
+                    + TimescaleSupport.FrozenRollupAggregates.Length,
                 created);
 
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
@@ -596,10 +598,13 @@ public sealed class TimescaleAggregateCompressionTests
                 Assert.Equal((long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds, seconds);
             }
 
-            /* 23 since #3653 (Q12): the count is the registry's, not a literal, so the three successors are counted
-               the moment they are registered. */
+            /* Twenty, not twenty-three (#3653, LC): the legacy trio's move to FrozenRollupAggregates took them out
+               of HourlyAggregates/DailyAggregates, and the three interval-honest successor dailies (previously
+               held out by CompressionDeferredUntilFreeze) now fill the freed band slots. The count is the
+               registry's, not a literal chosen to match; this pin catches the day either side of that trade
+               moves without the other. */
             Assert.Contains($"{TimescaleSupport.AggregateCompressionTargets.Count}/{TimescaleSupport.AggregateCompressionTargets.Count} materializations chunked at {TimescaleSupport.MaterializationChunkInterval}", firstLog.Joined, StringComparison.Ordinal);
-            Assert.Equal(23, TimescaleSupport.AggregateCompressionTargets.Count);
+            Assert.Equal(20, TimescaleSupport.AggregateCompressionTargets.Count);
             Assert.Contains($"{wideBefore} changed this start", firstLog.Joined, StringComparison.Ordinal);
 
             /* A settled store issues no set_chunk_time_interval at all: the direct call returns zero changes and
@@ -727,7 +732,11 @@ public sealed class TimescaleAggregateCompressionTests
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             await TimescaleSupport.EnsureAggregateCompressionAsync(connection, null, ct);
 
-            var view = TimescaleSupport.ProcedureStatsHourlyView;
+            /* #3653 LC: procedure_stats_hourly is one of the frozen six now and left AggregateCompressionTargets
+               entirely (EnsureAggregateCompressionAsync never attaches it a policy to drift), so the alter_job
+               below would match no row. procedure_stats_interval_hourly, its interval-honest successor, is
+               still hourly-tier compressed and stands in as the example. */
+            var view = TimescaleSupport.ProcedureStatsIntervalHourlyView;
 
             /* Drift one policy the way an older build would have left it: the raw tier's window and tick, an
                anchor off the band. */

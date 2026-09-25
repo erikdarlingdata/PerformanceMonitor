@@ -74,17 +74,24 @@ public sealed class RollupBackfillLiveTests
         /* ── 2. The rollup is created over that history, WITH NO DATA — the #1759 shape exactly. ── */
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
+        /* #3653 LC: query_stats_hourly is one of the frozen six — it still stands up WITH NO DATA, but nothing
+           ever gives it a refresh policy or feeds the raw purge gate off its coverage again (RawTierCoverage
+           now names the successor). The #1759 shape this test proves — a rollup created over pre-existing
+           history reads empty below its shallow floor until backfilled, and the purge gate then releases —
+           only still happens on a view the freeze left live, so query_stats_interval_hourly stands in as the
+           example, keeping the same source, grain and daily companion. */
+
         /* Materialize only the recent window, which is all the 3-day refresh policy would ever have done on a
            store that existed before its rollups. This is what makes the floor shallow. */
         await RollupBackfill.RunSliceAsync(
-            connection, TimescaleSupport.QueryStatsHourlyView, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
+            connection, TimescaleSupport.QueryStatsIntervalHourlyView, now.Date.AddDays(-2), now.Date.AddDays(1), SilentDisclosure(), ct);
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
-        Assert.True(rollups.QueryGrainHourly, "the query_stats hourly rollup should exist after the ensure sweep");
+        Assert.True(rollups.QueryGrainIntervalHourly, "the query_stats_interval_hourly rollup should exist after the ensure sweep");
 
         var before = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
-        var floorBefore = before.FloorOf(TimescaleSupport.QueryStatsHourlyView);
+        var floorBefore = before.FloorOf(TimescaleSupport.QueryStatsIntervalHourlyView);
         var rawFloor = before.RawOldestOf("query_stats");
 
         Assert.NotNull(floorBefore);
@@ -96,7 +103,7 @@ public sealed class RollupBackfillLiveTests
                the rows — this is the hard partition, not a slow path. If this assertion ever stops holding,
                the premise behind all of #1759 has changed and the fix should be revisited, not patched. ── */
         var windowStart = now.AddDays(-8);
-        var rollupRows = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
+        var rollupRows = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
         var rawRows = await CountAsync(connection, "SELECT count(*) FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", windowStart, now.AddDays(-6), ct);
 
         Assert.True(rawRows > 0, "raw must hold rows in the pre-coverage window, or the test is not exercising #1759");
@@ -104,19 +111,19 @@ public sealed class RollupBackfillLiveTests
 
         /* ── 4. PHASE 1: the router must send that window to RAW, where the data actually is. Age alone puts an
                8-day window on the hourly rollup, which would answer with silence. ── */
-        var coverageLadder = before.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+        var coverageLadder = before.For(TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsIntervalDailyView);
 
         Assert.Equal(
             RetentionTier.Hourly,
-            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily));
+            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainIntervalHourly, rollups.QueryGrainIntervalDaily));
 
         Assert.Equal(
             RetentionTier.Raw,
-            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily, coverageLadder));
+            RetentionTierRouter.Resolve(now, windowStart, rollups.QueryGrainIntervalHourly, rollups.QueryGrainIntervalDaily, coverageLadder));
 
         /* ── 5. PHASE 2: back fill in slices, newest-first, exactly as the verb does. ── */
         var plan = RollupBackfill.Plan(
-            TimescaleSupport.QueryStatsHourlyView, rawFloor, floorBefore,
+            TimescaleSupport.QueryStatsIntervalHourlyView, rawFloor, floorBefore,
             materializedBuckets: 48, materializedBytes: 48 * 1024,
             rawBytes: 0, bucketWidth: TimeSpan.FromHours(1));
 
@@ -127,7 +134,7 @@ public sealed class RollupBackfillLiveTests
         var previousFloor = floorBefore;
         foreach (var (from, to) in RollupBackfill.Slices(plan.FromUtc, plan.ToUtc))
         {
-            var floorDuring = await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsHourlyView, from, to, SilentDisclosure(), ct);
+            var floorDuring = await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, from, to, SilentDisclosure(), ct);
             slicesRun++;
 
             /* Progress only ever goes BACKWARDS. Deliberately NOT "the floor reached this slice's start": a
@@ -149,14 +156,14 @@ public sealed class RollupBackfillLiveTests
 
         /* ── 6. CONVERGENCE, MEASURED FROM DATA — never from the fact that the calls returned. ── */
         var after = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
-        var floorAfter = after.FloorOf(TimescaleSupport.QueryStatsHourlyView);
+        var floorAfter = after.FloorOf(TimescaleSupport.QueryStatsIntervalHourlyView);
 
         Assert.NotNull(floorAfter);
         Assert.True(floorAfter <= rawFloor,
             $"after the backfill the rollup must reach at or before raw's oldest row (rollup {floorAfter:O}, raw {rawFloor:O})");
 
         /* The window that was empty in step 3 now has rows. */
-        var rollupRowsAfter = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
+        var rollupRowsAfter = await CountAsync(connection, $"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} WHERE bucket >= $1 AND bucket < $2", windowStart, now.AddDays(-6), ct);
         Assert.True(rollupRowsAfter > 0, "the backfilled window must now be materialized");
 
         /* ── 7. The router goes BACK to the rollup — the backfill restored acceleration rather than stranding
@@ -164,8 +171,8 @@ public sealed class RollupBackfillLiveTests
         Assert.Equal(
             RetentionTier.Hourly,
             RetentionTierRouter.Resolve(
-                now, windowStart, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
-                after.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView)));
+                now, windowStart, rollups.QueryGrainIntervalHourly, rollups.QueryGrainIntervalDaily,
+                after.For(TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsIntervalDailyView)));
 
         /* ── 8. And the ARMING GATE now reports safe, which is the whole point: the held raw purge releases
                itself on the next evaluation — the running service's hourly pass since #3812, or the next start
@@ -304,12 +311,15 @@ AND   j.scheduled", ct);
             var dryText = dryOut.ToString();
             Assert.Contains("--dry-run: nothing was materialized", dryText, StringComparison.Ordinal);
             Assert.Contains("Free space on the store volume", dryText, StringComparison.Ordinal);
-            Assert.Contains(TimescaleSupport.QueryStatsHourlyView, dryText, StringComparison.Ordinal);
+            /* #3653 LC: query_stats_hourly is one of the frozen six and left RollupBackfill.Targets — the verb
+               would never plan it and its name would not appear here. query_stats_interval_hourly, its
+               interval-honest successor, is still a live target and stands in as the example. */
+            Assert.Contains(TimescaleSupport.QueryStatsIntervalHourlyView, dryText, StringComparison.Ordinal);
 
             await using (var check = new NpgsqlConnection(scratch.ConnectionString))
             {
                 await check.OpenAsync(ct);
-                var probe = await RollupBackfill.ProbeAsync(check, TimescaleSupport.QueryStatsHourlyView, "query_stats", "collection_time", ct);
+                var probe = await RollupBackfill.ProbeAsync(check, TimescaleSupport.QueryStatsIntervalHourlyView, "query_stats", "collection_time", ct);
 
                 /* Deliberately NOT "the rollup is still empty": the aggregate's own refresh policy is attached
                    by the ensure sweep and fires immediately, so a trailing window IS materialized by the time a
@@ -701,7 +711,11 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         await SeedHourlyQueryStatsAsync(connection, now.AddDays(-HistoryDays), now, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var view = TimescaleSupport.QueryStatsHourlyView;
+        /* #3653 LC: query_stats_hourly is one of the frozen six now — nothing ever advances its watermark
+           again, so backfilling IT can never arm the raw purge gate. RawTierCoverage arms query_stats'
+           retention off the interval-honest successor's coverage instead (RequireSuccessorOf), so that is
+           the view this test's arming-gate assertions have to drive. */
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var probe = await RollupBackfill.ProbeAsync(connection, view, "query_stats", "collection_time", ct);
         var plan = RollupBackfill.Plan(
             view, probe.SourceOldestUtc, probe.CoverageOldestUtc,
@@ -927,15 +941,19 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
 
         await SeedHourlyQueryStatsAsync(connection, historyFrom, now, ct);
 
-        /* Aggregates WITHOUT their refresh policies — see the remarks. */
-        foreach (var createSql in new[] { TimescaleSupport.CreateQueryStatsHourlySql, TimescaleSupport.CreateQueryStatsDailySql })
+        /* Aggregates WITHOUT their refresh policies — see the remarks.
+           #3653 LC: query_stats_hourly/query_stats_daily are two of the frozen six now, and left
+           RollupBackfill.Targets entirely — the Single() lookup below would throw. The interval-honest
+           successor pair is still hierarchical the same way (daily reads the hourly's bucket, not raw) and
+           still a live Targets entry, so it stands in as the example. */
+        foreach (var createSql in new[] { TimescaleSupport.CreateQueryStatsIntervalHourlySql, TimescaleSupport.CreateQueryStatsIntervalDailySql })
         {
             await using var create = new NpgsqlCommand(createSql, connection);
             await create.ExecuteNonQueryAsync(ct);
         }
 
-        var hourly = TimescaleSupport.QueryStatsHourlyView;
-        var daily = TimescaleSupport.QueryStatsDailyView;
+        var hourly = TimescaleSupport.QueryStatsIntervalHourlyView;
+        var daily = TimescaleSupport.QueryStatsIntervalDailyView;
 
         /* The hourly holds the WHOLE history... */
         await RollupBackfill.RunSliceAsync(connection, hourly, historyFrom, now.Date, SilentDisclosure(), ct);
@@ -986,14 +1004,14 @@ VALUES ($1, $2, $3, 'backfill-e2e', 'TestDb', decode(md5('poison'), 'hex'), deco
         await UnscheduleAllJobsAsync(connection, ct);
     }
 
-    /// <summary>Is query_stats_hourly's retention policy ARMED? The #1798 observable — it is gated on the
-    /// DAILY covering the hourly, which is the comparison the backfill now converges to.</summary>
+    /// <summary>Is query_stats_interval_hourly's retention policy ARMED? The #1798 observable — it is gated on
+    /// the DAILY covering the hourly, which is the comparison the backfill now converges to.</summary>
     private const string ArmedHourlyPolicySql = @"
 SELECT count(*)
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = 'query_stats_hourly'
+AND   j.hypertable_name = 'query_stats_interval_hourly'
 AND   j.scheduled";
 
     /// <summary>One nullable timestamp, for reading a relation's oldest instant.</summary>

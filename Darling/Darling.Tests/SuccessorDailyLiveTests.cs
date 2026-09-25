@@ -34,11 +34,13 @@ public sealed class SuccessorDailyLiveTests
     private const int ServerId = -936537;
     private const string ServerName = "successor-daily-e2e";
 
-    /// <summary>Step 1: the ensure sweep creates all three successor dailies, attaches a refresh policy to
-    /// each, attaches NO compression policy to any of them (the LC-freeze defer), and a SECOND sweep is a
-    /// no-op — no error, no duplicate policy.</summary>
+    /// <summary>Step 1: the ensure sweep creates all three successor dailies and attaches a refresh policy to
+    /// each; the SEPARATE compression ensure then attaches a compression policy to each too, now that LC has
+    /// frozen the legacy trio's own daily-band membership and freed the three slots the successors take in
+    /// <see cref="TimescaleSupport.AggregateCompressionTargets"/> (no more deferral). Both sweeps are
+    /// idempotent — a SECOND pass of each is a no-op, no error, no duplicate policy.</summary>
     [Fact]
-    public async Task EnsureSweep_CreatesSuccessorDailies_WithRefreshButNoCompression_AndIsIdempotent()
+    public async Task EnsureSweep_CreatesSuccessorDailies_WithRefreshAndCompression_AndIsIdempotent()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -79,27 +81,44 @@ public sealed class SuccessorDailyLiveTests
            swallowed failure fails HERE with the verbatim Postgres/Timescale error in the message, rather than
            surfacing three call frames downstream as a bare "relation does not exist". */
         Assert.False(log.Joined.Contains("Warning", StringComparison.Ordinal), "ensure sweep warnings:\n" + log.Joined);
+        /* #3653 LC: the sweep's unified aggregates list now also concats FrozenRollupAggregates (the six
+           legacy rollups still get CREATEd on a fresh store, just no refresh policy), so the ready count is
+           six higher than the four grid/baseline/off-grid lists alone. */
         Assert.Equal(
             TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
-                + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
+                + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length
+                + TimescaleSupport.FrozenRollupAggregates.Length,
             readyFirst);
+
+        /* The compression ensure is a SEPARATE sweep (EnsureAggregateCompressionAsync), never called by
+           EnsureContinuousAggregatesAsync — the worker's own start order runs it right after. Derived from
+           IsAggregateCompressionTarget rather than typed as 1, so this keeps proving whatever the registry
+           says rather than a value copied from today's membership. */
+        var compressedFirst = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, log, ct);
+        Assert.False(log.Joined.Contains("Warning", StringComparison.Ordinal), "compression ensure warnings:\n" + log.Joined);
 
         foreach (var view in successorDailies)
         {
             Assert.True(await RelationExistsAsync(connection, view, ct), $"{view} must exist after the ensure sweep: {log.Joined}");
             Assert.Equal(1, await RefreshPolicyCountAsync(connection, view, ct));
-            Assert.Equal(0, await CompressionPolicyCountAsync(connection, view, ct));
+            Assert.Equal(
+                TimescaleSupport.IsAggregateCompressionTarget(view) ? 1 : 0,
+                await CompressionPolicyCountAsync(connection, view, ct));
         }
 
         /* ── SECOND ensure: idempotent — no error, no duplicate policy on any of the three. ── */
         var readySecond = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
         Assert.Equal(readyFirst, readySecond);
+        var compressedSecond = await TimescaleSupport.EnsureAggregateCompressionAsync(connection, null, ct);
+        Assert.Equal(compressedFirst, compressedSecond);
 
         foreach (var view in successorDailies)
         {
             Assert.True(await RelationExistsAsync(connection, view, ct), $"{view} must still exist after the second ensure sweep");
             Assert.Equal(1, await RefreshPolicyCountAsync(connection, view, ct));
-            Assert.Equal(0, await CompressionPolicyCountAsync(connection, view, ct));
+            Assert.Equal(
+                TimescaleSupport.IsAggregateCompressionTarget(view) ? 1 : 0,
+                await CompressionPolicyCountAsync(connection, view, ct));
         }
     }
 
@@ -141,9 +160,13 @@ public sealed class SuccessorDailyLiveTests
         await SeedProcedureStatsAsync(connection, startDay, endDay, ct);
 
         var ready = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+        /* #3653 LC: the sweep's unified aggregates list also concats FrozenRollupAggregates (the six legacy
+           rollups still get CREATEd on a fresh store, just no refresh policy), so ready is six higher than the
+           four grid/baseline/off-grid lists alone. */
         Assert.Equal(
             TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
-                + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
+                + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length
+                + TimescaleSupport.FrozenRollupAggregates.Length,
             ready);
 
         /* Refresh the hourly tier FIRST — the dailies (legacy and successor alike) are hierarchical from an

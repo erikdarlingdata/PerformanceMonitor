@@ -592,7 +592,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
            so the successors are created exactly as a store will create them, and the sweep's own count says
            every one built. */
         var ready = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
-        Assert.Equal(TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length, ready);
+        /* #3653 LC: the sweep's unified aggregates list also concats FrozenRollupAggregates (the six legacy
+           rollups still get CREATEd on a fresh store, just no refresh policy), so ready is six higher than the
+           four grid/baseline/off-grid lists alone. */
+        Assert.Equal(TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length + TimescaleSupport.FrozenRollupAggregates.Length, ready);
 
         foreach (var view in new[] { TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
         {
