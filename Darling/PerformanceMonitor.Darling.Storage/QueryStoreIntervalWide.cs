@@ -469,7 +469,10 @@ WHERE t.server_id = $1;";
     /// The Queries grid's own minimum window (#3953 clause 5, ruling issuecomment-5836972848 item 5): below this
     /// the table's fixed per-decision round trips (two more queries plus a transaction) cost more than the read
     /// they would save, so the gate reads raw regardless of coverage. One constant per read — the MCP and slicer
-    /// reads (a later lane) set their own, and may not share this value.
+    /// reads (a later lane) set their own, and may not share this value. Stays 12 hours (lane B4t, rig-d4, 15-day
+    /// seed at a field store's rate, end-to-end through the viewer's grid read): median of 5 at the ruled
+    /// 12-hour cell, table 1488.1 ms (spread 1118.9-1563.3) against raw 1725.6 ms (spread 1239.4-2512.5) — the
+    /// table is at least as fast as raw there, so the ruling keeps this threshold.
     /// </summary>
     public static readonly TimeSpan GridWideMinWindow = TimeSpan.FromHours(12);
 
