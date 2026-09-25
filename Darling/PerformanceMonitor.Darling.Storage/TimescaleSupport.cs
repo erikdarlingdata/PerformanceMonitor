@@ -11675,12 +11675,13 @@ public sealed class RollupCoverage
     /// handed.
     ///
     /// <para><b>Called AFTER the tier is resolved, never instead of it.</b> The router decides whether the hourly
-    /// tier can answer a window from <see cref="For"/> over the LEGACY pair — the legacy floor is the deeper of
-    /// the two by construction (an upgraded store's successor starts <c>WITH NO DATA</c>), so "can the hourly
-    /// tier serve this window" is the legacy's question. Only once the tier is Hourly does THIS choose which
+    /// tier can answer a window from <see cref="For"/> over the LEGACY pair — <see cref="For"/> stitches the
+    /// legacy and successor floors (#3653 LC), taking the deeper of the two, so "can the hourly tier serve this
+    /// window" is answered correctly on both a pre-freeze store (legacy is deeper) and a fresh or post-trim store
+    /// (successor is deeper or the only non-null floor).  Only once the tier is Hourly does THIS choose which
     /// hourly relation, and the successor is chosen only when the window loses nothing by it. A reader that
-    /// asked this first and routed on the successor's floor would fall to raw on the very stores where the
-    /// legacy still holds the answer.</para>
+    /// asked this first and routed on the successor's floor alone would fall to raw on stores where the legacy
+    /// still holds the answer.</para>
     ///
     /// <para><b>Absence beats coverage.</b> A store on a service that predates the successors
     /// (<see cref="RollupAvailability.WithoutIntervalHourlies"/>) has a null successor floor AND no successor
@@ -11741,14 +11742,59 @@ public sealed class RollupCoverage
     /// <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool, TierCoverage)"/>. A pair with no
     /// daily view (or an unrecognized hourly view) still answers — with nulls, which the router treats as
     /// "no evidence".
+    ///
+    /// <para><b>Stitched floor for frozen-legacy pairs (#3653 LC).</b> After the LC freeze, a FRESH store
+    /// (just upgraded, legacy starts <c>WITH NO DATA</c>) has a null legacy floor while its successor holds real
+    /// data.  A store 90+ days post-freeze has had its legacy trimmed to empty for the same reason.  Both shapes
+    /// produce a null legacy floor, so routing on the legacy floor alone falls every window older than 4 days to
+    /// raw.  This method therefore stitches the legacy AND the successor: the effective floor for each tier is
+    /// the deeper (earlier) of the two non-null floors.  A null from both is still null (no evidence from
+    /// either).  Callers that determine which hourly <em>relation</em> to name in SQL still go through
+    /// <see cref="HourlyRelationFor"/>, which makes the legacy-vs-successor choice independently and only after
+    /// the tier has been resolved.</para>
     /// </summary>
     public TierCoverage For(string hourlyView, string? dailyView)
     {
         var rawTable = RawTableFor(hourlyView);
-        return new TierCoverage(
+
+        // #3653 LC: stitch legacy and successor floors so that fresh stores (empty legacy, successor has
+        // data) and post-trim stores (legacy drained by retention) still route correctly to the hourly tier.
+        var successorHourly = TimescaleSupport.SuccessorOf(hourlyView);
+        var hourlyFloor = DeepestFloor(
             FloorOf(hourlyView),
-            dailyView is null ? null : FloorOf(dailyView),
-            rawTable is null ? null : RawOldestOf(rawTable));
+            successorHourly is null ? null : FloorOf(successorHourly));
+
+        DateTime? dailyFloor = null;
+        if (dailyView is not null)
+        {
+            var successorDaily = SuccessorDailyFromLegacy(dailyView);
+            dailyFloor = DeepestFloor(
+                FloorOf(dailyView),
+                successorDaily is null ? null : FloorOf(successorDaily));
+        }
+
+        return new TierCoverage(hourlyFloor, dailyFloor, rawTable is null ? null : RawOldestOf(rawTable));
+    }
+
+    /// <summary>The deeper (earlier) of two nullable UTC floors — the effective floor when a frozen legacy
+    /// and its interval-honest successor both cover part of the span (#3653 LC). A null on either side is
+    /// skipped; null on both yields null (no evidence from either tier).</summary>
+    private static DateTime? DeepestFloor(DateTime? a, DateTime? b) =>
+        (a, b) is ({ } da, { } db) ? (da < db ? da : db) : a ?? b;
+
+    /// <summary>The interval-honest SUCCESSOR DAILY that replaces <paramref name="legacyDaily"/> for the
+    /// daily-tier floor lookup (#3653 LC), or <c>null</c> for a daily view that was never superseded.</summary>
+    private static string? SuccessorDailyFromLegacy(string legacyDaily)
+    {
+        foreach (var (legacyDailyV, successorDaily, _) in TimescaleSupport.SupersededDailyRollups)
+        {
+            if (string.Equals(legacyDailyV, legacyDaily, StringComparison.Ordinal))
+            {
+                return successorDaily;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Which tier <see cref="StitchedRelationSql"/> is stitching (#3653 A6): the boundary is the
