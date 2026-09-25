@@ -135,6 +135,26 @@ public sealed class DarlingWebFailureHandlingTests
         Assert.Contains(nameof(InvalidOperationException), logger.Joined, StringComparison.Ordinal);
     }
 
+    /// <summary>#4281: <c>route</c> is request-supplied (the backstop passes <c>context.Request.Path.Value</c>
+    /// straight off the wire), and Kestrel decodes a percent-encoded CR/LF in a path into the real characters
+    /// — so an unsanitized route could forge a second log line. <see cref="DarlingWebFailureLog.Report"/> must
+    /// sanitize it the same way <see cref="DarlingHttpRefusalLog.Sanitize"/> does a Host header: CR/LF become
+    /// '.', so the forged text lands inertly inside the one real entry instead of starting a line of its own.</summary>
+    [Fact]
+    public void Report_RouteCarriesCrLf_SanitizesSoNoForgedLineReachesTheLog()
+    {
+        var logger = new CapturingTestLogger();
+        var ex = new InvalidOperationException("boom");
+
+        DarlingWebFailureLog.Report(logger, "/api/ag\r\nForged: line", 5, ex);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.DoesNotContain("\r", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("/api/ag..Forged: line", logger.Joined, StringComparison.Ordinal);
+    }
+
     /* ═══════════════════════════ the wired pipeline: the top-of-pipeline backstop ═══════════════════════════ */
 
     /// <summary>Adapts <see cref="CapturingTestLogger"/> (a plain <see cref="ILogger"/>) to the generic

@@ -61,23 +61,28 @@ internal static class DarlingWebFailureLog
     /// The ONE log line for a failed request (#4276): a Warning for a timeout, an Error for anything else,
     /// naming the route, the elapsed milliseconds, the kind, the exception type and the SQLSTATE. No
     /// throttle — unlike <c>DarlingHttpRefusalLog</c>'s refusals, a failed READ on an operator's own LAN
-    /// dashboard is not adversary-shaped traffic, so there is no flood to bound.
+    /// dashboard is not adversary-shaped traffic, so there is no flood to bound. <paramref name="route"/> is
+    /// request-supplied (the backstop passes <c>context.Request.Path.Value</c> straight off the wire), so it
+    /// goes through <see cref="DarlingHttpRefusalLog.Sanitize"/> the same way that log sanitizes a Host
+    /// header, before either branch below writes it.
     /// </summary>
     internal static void Report(ILogger logger, string route, long elapsedMs, Exception exception)
     {
+        var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
+
         if (IsStatementTimeout(exception))
         {
             logger.LogWarning(
                 exception,
                 "Web dashboard read {Route} timed out after {ElapsedMs} ms ({Kind}): {ExceptionType}, SQLSTATE {SqlState}",
-                route, elapsedMs, "timeout", exception.GetType().Name, SqlState(exception));
+                safeRoute, elapsedMs, "timeout", exception.GetType().Name, SqlState(exception));
             return;
         }
 
         logger.LogError(
             exception,
             "Web dashboard read {Route} failed after {ElapsedMs} ms ({Kind}): {ExceptionType}, SQLSTATE {SqlState}",
-            route, elapsedMs, "error", exception.GetType().Name, SqlState(exception));
+            safeRoute, elapsedMs, "error", exception.GetType().Name, SqlState(exception));
     }
 
     /// <summary>The HTTP status a failure answers with: 503 for a timeout (tell-apart-from-a-bug, per the
