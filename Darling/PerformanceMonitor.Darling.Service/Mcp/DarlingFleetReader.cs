@@ -661,154 +661,55 @@ WHERE collection_time >= $1
 AND   server_id <> 0
 GROUP BY server_id, collector_name";
 
-    /* ─────────── #3893 arm 2: the same read, composed from the hourly aggregate + a raw head slice ─────────── */
+    /* ─────────── #3893 arm 2: the same read, composed from the hourly aggregate + a raw head slice ───────────
+       Moved to CollectionHealthRollupSupport in Storage (#4226) so the viewer's ViewerDataService reads the
+       SAME guard and composer instead of carrying its own raw-only fleet scan. The members below are thin
+       wrappers — same names, same values, same behavior — so this file's own pins (FreshStoreWatermarkTests,
+       CollectionHealthAggregateTests, FleetCollectionHealthMemoTests) needed no rewrite beyond the one
+       source-text scan for the guard's catch clause, which moved to Storage with the method it guards. */
 
-    /// <summary>Does <c>collect.collection_health_hourly</c> EXIST here? The <c>QueryStoreTrendRouting.RollupProbeSql</c>
-    /// precedent: a relation named in a statement is resolved at parse time, so the composed SQL may only be
-    /// CHOSEN after this probe (NULL on a plain-PostgreSQL store, never an error).</summary>
-    internal const string CollectionHealthRollupProbeSql =
-        "SELECT to_regclass('collect." + TimescaleSupport.CollectionHealthHourlyView + "') IS NOT NULL";
+    /// <summary>See <see cref="CollectionHealthRollupSupport.RollupProbeSql"/>.</summary>
+    internal const string CollectionHealthRollupProbeSql = CollectionHealthRollupSupport.RollupProbeSql;
 
-    /// <summary>The earliest watermark that can mean something was materialized (#3973): no Darling store holds
-    /// a collection from before 2000, so no real refresh can leave the watermark below it. Anything earlier is
-    /// the extension's "nothing materialized" sentinel, whichever one it uses.</summary>
-    internal static readonly DateTime MaterializedWatermarkFloor = new(2000, 1, 1);
+    /// <summary>See <see cref="CollectionHealthRollupSupport.MaterializedWatermarkFloor"/>.</summary>
+    internal static readonly DateTime MaterializedWatermarkFloor = CollectionHealthRollupSupport.MaterializedWatermarkFloor;
 
-    /// <summary>The aggregate's watermark — the instant below which it serves ONLY materialized buckets. NULL
-    /// while nothing is materialized, when the whole window is served real-time from raw. Run only after
-    /// <see cref="CollectionHealthRollupProbeSql"/> said the aggregate exists (which implies TimescaleDB, so the
-    /// catalog is there).
-    ///
-    /// <para><b>"Nothing materialized" is not <c>-infinity</c> (#3973).</b> The extension reports the minimum
-    /// FINITE timestamp, 4714-11-24 BC, before the first refresh (measured on TimescaleDB 2.28.1 and 2.30.1)
-    /// and still after a refresh over a window with no rows (measured on 2.28.1). <c>isfinite()</c> passes it,
-    /// and Npgsql cannot hold it as a <see cref="DateTime"/>, so the fleet overview failed with "Out of range of
-    /// DateTime" on every fresh store until rows had landed and a refresh had covered them. Anything before
-    /// <see cref="MaterializedWatermarkFloor"/> now reads as nothing materialized, whichever sentinel produced
-    /// it.</para></summary>
-    internal const string CollectionHealthWatermarkSql = @"
-SELECT CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
-FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
-      FROM _timescaledb_catalog.continuous_agg
-      WHERE user_view_schema = 'collect'
-      AND   user_view_name = '" + TimescaleSupport.CollectionHealthHourlyView + @"') x";
+    /// <summary>See <see cref="CollectionHealthRollupSupport.WatermarkSql"/>.</summary>
+    internal const string CollectionHealthWatermarkSql = CollectionHealthRollupSupport.WatermarkSql;
 
-    /// <summary>
-    /// THE CONTINUITY GUARD (#3893's watermark hole): how many distinct whole-hour buckets the aggregate holds in
-    /// [$1 head end, $2 watermark). Below the watermark only materialized buckets exist, so a missing hour there
-    /// is a HOLE — rows that exist in <c>collection_log</c> and that the aggregate will never serve. The eight-day
-    /// refresh window makes a hole impossible to form in steady state (<c>TimescaleSupport.CollectionHealthRefreshStartOffset</c>
-    /// says why), so this is belt-and-braces for what the policy cannot rule out: a refresh interrupted part-way,
-    /// a hand-run narrow refresh, an altered policy. GLOBAL, not per group: a refresh materializes whole
-    /// buckets across every group, so a hole is always a whole bucket. An hour with no rows fleet-wide reads as
-    /// missing too — a false positive that costs one exact raw scan, the safe direction.
-    ///
-    /// <para>Bounded by the watermark as a PARAMETER, deliberately, not by a subquery of it: a bound the planner
-    /// can see prunes the real-time branch of the view (measured 17–24 ms on the 3-day fleet rig); the same count
-    /// with the watermark as an InitPlan scanned the raw tail and took 2.3 s.</para>
-    /// </summary>
-    internal const string CollectionHealthContinuitySql =
-        "SELECT count(DISTINCT bucket) FROM collect." + TimescaleSupport.CollectionHealthHourlyView + " WHERE bucket >= $1 AND bucket < $2";
+    /// <summary>See <see cref="CollectionHealthRollupSupport.ContinuitySql"/>.</summary>
+    internal const string CollectionHealthContinuitySql = CollectionHealthRollupSupport.ContinuitySql;
 
     /// <summary>The raw read restricted to the partial head hour [$1, $2): <see cref="FleetCollectionHealthSql"/>
-    /// itself with one predicate inserted, DERIVED rather than restated, so the head slice can never drift from
-    /// the raw read's eleven aggregates (a pin holds the insertion to exactly one place).</summary>
+    /// itself with one predicate inserted (<see cref="CollectionHealthRollupSupport.InsertHeadBound"/>), DERIVED
+    /// rather than restated, so the head slice can never drift from the raw read's eleven aggregates (a pin
+    /// holds the insertion to exactly one place).</summary>
     internal static readonly string FleetCollectionHealthHeadSliceSql =
-        FleetCollectionHealthSql.Replace(
-            "WHERE collection_time >= $1",
-            "WHERE collection_time >= $1\nAND   collection_time < $2",
-            StringComparison.Ordinal);
+        CollectionHealthRollupSupport.InsertHeadBound(FleetCollectionHealthSql);
 
     /// <summary>
-    /// <see cref="FleetCollectionHealthSql"/>'s result, served from <c>collect.collection_health_hourly</c>: every
-    /// WHOLE hour bucket from $2 (the first hour boundary at or after the window start $1) UNION ALL the raw head
-    /// slice [$1, $2), re-aggregated per (server, collector) — COUNT by SUM, SUM by SUM, MAX by MAX, all lossless
-    /// over hours. Same thirteen ordinals, same names, same types (the SUMs cast back to bigint), so the reader
-    /// below cannot tell which statement it ran. The aggregate is <c>materialized_only = false</c>: buckets above
-    /// its watermark are computed real-time from raw, so the result is current to the second.
+    /// <see cref="FleetCollectionHealthSql"/>'s result, served from <c>collect.collection_health_hourly</c>
+    /// (<see cref="CollectionHealthRollupSupport.ComposeFleetSql"/>): every WHOLE hour bucket from $2 (the first
+    /// hour boundary at or after the window start $1) UNION ALL the raw head slice [$1, $2), re-aggregated per
+    /// (server, collector). Same thirteen ordinals, same names, same types (the SUMs cast back to bigint), so
+    /// the reader below cannot tell which statement it ran. The aggregate is <c>materialized_only = false</c>:
+    /// buckets above its watermark are computed real-time from raw, so the result is current to the second.
     /// </summary>
-    internal static readonly string FleetCollectionHealthComposedSql = @"
-WITH parts AS
-(
-    SELECT server_id, collector_name, total_runs, success_count, error_count, last_success_time,
-           permission_denied_count, last_run_time, abandoned_count, extension_missing_count,
-           last_non_skip_time, last_productive_time, last_zero_row_streak_break_time
-    FROM collect." + TimescaleSupport.CollectionHealthHourlyView + @"
-    WHERE bucket >= $2
-    UNION ALL
-" + FleetCollectionHealthHeadSliceSql + @"
-)
-SELECT
-    server_id,
-    collector_name,
-    CAST(SUM(total_runs) AS bigint) AS total_runs,
-    CAST(SUM(success_count) AS bigint) AS success_count,
-    CAST(SUM(error_count) AS bigint) AS error_count,
-    MAX(last_success_time) AS last_success_time,
-    CAST(SUM(permission_denied_count) AS bigint) AS permission_denied_count,
-    MAX(last_run_time) AS last_run_time,
-    CAST(SUM(abandoned_count) AS bigint) AS abandoned_count,
-    CAST(SUM(extension_missing_count) AS bigint) AS extension_missing_count,
-    MAX(last_non_skip_time) AS last_non_skip_time,
-    MAX(last_productive_time) AS last_productive_time,
-    MAX(last_zero_row_streak_break_time) AS last_zero_row_streak_break_time
-FROM parts
-GROUP BY server_id, collector_name";
+    internal static readonly string FleetCollectionHealthComposedSql =
+        CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthSql);
 
-    /// <summary>The first hour boundary at or after <paramref name="windowStart"/> — where whole buckets begin.</summary>
-    internal static DateTime CeilingHour(DateTime windowStart)
-    {
-        var floor = new DateTime(windowStart.Year, windowStart.Month, windowStart.Day, windowStart.Hour, 0, 0, DateTimeKind.Unspecified);
-        return floor == windowStart ? floor : floor.AddHours(1);
-    }
+    /// <summary>The first hour boundary at or after <paramref name="windowStart"/> — where whole buckets begin.
+    /// See <see cref="CollectionHealthRollupSupport.CeilingHour"/>.</summary>
+    internal static DateTime CeilingHour(DateTime windowStart) => CollectionHealthRollupSupport.CeilingHour(windowStart);
 
     /// <summary>
     /// Chooses the statement for the seven-day collection-health read: the composed one only when both guards
-    /// pass, else the exact raw scan. (a) ABSENT: no aggregate (plain PostgreSQL, or not yet created) → raw.
-    /// (b) CONTINUITY: any whole hour in [head end, watermark) missing as a bucket → raw
-    /// (<see cref="CollectionHealthContinuitySql"/> says why). A guard read that fails is treated as a failed
-    /// guard, availability-first: the raw scan is always exact, only slower. That includes a value the client
-    /// cannot convert (#3973): a guard read that produced one used to fail the whole overview instead.
+    /// pass, else the exact raw scan. See <see cref="CollectionHealthRollupSupport.RollupUsableAsync"/> for (a)
+    /// the ABSENT guard and (b) the CONTINUITY guard.
     /// </summary>
-    internal static async Task<bool> CollectionHealthRollupUsableAsync(
-        NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using (var probe = postgres.CreateCommand(CollectionHealthRollupProbeSql))
-            {
-                probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
-                {
-                    return false;
-                }
-            }
-
-            DateTime? watermark;
-            await using (var read = postgres.CreateCommand(CollectionHealthWatermarkSql))
-            {
-                read.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                watermark = await read.ExecuteScalarAsync(cancellationToken) is DateTime w ? w : null;
-            }
-
-            if (watermark is not { } mark || mark <= headEnd)
-            {
-                return true; // nothing whole below the watermark inside the window: all real-time, nothing to hole
-            }
-
-            var expected = (long)Math.Floor((mark - headEnd).TotalHours);
-            await using var count = postgres.CreateCommand(CollectionHealthContinuitySql);
-            count.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-            AddTimestamp(count, headEnd);
-            AddTimestamp(count, headEnd.AddHours(expected));
-            var present = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
-            return present >= expected;
-        }
-        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
-        {
-            return false;
-        }
-    }
+    internal static Task<bool> CollectionHealthRollupUsableAsync(
+        NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken) =>
+        CollectionHealthRollupSupport.RollupUsableAsync(postgres, headEnd, cancellationToken);
 
     /// <summary>The default depth of the worst-first "Needs attention" ranking.</summary>
     public const int DefaultWorstCount = 5;
