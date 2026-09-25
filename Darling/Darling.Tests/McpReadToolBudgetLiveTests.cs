@@ -94,13 +94,10 @@ public sealed class McpReadToolBudgetLiveTests
     /// </summary>
     private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
     {
-        ["describe_custom_view_catalog"] = 98_173,   // #4198 per-tool lane
-        ["get_blocking"] = 35_672,                   // #4198 per-tool lane
-        ["get_collection_health"] = 34_679,          // #4198 per-tool lane
-        ["get_collection_log"] = 68_497,             // #4198 per-tool lane
-        ["get_fleet_overview"] = 78_524,             // #4198 per-tool lane
-        ["get_query_store_regressions"] = 181_996,   // #4198 per-tool lane
-        ["get_query_store_top"] = 48_360,            // #4198 per-tool lane
+        /* Empty: every #4198 per-tool lane has merged (get_blocking #4267, get_collection_log #4265,
+           get_query_store_regressions #4264, get_collection_health #4268, describe_custom_view_catalog #4272,
+           get_query_store_top #4273), and get_fleet_overview already fit. A new offender gets a row here only
+           with an issue for its own fix. */
     };
 
     [Fact]
