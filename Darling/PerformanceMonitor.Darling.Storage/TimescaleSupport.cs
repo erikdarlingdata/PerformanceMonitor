@@ -6037,9 +6037,14 @@ AND   j.hypertable_name = '{relation}'";
     /// there is no seam left to hold a row, the probe always comes back empty, and the two branches converge —
     /// the same steady state the old unconditional stitch reached, just no longer assumed along the way. Both
     /// empty → <c>NULL</c> → <c>Short</c> (correct: fresh install, no history yet). The seam is what
-    /// <see cref="RepairMaterializationHolesAsync"/> repairs, by scanning a stitched successor from the
-    /// legacy's last bucket instead of its own floor; once that repair runs, the seam is empty and this gate's
-    /// fallback releases on its own, no manual step.</para>
+    /// <see cref="RepairMaterializationHolesAsync"/> repairs, by giving a stitched successor a SEAM scan window
+    /// down to the legacy's last bucket, unclamped by the horizon that bounds its ordinary scan window — so an
+    /// outage longer than that horizon's own span (#4186 follow-up: the first cut folded the seam into the same
+    /// horizon clamp as the ordinary window, and a seam older than it was silently never scanned) still gets
+    /// repaired instead of clamped away. Once that repair runs, the seam is empty and this gate's fallback
+    /// releases automatically, with no manual step, bounded only by the repair's own per-start cap — a seam
+    /// wider than one start's cap takes more than one start to close in full, but every start makes progress on
+    /// it.</para>
     ///
     /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
     /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude

@@ -541,6 +541,101 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// #4186 follow-up: the same seam shape as
+    /// <see cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases"/>, but the outage
+    /// outlasts the raw retention horizon itself (<see cref="TimescaleSupport.MaterializationHoleScanSpanFor"/>:
+    /// 4 days for <c>procedure_stats</c>) instead of sitting comfortably inside it. The seam fix's first cut
+    /// folded the seam's lower bound into the SAME <c>max(_, horizon)</c> the ordinary scan clamps to, so a seam
+    /// older than the horizon was silently dropped every start and the gate held the raw purge forever with no
+    /// manual step ever releasing it. The 2-day twin above never exercises that clamp — its horizon sits days
+    /// before the seam — so it only proves the short case; this test's outage is 6 days, longer than the
+    /// 4-day span, and deliberately exercises it.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamOlderThanTheHorizon_HoleWalkStillRepairsItAndGateReleases()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Same seam shape as the 2-day twin: S is the stop, the legacy is refreshed through S-2h, raw
+               carries the [S-1h, S] tail plus a rejected interval-0 restart row. The outage here runs 6 days —
+               longer than procedure_stats' 4-day raw span — so the successor's first post-upgrade refresh
+               lands at U = S+6d, and the seam sits entirely below the horizon RepairMaterializationHolesAsync
+               computes from U. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seam6_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, s.AddMinutes(30), "seam6_proc_restart", 0, 0, 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-6), s.AddHours(-1), ct);
+
+            var u = s.AddDays(6);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seam6_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            /* The seam holds raw rows the stitch cannot see through unconditionally — Short, not Covered. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* The product's own start-path entry point (DarlingWorker calls this exact method). Before the
+               #4186 follow-up fix, the seam's lower bound was clamped to U minus the 4-day span — comfortably
+               ABOVE the seam, since the outage is 6 days — so this repaired 0 buckets and the seam stood
+               forever without a manual --backfill-rollups. */
+            var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
+            Assert.True(summary.BucketsRepaired >= 2, $"expected the 2-bucket seam tail to be repaired, got {summary.BucketsRepaired}");
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(s.AddHours(-1), newFloor);
+            }
+
+            /* The seam is now empty (the successor's own floor reaches the legacy's boundary) — Covered. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// #4186: the no-deadlock twin of <see cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases"/> —
     /// same frozen-legacy-plus-outage shape, but the seam itself holds NO raw rows (an outage that began
     /// right at a legacy refresh, or a tail already purged before this fix existed). A FLOOR-only

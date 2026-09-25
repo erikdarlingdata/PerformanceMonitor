@@ -213,6 +213,101 @@ public sealed class MaterializationHoleRepairTests
         Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.AlignDown(instant, TimeSpan.Zero));
     }
 
+    [Fact]
+    public void ScanWindows_NoSeam_GivesTheOrdinaryWindowOnly()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+
+        /* floor newer than the horizon: the ordinary window starts at floor. */
+        var floor = Hour.AddHours(50);
+        var horizon = Hour;
+        var ceiling = Hour.AddHours(80);
+        Assert.Equal(
+            new[] { (floor, ceiling) },
+            TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor: floor, width));
+
+        /* floor older than the horizon (the ordinary, pre-#4186 clamp): the window starts at the horizon. */
+        var oldFloor = Hour;
+        var laterHorizon = Hour.AddHours(20);
+        Assert.Equal(
+            new[] { (laterHorizon, ceiling) },
+            TimescaleSupport.MaterializationHoleScanWindows(oldFloor, ceiling, laterHorizon, seamFloor: oldFloor, width));
+    }
+
+    [Fact]
+    public void ScanWindows_SeamAboveTheHorizon_GivesTwoWindows_SeamThenOrdinary()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var floor = Hour.AddHours(10);
+        var horizon = Hour.AddHours(2);
+        var seamFloor = Hour.AddHours(4);
+        var ceiling = Hour.AddHours(50);
+
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+
+        Assert.Equal(new[] { (seamFloor, floor.AddHours(-1)), (floor, ceiling) }, windows);
+        Assert.True(windows[0].From >= horizon, "the seam sits above the horizon in this case — a sanity check, not the regression this pins");
+    }
+
+    [Fact]
+    public void ScanWindows_SeamBelowTheHorizon_GivesTwoWindows_TheSeamUnclamped()
+    {
+        /* #4186 follow-up: a store stopped more than the raw span (4 days = 96h here) before its successor's
+           first start. The seam predates the horizon entirely — the exact shape the clamp used to swallow. */
+        var width = TimescaleSupport.HourlyBucket;
+        var horizon = Hour.AddHours(96);
+        var floor = Hour.AddHours(150);
+        var seamFloor = Hour.AddHours(10);
+        var ceiling = Hour.AddHours(200);
+
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+
+        Assert.Equal(new[] { (seamFloor, floor.AddHours(-1)), (floor, ceiling) }, windows);
+
+        /* The regression itself: the seam window's From reaches below the horizon rather than clamping to it —
+           the pre-fix formula (from = max(seamFloor, horizon)) would have reported Hour.AddHours(96) here. */
+        Assert.True(windows[0].From < horizon);
+        Assert.Equal(seamFloor, windows[0].From);
+    }
+
+    [Fact]
+    public void ScanWindows_TheOrdinaryWindow_NeverStartsBelowTheHorizon()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var ceiling = Hour.AddHours(500);
+
+        foreach (var (floor, horizon, seamFloor) in new[]
+        {
+            (Hour.AddHours(50), Hour, Hour.AddHours(50)),               /* no seam, floor above horizon */
+            (Hour, Hour.AddHours(20), Hour),                            /* no seam, floor below horizon */
+            (Hour.AddHours(10), Hour.AddHours(2), Hour.AddHours(4)),    /* seam above horizon */
+            (Hour.AddHours(150), Hour.AddHours(96), Hour.AddHours(10)), /* seam below horizon */
+        })
+        {
+            var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+            var ordinary = windows[^1];
+            Assert.True(ordinary.From >= horizon);
+            Assert.Equal(ordinary.From, floor > horizon ? floor : horizon);
+        }
+    }
+
+    [Fact]
+    public void ScanWindows_EdgeCases_OneBucketSeam_NoWindowsWhenNothingToScan_AndTheWidthGuard()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+
+        /* A seam exactly one bucket wide still yields a valid, single-bucket window. */
+        var floor = Hour.AddHours(5);
+        var oneBucketSeam = floor.AddHours(-1);
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, Hour.AddHours(50), Hour, oneBucketSeam, width);
+        Assert.Equal(new[] { (oneBucketSeam, oneBucketSeam), (floor, Hour.AddHours(50)) }, windows);
+
+        /* No seam and the whole span is older than the horizon: nothing to scan. */
+        Assert.Empty(TimescaleSupport.MaterializationHoleScanWindows(Hour, Hour.AddHours(5), Hour.AddHours(20), seamFloor: Hour, width));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.MaterializationHoleScanWindows(Hour, Hour, Hour, Hour, TimeSpan.Zero));
+    }
+
     /// <summary>
     /// The start path: launched (not awaited) right after the ensure, on its own connection, inside the
     /// TimescaleDB block, before the compression and retention ensures; drained at shutdown beside the baseline
