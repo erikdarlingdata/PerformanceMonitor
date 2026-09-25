@@ -269,10 +269,21 @@ public sealed class ViewerQuerySnapshotsSqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("query_text NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC, cpu_time_ms DESC", sql, StringComparison.Ordinal);
-        /* The plan columns the Estimated / Actual buttons bind are selected. */
-        Assert.Contains("query_plan", sql, StringComparison.Ordinal);
-        Assert.Contains("live_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id", sql, StringComparison.Ordinal);
+
+        /* #4239: the Estimated / Actual plan buttons now gate on has-plan FLAGS, not the full plan XML — a
+           naive Assert.DoesNotContain("query_plan") would be fooled by "has_query_plan" being a superstring,
+           so split into lines and check no line is exactly the bare (no-longer-selected) column name. */
+        var columnLines = sql.Split('\n').Select(l => l.Trim().TrimEnd(',')).ToArray();
+        Assert.DoesNotContain("query_plan", columnLines);
+        Assert.DoesNotContain("live_query_plan", columnLines);
+        Assert.Contains("query_plan IS NOT NULL AS has_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("live_query_plan IS NOT NULL AS has_live_query_plan", sql, StringComparison.Ordinal);
+
+        /* #4239: the Active-Queries grid caps to the newest 1,000 rows of the matched window; the trailing
+           window-function total backs the "showing newest 1,000 of N" note. */
+        Assert.Contains("COUNT(*) OVER () AS total_count", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1000", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -339,12 +350,19 @@ public sealed class ViewerQuerySnapshotsSqlTests
 public sealed class ViewerActiveQueriesDisplayTests
 {
     [Fact]
-    public void QuerySnapshotRow_HasPlanFlags_GateOnNonEmptyPlanXml()
+    public void QuerySnapshotRow_HasPlanFlags_AreIndependentOfPlanXml()
     {
+        /* #4239: HasQueryPlan/HasLiveQueryPlan are now plain settable flags, not computed from
+           QueryPlan/LiveQueryPlan — a stored-row read sets them from the store's has_query_plan /
+           has_live_query_plan presence columns while leaving QueryPlan/LiveQueryPlan null (fetched later,
+           on demand); only the live DMV path sets both the flag AND the XML together. So setting QueryPlan
+           alone must no longer imply HasQueryPlan, and the flags must be settable independently of the XML. */
         Assert.False(new ViewerQuerySnapshotRow().HasQueryPlan);
         Assert.False(new ViewerQuerySnapshotRow().HasLiveQueryPlan);
-        Assert.True(new ViewerQuerySnapshotRow { QueryPlan = "<ShowPlanXML/>" }.HasQueryPlan);
-        Assert.True(new ViewerQuerySnapshotRow { LiveQueryPlan = "<ShowPlanXML/>" }.HasLiveQueryPlan);
+        Assert.False(new ViewerQuerySnapshotRow { QueryPlan = "<ShowPlanXML/>" }.HasQueryPlan);
+        Assert.False(new ViewerQuerySnapshotRow { LiveQueryPlan = "<ShowPlanXML/>" }.HasLiveQueryPlan);
+        Assert.True(new ViewerQuerySnapshotRow { HasQueryPlan = true }.HasQueryPlan);
+        Assert.True(new ViewerQuerySnapshotRow { HasLiveQueryPlan = true }.HasLiveQueryPlan);
     }
 
     [Fact]
@@ -527,9 +545,10 @@ public sealed class ViewerQueriesRestLivePostgresTests
             await InsertQuerySnapshotAsync(connection, SnapshotServerId, newer, spid: 52, cpu: 500, hash: "0xB2", queryText: "SELECT mid");
             await InsertQuerySnapshotAsync(connection, SnapshotServerId, newer, spid: 53, cpu: 900, hash: "0xB3", queryText: "SELECT hot");
 
-            var rows = await viewer.GetLatestQuerySnapshotsAsync(SnapshotServerId, start, end);
+            var (totalCount, rows) = await viewer.GetLatestQuerySnapshotsAsync(SnapshotServerId, start, end);
 
             Assert.Equal(3, rows.Count);                       /* WAITFOR excluded */
+            Assert.Equal(3, totalCount);                       /* #4239: pre-cap total matches row count (well under the 1,000 cap) */
             Assert.DoesNotContain(rows, r => r.QueryHash == "0xWAIT");
             Assert.Equal(53, rows[0].SessionId);               /* newest batch, highest cpu first */
             Assert.Equal(52, rows[1].SessionId);
