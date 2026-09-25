@@ -847,7 +847,13 @@ public sealed class DarlingStoreLoginsTests
         var start = Body(code, "private async Task<bool> TryStartServerAsync(");
 
         Assert.DoesNotContain("config.Postgres.ConnectionString", start, StringComparison.Ordinal);
-        Assert.Contains("NpgsqlDataSource.Create(storeConnectionString)", start, StringComparison.Ordinal);
+
+        /* #4277: every STORE data source pins its session timezone to UTC, so the resolved
+           storeConnectionString is wrapped before it reaches Create rather than passed bare. */
+        Assert.Contains(
+            "NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString))",
+            start,
+            StringComparison.Ordinal);
 
         var assignments = Regex.Matches(start, @"storeConnectionString\s*=(?!=)").Count;
         Assert.Equal(2, assignments);
