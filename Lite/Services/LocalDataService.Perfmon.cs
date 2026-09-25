@@ -173,23 +173,6 @@ ORDER BY collection_time";
     }
 
     /// <summary>
-    /// Batched sibling of <see cref="GetPerfmonTrendAsync"/>: fetches the trend for ALL selected
-    /// counters in ONE query (replacing an N+1 query-per-counter loop), grouped by counter name.
-    /// <para>#4234: wraps the unchanged per-collection SUM as a subquery and re-aggregates into buckets sized
-    /// to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c> always 1 into
-    /// <see cref="TrendBuckets.AutoMinutes"/>, the ruling's own wording). <see cref="PerfmonTrendPoint"/>'s
-    /// fields keep their per-collection MEANING: <c>Value</c> is the bucket's rounded GAUGE average (the
-    /// ruling's rule for a gauge); <c>DeltaValue</c>/<c>SampleIntervalSeconds</c> are summed only over rated
-    /// collections (a stored interval &gt; 0), so <c>DeltaValue / SampleIntervalSeconds</c> downstream is
-    /// still the ruling's rate (summed deltas over summed intervals), and both are NULL together for a bucket
-    /// with no rated collection — the same "no delta" state an unrated per-collection row always carried;
-    /// <c>CntrType</c> keeps the per-collection MIN=MAX-agreement rule, now double-aggregated. When EVERY
-    /// bucket the whole call returned holds exactly one physical collection, each point is stamped at its
-    /// bucket's raw <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged
-    /// bucket anywhere (any counter) keeps <c>bucket_start</c> throughout. Darling's twin is
-    /// <c>ViewerDataService.PerfmonTrendsSql</c> / <c>GetPerfmonTrendsByCountersAsync</c> (#4234, PR #4304).</para>
-    /// </summary>
-    /// <summary>
     /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetPerfmonTrendsByCountersAsync"/>
     /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>counter_name IN (...)</c>
     /// list so that list's numbering does not shift) is checkable without a live DuckDB. Darling's twin is
@@ -228,6 +211,23 @@ GROUP BY counter_name, 2
 ORDER BY counter_name, 2";
     }
 
+    /// <summary>
+    /// Batched sibling of <see cref="GetPerfmonTrendAsync"/>: fetches the trend for ALL selected
+    /// counters in ONE query (replacing an N+1 query-per-counter loop), grouped by counter name.
+    /// <para>#4234: wraps the unchanged per-collection SUM as a subquery and re-aggregates into buckets sized
+    /// to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c> always 1 into
+    /// <see cref="TrendBuckets.AutoMinutes"/>, the ruling's own wording). <see cref="PerfmonTrendPoint"/>'s
+    /// fields keep their per-collection MEANING: <c>Value</c> is the bucket's rounded GAUGE average (the
+    /// ruling's rule for a gauge); <c>DeltaValue</c>/<c>SampleIntervalSeconds</c> are summed only over rated
+    /// collections (a stored interval &gt; 0), so <c>DeltaValue / SampleIntervalSeconds</c> downstream is
+    /// still the ruling's rate (summed deltas over summed intervals), and both are NULL together for a bucket
+    /// with no rated collection — the same "no delta" state an unrated per-collection row always carried;
+    /// <c>CntrType</c> keeps the per-collection MIN=MAX-agreement rule, now double-aggregated. When EVERY
+    /// bucket the whole call returned holds exactly one physical collection, each point is stamped at its
+    /// bucket's raw <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged
+    /// bucket anywhere (any counter) keeps <c>bucket_start</c> throughout. Darling's twin is
+    /// <c>ViewerDataService.PerfmonTrendsSql</c> / <c>GetPerfmonTrendsByCountersAsync</c> (#4234, PR #4304).</para>
+    /// </summary>
     public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(int serverId, List<string> counterNames, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetPerfmonTrendsByCountersAsync", "v_perfmon_stats trends batched by counter, bucketed");

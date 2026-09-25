@@ -318,24 +318,25 @@ public static class DarlingWebEndpoints
                 }
                 catch (Exception ex)
                 {
-                    /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope (the common
-                       case, ToHttpResult's ServerError arm below still answers that shape -- #4283, pending a
-                       design decision); this catch is only a backstop for a binding-layer throw. #4276: also the
-                       one log line this surface was missing. #4281 review, finding 2: this used to fall through
-                       to ToHttpResult too, which put ex.Message on the wire -- answer with the SAME body and
-                       status the top-of-pipeline backstop gives, so the wording and the timeout/error split
-                       cannot drift between the two call sites. */
+                    /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
+                       McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
+                       Reported and answered directly from the real Exception here — ServerErrorResult's
+                       sentence-based classifier is for the FAR more common case below, where the exception is
+                       already gone by the time a tool's own catch handed back its envelope. Answering here
+                       too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
+                       routing this through FormatError first would make ToHttpResult's classifier re-derive
+                       from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
-                return ToHttpResult(result);
+                return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
         }
 
-        MapCustomViews(app, postgres);
-        MapCustomAlerts(app, postgres);
-        MapMuteRules(app, postgres);
+        MapCustomViews(app, postgres, logger);
+        MapCustomAlerts(app, postgres, logger);
+        MapMuteRules(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -345,7 +346,7 @@ public static class DarlingWebEndpoints
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
-        DarlingTriageEndpoint.Map(app, postgres, analysis);
+        DarlingTriageEndpoint.Map(app, postgres, analysis, logger);
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
@@ -361,7 +362,7 @@ public static class DarlingWebEndpoints
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new CustomViewStore(postgres);
 
@@ -415,23 +416,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
+               the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
+            var result = await store.CreateAsync(
+                request.Name, request.Description, request.DefinitionJson,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
-                    CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not create the view.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving view: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
+                CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not create the view.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Update — 200 on success; 400 bad body/definition, 404 gone, 409 stale-version OR duplicate name.
@@ -461,24 +457,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await store.UpdateAsync(
+                id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
-                    CustomViewResult.NotFound => NotFoundResult(),
-                    CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not update the view.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving view: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
+                CustomViewResult.NotFound => NotFoundResult(),
+                CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not update the view.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Delete — 204 on success, 404 when missing. Any authenticated seat; application/json required. */
@@ -489,15 +479,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            try
-            {
-                var result = await store.DeleteAsync(id, context.RequestAborted);
-                return result is CustomViewResult.Ok ? Results.NoContent() : NotFoundResult();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error deleting view: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await store.DeleteAsync(id, context.RequestAborted);
+            return result is CustomViewResult.Ok ? Results.NoContent() : NotFoundResult();
         });
 
         /* Compile-and-run a single composed panel spec (Custom Views v2, #1563) against the least-privilege
@@ -530,11 +514,20 @@ public static class DarlingWebEndpoints
 
             /* The compile-and-run itself lives in the shared RunComposedPanelAsync (the ONE runner behind both
                this endpoint and the MCP run_custom_view_panel tool); this route only adds the web concerns —
-               content-type gate, stream parse — then maps the discriminated outcome onto HTTP status. */
+               content-type gate, stream parse — then maps the discriminated outcome onto HTTP status.
+               RunComposedPanelAsync's outward text is UNCHANGED by #4283: its outcome.Error keeps carrying the
+               real "Error running query: {ex.Message}" sentence, because run_custom_view_panel's MCP caller
+               (DarlingMcpCustomViewTools) reads that same field and #4283 does not touch what an MCP client
+               sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
+               the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
+            var stopwatch = Stopwatch.StartNew();
             var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted);
-            return outcome.Payload is not null
-                ? JsonNodeResult(outcome.Payload)
-                : ErrorResult(outcome.Error!, outcome.IsServerError ? StatusCodes.Status500InternalServerError : StatusCodes.Status400BadRequest);
+            if (outcome.Payload is not null)
+            {
+                return JsonNodeResult(outcome.Payload);
+            }
+
+            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -556,7 +549,7 @@ public static class DarlingWebEndpoints
     /// naming the gate. The store/evaluator run on the host's least-privilege VIEWER pool (the same
     /// <paramref name="postgres"/> the reads and <c>/api/compose/run</c> use — never the owner pool).
     /// </summary>
-    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new CustomAlertRuleStore(postgres);
 
@@ -598,23 +591,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
+               the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
+            var result = await store.CreateAsync(
+                request.Name, request.Description, request.DefinitionJson, request.Enabled,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson, request.Enabled,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
-                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not create the alert rule.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
+                CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not create the alert rule.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Update — 200 on success; 400 bad body/definition, 404 gone, 409 stale-version OR duplicate name. A
@@ -644,24 +632,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await store.UpdateAsync(
+                id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
-                    CustomAlertRuleResult.NotFound => AlertNotFoundResult(),
-                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not update the alert rule.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
+                CustomAlertRuleResult.NotFound => AlertNotFoundResult(),
+                CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not update the alert rule.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Delete — 204 on success, 404 when missing. application/json required. Routes through
@@ -678,22 +660,20 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            try
-            {
-                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, id, logger: null, context.RequestAborted);
-                return result is CustomAlertRuleResult.Ok ? Results.NoContent() : AlertNotFoundResult();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error deleting alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, id, logger: null, context.RequestAborted);
+            return result is CustomAlertRuleResult.Ok ? Results.NoContent() : AlertNotFoundResult();
         });
 
         /* The starter templates (#3325): the SAME code-defined set the list_custom_alert_templates MCP tool
            returns, byte-identical (wraps that tool), mapped through the shared ToHttpResult exactly as the
            /api/read/* tool endpoints map their string results. Read-only, touches no store; open to any seat. */
         app.MapGet("/api/alert-templates", async () =>
-            ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates()));
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates();
+            return ToHttpResult(result, "/api/alert-templates", logger, stopwatch.ElapsedMilliseconds);
+        });
 
         /* Validate — dry-run a definition WITHOUT persisting; returns {valid, error}. The definition rides as an
            embedded JSON object (same as create/update bodies), validated by the SAME
@@ -743,7 +723,9 @@ public static class DarlingWebEndpoints
                 return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
-            return ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson);
+            return ToHttpResult(result, "/api/alerts/test", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -794,7 +776,7 @@ public static class DarlingWebEndpoints
     /// <c>{"enabled": bool}</c> sub-resource, the reversible flag flip that never touches another field. The id
     /// is the rule's GUID string from <c>get_mute_rules</c> / create's response.</para>
     /// </summary>
-    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new PgMuteRuleStore(postgres);
 
@@ -809,9 +791,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context)),
-                StatusCodes.Status201Created);
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context));
+            return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
         /* Update — PARTIAL, the merged update_mute_rule semantics verbatim: the body carries ONLY the fields to
@@ -826,8 +808,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context)));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context));
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 
         /* Set-enabled — the reversible flag flip that keeps the rule's id, scope, reason and creation date (the
@@ -860,8 +843,9 @@ public static class DarlingWebEndpoints
                     StatusCodes.Status400BadRequest);
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}/enabled", logger, stopwatch.ElapsedMilliseconds);
         });
 
         /* Delete — 200 with the verb's {status:"deleted", rule_id} envelope rather than the views surface's
@@ -875,8 +859,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -935,13 +920,24 @@ public static class DarlingWebEndpoints
 
     /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
     /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — a refusal (<c>invalid</c>) included, which is the
-    /// shape the read surface adopted from here in #3739 — except an error (the caught-exception envelope or a
-    /// bare non-JSON string), which is wrapped as <c>{"error": sentence}</c> exactly as <see cref="ToHttpResult"/>
-    /// wraps the read surface's.</summary>
-    private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
+    /// shape the read surface adopted from here in #3739.
+    ///
+    /// <para><b>#4283: the ServerError arm never puts the tool's caught-exception text on the wire.</b> Classified
+    /// FIRST, before <see cref="MuteRuleEnvelopeStatus"/> ever runs, and answered through
+    /// <see cref="ServerErrorResult"/> exactly as <see cref="ToHttpResult"/> answers the read surface's — logged
+    /// ONCE, the body a fixed message, 503 when the sentence carries a caught statement_timeout's 57014 token,
+    /// 500 otherwise. Any other error (a bare non-JSON string) is still wrapped as <c>{"error": sentence}</c>.</para>
+    /// </summary>
+    internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
     {
+        var kind = ClassifyToolResponse(result);
+        if (kind is ToolResponseKind.ServerError)
+        {
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs);
+        }
+
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
-        return ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
+        return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
             ? Results.Text(result, "application/json", statusCode: httpStatus)
             : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
     }
@@ -950,15 +946,43 @@ public static class DarlingWebEndpoints
     /// annotations}</c> payload on success, or an error the caller maps onto its own surface (HTTP status /
     /// MCP envelope). <see cref="IsServerError"/> distinguishes a client-correctable error — a bad spec or a
     /// bounded query failure (statement_timeout / Postgres error), i.e. HTTP 400 — from an unexpected internal
-    /// failure (HTTP 500).</summary>
-    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError)
+    /// failure (HTTP 500). <see cref="Fault"/> (#4283 review round 1, M1) rides along on a BadRequest for a
+    /// PostgresException the panel author cannot act on — the real exception, so the WEB endpoint mapping can
+    /// answer it through the same backstop as an uncaught one; <see cref="Error"/>/<see cref="IsServerError"/>
+    /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.
+    /// <see cref="AuthorSqlState"/> (#4293 round 2) is set only on the author-actionable PostgresException arm,
+    /// so the web log line can name the SQLSTATE without re-deriving it.</summary>
+    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null)
     {
         internal static ComposeRunOutcome Ok(JsonObject payload) => new(payload, null, false);
 
         internal static ComposeRunOutcome BadRequest(string error) => new(null, error, false);
 
+        internal static ComposeRunOutcome BadRequest(string error, PostgresException fault) => new(null, error, false, fault);
+
+        internal static ComposeRunOutcome AuthorQueryError(string error, string? sqlState) => new(null, error, false, null, sqlState);
+
         internal static ComposeRunOutcome ServerError(string error) => new(null, error, true);
     }
+
+    /// <summary>#4283 review round 1 (M1): the PostgresException SQLSTATEs a Custom Views panel author can act
+    /// on by editing their own panel — a statement_timeout cancel, or a class-22/class-42 error other than
+    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel). Everything else (28P01
+    /// auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...) is a STORE
+    /// fault the author cannot fix.</summary>
+    internal static bool IsComposeRunAuthorActionable(string? sqlState) =>
+        sqlState == "57014"
+        || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
+        || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
+
+    /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
+    /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
+    /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
+    /// server rejects answers FATAL 22023 or 42704, which names the configured setting and its value).</summary>
+    internal static ComposeRunOutcome FromPostgresException(PostgresException ex) =>
+        IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+            ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
+            : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1106,13 +1130,58 @@ public static class DarlingWebEndpoints
         }
         catch (PostgresException ex)
         {
-            /* A statement_timeout cancel (57014) or any bounded query error — client-correctable. */
-            return ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
+            /* #4283 review round 1 (M1): 57014 / class 22 / class 42 except 42501 are what a panel author
+               can act on — kept as Query failed: {MessageText} under 400, verbatim. Anything else (28P01
+               auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...)
+               is a STORE fault the author cannot fix; the real exception rides back on Fault so the WEB
+               endpoint (which has the logger) can answer through the same backstop shape #4276 gives an
+               uncaught one. outcome.Error/IsServerError stay exactly what they always were either way, so
+               run_custom_view_panel's MCP answer does not change.
+               #4293 round 2: the decision (including the FATAL/PANIC override) lives in FromPostgresException,
+               so a test can run it without a live Postgres round trip. */
+            return FromPostgresException(ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
         }
+    }
+
+    /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
+    /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
+    /// <see cref="MuteRuleToolResult"/> shape) so the three arms are directly testable without a live Postgres
+    /// round trip. <see cref="ComposeRunOutcome.Fault"/> (#4283 M1) is checked first: a STORE fault the panel
+    /// author could not have caused answers through the same fixed-body backstop #4276 gives an uncaught
+    /// exception, logged once, no role/host text on the wire — even though the outcome that carried it is
+    /// itself a BadRequest shape (<see cref="ComposeRunOutcome.IsServerError"/> false), it still needs the
+    /// 500-class backstop treatment, not a 400. Absent a Fault, <see cref="ComposeRunOutcome.IsServerError"/>
+    /// false is a bad spec or #4283's allow-listed "Query failed: {ex.MessageText}" (a Custom Views author
+    /// needs that syntax error, statement_timeout cancel included, to fix their own panel) — that text STAYS;
+    /// true is the generic-Exception catch's "Error running query: {ex.Message}", reclassified here exactly as
+    /// <see cref="ToHttpResult"/>'s ServerError arm reclassifies a tool's envelope, since by this point the
+    /// real Exception is equally gone — only the sentence survived the round trip through
+    /// <see cref="ComposeRunOutcome"/>.</summary>
+    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs)
+    {
+        if (outcome.Fault is not null)
+        {
+            DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault);
+            return Results.Json(DarlingWebFailureLog.Body(outcome.Fault), statusCode: DarlingWebFailureLog.StatusCode(outcome.Fault));
+        }
+
+        if (!outcome.IsServerError && outcome.AuthorSqlState is { } sqlState)
+        {
+            /* #4293 round 2 (R2-L1): a panel's own query error still answers its text at 400 so the author can fix
+               the panel, but it is logged once too, so store drift (42P01/42703 after a migration that did not
+               finish) reaches the service log, not only one author's browser. */
+            logger.LogWarning(
+                "{Route} answered a Custom View panel's query error at 400 after {ElapsedMs} ms (SQLSTATE {SqlState}): {Error}",
+                route, elapsedMs, sqlState, outcome.Error);
+        }
+
+        return outcome.IsServerError
+            ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs)
+            : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
     }
 
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
@@ -3079,22 +3148,45 @@ public static class DarlingWebEndpoints
             return ToolResponseKind.ServerError;
         }
 
+        if (result.StartsWith(Mcp.DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+        {
+            return ToolResponseKind.ServerError;
+        }
+
         return ToolResponseKind.ClientError;
     }
 
     /// <summary>The read surface's HTTP answer. A refusal is the envelope itself as the body under 400 — the
     /// shape the mute-rule write routes have always answered <c>invalid</c> with, so <c>status</c>, <c>message</c>
-    /// and <c>hints.parameter</c> reach a web client exactly as they reach an MCP client (#3739). The two error
-    /// arms carry the SENTENCE under <c>error</c> (<see cref="McpHelpers.ErrorMessageOf"/> unwraps the envelope;
-    /// a bare string is already the sentence), so the body a web client reads for a failure is the same
-    /// <c>{"error": "Error during get_x: ..."}</c> it read before the tools' own wire shape changed.</summary>
-    private static IResult ToHttpResult(string result) => ClassifyToolResponse(result) switch
+    /// and <c>hints.parameter</c> reach a web client exactly as they reach an MCP client (#3739).
+    ///
+    /// <para><b>#4283: the ServerError arm never puts the tool's caught-exception text on the wire.</b> A
+    /// tool's own catch turns <c>ex.Message</c> into <c>McpHelpers.ErrorMessageOf(result)</c> — a PostgreSQL
+    /// error starting with its SQLSTATE and the server's message, or a failed store connection naming its host
+    /// and port — before this method ever sees it. The sentence is logged ONCE through
+    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/> (so the service log still names
+    /// what failed) and the body becomes <see cref="DarlingWebFailureLog.Body(string)"/>'s fixed message, under
+    /// <see cref="DarlingWebFailureLog.StatusCode(string)"/> — 503 when the sentence carries a caught
+    /// statement_timeout's 57014 token, 500 otherwise, the same split #4281's backstop gives an UNCAUGHT one.
+    /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
+    /// maps here too, for the same reason.</para>
+    /// </summary>
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs) => ClassifyToolResponse(result) switch
     {
         ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
         ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-        ToolResponseKind.ServerError => Results.Json(new { error = McpHelpers.ErrorMessageOf(result) }, statusCode: StatusCodes.Status500InternalServerError),
+        ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
         _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
     };
+
+    /// <summary>The ServerError arm's body, factored out so both <see cref="ToHttpResult"/> and the
+    /// <c>/api/read/*</c> loop's binding-layer catch (which holds the real <see cref="Exception"/>, not just
+    /// its sentence) answer with the identical fixed shape.</summary>
+    internal static IResult ServerErrorResult(string sentence, string route, ILogger logger, long elapsedMs)
+    {
+        DarlingWebFailureLog.Report(logger, route, elapsedMs, sentence);
+        return Results.Json(DarlingWebFailureLog.Body(sentence), statusCode: DarlingWebFailureLog.StatusCode(sentence));
+    }
 
     /* ─────────────────────────── query-string binding ─────────────────────────── */
 

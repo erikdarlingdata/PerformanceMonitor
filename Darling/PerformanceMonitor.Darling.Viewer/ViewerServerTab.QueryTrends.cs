@@ -141,14 +141,22 @@ public partial class ViewerServerTab
     /// tier is spelled with the payload's own word (<see cref="QueryTrendSeries.Source"/>: <c>raw</c> /
     /// <c>hourly</c>) so a user reading the chart and an agent reading <c>get_query_duration_trend</c> are
     /// told the same thing in the same vocabulary; the parenthetical says what the word means on a chart.
+    /// A raw series whose buckets merged collections (<see cref="QueryTrendSeries.BucketMinutes"/> &gt; 0, #4234)
+    /// names its width instead of claiming one point per collection.
     /// </summary>
     internal static string DescribeTrendCoverage(QueryTrendSeries series)
         => ComposeTrendCoverage(
             series.Tier == PerformanceMonitor.Darling.Storage.RetentionTier.Raw
-                ? $"{series.Source} (one point per collection)"
+                ? series.BucketMinutes > 0
+                    ? $"{series.Source} (one point per {DescribeBucketWidth(series.BucketMinutes)})"
+                    : $"{series.Source} (one point per collection)"
                 : $"{series.Source} rollup (one point per hour)",
             series.Truncated ? series.EffectiveStartUtc : null,
             "the store no longer holds the rest of this window at this tier");
+
+    /// <summary>The bucket width named in a raw trend's coverage title (#4234): minutes below an hour, whole hours from it.</summary>
+    private static string DescribeBucketWidth(int minutes)
+        => minutes == 1 ? "minute" : minutes % 60 == 0 ? (minutes == 60 ? "hour" : $"{minutes / 60} hours") : $"{minutes} minutes";
 
     /// <summary>
     /// The Query Store duration chart's coverage title (#3653) — the same idiom as
