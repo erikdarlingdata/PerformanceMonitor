@@ -1254,7 +1254,7 @@ LEFT JOIN LATERAL (
     /// width is appended as its OWN trailing parameter at <paramref name="widthParamIndex"/> so that numbering
     /// never shifts, mirroring the wait/perfmon trend reads' own width parameter.
     /// </summary>
-    private static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
+    internal static string DurationTrendChartSql(string relation, string dbClause, int widthParamIndex) => $@"
 WITH raw AS
 (
     SELECT
@@ -1404,7 +1404,7 @@ LIMIT 1";
     /// method's doc comment for the rules (no ELSE, no HAVING, GREATEST-clamped bucket start, trailing width
     /// parameter). Reads <c>v_query_stats</c> only; there is no procedure-side execution-count chart.
     /// </summary>
-    private static string ExecutionCountTrendChartSql(string dbClause, int widthParamIndex) => $@"
+    internal static string ExecutionCountTrendChartSql(string dbClause, int widthParamIndex) => $@"
 WITH raw AS
 (
     SELECT
