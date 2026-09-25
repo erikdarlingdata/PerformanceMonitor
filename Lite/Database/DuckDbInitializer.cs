@@ -13,10 +13,29 @@ namespace PerformanceMonitorLite.Database;
 /// <summary>
 /// Initializes the DuckDB database and creates tables on first run.
 /// </summary>
-public class DuckDbInitializer
+public class DuckDbInitializer : IDisposable
 {
     private readonly string _databasePath;
     private readonly ILogger<DuckDbInitializer>? _logger;
+
+    /// <summary>
+    /// The sentinel connection (#4262): one <see cref="DuckDBConnection"/> held open on
+    /// <see cref="ConnectionString"/> for the life of this instance. DuckDB.NET's connection manager
+    /// dedups by connection string onto one native handle per string, so every other caller's
+    /// <see cref="CreateConnection"/> (an identical string) attaches to the handle this field pins open
+    /// instead of paying DuckDB's full open/close cost on every call — that cost, not any query, was the
+    /// bulk of an Overview tick's latency. No caller other than this class changes: they keep creating
+    /// their own <see cref="DuckDBConnection"/> exactly as before.
+    ///
+    /// <para><b>The hazard this trades in: with the sentinel open, a fresh connection cannot see a file
+    /// deleted out from under it.</b> DuckDB.NET hands the fresh connection the SAME cached native handle
+    /// rather than reopening the path, so <see cref="ResetDatabaseAsync"/> deleting <c>_databasePath</c>
+    /// became a silent no-op — a "new" connection kept reading the deleted file's rows. Every path that
+    /// deletes, moves or replaces the database file or its <c>.wal</c> MUST call <see cref="ReleaseSentinel"/>
+    /// before doing so and <see cref="ReopenSentinel"/> after, both while still holding the write lock, so
+    /// no caller can open in the gap between the file coming down and the sentinel reflecting it.</para>
+    /// </summary>
+    private DuckDBConnection? _sentinel;
 
     /// <summary>
     /// Coordinates every DuckDB caller in the process against MAINTENANCE — CHECKPOINT, the archive
@@ -282,6 +301,43 @@ public class DuckDbInitializer
         _archivePath = Path.Combine(Path.GetDirectoryName(databasePath) ?? ".", "archive");
     }
 
+    /// <summary>
+    /// Closes the sentinel (#4262) so the next open genuinely re-reads <c>_databasePath</c> from disk
+    /// instead of reattaching to DuckDB.NET's cached handle for the file that is about to come down.
+    /// Only safe under the write lock — a live reader could otherwise still be attached when the caller
+    /// deletes the file right after this returns. A no-op if the sentinel was never opened (a fresh
+    /// install's first <see cref="InitializeAsync"/>) or is already closed (a repeat call).
+    /// </summary>
+    private void ReleaseSentinel()
+    {
+        _sentinel?.Dispose();
+        _sentinel = null;
+    }
+
+    /// <summary>
+    /// Opens the sentinel (#4262) once the on-disk file reflects what callers should now see — after
+    /// <see cref="InitializeCoreAsync"/> has finished creating tables (including any storage-version
+    /// migration) or rebuilding them for a reset. Must run before the write lock guarding that rebuild is
+    /// released, or a caller could open in the gap between the file landing and the sentinel pinning it.
+    /// </summary>
+    private void ReopenSentinel()
+    {
+        var connection = new DuckDBConnection(ConnectionString);
+        connection.Open();
+        _sentinel = connection;
+    }
+
+    /// <summary>
+    /// Closes the sentinel connection so the database file is free to move or delete once the app is
+    /// shutting down (#4262). Safe to call more than once and safe to call before the sentinel was ever
+    /// opened — both collapse to <see cref="ReleaseSentinel"/>'s existing no-op cases.
+    /// </summary>
+    public void Dispose()
+    {
+        using var writeLock = AcquireWriteLock();
+        ReleaseSentinel();
+    }
+
     /* Tables that have parquet archives — views are created to UNION hot data with archived parquet files.
        Catalog-driven: every collector table (from CollectorCatalog) plus the two non-collector time-series
        tables (config_alert_log, collection_log). Adding a collector to the catalog gives it an archive view
@@ -331,10 +387,36 @@ public class DuckDbInitializer
     public string ConnectionString => $"Data Source={_databasePath};memory_limit=1GB;checkpoint_threshold=1GB";
 
     /// <summary>
-    /// Ensures the database exists and all tables are created.
+    /// Ensures the database exists and all tables are created, then opens the sentinel (#4262).
     /// Handles DuckDB version mismatches by exporting data to Parquet, recreating the database, and importing.
+    ///
+    /// <para>Takes the write lock for its whole body — including <see cref="ResetDatabaseAsync"/>'s
+    /// destructive path calling the lock-free <see cref="InitializeCoreAsync"/> directly instead of this
+    /// method, since <see cref="s_dbLock"/> is <see cref="LockRecursionPolicy.NoRecursion"/> and a second
+    /// <c>AcquireWriteLock</c> on the same (already-holding) thread would throw rather than nest.</para>
     /// </summary>
     public async Task InitializeAsync()
+    {
+        using var writeLock = AcquireWriteLock();
+
+        /* A repeat call (a test re-initializing the same instance, say) must not leak the previous
+           sentinel — ReleaseSentinel is a no-op the first time, when there is nothing to release yet. */
+        ReleaseSentinel();
+
+        await InitializeCoreAsync();
+
+        /* Only now, with tables created (or migrated) and archive views/analysis schema in place, is the
+           on-disk file what callers should see. Opening here — still under the write lock — means no
+           caller can attach to a partially-initialized file. */
+        ReopenSentinel();
+    }
+
+    /// <summary>
+    /// The body of <see cref="InitializeAsync"/>, split out so <see cref="ResetDatabaseAsync"/> can run it
+    /// while it is already holding the write lock itself. Takes no lock of its own — every caller must
+    /// already hold the write lock before calling this.
+    /// </summary>
+    private async Task InitializeCoreAsync()
     {
         _logger?.LogInformation("Initializing DuckDB database at {Path}", _databasePath);
 
@@ -2178,6 +2260,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     {
         using var writeLock = AcquireWriteLock();
 
+        /* Close the sentinel BEFORE deleting the file (#4262). Left open, DuckDB.NET would hand the
+           reinitialized database's own connections — and every other caller's CreateConnection() after
+           this returns — the SAME cached native handle this held, so the delete below would be invisible
+           to them: a "fresh" connection would keep reading the rows this was about to remove. */
+        ReleaseSentinel();
+
         if (File.Exists(_databasePath))
             File.Delete(_databasePath);
 
@@ -2186,7 +2274,14 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
             File.Delete(walPath);
 
         _logger?.LogInformation("Database files deleted, reinitializing");
-        await InitializeAsync();
+
+        /* InitializeCoreAsync, not InitializeAsync: this thread already holds the write lock above, and
+           InitializeAsync would try to take it again and throw (NoRecursion). */
+        await InitializeCoreAsync();
+
+        /* Reopen only once the fresh tables exist and archive views/analysis schema are rebuilt, and
+           still under the write lock above — the same ordering InitializeAsync uses. */
+        ReopenSentinel();
     }
 
     /// <summary>
