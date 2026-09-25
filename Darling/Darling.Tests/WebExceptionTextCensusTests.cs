@@ -185,6 +185,39 @@ public sealed class WebExceptionTextCensusTests
     }
 
     [Fact]
+    public void IsStatementTimeoutSentence_57014AppearsOnlyAsATailValue_IsFalse()
+    {
+        /* #4283 L1: the anchor's real target — a digit run that IS 57014, with word boundaries either side
+           (so the pre-anchor \b57014\b regex false-positived here), but appearing in the TAIL of the sentence
+           as a quoted value rather than right after a known prefix. The real SQLSTATE here is 22P02. */
+        Assert.False(DarlingWebFailureLog.IsStatementTimeoutSentence(
+            "Error during get_x: 22P02: invalid input syntax for type integer: \"57014\""));
+        Assert.False(DarlingWebFailureLog.IsStatementTimeoutSentence(
+            $"{DarlingServerResolver.RegistryReadFaultPrefix}22P02: invalid input syntax for type integer: \"57014\""));
+    }
+
+    [Fact]
+    public void IsStatementTimeoutSentence_ResolverConnectionErrorNamingPort57014_IsFalse()
+    {
+        /* A non-Postgres connection exception (no "SqlState: " shape at all) that happens to name port 57014
+           must not match either. */
+        Assert.False(DarlingWebFailureLog.IsStatementTimeoutSentence(
+            $"{DarlingServerResolver.RegistryReadFaultPrefix}Failed to connect to 10.0.0.5:57014"));
+    }
+
+    [Fact]
+    public void IsStatementTimeoutSentence_RealTimeout_OnEachKnownPrefix_IsTrue()
+    {
+        const string tail = "57014: canceling statement due to statement timeout";
+        Assert.True(DarlingWebFailureLog.IsStatementTimeoutSentence($"Error during get_x: {tail}"));
+        Assert.True(DarlingWebFailureLog.IsStatementTimeoutSentence($"Error running query: {tail}"));
+
+        var resolverSentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}{tail}";
+        Assert.True(DarlingWebFailureLog.IsStatementTimeoutSentence(resolverSentence));
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, DarlingWebFailureLog.StatusCode(resolverSentence));
+    }
+
+    [Fact]
     public void StatusCodeAndBody_SentenceOverload_MatchTheExceptionOverload()
     {
         var ex = new PostgresException("cancelled", "ERROR", "ERROR", "57014");

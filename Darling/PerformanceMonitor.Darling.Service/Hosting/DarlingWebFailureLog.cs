@@ -73,11 +73,18 @@ internal static class DarlingWebFailureLog
     /// timeout reaches this classifier as a real 57014 in practice (the shape <c>McpReadCommandTimeoutTests</c>
     /// pins), not as the client-side race.</para>
     ///
-    /// <para>Word-boundary, not a bare substring — the same defense
-    /// <c>MigrationDataMovingRungCensusPins</c>'s <c>s_cancelTrap</c> uses against a digit run or identifier
-    /// that merely contains <c>57014</c> (a table name, a row count) rather than naming the SQLSTATE.</para>
+    /// <para>Anchored to a known prefix, not a bare word-boundary (#4283 L1): a word boundary alone still lets
+    /// <c>57014</c> match anywhere in the tail text — a repeated value, a port number, an identifier that merely
+    /// contains the digits — the same trap <c>MigrationDataMovingRungCensusPins</c>'s <c>s_cancelTrap</c> guards
+    /// against for a different sentence shape. Anchoring to the START of the sentence and requiring the token
+    /// immediately after one of the three known prefixes (<c>ErrorSentence</c>'s <c>"Error during {op}: "</c>,
+    /// the compose route's <c>"Error running query: "</c>, and the resolver's own
+    /// <see cref="Mcp.DarlingServerResolver.RegistryReadFaultPrefix"/>) means the token can only match where a
+    /// real SQLSTATE sits, not wherever the digits happen to recur later in the same sentence.</para>
     /// </summary>
-    private static readonly Regex s_sentenceTimeoutToken = new(@"\b57014\b", RegexOptions.Compiled);
+    private static readonly Regex s_sentenceTimeoutToken = new(
+        $@"^(Error during [^:]+: |Error running query: |{Regex.Escape(Mcp.DarlingServerResolver.RegistryReadFaultPrefix)})57014: ",
+        RegexOptions.Compiled);
 
     internal static bool IsStatementTimeoutSentence(string sentence) =>
         sentence is not null && s_sentenceTimeoutToken.IsMatch(sentence);
