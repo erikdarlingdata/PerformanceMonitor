@@ -1506,13 +1506,18 @@ public sealed class McpPayloadContractCensusTests
             "the dedup_key fingerprint scan's ceiling (FingerprintScanCeiling), observed off a ceiling + 1 fetch, beside the page's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("window_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTrendTools.cs", "McpQueryTools.cs"],
             "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack"),
+        ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
         ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier)"),
+        ("findings_truncated_note", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: the prose beside findings_truncated — how many diagnostic chains were active in the window and that raising limit or narrowing hours_back would show more of them"),
     ];
+
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SourceSideCutKeys =
     [
@@ -1528,10 +1533,14 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
+        ("confidence_basis_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: get_analysis_findings' confidence_basis — a near-fixed methodology sentence repeated on every finding (StoryConfidence.DescribeBasis) — previews to 160 characters (FindingTextPreviewLength) by default; full_text returns it whole"),
+        ("advice_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
+            "#4198: get_analysis_findings' advice.investigation / advice.remediation — free prose repeated on every finding — preview to 160 characters by default; full_text returns both whole. remediation_command is never previewed at any setting, so it carries no *_truncated key of its own"),
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpSessionTools.cs"],
-            "#4198: query_text is previewed at read time by two tools: get_active_queries previews at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_plan_corrections previews at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
+            "#4198: query_text is previewed at read time by three tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
         ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
         ("blocked_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
