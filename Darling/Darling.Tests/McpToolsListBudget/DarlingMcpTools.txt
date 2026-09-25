@@ -20,10 +20,12 @@ param get_analysis_facts.min_severity 90
 param get_analysis_facts.server_name 28
 param get_analysis_facts.source 180
 
-tool get_analysis_findings 610
+tool get_analysis_findings 740
 param get_analysis_findings.as_of 167
+param get_analysis_findings.full_text 146
 param get_analysis_findings.hours_back 49
 param get_analysis_findings.include_drilldown 122
+param get_analysis_findings.limit 122
 param get_analysis_findings.server_name 28
 
 tool mute_analysis_finding 597
