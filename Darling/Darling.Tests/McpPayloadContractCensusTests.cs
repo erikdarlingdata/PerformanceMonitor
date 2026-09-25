@@ -1477,11 +1477,11 @@ public sealed class McpPayloadContractCensusTests
     /// caller to raise a limit that changes nothing.</item>
     /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
     /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
-    /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
-    /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
+    /// one wide field (query text, a plan fragment, a deadlock graph, an error message) rather than the page —
+    /// unlike a source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
     /// <c>full_graph</c>; <c>get_active_queries</c> and <c>get_store_query_stats</c> both take
     /// <c>full_text</c>, the same name — get_active_queries' own was renamed from <c>full_query_text</c> to
-    /// match).</item>
+    /// match; <c>get_collection_log</c> uses <c>full_text</c> for its <c>error_message</c> preview).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1532,6 +1532,8 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
         ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpSessionTools.cs"],
             "#4198: query_text is previewed at read time by two tools: get_active_queries previews at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_plan_corrections previews at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
+            "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
         ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
             "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
     ];

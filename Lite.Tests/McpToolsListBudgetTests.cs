@@ -101,7 +101,10 @@ public sealed class McpToolsListBudgetTests
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
        covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
-    private const int TotalCeilingBytes = 90_672;
+    /* #4198: get_collection_log's per-server form gained full_text (76 bytes), matching Darling's twin;
+       limit's own description banked 1 byte. +116 net (Lite's server_name description is shorter than
+       Darling's, since it has no fleet-maintenance sentinel to warn about). */
+    private const int TotalCeilingBytes = 90_800;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

@@ -110,13 +110,18 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
+    /* #4198: get_collection_log's per-server form gained full_text (its error_message preview opt-in,
+       76 bytes) and limit's own description banked 1 byte describing the new lower default. +127 net. */
     /* #4198 (per-tool lane, get_object_locking): +79 bytes for the new limit parameter (default lowered from
        a 200-row hard cap to 75, measured under McpResponseBudget.DefaultBytes on a seeded fixture). Merged
        with origin/dev's own #4192/#4195/#4193/#4217 bump above; the constant below is the measured total
        with both changes applied, not the two deltas added by hand. */
     /* #4198 (lane TH, merge with get_object_locking): re-measured after merging origin/dev; combined total
        of active_queries (#4261) + object_locking (#4258) changes on top of dev. */
-    private const int TotalCeilingBytes = 172_632;
+    /* #4198 (collection_log, merge): re-measured after merging origin/dev (dev now includes #4261+#4258);
+       combined total with collection_log (#4265) changes on top. */
+    private const int TotalCeilingBytes = 172_760;
+
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
 
