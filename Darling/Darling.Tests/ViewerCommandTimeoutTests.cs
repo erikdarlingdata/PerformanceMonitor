@@ -1613,16 +1613,19 @@ public sealed class ViewerCommandTimeoutTests
     /// lane count of a <c>ViewerReadFanOut.Lanes</c> split in the same member.
     ///
     /// <para><b>The runtime half is the one that matters and the reason this is not a value assertion.</b>
-    /// The two per-server fan-outs used to pass their raw fleet count, on the stated reasoning that the
+    /// The per-server fan-outs used to pass their raw fleet count, on the stated reasoning that the
     /// clamp inside <c>ViewerReadFanOut</c> made a hand-capped guess unnecessary. The clamp did bound the
     /// DEADLINE, and nothing bounded the READS — so a fleet of forty-two started forty-two of them against
     /// ten permits and thirty-two failed on <c>ConnectionTimeoutSeconds</c> without reaching a deadline at
-    /// all. A clamp cannot fix that from inside; only the site can, by not starting them. Re-spell either
-    /// site as <c>Of(servers.Count)</c> and this goes red.</para>
+    /// all. A clamp cannot fix that from inside; only the site can, by not starting them. Re-spell the
+    /// remaining site as <c>Of(servers.Count)</c> and this goes red.</para>
     ///
     /// <para>Both populations carry a floor, because a scan that matched neither shape would otherwise
-    /// report a clean sweep over nothing — this project has twenty-one literal declarations and two runtime
-    /// ones.</para>
+    /// report a clean sweep over nothing — this project has at least fifteen literal declarations. Runtime
+    /// ones used to be two (Server Inventory's per-server metrics loop was the other), until #4227 replaced
+    /// that loop with one fleet-wide statement and left no fan-out there to declare a width at all — one
+    /// fewer per-server round trip, not a narrower scan, so the floor drops to one rather than being
+    /// removed.</para>
     /// </summary>
     [Fact]
     public void NoDeclaredFanOutWidth_OutrunsThePermitsOrTheMeasurement()
@@ -1691,9 +1694,9 @@ public sealed class ViewerCommandTimeoutTests
             + "so its clean result is about nothing");
 
         Assert.True(
-            derived >= 2,
-            $"only {derived} runtime fan-out width(s) were read. The two per-server fan-outs are the whole "
-            + "reason this pin exists; a scan that no longer sees them cannot report on them");
+            derived >= 1,
+            $"only {derived} runtime fan-out width(s) were read. The per-server fan-out(s) are the whole "
+            + "reason this pin exists; a scan that no longer sees any cannot report on them");
 
         Assert.True(
             offenders.Count == 0,
