@@ -128,22 +128,24 @@ public sealed class PgTargetClockTests
     }
 
     /// <summary>
-    /// The seam count the anomaly tests' "one protected override" pin grew by one here, and by one more for the
-    /// keyed seam (#3691 lane 33: <c>ResolveKeyedBaselineQuery</c>, a metric → SQL map like the first) — exactly
-    /// three, and nothing else of the base machinery is redeclared: no instance state (the resolved clock and every
-    /// bucket map, keyed or not, live in the base's cache entries), no second resolver, no second bind. Each override
-    /// is a read or a map, and the base does the rest.
+    /// The seam count the anomaly tests' "one protected override" pin grew by one here, by one more for the
+    /// keyed seam (#3691 lane 33: <c>ResolveKeyedBaselineQuery</c>, a metric → SQL map like the first), and by one
+    /// more for #4298's cache-grain seam (<c>IsDailyCacheArm</c>) — exactly four, and nothing else of the base
+    /// machinery is redeclared: no instance state (the resolved clock and every bucket map, keyed or not, live in
+    /// the base's cache entries), no second resolver, no second bind. Each override is a read, a map or (for
+    /// #4298) a constant answer, and the base does the rest.
     /// </summary>
     [Fact]
-    public void ThePostgresProvider_RedeclaresExactlyTheThreeSeams_AndNoState()
+    public void ThePostgresProvider_RedeclaresExactlyTheFourSeams_AndNoState()
     {
         var declared = typeof(PgTargetBaselineProvider)
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly);
         var overrides = Array.FindAll(declared, m => m.GetBaseDefinition().DeclaringType == typeof(PgBaselineProvider));
-        Assert.Equal(3, overrides.Length);
+        Assert.Equal(4, overrides.Length);
         Assert.Contains(overrides, m => m.Name == "ResolveBaselineQuery");
         Assert.Contains(overrides, m => m.Name == "ReadServerClockAsync");
         Assert.Contains(overrides, m => m.Name == "ResolveKeyedBaselineQuery");
+        Assert.Contains(overrides, m => m.Name == "IsDailyCacheArm");
         Assert.Empty(typeof(PgTargetBaselineProvider).GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly));
 
         var clock = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.Clock.cs"));
@@ -183,10 +185,11 @@ public sealed class PgTargetClockLiveTests
     private const int Tuesday = (int)DayOfWeek.Tuesday;
 
     /* The series: 2026-02-07 00:00Z through 2026-03-11 00:00Z, one row a minute, across the 2026-03-08 07:00Z
-       spring-forward (−05:00 → −04:00). The analysis instant is Tuesday 2026-03-17 13:30Z = 09:30 EDT; its 30-day
-       window runs 2026-02-15 13:00Z to 2026-03-17 13:00Z — it ends on the analysis HOUR (#3941), so the analysis day's
-       own 13Z rows are never in it, which is why the instant is the Tuesday AFTER the series' last one — and it holds
-       Tuesdays Feb 17, 24 and Mar 3 on the EST side and the whole of Mar 10 on the EDT side. */
+       spring-forward (−05:00 → −04:00). The analysis instant is Tuesday 2026-03-17 13:30Z = 09:30 EDT; PgTps is a
+       daily-cache arm (#4298), so its 30-day window runs 2026-02-15 00:00Z to 2026-03-17 00:00Z — the UTC day
+       boundary, not the analysis hour — and the analysis day's own rows are never in it either way, which is why the
+       instant is the Tuesday AFTER the series' last one — and it holds Tuesdays Feb 17, 24 and Mar 3 on the EST side
+       and the whole of Mar 10 on the EDT side. */
     private static readonly DateTime SeriesStart = new(2026, 2, 7, 0, 0, 0, DateTimeKind.Unspecified);
     private static readonly DateTime AnalysisTime = new(2026, 3, 17, 13, 30, 0, DateTimeKind.Unspecified);
     private const int SeriesMinutes = 32 * 24 * 60;
@@ -249,8 +252,11 @@ public sealed class PgTargetClockLiveTests
 
             /* The snapshot rule's other half: a newer snapshot INSIDE the window whose TimeZone is session-scoped
                (the collector's own connection set it) describes the connection, not the server — that compute keys
-               on UTC rather than on Tokyo, and rather than on the older snapshot's New York. */
-            await PlantSnapshotAsync(connection, NewYorkServerId, NewYorkServerName, AnalysisTime.AddHours(-1), "Asia/Tokyo", "session", ct);
+               on UTC rather than on Tokyo, and rather than on the older snapshot's New York. #4298: the window now
+               ends at the UTC day boundary (2026-03-17 00:00Z), not the analysis hour (13:00Z), so this snapshot has
+               to land at or before that boundary to still be "inside the window" — an hour before the ANALYSIS
+               INSTANT (13:30Z) no longer is. */
+            await PlantSnapshotAsync(connection, NewYorkServerId, NewYorkServerName, PgBaselineProvider.RoundedDay(AnalysisTime).AddHours(-1), "Asia/Tokyo", "session", ct);
             provider.ClearCache();
             var sessionScoped = await provider.GetBaselineAsync(NewYorkServerId, MetricNames.PgTps, AnalysisTime, ct);
             Assert.Equal((13, Tuesday), (sessionScoped.HourOfDay, sessionScoped.DayOfWeek));

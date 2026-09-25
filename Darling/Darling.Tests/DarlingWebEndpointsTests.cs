@@ -227,19 +227,27 @@ public sealed class DarlingWebEndpointsTests
 
     /// <summary>The bare-string arm survives as the floor under everything the producers no longer emit: the
     /// four sentences here WERE the wire shape of these refusals until #3739 (they are the envelope's <c>message</c>
-    /// now, and classify as <c>Refusal</c> above); what still reaches this arm is a store fault the resolver
-    /// reports as a sentence and the <c>list_servers</c> miss on an empty registry. Kept at 400 so a producer
-    /// nobody shaped is still refused rather than passed through as data.</summary>
+    /// now, and classify as <c>Refusal</c> above); what still reaches this arm is the <c>list_servers</c> miss on
+    /// an empty registry. The resolver's registry-read fault used to reach it too; since #4283 it is a server error
+    /// (the fact below). Kept at 400 so a producer nobody shaped is still refused rather than passed through as
+    /// data.</summary>
     [Theory]
     [InlineData("Could not resolve server. Available servers:\nSQL2022")]
     [InlineData("Invalid hours_back value '9999'. Must be a positive integer (1-168).")]
     [InlineData("Missing required parameter 'wait_type'.")]
     [InlineData("baseline_hours_back must be greater than hours_back.")]
-    [InlineData("Could not read the servers registry from the Postgres store: connection refused")]
     [InlineData("No servers are registered yet. The service registers each monitored server on its first successful connection.")]
     [InlineData("")]
     public void ClassifyToolResponse_OtherBareStrings_AreClientErrors(string result) =>
         Assert.Equal(DarlingWebEndpoints.ToolResponseKind.ClientError, DarlingWebEndpoints.ClassifyToolResponse(result));
+
+    /// <summary>#4283: the resolver's registry-read fault is a store fault, not a refusal, so it answers 500 with the
+    /// fixed body rather than 400 with the sentence (which carries the store's own error text).</summary>
+    [Fact]
+    public void ClassifyToolResponse_TheResolversRegistryReadFault_IsAServerError() =>
+        Assert.Equal(
+            DarlingWebEndpoints.ToolResponseKind.ServerError,
+            DarlingWebEndpoints.ClassifyToolResponse(DarlingServerResolver.RegistryReadFaultPrefix + "connection refused"));
 
     /* ── query-string parse helpers (invariant, default-on-miss) ── */
 
