@@ -24,6 +24,13 @@ namespace PerformanceMonitorLite.Services;
  * buckets of $N minutes, so an MCP answer stays near TrendBuckets.McpPointBudget points instead of one point per
  * collection per series: a day of file I/O was 12,500 rows and 1.4 MB.
  *
+ * #4234 later bucketed three of those SAME per-collection reads in place for their own chart callers
+ * (GetCpuUtilizationAsync, GetTotalWaitTrendAsync — the all-types aggregate, not GetWaitStatsTrendAsync above —
+ * and GetMemoryTrendAsync, all three called ONLY by Overview's correlated lanes and their dedicated tab chart,
+ * never by an MCP tool), at TrendBudget.Chart's wider point budget rather than McpPointBudget. The MCP-bucketed
+ * reads below stay separate functions with their own SQL, because get_cpu_utilization and friends bucket to a
+ * narrower budget than a chart would want.
+ *
  * Darling's twins are DarlingTrendReader (file I/O, the duration pair via DurationTrendRouting's bucketed
  * builders) and DarlingBlockingTrendReader (lock waits); the SQL differs only in dialect — DuckDB's time_bucket
  * where PostgreSQL has date_bin, both on TrendBuckets.OriginSql so a width that does not divide a day still
