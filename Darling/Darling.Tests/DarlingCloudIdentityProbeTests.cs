@@ -139,6 +139,34 @@ public sealed class DarlingCloudIdentityProbeTests
     }
 
     [Fact]
+    public async Task ProbeAsync_Ec2InstanceTypeBodyExceedsCapByTrailingWhitespace_RejectedByTheCapAlone_ReturnsNone()
+    {
+        /* 60 valid characters, then 240 spaces: 300 bytes. After Trim() this would read as 60 valid
+           characters — inside ValuePattern's 1-64 range — so ONLY the 256-byte cap (checked on the raw byte
+           count, before Trim() ever runs) can be what rejects it. The 300-'a' oversized test above fails the
+           pattern too even once trimmed, so it does not by itself prove the cap exists. */
+        var paddedPastTheCap = new string('a', 60) + new string(' ', 240);
+        var handler = new FakeHandler((request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/latest/api/token")
+            {
+                return Task.FromResult(Text(HttpStatusCode.OK, "TOKEN"));
+            }
+
+            if (request.RequestUri!.AbsolutePath == "/latest/meta-data/instance-type")
+            {
+                return Task.FromResult(Text(HttpStatusCode.OK, paddedPastTheCap));
+            }
+
+            return Task.FromResult(Empty(HttpStatusCode.NotFound));
+        });
+
+        var identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
+
+        Assert.Equal(CloudIdentity.None, identity);
+    }
+
+    [Fact]
     public async Task ProbeAsync_Ec2InstanceTypeRedirects_NeverFollowed_AzureAlsoNotFound_ReturnsNone()
     {
         var handler = new FakeHandler((request, _) =>
@@ -172,6 +200,64 @@ public sealed class DarlingCloudIdentityProbeTests
     }
 
     [Fact]
+    public async Task ProbeAsync_Ec2InstanceTypeIs404WithAValidLookingBody_RejectedByStatusNotBody_ReturnsNone()
+    {
+        /* "t3.large" alone would pass ValuePattern — only the IsSuccessStatusCode check (ruling 2) can be
+           what rejects this. The existing 404 test above uses an empty body, which the pattern would reject
+           on its own even with that status check removed, so it does not by itself prove the check exists. */
+        var handler = new FakeHandler((request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/latest/api/token")
+            {
+                return Task.FromResult(Text(HttpStatusCode.OK, "TOKEN"));
+            }
+
+            if (request.RequestUri!.AbsolutePath == "/latest/meta-data/instance-type")
+            {
+                return Task.FromResult(Text(HttpStatusCode.NotFound, "t3.large"));
+            }
+
+            return Task.FromResult(Empty(HttpStatusCode.NotFound));
+        });
+
+        var identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
+
+        Assert.Equal(CloudIdentity.None, identity);
+    }
+
+    [Fact]
+    public async Task ProbeAsync_Ec2InstanceTypeIs302WithAValidLookingBody_RejectedByStatusNotBody_ReturnsNone()
+    {
+        /* Same point as the 404 test above, for the redirect status the existing redirect test (also an
+           empty body) does not by itself prove the status check rejects rather than just the pattern. */
+        var handler = new FakeHandler((request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/latest/api/token")
+            {
+                return Task.FromResult(Text(HttpStatusCode.OK, "TOKEN"));
+            }
+
+            if (request.RequestUri!.AbsolutePath == "/latest/meta-data/instance-type")
+            {
+                var redirect = Text(HttpStatusCode.Found, "t3.large");
+                redirect.Headers.Location = new Uri("http://169.254.169.254/latest/meta-data/instance-type/other");
+                return Task.FromResult(redirect);
+            }
+
+            if (request.RequestUri!.AbsolutePath.EndsWith("/other", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("the redirect target must never be fetched (AllowAutoRedirect=false)");
+            }
+
+            return Task.FromResult(Empty(HttpStatusCode.NotFound));
+        });
+
+        var identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
+
+        Assert.Equal(CloudIdentity.None, identity);
+    }
+
+    [Fact]
     public async Task ProbeAsync_ValueFailsAcceptPattern_RejectedAndAzureAlsoNotFound_ReturnsNone()
     {
         var handler = new FakeHandler((request, _) =>
@@ -193,6 +279,37 @@ public sealed class DarlingCloudIdentityProbeTests
 
         Assert.Equal(CloudIdentity.None, identity);
     }
+
+    [Fact]
+    public async Task ProbeAsync_AzureValueFailsAcceptPattern_ReturnsNone()
+    {
+        /* EC2 finds nothing, so Azure is reached, and AZURE's own value fails ValuePattern this time. The
+           test above only exercises TryEc2Async's ValuePattern.IsMatch call — a reviewer who removed just
+           TryAzureAsync's own check would leave every existing test green. */
+        var handler = new FakeHandler((request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("vmSize", StringComparison.Ordinal))
+            {
+                return Task.FromResult(Text(HttpStatusCode.OK, "bad value<script>"));
+            }
+
+            return Task.FromResult(Empty(HttpStatusCode.NotFound));
+        });
+
+        var identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
+
+        Assert.Equal(CloudIdentity.None, identity);
+    }
+
+    /* A Stopwatch-bound timing test (EC2's token PUT answering 401 at ~190 ms, Azure hanging, asserting total
+       elapsed stays under a bound between the correct ~200 ms and a broken ~390 ms) lived here and was
+       dropped: measured directly, it is racy. The SHARED outer budget still bounds the EC2 leg's own
+       Task.Delay regardless of what Azure gets, so on a loaded machine EC2's delay can itself lose the race
+       to that shared budget before completing "naturally" — 2 of 3 runs against a deliberately-reverted,
+       per-request-timeout build still finished under the bound, for a reason unrelated to what the test meant
+       to check. DarlingCloudIdentityProbeSourcePinTests.CreateHandler_ArmsExactlyOneBudget_NotAPerRequestTimeout
+       pins the same "one shared budget" property deterministically instead: a per-request-timeout
+       implementation needs a SECOND call to CancelAfter(, so counting them is exact where a clock is not. */
 
     [Fact]
     public void CreateHandler_ReturnsASocketsHttpHandler()
@@ -318,24 +435,77 @@ public sealed class DarlingCloudIdentityProbeSourcePinTests
 {
     private const string ProbeClassName = "DarlingCloudIdentityProbe";
 
+    /* GatherStartupProfileAsync_NeverReachesTheProbe and DarlingWorker_NeverReachesTheProbe used to live here
+       as name pins: each checked one named method body, or one named file, for the ABSENCE of the string
+       "DarlingCloudIdentityProbe". That only rules out the two spots someone thought to name — a new call
+       site added anywhere else (a third file, a helper method) would pass both checks with everything green.
+       Replaced by a call-site CENSUS: every .cs file under this project is scanned for each marker, and the
+       set of files that contain it must equal the exact set ruling 3 names — not "does not contain" one
+       named spot, but "contains, and ONLY in these spots". */
+
     [Fact]
-    public void GatherStartupProfileAsync_NeverReachesTheProbe()
+    public void ProbeAsyncCallSite_OnlyInsideDarlingStoreHostProfile_GatherAsync()
     {
+        var files = FilesContainingAcrossServiceProject("DarlingCloudIdentityProbe.ProbeAsync(");
+
+        Assert.Equal(new[] { "DarlingStoreHostProfile.cs" }, files);
+
         var stripped = CSharpSourceWalker.StripCommentsAndStrings(
             ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs"));
 
-        var body = ExtractMethodBody(stripped, "Task<HostProfile> GatherStartupProfileAsync(");
+        var gatherAsyncBody = ExtractMethodBody(stripped, "Task<HostProfile> GatherAsync(");
+        Assert.Contains("DarlingCloudIdentityProbe.ProbeAsync(", gatherAsyncBody, StringComparison.Ordinal);
 
-        Assert.DoesNotContain(ProbeClassName, body, StringComparison.Ordinal);
+        /* The startup path (DarlingWorker's once-per-process-start profile) must never reach the probe
+           (ruling 3) — kept as its own explicit assertion, not just an absence implied by the file-level
+           census above, since GatherStartupProfileAsync lives in the SAME file as the one legitimate call. */
+        var startupBody = ExtractMethodBody(stripped, "Task<HostProfile> GatherStartupProfileAsync(");
+        Assert.DoesNotContain(ProbeClassName, startupBody, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void DarlingWorker_NeverReachesTheProbe()
+    public void GatherAsyncCallSite_OnlyInCliCommandsAndTheMcpStoreHostTool()
     {
-        var stripped = CSharpSourceWalker.StripCommentsAndStrings(
-            ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingWorker.cs"));
+        var files = FilesContainingAcrossServiceProject("DarlingStoreHostProfile.GatherAsync(");
 
-        Assert.DoesNotContain(ProbeClassName, stripped, StringComparison.Ordinal);
+        Assert.Equal(new[] { "DarlingCliCommands.cs", "Mcp/DarlingMcpStoreHostTools.cs" }, files);
+    }
+
+    [Fact]
+    public void GetStoreHostCallSite_OnlyInTheMcpToolAndTheWebDispatch()
+    {
+        var files = FilesContainingAcrossServiceProject("GetStoreHost(");
+
+        Assert.Equal(new[] { "DarlingWebEndpoints.cs", "Mcp/DarlingMcpStoreHostTools.cs" }, files);
+    }
+
+    /// <summary>Every <c>.cs</c> file under <c>Darling/PerformanceMonitor.Darling.Service/</c> (skipping
+    /// <c>bin</c>/<c>obj</c> build output), comment/string-stripped, that contains <paramref name="marker"/> —
+    /// sorted, relative paths with <c>/</c> separators so the assertion reads the same on every OS.</summary>
+    private static string[] FilesContainingAcrossServiceProject(string marker)
+    {
+        var serviceDir = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service");
+        Assert.True(Directory.Exists(serviceDir), $"#4214 part 2b scan root not found: {serviceDir}");
+
+        var matches = new List<string>();
+
+        foreach (var path in Directory.EnumerateFiles(serviceDir, "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(serviceDir, path).Replace('\\', '/');
+            if (relative.StartsWith("bin/", StringComparison.Ordinal) || relative.StartsWith("obj/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var stripped = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+            if (stripped.Contains(marker, StringComparison.Ordinal))
+            {
+                matches.Add(relative);
+            }
+        }
+
+        matches.Sort(StringComparer.Ordinal);
+        return [.. matches];
     }
 
     /* CreateHandler_SetsUseProxyFalse and CreateHandler_SetsAllowAutoRedirectFalse used to live here as
@@ -353,6 +523,26 @@ public sealed class DarlingCloudIdentityProbeSourcePinTests
         var body = ExtractMethodBody(stripped, "Task<CloudIdentity> ProbeAsync(CancellationToken cancellationToken)");
 
         Assert.Contains("using var handler = CreateHandler()", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>Ruling 2's "one budget for the whole probe" pinned deterministically, not with a clock. A
+    /// behavioral timing test (EC2 answering just under the budget, Azure hanging, asserting total elapsed
+    /// stays under a bound between "one shared budget" and "a fresh budget per request") was tried and
+    /// dropped: the SHARED outer budget still bounds the EC2 leg's own delay regardless of what Azure gets, so
+    /// under load EC2's delay can lose the race to that shared budget before completing "naturally", passing
+    /// the assertion for a reason unrelated to what it meant to check — measured flaky (2 of 3 runs) against a
+    /// deliberately broken, per-request-timeout build. Counting <c>CancelAfter(</c> call sites has no clock to
+    /// race: a per-request-timeout implementation needs a SECOND one (one for EC2, one for Azure), so exactly
+    /// one proves the budget is shared.</summary>
+    [Fact]
+    public void CreateHandler_ArmsExactlyOneBudget_NotAPerRequestTimeout()
+    {
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(
+            ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCloudIdentityProbe.cs"));
+
+        var occurrences = stripped.Split("CancelAfter(", StringSplitOptions.None).Length - 1;
+
+        Assert.Equal(1, occurrences);
     }
 
     private static string ExtractMethodBody(string strippedSource, string signatureAnchor)
