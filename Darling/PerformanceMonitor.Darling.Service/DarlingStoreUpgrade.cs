@@ -2989,20 +2989,45 @@ internal sealed class DarlingStoreUpgrade
                    must not fail over a port collision that says nothing about them. */
                 if (!await TryStartTrialAsync())
                 {
-                    /* The store must still start — the safer empty file wins over the fuller one.
+                    /* Header-only FIRST (item 3, round-2 review Medium 2) — the same empty file every other
+                       failure path here resets to — so the retry just below starts on nothing the carried
+                       settings touched, and proves whether THEY were the cause or something else was.
                        CancellationToken.None: this write is what keeps the store bootable, and a cancellation
-                       landing right here must not be able to skip it. Never the trial's own exception message:
-                       it can embed the server log tail, and PostgreSQL's own startup error can echo a failing
-                       setting's value — logging it here would reopen Medium 1 through this new path (TryStartTrialAsync
-                       already swallows it for exactly this reason). Names and a pointer to the original only. */
+                       landing right here must not be able to skip it. */
                     await File.WriteAllTextAsync(newAutoConfPath, header, CancellationToken.None);
-                    _logger.LogWarning(
-                        "The carried settings did not let the new cluster start, even though each passed " +
-                        "alone — leaving postgresql.auto.conf EMPTY rather than risk the store not starting. " +
-                        "Dropped: {Names}. The originals are kept at {Path}.",
-                        string.Join(", ", carried), preUpgradeCopy);
 
-                    return new AutoConfCarryResult(Array.Empty<string>(), settings.Select(s => s.Name).ToList());
+                    var pgLogPath = Path.Combine(
+                        Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!,
+                        DarlingManagedPostgres.ServerLogFileName);
+
+                    if (await TryStartTrialAsync())
+                    {
+                        /* The empty-file retry started: the settings really were the cause. Never either
+                           attempt's own exception message: it can embed the server log tail, and PostgreSQL's
+                           own startup error can echo a failing setting's value — logging it here would reopen
+                           Medium 1 through this new path (TryStartTrialAsync already swallows it for exactly
+                           this reason). Names, and pg.log for whoever wants the detail, only. */
+                        _logger.LogWarning(
+                            "The carried settings did not let the new cluster start, even though each passed " +
+                            "alone — leaving postgresql.auto.conf EMPTY rather than risk the store not starting. " +
+                            "Dropped: {Names}. See {Log} for the failing start. The originals are kept at {Path}.",
+                            string.Join(", ", carried), pgLogPath, preUpgradeCopy);
+
+                        return new AutoConfCarryResult(Array.Empty<string>(), settings.Select(s => s.Name).ToList());
+                    }
+
+                    /* The empty-file retry ALSO failed — nothing about the carried settings explains that, so
+                       this is not a reason to drop or blame them; something else about this cluster will not
+                       start (round-2 review, #4280 Medium 2, Q3). The file is already header-only. A NEW,
+                       fixed message, never either attempt's own exception (same reasoning as above): thrown so
+                       the post-commit handler around this call reports a warning on the upgrade's outcome
+                       instead of a silent success. This throw passes through the catch below on its way out,
+                       which re-runs the same (idempotent) header-only reset and logs its own line again —
+                       accepted rather than special-cased around. */
+                    throw new InvalidOperationException(
+                        $"The new PostgreSQL cluster at {newDataDirectory} would not start even with an empty " +
+                        $"postgresql.auto.conf, so this is unrelated to the carried settings — see {pgLogPath} " +
+                        "for the failing start.");
                 }
             }
 
@@ -3024,7 +3049,12 @@ internal sealed class DarlingStoreUpgrade
                 try
                 {
                     File.WriteAllText(marker, trialPort.ToString(CultureInfo.InvariantCulture));
-                    await StartClusterAsync(newBinDirectory, newDataDirectory, trialPort, cancellationToken, QuiescedUpdateServerOptions);
+                    /* QuiescedStartWaitSeconds (900s), not the default 120s (item 3, round-2 review Medium 2):
+                       this can be the retry below, on a cluster whose first start already used up part of any
+                       generous wait, and a short timeout here would misreport an unrelated slow start as a
+                       settings failure. */
+                    await StartClusterAsync(
+                        newBinDirectory, newDataDirectory, trialPort, cancellationToken, QuiescedUpdateServerOptions, QuiescedStartWaitSeconds);
                     started = true;
                 }
                 catch (Exception)
@@ -3082,10 +3112,19 @@ internal sealed class DarlingStoreUpgrade
                 }
                 catch (Exception deleteEx)
                 {
+                    /* original.Message joins the other two reasons (round-2 review, Low 1) so this exception's
+                       own text is self-contained — an operator, or a log that only shows the top-level
+                       message, still sees WHY the carry itself did not finish, not just why the two cleanup
+                       attempts after it also failed. Safe here specifically: every exception that can reach
+                       this catch (a probe timeout/cancellation, a file I/O fault, item 3's own fixed-message
+                       throw — StopClusterConfirmedAsync never throws) is already one this class never lets
+                       carry a setting's value or the server log tail, the same guarantee TryStartTrialAsync's
+                       own swallow relies on above. */
                     throw new InvalidOperationException(
-                        $"postgresql.auto.conf carry did not finish, and neither resetting {newAutoConfPath} " +
-                        $"to empty ({resetEx.Message}) nor deleting it ({deleteEx.Message}) succeeded. It may " +
-                        "hold an unverified setting — delete or empty this file by hand before the next start.",
+                        $"postgresql.auto.conf carry did not finish ({original.Message}), and neither resetting " +
+                        $"{newAutoConfPath} to empty ({resetEx.Message}) nor deleting it ({deleteEx.Message}) " +
+                        "succeeded. It may hold an unverified setting — delete or empty this file by hand before " +
+                        "the next start.",
                         original);
                 }
             }

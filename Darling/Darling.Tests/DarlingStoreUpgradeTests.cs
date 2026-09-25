@@ -935,9 +935,10 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>Medium 1: a CARRIED setting's log line never repeats its value either, secret-looking name or
-    /// not — only the name and a pointer to the pre-upgrade copy. "unused-bin-dir" makes the belt-and-braces
-    /// real start (Medium 2) fail fast and drop it again; this test only cares that the log and the file both
-    /// stay clean of the value either way.</summary>
+    /// not — only the name and a pointer to the pre-upgrade copy. "unused-bin-dir" has no real pg_ctl.exe, so
+    /// item 3's retry (also on "unused-bin-dir") fails too — unrelated to the settings, which is exactly what
+    /// the new throw says. This test cares that the throw, the log, and the file all stay clean of the value
+    /// either way.</summary>
     [Fact]
     public async Task CarryAutoConfAsync_CarriedSecretNamedSetting_NeverLogsItsValue()
     {
@@ -958,8 +959,12 @@ public sealed class DarlingStoreUpgradeTests
 
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
-            await upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None));
+
+            Assert.Contains("pg.log", ex.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2", ex.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("host=x", ex.Message, StringComparison.Ordinal);
 
             var logText = log.ToString();
             Assert.Contains("Carried primary_conninfo", logText, StringComparison.Ordinal);
@@ -1015,8 +1020,10 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>Low 1: when the catch's reset write ALSO fails, the fallback File.Delete is tried, and when
-    /// THAT also fails the thrown exception names the file and keeps the original as InnerException — here a
-    /// read-only postgresql.auto.conf blocks both the reset write and the delete deterministically.</summary>
+    /// THAT also fails the thrown exception names the file, keeps the original as InnerException, AND folds the
+    /// original's own message into its text — so a caller or a log that only shows the top-level message still
+    /// sees why the carry itself did not finish, not just why the two cleanup attempts after it also failed.
+    /// Here a read-only postgresql.auto.conf blocks both the reset write and the delete deterministically.</summary>
     [Fact]
     public async Task CarryAutoConfAsync_ResetAndDeleteBothFail_ThrowsNamingTheFile_WithTheOriginalAsInnerException()
     {
@@ -1046,6 +1053,7 @@ public sealed class DarlingStoreUpgradeTests
 
             Assert.Contains(newAutoConfPath, ex.Message, StringComparison.Ordinal);
             Assert.IsType<TimeoutException>(ex.InnerException);
+            Assert.Contains(ex.InnerException!.Message, ex.Message, StringComparison.Ordinal);
         }
         finally
         {
