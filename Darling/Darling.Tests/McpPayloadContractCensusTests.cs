@@ -1475,6 +1475,10 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
+    /// <item><b>A read-side preview</b> — <see cref="ReadSidePreviewCutKeys"/> (#4198): the full value IS in
+    /// the store; the READ chose a preview width for its default response-size budget, and a caller opts back
+    /// into the whole thing with <c>full_text</c> rather than re-paging — the opposite direction from a
+    /// source-side cut, where nothing left to fetch would help.</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1531,6 +1535,12 @@ public sealed class McpPayloadContractCensusTests
             "the page's count beside an honest WHOLE total (total_entries / total_events / total_facts, or a <noun>_count over the whole in-memory set) — the cut is exact and disclosed by the pair; the #3594 spelling is *_returned + truncated, and the rename is fenced tonight because four PgTarget* test files read shown off get_analysis_facts"),
     ];
 
+    public static readonly (string Key, string[] Files, string WhatWasCut)[] ReadSidePreviewCutKeys =
+    [
+        ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
+            "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
+    ];
+
     public static readonly (string Key, string[] Files, string WhatItActuallyIs)[] CutHomonyms =
     [
         ("is_partial", ["DarlingMcpPgIndexUsageTools.cs"], "a PARTIAL INDEX (CREATE INDEX … WHERE) — an index property the collector reads off pg_index, not a cut"),
@@ -1567,6 +1577,7 @@ public sealed class McpPayloadContractCensusTests
         SecondBoundCutKeys.Select(k => (k.Key, k.Files))
             .Concat(CutNoteKeys.Select(k => (k.Key, k.Files)))
             .Concat(SourceSideCutKeys.Select(k => (k.Key, k.Files)))
+            .Concat(ReadSidePreviewCutKeys.Select(k => (k.Key, k.Files)))
             .Concat(WithheldSummaryKeys.Select(k => (k.Key, k.Files)))
             .Concat(PageCountsUnderANeutralNoun.Select(k => (k.Key, k.Files)))
             .Concat(CutHomonyms.Select(k => (k.Key, k.Files)));
