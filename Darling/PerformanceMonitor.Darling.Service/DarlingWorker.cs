@@ -1344,6 +1344,15 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #4220: web.publicBaseUrl shaped like it carries a credential (a query string, fragment, or
+           userinfo — e.g. the dashboard's own sign-in link pasted in by mistake). Ruled: sending the link is
+           the operator's call, not refused here; one warning at startup is the whole mitigation. */
+        var triageLinkWarning = TriageLink.DescribeCredentialShapedBaseWarning(config.Web.PublicBaseUrl);
+        if (triageLinkWarning is not null)
+        {
+            _logger.LogWarning("{Warning}", triageLinkWarning);
+        }
+
         /* Bundled-Postgres bootstrap (the shipped zero-admin default): in managed mode the
            service unpacks/initializes/starts its own Postgres BEFORE the store connection
            below, and the connection string is DERIVED (localhost + port + the generated

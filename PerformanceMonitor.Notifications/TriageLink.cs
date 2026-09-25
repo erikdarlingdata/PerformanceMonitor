@@ -75,4 +75,63 @@ public static class TriageLink
 
         return builder.ToString();
     }
+
+    /// <summary>
+    /// PURE: the host component of <paramref name="baseUrl"/> when it is the same absolute-http/https shape
+    /// <see cref="Build"/> accepts, or null otherwise (unset, or not that shape). No port, no scheme, no
+    /// credentials — just the Host-header-comparable name or IP literal.
+    ///
+    /// <para>#4220: the web host passes this to its Host-header allowlist as one extra admitted value (see
+    /// <c>DarlingHostBinding.IsAllowedHost</c>) — the host the operator configured is not attacker-reachable,
+    /// so admitting it closes the gap where <c>darling.sample.json</c> suggests a DNS name for
+    /// <c>publicBaseUrl</c> but the guard, unchanged, would have refused every request that named it.</para>
+    /// </summary>
+    public static string? TryGetHost(string? baseUrl)
+    {
+        var trimmed = baseUrl?.Trim();
+        if (string.IsNullOrEmpty(trimmed)
+            || !Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+            || (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+
+        return uri.Host;
+    }
+
+    /// <summary>
+    /// PURE: a one-line startup warning when <paramref name="baseUrl"/> is shaped like it carries a credential
+    /// — a query string, a fragment, or userinfo (e.g. the dashboard's own sign-in link,
+    /// <c>http://host:port/?token=...</c>, pasted in by mistake). Null when there is nothing to warn about.
+    ///
+    /// <para>Ruled (#4220, 2026-09-25): sending the link is the operator's decision — <see cref="Build"/> does
+    /// not refuse a base shaped this way, and every channel still gets the link. This is the whole mitigation:
+    /// name the risk once at startup instead of silently repeating it in every alert payload from then on. The
+    /// message never echoes the configured value — that would put the very credential it warns about into the
+    /// log.</para>
+    /// </summary>
+    public static string? DescribeCredentialShapedBaseWarning(string? baseUrl)
+    {
+        var trimmed = baseUrl?.Trim().TrimEnd('/');
+        if (string.IsNullOrEmpty(trimmed)
+            || !Uri.TryCreate(trimmed, UriKind.Absolute, out var uri)
+            || (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)))
+        {
+            /* Not a shape Build ever turns into a link (same absolute-http/https gate as Build) — nothing
+               will ever carry this value, so there is nothing to warn about. */
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment) && string.IsNullOrEmpty(uri.UserInfo))
+        {
+            return null;
+        }
+
+        return "web.publicBaseUrl includes a query string, fragment, or embedded sign-in details — that text is "
+            + "sent verbatim in every alert's triage link (Slack, Teams, PagerDuty, generic, email). If it is a "
+            + "token or credential, treat every channel that receives alerts as having it. This is not refused; "
+            + "edit web.publicBaseUrl if that was not intended.";
+    }
 }
