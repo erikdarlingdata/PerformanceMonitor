@@ -682,8 +682,8 @@ SELECT deskewed FROM (
             /* The viewer's CPU read, same rows, same preference. */
             await using (var viewer = new ViewerDataService(cs!))
             {
-                var samples = await viewer.GetCpuUtilizationAsync(ServerId, now.AddHours(-1), ct);
-                Assert.Equal(new[] { (pre1Utc, 21), (pre2Utc, 22), (straddleUtc, 31), (newestUtc, 32) },
+                var samples = await viewer.GetCpuUtilizationAsync(ServerId, now.AddHours(-1), now, ct);
+                Assert.Equal(new (DateTime, double)[] { (pre1Utc, 21), (pre2Utc, 22), (straddleUtc, 31), (newestUtc, 32) },
                     samples.Select(s => (s.SampleTime, s.SqlServerCpu)).ToArray());
             }
 

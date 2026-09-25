@@ -241,9 +241,9 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             Assert.Equal(3, samples.Count);
             /* Raw (not averaged), ordered by sample_time. */
             Assert.Equal(new[] { s1.Ticks, s2.Ticks, s3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
-            Assert.Equal(new[] { 10, 20, 30 }, samples.Select(s => s.SqlServerCpu));
+            Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
             /* Middle sample's NULL other-process CPU reads as 0. */
-            Assert.Equal(new[] { 5, 0, 15 }, samples.Select(s => s.OtherProcessCpu));
+            Assert.Equal(new[] { 5.0, 0.0, 15.0 }, samples.Select(s => s.OtherProcessCpu));
 
             bodySucceeded = true;
         }
@@ -310,7 +310,10 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             await InsertCpuAsync(connection, SkewServerId, SkewServerName, collUtc, trueUtcOld + utc, sqlCpu: 41, otherCpu: 9);
             await InsertCpuAsync(connection, SkewServerId, SkewServerName, collUtc, trueUtcNew + utc, sqlCpu: 42, otherCpu: 10);
 
-            var samples = await viewer.GetCpuUtilizationAsync(SkewServerId, collPdt.AddMinutes(-10));
+            /* #4234: an explicit endUtc close to the fixture's own fixed 2026-06-01 window — the default
+               (the wall clock) would otherwise size the bucket width off a multi-month gap and merge these
+               hour-apart batches together. */
+            var samples = await viewer.GetCpuUtilizationAsync(SkewServerId, collPdt.AddMinutes(-10), collUtc.AddMinutes(10));
 
             Assert.Equal(8, samples.Count);
 
@@ -319,7 +322,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
                Paired with its (unique) CPU value so the assertion pins which row de-skewed to which
                instant. */
             Assert.Equal(
-                new[]
+                new (long, double)[]
                 {
                     (truePdtOld.Ticks, 11),
                     (truePdtNew.Ticks, 12),
