@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -212,5 +214,180 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         return await cmd.ExecuteScalarAsync();
+    }
+
+    /// <summary>
+    /// #4262 round 1 finding 1. Forces <see cref="DuckDbInitializer.TrimThresholdBytes"/> low so the
+    /// sentinel's ordinary resting usage counts as "over", then runs one cycle directly rather than waiting
+    /// on the real 60s timer. <c>memory_limit</c> must come back to exactly what it was before the cycle —
+    /// read through a fresh connection first (DuckDB's own formatting of the configured value, whatever
+    /// that is) and compared after, rather than asserted against a guessed literal.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_OverThreshold_RestoresConfiguredMemoryLimit()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 1;
+        try
+        {
+            string beforeLimit;
+            using (var connection = initializer.CreateConnection())
+            {
+                await connection.OpenAsync();
+                beforeLimit = Convert.ToString(await ScalarAsync(connection, "SELECT current_setting('memory_limit')")) ?? "";
+            }
+
+            initializer.RunMemoryTrimCycle();
+
+            using (var connection = initializer.CreateConnection())
+            {
+                await connection.OpenAsync();
+                var afterLimit = Convert.ToString(await ScalarAsync(connection, "SELECT current_setting('memory_limit')")) ?? "";
+                Assert.Equal(beforeLimit, afterLimit);
+            }
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// #4262 round 1 finding 1: "never wait, so a reader is never blocked behind the trim." With another
+    /// thread holding the read lock and the threshold forced to 0 (so the cycle always wants to trim),
+    /// <c>RunMemoryTrimCycle</c> must return immediately rather than wait for that reader to finish.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_ReadLockHeldByAnotherThread_SkipsWithoutWaiting()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        try
+        {
+            var readerTask = Task.Run(() =>
+            {
+                using var readLock = initializer.AcquireReadLock();
+                readerReady.Set();
+                releaseReader.Wait(TimeSpan.FromSeconds(5));
+            });
+
+            Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)));
+
+            var stopwatch = Stopwatch.StartNew();
+            initializer.RunMemoryTrimCycle();
+            stopwatch.Stop();
+
+            Assert.True(stopwatch.ElapsedMilliseconds < 500,
+                $"Trim cycle waited {stopwatch.ElapsedMilliseconds}ms behind a held read lock instead of skipping at once");
+
+            releaseReader.Set();
+            await readerTask;
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// #4262 round 1 finding 2. With a read lock held on another thread for longer than
+    /// <c>Dispose</c>'s write-lock timeout, <c>Dispose</c> must still return in roughly 2s rather than hang
+    /// the caller (the UI thread, in production), must not throw, and must still release the sentinel —
+    /// proven here by the file becoming exclusively openable right after.
+    /// </summary>
+    [Fact]
+    public async Task Dispose_ReadLockHeldOnAnotherThread_ReturnsWithoutHangingOrThrowing()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var readerReady = new ManualResetEventSlim();
+        var releaseReader = new ManualResetEventSlim();
+        var readerTask = Task.Run(() =>
+        {
+            using var readLock = initializer.AcquireReadLock();
+            readerReady.Set();
+            releaseReader.Wait(TimeSpan.FromSeconds(10));
+        });
+
+        Assert.True(readerReady.Wait(TimeSpan.FromSeconds(5)));
+
+        var stopwatch = Stopwatch.StartNew();
+        var ex = Record.Exception(() => initializer.Dispose());
+        stopwatch.Stop();
+
+        Assert.Null(ex);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3),
+            $"Dispose took {stopwatch.Elapsed} with a read lock held elsewhere");
+
+        releaseReader.Set();
+        await readerTask;
+
+        File.Open(_dbPath, FileMode.Open, FileAccess.Read, FileShare.None).Dispose();
+    }
+
+    /// <summary>
+    /// #4262 round 1 finding 3. Before this fix, <c>CreateArchiveViewsAsync</c> opened its connection with
+    /// no lock at all, so it would have returned immediately here regardless of the concurrent write lock.
+    /// Now it must wait behind the held write lock, proving the read lock is actually taken.
+    /// </summary>
+    [Fact]
+    public async Task CreateArchiveViewsAsync_WaitsForConcurrentWriteLock()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var writeLockAcquired = new ManualResetEventSlim();
+        var releaseWriteLock = new ManualResetEventSlim();
+        var holderTask = Task.Run(() =>
+        {
+            using var writeLock = initializer.AcquireWriteLock();
+            writeLockAcquired.Set();
+            releaseWriteLock.Wait(TimeSpan.FromSeconds(5));
+        });
+
+        Assert.True(writeLockAcquired.Wait(TimeSpan.FromSeconds(5)));
+
+        var archiveViewsTask = Task.Run(() => initializer.CreateArchiveViewsAsync());
+        var raced = await Task.WhenAny(archiveViewsTask, Task.Delay(TimeSpan.FromMilliseconds(300)));
+        Assert.NotSame(archiveViewsTask, raced);
+
+        releaseWriteLock.Set();
+        await holderTask;
+        await archiveViewsTask;
+
+        initializer.Dispose();
+    }
+
+    /// <summary>
+    /// #4262 round 1 finding 3. <c>QueryStoreSliceRepairService.PromoteRewrittenFileAsync</c> calls
+    /// <c>CreateArchiveViewsAsync</c> while its own caller already holds the write lock — contrary to the
+    /// review's claim that call site held no lock. <c>s_dbLock</c> is <c>NoRecursion</c>, so this proves
+    /// the public method survives being called from a write-lock holder (backstopped by
+    /// <c>AcquireReadLock</c>'s recursion catch) rather than throwing <c>LockRecursionException</c>.
+    /// </summary>
+    [Fact]
+    public async Task CreateArchiveViewsAsync_CalledWhileHoldingWriteLockOnSameThread_DoesNotThrow()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        using (initializer.AcquireWriteLock())
+        {
+            var ex = await Record.ExceptionAsync(() => initializer.CreateArchiveViewsAsync());
+            Assert.Null(ex);
+        }
+
+        initializer.Dispose();
     }
 }
