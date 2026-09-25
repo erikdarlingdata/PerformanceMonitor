@@ -3070,6 +3070,11 @@ public static class DarlingWebEndpoints
             return ToolResponseKind.ServerError;
         }
 
+        if (result.StartsWith(Mcp.DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+        {
+            return ToolResponseKind.ServerError;
+        }
+
         return ToolResponseKind.ClientError;
     }
 

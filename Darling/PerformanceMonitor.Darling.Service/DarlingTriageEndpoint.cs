@@ -600,12 +600,24 @@ internal static class DarlingTriageEndpoint
                         serverId = resolved.ServerId;
                         serverName = resolved.ServerName;
                     }
+                    else if (error.StartsWith(DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+                    {
+                        /* #4283 H2: the resolver's OWN store-fault sentence, not the caller's refusal — this is
+                           the ONE branch below that can carry ex.Message (via LoadEnabledOrFaultAsync's catch), so
+                           it is logged once and answered with the fixed generic/timeout note, never shown raw. */
+                        DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, error);
+                        notes.Add((JsonNode)(DarlingWebFailureLog.IsStatementTimeoutSentence(error)
+                            ? DarlingWebFailureLog.TimeoutMessage
+                            : DarlingWebFailureLog.GenericMessage));
+                    }
                     else
                     {
                         /* The resolver's miss is the `invalid` envelope since #3739; a note on this page is TEXT,
                            so the sentence is read back out of it rather than the JSON being shown as prose. This
                            is a client-correctable refusal, not a caught exception, so it is NOT #4283's target —
-                           the resolver's own validator sentence, never ex.Message. */
+                           the resolver's own validator sentence, never ex.Message. (The resolver's OWN
+                           store-fault sentence — the one that DOES carry ex.Message — is handled by the branch
+                           above: logged once, never shown raw.) */
                         notes.Add((JsonNode)McpHelpers.ErrorMessageOf(error));
                     }
                 }
@@ -775,7 +787,10 @@ internal static class DarlingTriageEndpoint
                     break;
                 default:
                     /* Refusal / ClientError: a validator's or resolver's own sentence, client-correctable and
-                       never ex.Message — shown as-is, same as the read surface's 400 body. */
+                       never ex.Message — shown as-is, same as the read surface's 400 body. True now specifically
+                       because #4283 H2's ClassifyToolResponse reclassifies the resolver's OWN registry-read-fault
+                       sentence as ServerError before this arm ever sees it; only a genuine refusal/miss sentence
+                       reaches here. */
                     result["error"] = McpHelpers.ErrorMessageOf(raw);
                     break;
             }

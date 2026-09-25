@@ -280,6 +280,45 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
     }
 
+    [Fact]
+    public void ToHttpResult_ResolverRegistryFault_MapsTo500_NotClientError_OneErrorLog()
+    {
+        var logger = new CapturingTestLogger();
+        var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}Host=store.internal;Port=5432 role \"app_rw\" failed";
+
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain("store.internal", json.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public void ToHttpResult_ResolverRegistryFaultTimeout_MapsTo503()
+    {
+        var logger = new CapturingTestLogger();
+        var sentence = $"{DarlingServerResolver.RegistryReadFaultPrefix}57014: canceling statement due to statement timeout";
+
+        var result = DarlingWebEndpoints.ToHttpResult(sentence, "/api/triage", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
+        Assert.Equal(DarlingWebFailureLog.TimeoutMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>The resolver's own fault-sentence prefix, pinned byte-identical to what
+    /// <c>DarlingServerResolver.LoadEnabledOrFaultAsync</c>'s catch built inline before #4283 H2 factored it out
+    /// — an MCP caller (which reads this sentence back unchanged through <c>McpHelpers.ErrorMessageOf</c>, never
+    /// through <see cref="DarlingWebEndpoints.ClassifyToolResponse"/>) sees no text change from this fix.</summary>
+    [Fact]
+    public void RegistryReadFaultPrefix_IsPinnedByteIdentical_ToThePreFixLiteral()
+    {
+        Assert.Equal("Could not read the servers registry from the Postgres store: ", DarlingServerResolver.RegistryReadFaultPrefix);
+    }
+
     /* ═══════════════════════════ DarlingWebEndpoints.MuteRuleToolResult: the ServerError arm (#4283 H1) ═══════════════════════════ */
 
     [Fact]
