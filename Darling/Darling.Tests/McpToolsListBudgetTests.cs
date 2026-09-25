@@ -99,7 +99,11 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
-    private const int TotalCeilingBytes = 172_220;
+    /* #4198 (lane TK): +240 bytes for get_collection_health's new full_detail opt-in parameter (the head is
+       unchanged; the compaction rule lives in the tail get_tool_guide serves, not the served head). Default
+       calls now compact HEALTHY collectors with nothing to report, which took the default response from
+       41,669 bytes (measured, every field on every collector) to 20,707 bytes, under the shared 32 KB budget. */
+    private const int TotalCeilingBytes = 172_460;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

@@ -39,6 +39,31 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
     private readonly ITestOutputHelper _output;
     public CollectionHealthPayloadBudgetLiveTests(ITestOutputHelper output) => _output = output;
 
+    /// <summary>No-rig pin: the web viewer's /api/read row must keep today's full per-collector payload, not
+    /// the new compact default. Source-scanned rather than rig-driven so it runs everywhere, including CI legs
+    /// with no Postgres rig.</summary>
+    [Fact]
+    public void WebViewerRow_PassesFullDetailTrue()
+    {
+        var path = FindRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var source = System.IO.File.ReadAllText(path);
+        Assert.Contains(
+            "[\"get_collection_health\"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true)",
+            source, StringComparison.Ordinal);
+    }
+
+    private static string FindRepoFile(params string[] relativeParts)
+    {
+        var dir = AppContext.BaseDirectory;
+        for (var i = 0; i < 8; i++)
+        {
+            var candidate = System.IO.Path.Combine(new[] { dir }.Concat(relativeParts).ToArray());
+            if (System.IO.File.Exists(candidate)) return candidate;
+            dir = System.IO.Path.GetDirectoryName(dir) ?? dir;
+        }
+        throw new System.IO.FileNotFoundException(System.IO.Path.Combine(relativeParts));
+    }
+
     [Fact]
     public async Task DefaultCall_StaysUnderBudget_AndNeverCompactsANonBoringCollector()
     {

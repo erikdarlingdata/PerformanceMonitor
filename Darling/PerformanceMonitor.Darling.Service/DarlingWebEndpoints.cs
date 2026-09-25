@@ -2662,7 +2662,10 @@ public static class DarlingWebEndpoints
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
 
             /* ── core data reads ── */
-            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c)),
+            /* #4198: full_detail=true keeps the web viewer's payload exactly what it was before the default
+               cut — every field on every collector row, never the compact shape a boring-healthy row gets
+               by default. */
+            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true),
             ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
                 ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs)
                 : UnparseableParam("min_duration_ms"),
