@@ -287,6 +287,16 @@ public static class DarlingWebEndpoints
             return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
+        /* The nav-gate probe (#4189): refreshAgNav's only question is "is this nonzero", and answering it from
+           /api/ag cost every page load a 140-266 KB, 1.5-2.6s topology read, repeated every 60s poll for as
+           long as the answer stayed no. Same distinct-group definition, one aggregate query instead. */
+        app.MapGet("/api/ag/count", async (HttpContext context) =>
+        {
+            var count = await DarlingAgReader.GetAvailabilityGroupCountAsync(
+                postgres, null, context.RequestAborted);
+            return Results.Json(new AvailabilityGroupCountResult { AvailabilityGroupCount = count }, DarlingAgReader.JsonOptions);
+        });
+
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
         foreach (var (name, handler) in BuildReadDispatch(logger))
         {

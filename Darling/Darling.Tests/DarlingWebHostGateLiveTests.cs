@@ -61,6 +61,11 @@ public sealed class DarlingWebHostGateLiveTests
         var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
 
+        // #4188: ConfigurePipeline now calls app.UseResponseCompression(), which resolves its options from DI —
+        // registered here exactly as the production builder in TryStartServerAsync registers them, or every
+        // request below throws resolving a service nothing added.
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+
         var app = builder.Build();
 
         var host = new DarlingWebHostService(
