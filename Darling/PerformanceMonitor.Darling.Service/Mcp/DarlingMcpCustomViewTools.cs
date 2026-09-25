@@ -294,7 +294,8 @@ public sealed class DarlingMcpCustomViewTools
     [McpServerTool(Name = "describe_custom_view_catalog"), Description(
         "Returns the COMPOSE CATALOG: the exact vocabulary (measures, dimensions, aggregates, units, timeBuckets, viz) " +
         "a composed (v2) panel may use; the compiler emits ONLY these identifiers. CALL THIS FIRST before " +
-        "create/update/validate/run_custom_view_panel. On query_stats, ad-hoc SQL carries the literal '(ad hoc)' " +
+        "create/update/validate/run_custom_view_panel. Default is COMPACT (#4198, see guide); source/full_detail " +
+        "get more. On query_stats, ad-hoc SQL carries the literal '(ad hoc)' " +
         "module; a neq filter on procedure name still INCLUDES those rows (the dimension value is never null). " +
         "Static reference data: no server, time window, or collected-data read. <<GUIDE>> " +
         "Returns the COMPOSE CATALOG — the exact vocabulary a composed (v2) custom-view panel may draw from — so you " +
@@ -302,11 +303,27 @@ public sealed class DarlingMcpCustomViewTools
         "update_custom_view / validate_custom_view / run_custom_view_panel: the panel's 'source', 'measure'/'ratio', " +
         "'aggregate', 'unit', 'groupBy'/'filters' dimensions, 'timeBucket', and 'viz' must all come from this " +
         "catalog (the compiler emits ONLY these identifiers), and the validation errors do not enumerate the legal " +
-        "names, so guessing them is slow. Returns {measures, dimensions, annotationSources, universalDimensions, " +
-        "unitFamilies, aggregates, timeBuckets, filterOps, viz}. Each measure names its 'source' (collector table), " +
+        "names, so guessing them is slow. " +
+        "DEFAULT CALL (#4198 — the full catalog is 98 KB, three times this tool's budget): {sources: [{source, " +
+        "measures: [{key, displayName, kind, unitFamily, validAggregates}]}], annotationSources (key/displayName/" +
+        "category only), universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, viz, compact: true, " +
+        "note}. displayName is the measure's one-line purpose; kind is scalar|ratio (use the key as the panel's " +
+        "'measure', or as 'ratio' when kind='ratio'); validAggregates is what the panel's 'aggregate' may be — it " +
+        "is the one field that VARIES within a source (a ratio measure's list differs from its source's scalars), " +
+        "so it stays inline, because the compact form drops allowedDimensions and dimensions, and `source=<name>` returns them. " +
+        "SOURCE DRILL-DOWN (source=\"wait_stats\", a name from the default call's sources[].source): {source, " +
+        "measures (every field below, filtered to this source), dimensions (this source's filterable/groupable " +
+        "columns), annotationSources, ...the same small vocabularies}. An unmatched source comes back with empty " +
+        "measures/dimensions and a note, not an error. " +
+        "FULL_DETAIL=true (or full_detail with source: same, unfiltered): today's original shape, {measures, " +
+        "dimensions, annotationSources, universalDimensions, unitFamilies, aggregates, timeBuckets, filterOps, " +
+        "viz}, every measure/dimension/annotationSource at every field — the same shape web /api/catalog serves " +
+        "the Custom Views editor (unrelated to this default; the editor always gets the full catalog). " +
+        "Each measure names its 'source' (collector table), " +
         "its 'key' (use as the panel's 'measure', or as 'ratio' when kind='ratio'), its 'kind' (scalar|ratio), the " +
         "'validAggregates' and 'allowedDimensions' legal for it, its unit family + default/native unit, and " +
-        "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it). A panel then names a " +
+        "'appliesTo' (which server types — onPrem/azureSqlDb/azureMi/awsRds — can collect it; a UI greying hint, " +
+        "not a compose-time restriction). A panel then names a " +
         "'source' + 'measure'|'ratio', an 'aggregate' from that measure's validAggregates, a 'unit' from its family, " +
         "an optional 'timeBucket' (time series; prefer 'auto', which adapts the grain minute/hour/day to the " +
         "panel's window so any range renders), 'topN' (ranked), or BOTH (the bucketed trend of exactly the top-N " +
@@ -324,11 +341,20 @@ public sealed class DarlingMcpCustomViewTools
         "null). For a true top-statements panel group by 'statement' instead: procedures keep their module name " +
         "and ad-hoc statements stay distinct by query_hash. Static " +
         "reference data — no server or time window needed; it reads no monitored server and no collected data.")]
-    public static Task<string> DescribeCustomViewCatalog()
+    public static Task<string> DescribeCustomViewCatalog(
+        [Description("Drill into ONE source (collector table, e.g. 'wait_stats') for its full per-measure detail plus its " +
+            "dimensions. A name from the default call's sources[].source. Default null (no filter).")] string? source = null,
+        [Description("Return the complete catalog at full per-entry detail, ungrouped, instead of the compact default. Default false.")] bool full_detail = false)
     {
         try
         {
-            return Task.FromResult(DarlingWebEndpoints.BuildComposeCatalogNode().ToJsonString(McpHelpers.JsonOptions));
+            var full = DarlingWebEndpoints.BuildComposeCatalogNode();
+            var result = source is not null
+                ? DarlingWebEndpoints.FilterComposeCatalogNodeBySource(full, source)
+                : full_detail
+                    ? full
+                    : DarlingWebEndpoints.BuildComposeCatalogCompactNode(full);
+            return Task.FromResult(result.ToJsonString(McpHelpers.JsonOptions));
         }
         catch (Exception ex)
         {

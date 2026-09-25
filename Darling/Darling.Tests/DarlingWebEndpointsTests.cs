@@ -8,8 +8,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
@@ -452,5 +454,56 @@ public sealed class DarlingWebEndpointsTests
         var never = Assert.IsType<JsonObject>(array[1]);
         Assert.True(never.ContainsKey("last_fired"));
         Assert.Null(never["last_fired"]);
+    }
+
+    /// <summary>
+    /// #4198: <c>get_analysis_findings</c> grew a default <c>limit</c> (18 chains) and a default text preview
+    /// (<c>full_text: false</c>), sized for a chat caller watching its own token budget. The web viewer's two
+    /// "Analysis Findings" tables never asked for that budget and render no field the preview cuts — a
+    /// regression here would silently drop rows past the 18th from the table with no error, which a JSON-shape
+    /// test cannot catch because the response is still well-formed, just short. No rig: this reads the
+    /// dispatch-row SOURCE rather than invoking it, because invoking it needs a live Postgres connection.
+    /// </summary>
+    [Fact]
+    public void GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText()
+    {
+        var source = ReadSource(WebEndpointsSourcePath);
+
+        var line = source
+            .Split('\n')
+            .FirstOrDefault(l => l.Contains("[\"get_analysis_findings\"] = (c, pg, an) =>", StringComparison.Ordinal));
+
+        Assert.True(line is not null,
+            "#4198: the /api/read dispatch row for get_analysis_findings has moved or been renamed; update this pin's search text.");
+
+        Assert.Contains("Rows(c, \"limit\", MaxRowLimit)", line, StringComparison.Ordinal);
+        Assert.Contains("QueryBool(c, \"full_text\", true)", line, StringComparison.Ordinal);
+    }
+
+    private static string ReadSource(string relative)
+    {
+        var path = Path.Combine(RepoRoot(), relative);
+
+        Assert.True(File.Exists(path), $"#4198 scan target not found: {path}");
+
+        return File.ReadAllText(path);
+    }
+
+    private const string WebEndpointsSourcePath =
+        "Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs";
+
+    private static string RepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+
+        while (dir is not null
+               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
+               && !Directory.Exists(Path.Combine(dir, ".git")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return dir!;
     }
 }
