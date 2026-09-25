@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -136,43 +137,26 @@ public sealed partial class ViewerDataService
                     : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "database resource usage");
 
-    /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy relation for that tier,
-    /// unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> for why routing this through the
-    /// stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
-    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
-        TopResourceConsumersByTotalSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
+    /// <summary>Top consumers (by total AND by average — one statement, #4227) for <paramref name="tier"/>,
+    /// over the legacy relation for that tier, unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/>
+    /// for why routing this through the stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
+    public static string TopResourceConsumersSqlFor(RetentionTier tier) =>
+        TopResourceConsumersSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
-    /// <summary>Top consumers (by total) over the stitched relation (#3653 A6) — see
-    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
-    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
+    /// <summary>Top consumers (by total and by average) over the stitched relation (#3653 A6) — see
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>. The I/O side
+    /// (<c>v_file_io_stats</c>) has no rollup and is never routed, on either tier — unchanged from before #4227
+    /// merged the two statements.</summary>
+    public static string TopResourceConsumersSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
-            ? TopResourceConsumersByTotalSql
+            ? TopResourceConsumersSql
             : RouteOrThrow(
-                TopResourceConsumersByTotalSql,
+                TopResourceConsumersSql,
                 ConsumerCteRaw,
                 ConsumerCteForCagg(tier == RetentionTier.Hourly
                     ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
                     : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
-                "top consumers by total");
-
-    /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy relation for that tier,
-    /// unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> for why routing this through the
-    /// stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
-    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
-        TopResourceConsumersByAvgSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
-
-    /// <summary>Top consumers (by average) over the stitched relation (#3653 A6) — see
-    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
-    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
-        tier == RetentionTier.Raw
-            ? TopResourceConsumersByAvgSql
-            : RouteOrThrow(
-                TopResourceConsumersByAvgSql,
-                ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly
-                    ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
-                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
-                "top consumers by average");
+                "top consumers");
 
     public const string DatabaseResourceUsageSql = @"
 WITH workload AS (
@@ -348,8 +332,20 @@ ORDER BY max_connections DESC";
         return items;
     }
 
-    /// <summary>Top-N databases by total CPU for the Utilization summary. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string TopResourceConsumersByTotalSql = @"
+    /// <summary>
+    /// Top databases by total CPU AND by average CPU per execution for the Utilization summary — ONE pass
+    /// over query_stats/file_io_stats feeding BOTH grids (#4227; the two statements this replaced each
+    /// aggregated the same 24h of raw query_stats independently, ~27k buffers apiece). $1 server_id, $2 cutoff.
+    /// Returns every database with a workload or an I/O row in the window, not just the topN of either
+    /// ordering — <see cref="GetTopResourceConsumersAsync"/> ranks and slices both grids from this one row set,
+    /// since a single statement can only LIMIT one ordering and the two grids rank by different columns.
+    ///
+    /// <para>Deliberately does NOT filter out a NULL database_name (an unattributed query_stats row) here.
+    /// The old ByTotal statement did (<c>WHERE c.database_name IS NOT NULL</c>); the old ByAvg statement never
+    /// did. Baking either rule in would apply it to both grids, so the NULL-name filter is applied client-side,
+    /// per grid, in <see cref="GetTopResourceConsumersAsync"/> instead.</para>
+    /// </summary>
+    public const string TopResourceConsumersSql = @"
 WITH workload AS (
     SELECT
         database_name,
@@ -392,14 +388,21 @@ SELECT
     c.execution_count,
     CAST(c.io_total_mb AS DECIMAL(19,2)),
     CAST(c.cpu_time_ms * 100.0 / t.total_cpu AS DECIMAL(5,2)),
-    CAST(c.io_total_mb * 100.0 / t.total_io AS DECIMAL(5,2))
+    CAST(c.io_total_mb * 100.0 / t.total_io AS DECIMAL(5,2)),
+    CASE WHEN c.execution_count > 0 THEN CAST(c.cpu_time_ms * 1.0 / c.execution_count AS DECIMAL(19,2)) END,
+    CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END
 FROM combined c
 CROSS JOIN totals t
-WHERE c.database_name IS NOT NULL
-ORDER BY c.cpu_time_ms DESC
-LIMIT $3";
+ORDER BY c.database_name";
 
-    public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByTotalAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Both top-consumer grids from the one <see cref="TopResourceConsumersSql"/> round trip. Column 6
+    /// (avg_cpu_ms) is NULL exactly when execution_count = 0, which is the old ByAvg statement's
+    /// <c>HAVING SUM(delta_execution_count) > 0</c> restated as a per-row test instead of a group filter — the
+    /// same rows survive either way, since HAVING on an aggregate is equivalent to filtering the already-grouped
+    /// result on that same aggregate.
+    /// </summary>
+    public async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> GetTopResourceConsumersAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
         var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
@@ -408,95 +411,63 @@ LIMIT $3";
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier, coverage, cutoff));
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersSqlFor(tier, coverage, cutoff));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
 
-        var items = new List<TopResourceConsumerRow>();
+        var totalCandidates = new List<TopResourceConsumerRow>();
+        var avgCandidates = new List<TopResourceConsumerRow>();
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new TopResourceConsumerRow
+            var dbNameIsNull = reader.IsDBNull(0);
+            var dbName = dbNameIsNull ? "" : reader.GetString(0);
+            var cpuTimeMs = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1));
+            var executionCount = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
+            var ioTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3));
+
+            /* The ByTotal grid has always excluded an unattributed (NULL) database_name — the old
+               TopResourceConsumersByTotalSql's WHERE c.database_name IS NOT NULL. */
+            if (!dbNameIsNull)
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                CpuTimeMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                IoTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                PctCpu = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
-                PctIo = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
-            });
-        }
-        return items;
-    }
+                totalCandidates.Add(new TopResourceConsumerRow
+                {
+                    DatabaseName = dbName,
+                    CpuTimeMs = cpuTimeMs,
+                    ExecutionCount = executionCount,
+                    IoTotalMb = ioTotalMb,
+                    PctCpu = reader.IsDBNull(4) ? 0m : Convert.ToDecimal(reader.GetValue(4)),
+                    PctIo = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
+                });
+            }
 
-    /// <summary>Top-N databases by average CPU per execution for the Utilization summary. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string TopResourceConsumersByAvgSql = @"
-WITH workload AS (
-    SELECT
-        database_name,
-        SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
-        SUM(delta_execution_count) AS execution_count
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_worker_time IS NOT NULL
-    GROUP BY database_name
-    HAVING SUM(delta_execution_count) > 0
-),
-io AS (
-    SELECT
-        database_name,
-        SUM(delta_read_bytes + delta_write_bytes) / 1048576.0 AS io_total_mb
-    FROM v_file_io_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   delta_read_bytes IS NOT NULL
-    GROUP BY database_name
-)
-SELECT
-    w.database_name,
-    CAST(w.cpu_time_ms * 1.0 / w.execution_count AS DECIMAL(19,2)) AS avg_cpu_ms,
-    w.execution_count,
-    CAST(COALESCE(i.io_total_mb, 0) AS DECIMAL(19,2)),
-    w.cpu_time_ms,
-    CAST(COALESCE(i.io_total_mb, 0) * 1.0 / w.execution_count AS DECIMAL(19,4)) AS avg_io_mb
-FROM workload w
-LEFT JOIN io i ON i.database_name = w.database_name
-ORDER BY avg_cpu_ms DESC
-LIMIT $3";
-
-    public async Task<List<TopResourceConsumerRow>> GetTopResourceConsumersByAvgAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
-    {
-        var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
-        var (rollups, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
-        var tier = RetentionTierRouter.Resolve(
-            DateTime.UtcNow, cutoff, rollups.QueryGrainHourly, rollups.QueryGrainDaily,
-            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
-
-        /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier, coverage, cutoff));
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
-
-        var items = new List<TopResourceConsumerRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            items.Add(new TopResourceConsumerRow
+            /* The ByAvg grid never filtered a NULL database_name, only a zero-execution one; avg_cpu_ms is
+               NULL exactly for those, so testing it here reproduces the old HAVING. */
+            if (!reader.IsDBNull(6))
             {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                CpuTimeMs = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                ExecutionCount = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                IoTotalMb = reader.IsDBNull(3) ? 0m : Convert.ToDecimal(reader.GetValue(3)),
-                TotalCpuTimeMs = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
-                AvgIoMb = reader.IsDBNull(5) ? 0m : Convert.ToDecimal(reader.GetValue(5))
-            });
+                avgCandidates.Add(new TopResourceConsumerRow
+                {
+                    DatabaseName = dbName,
+                    CpuTimeMs = Convert.ToInt64(reader.GetValue(6)),
+                    ExecutionCount = executionCount,
+                    IoTotalMb = ioTotalMb,
+                    TotalCpuTimeMs = cpuTimeMs,
+                    AvgIoMb = reader.IsDBNull(7) ? 0m : Convert.ToDecimal(reader.GetValue(7))
+                });
+            }
         }
-        return items;
+
+        /* Both grids were "ORDER BY <metric> DESC LIMIT $3" in SQL; ranking moves here so the one row set can
+           feed both orderings. OrderByDescending is a stable sort, so a tie now breaks by the shared
+           statement's ORDER BY c.database_name — deterministic, where the old per-grid statements left a
+           tie's order to whichever plan Postgres picked (never a documented contract, and cpu_time_ms /
+           avg_cpu_ms are sums of independent per-database deltas, so an exact tie is not expected in practice). */
+        var byTotal = totalCandidates.OrderByDescending(r => r.CpuTimeMs).Take(topN).ToList();
+        var byAvg = avgCandidates.OrderByDescending(r => r.CpuTimeMs).Take(topN).ToList();
+
+        return (byTotal, byAvg);
     }
 
     /// <summary>Wait stats grouped by cost category over the window. $1 server_id, $2 cutoff.</summary>

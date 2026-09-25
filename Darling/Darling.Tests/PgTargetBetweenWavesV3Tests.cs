@@ -60,18 +60,26 @@ public sealed class PgTargetBetweenWavesV3Tests
         Assert.Equal(typeof(DarlingPgCpuUtilizationReader.HostMemory), memory.ParameterType);
         Assert.Equal(6, typeof(DarlingPgCpuUtilizationReader.HostMemory).GetProperties(BindingFlags.Public | BindingFlags.Instance).Count(p => p.PropertyType == typeof(long?)));
 
-        var description = typeof(DarlingMcpPgCpuUtilizationTools).GetMethod("GetPgCpuUtilization")!
+        /* #4193 moved GetPgCpuUtilization behind an MCP-facing overload plus an internal budget-taking one, so
+           GetMethod("GetPgCpuUtilization") is ambiguous now — resolved by the MCP registration instead, the
+           idiom PgLogEventMetricsTests already uses for the same shape. */
+        var description = typeof(DarlingMcpPgCpuUtilizationTools).GetMethods()
+            .Single(m => m.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolAttribute>()?.Name == "get_pg_cpu_utilization")
             .GetCustomAttributes<DescriptionAttribute>(inherit: false).Single().Description;
         foreach (var column in six)
             Assert.Contains(column, description, StringComparison.Ordinal);
         Assert.Contains("memory_samples_in_bucket", description, StringComparison.Ordinal);
         Assert.Contains("null means not measured, never zero memory", description, StringComparison.Ordinal);
 
-        /* The tool's projection names every one of the six as a payload key, plus its own denominator. */
+        /* #4193: aggregation moved into the bucketed SQL (HistoryBucketedSql), so the tool's projection now
+           reads each column off the reader's own CpuBucketPoint rather than folding raw rows with MeanBytes. */
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "DarlingPgCpuUtilizationReader.cs");
+        foreach (var column in six)
+            Assert.Contains($"{column},", reader, StringComparison.Ordinal);
         var tool = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgCpuUtilizationTools.cs");
         foreach (var column in six)
-            Assert.Contains($"{column} = MeanBytes(", tool, StringComparison.Ordinal);
-        Assert.Contains("memory_samples_in_bucket = g.Count(r => r.Memory?.TotalBytes is not null)", tool, StringComparison.Ordinal);
+            Assert.Contains($"{column} = p.Memory?.", tool, StringComparison.Ordinal);
+        Assert.Contains("memory_samples_in_bucket = p.MemorySamples", tool, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── item 3: the spill leads to the composition check ───────────────────────── */

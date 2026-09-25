@@ -94,7 +94,7 @@ public sealed class CollectionCaveatsRungTests
 
     /// <summary>
     /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 141 — the top arm, since nothing has landed on top of it yet.
+    /// returns 141 — a position within the signature, not its end, now that V143 has appended its own.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
