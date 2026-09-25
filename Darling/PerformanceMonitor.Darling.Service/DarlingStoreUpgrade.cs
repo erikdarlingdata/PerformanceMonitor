@@ -2689,7 +2689,7 @@ internal sealed class DarlingStoreUpgrade
                 }
 
                 name = trimmed[..ws];
-                valueField = trimmed[(ws + 1)..].Trim();
+                valueField = trimmed[(ws + 1)..].Trim(' ', '\t');
             }
             else
             {

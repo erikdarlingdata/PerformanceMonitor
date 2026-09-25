@@ -232,6 +232,20 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public void ParseAutoConf_ANameValueLineWhoseValueStartsWithNbsp_IsNotCarriedAsAStrippedValue()
+    {
+        /* The no-'=' form's value side used string.Trim() (full-Unicode trim), stripping a leading NBSP
+           that guc-file.l would not treat as separating whitespace — silently carrying "64MB" when the
+           file actually held NBSP+"64MB" (#4280 round-2 part 3 leftover, one token). Trim(' ', '\t') now
+           matches the '=' form two lines below it: the NBSP stays, so DecodeAutoConfValue treats it as
+           the start of an empty unquoted token and the line is not carried at all — never work_mem = 64MB. */
+        var settings = DarlingStoreUpgrade.ParseAutoConf("work_mem  64MB\n", out var skippedLines);
+
+        Assert.Empty(settings);
+        Assert.Empty(skippedLines);
+    }
+
+    [Fact]
     public void ParseAutoConf_ANameValueLineSplitByABareCarriageReturn_SkipsBothResultingLines()
     {
         /* StringReader.ReadLine treats a bare '\r' as its own line terminator, so "work_mem\r128MB" reads
