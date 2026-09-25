@@ -454,7 +454,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 },
                 _logger);
 
-            var builder = WebApplication.CreateBuilder();
+            /* #4286 review, Low 1: with no EnvironmentName set here, an ASPNETCORE_ENVIRONMENT or
+               DOTNET_ENVIRONMENT of "Development" left set anywhere on the machine would add the developer
+               exception page ahead of the Host guard and the bearer check -- a throw that escapes then answers
+               with the exception message and stack trace on the loopback bind, which has no token. Same pin as
+               the web host (DarlingWebHostService, #4281 review finding 4). */
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Production,
+            });
 
             builder.WebHost.ConfigureKestrel(options =>
             {

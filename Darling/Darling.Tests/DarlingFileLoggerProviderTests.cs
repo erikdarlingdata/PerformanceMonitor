@@ -159,13 +159,18 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         Assert.Contains("the other line in the same batch", written, StringComparison.Ordinal);
     }
 
-    /// <summary>#4281 review, finding 5: exception.Message can repeat request text (a PostgreSQL cast error
-    /// echoes the bad value; KeyNotFoundException echoes the key) and reached the file log unsanitized -- CR/LF
-    /// in it could forge a second line the same way an unsanitized route could. The FORMATTED message is
-    /// deliberately left alone (DarlingWorker's "Store host profile" line embeds '\n' on purpose); only
-    /// exception.Message is sanitized.</summary>
+    /// <summary>
+    /// #4281 review, finding 5 and its #4286 follow-up (Low 5): exception.Message can repeat request text (a
+    /// PostgreSQL cast error echoes the bad value; KeyNotFoundException echoes the key) and reached the file
+    /// log unsanitized -- CR/LF in it could forge a second entry the same way an unsanitized route could.
+    /// The fix now cleans the WHOLE assembled line at the sink (not just exception.Message), and a CRLF
+    /// collapses to ONE kept line feed rather than two dots -- so the forged-looking text survives readably,
+    /// but INDENTED, which is what actually defeats the forgery: it can never start at column 0, the one
+    /// place a reader looks for the next entry's timestamp. Same input the pre-#4286 version of this test
+    /// used, new expected shape.
+    /// </summary>
     [Fact]
-    public void Log_ExceptionMessageCarriesCrLf_SanitizesSoNoForgedLineReachesTheFile()
+    public void Log_ExceptionMessageCarriesCrLf_StaysOneEntry_ContinuationNeverAtColumnZero()
     {
         var logDir = Path.Combine(_tempRoot, "logs");
         using var provider = new DarlingFileLoggerProvider(logDir, _ => { });
@@ -176,8 +181,79 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         provider.Flush();
 
         var written = File.ReadAllText(provider.CurrentLogFile());
+
+        /* The CR is gone (collapsed into the LF it preceded), and the fake timestamp is now indented --
+           never a bare "\n2026-08-21" or "\r\n2026-08-21" at the start of a line. */
         Assert.DoesNotContain("\r\n2026-08-21", written, StringComparison.Ordinal);
-        Assert.Contains("bad value..2026-08-21 12:00:00 WARN  Forged line", written, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n2026-08-21", written, StringComparison.Ordinal);
+        Assert.Contains("bad value\n    2026-08-21 12:00:00 WARN  Forged line", written, StringComparison.Ordinal);
+
+        /* "Stays one entry": only the real entry's own timestamp sits at the true start of a line. */
+        var realEntryStarts = System.Text.RegularExpressions.Regex.Matches(
+            written, @"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", System.Text.RegularExpressions.RegexOptions.Multiline);
+        Assert.Single(realEntryStarts);
+    }
+
+    /// <summary>
+    /// #4286 review, Low 4 applied at the sink: this used to check only ASCII control characters -- the C1
+    /// range (here NEL/U+0085) and the Unicode line separators (here U+2028) passed through into the file
+    /// unsanitized, the same gap DarlingHttpRefusalLog.Sanitize and DarlingWebOidc's subject check had.
+    /// </summary>
+    [Fact]
+    public void Log_MessageCarriesC1ControlOrUnicodeLineSeparator_MapsToADot()
+    {
+        var logDir = Path.Combine(_tempRoot, "logs");
+        using var provider = new DarlingFileLoggerProvider(logDir, _ => { });
+        var logger = provider.CreateLogger("Test");
+
+        logger.LogInformation("before{Sep1}middle{Sep2}end", ((char)0x0085).ToString(), ((char)0x2028).ToString());
+        provider.Flush();
+
+        var written = File.ReadAllText(provider.CurrentLogFile());
+        Assert.Contains("before.middle.end", written, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u0085', written);
+        Assert.DoesNotContain((char)0x2028, written);
+    }
+
+    /// <summary>
+    /// #4286 review, Low 5: the whole-line clean must not mangle DarlingWorker's own "Store host profile"
+    /// line -- <c>_logger.LogInformation("Store host profile:\n{Profile}", FormatStartupProfileText(...))</c>,
+    /// logged once at every start (DarlingWorker.cs, #4214 ruling 9) -- which embeds '\n' on purpose to print
+    /// a readable multi-line block. Same call shape and a real HostProfile
+    /// (<see cref="StartupHostProfileLogTests"/>'s fixture, duplicated here since it is private there): every
+    /// row must survive on its own line, indented, not collapsed into the timestamp line or dotted out.
+    /// </summary>
+    [Fact]
+    public void Log_StoreHostProfileBlock_StaysReadable_EachRowOnItsOwnIndentedLine()
+    {
+        var profile = new HostProfile
+        {
+            Platform = "linux",
+            IsContainerized = true,
+            ProcessorCount = 4,
+            Memory = new HostMemoryProfile(8_589_934_592, 4_294_967_296, 4_294_967_296, true, "cgroup v2 memory.max"),
+            DataVolume = new HostDataVolumeProfile(107_374_182_400, 53_687_091_200, "ext4", true),
+            IsManagedStore = true,
+            Store = new HostStoreFacts("17.4", "2.99.0", 999_999_999_999, 42.0, 123, 999_999_999_999, 4_242),
+            Settings =
+            [
+                new HostSettingProfile("shared_buffers", "2048MB", 2048, "v8 (#4214 managed block)", "2048MB", 2048, HostSettingVerdict.Matches),
+            ],
+        };
+
+        var logDir = Path.Combine(_tempRoot, "logs");
+        using var provider = new DarlingFileLoggerProvider(logDir, _ => { });
+        var logger = provider.CreateLogger("Test");
+
+        logger.LogInformation("Store host profile:\n{Profile}", DarlingStoreHostProfile.FormatStartupProfileText(profile));
+        provider.Flush();
+
+        var written = File.ReadAllText(provider.CurrentLogFile());
+
+        Assert.Contains("Store host profile:\n    Host: linux (containerized), 4 CPU(s)", written, StringComparison.Ordinal);
+        Assert.Contains("\n    RAM: 4 GB", written, StringComparison.Ordinal);
+        Assert.Contains("\n    Data volume: 100 GB total, 50 GB free (ext4)", written, StringComparison.Ordinal);
+        Assert.Contains("\n    shared_buffers", written, StringComparison.Ordinal);
     }
 
     /* ---------------- #1652 gap 3: the RECURRING retention sweep ---------------- */

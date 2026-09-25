@@ -327,6 +327,27 @@ public class DarlingHttpRefusalLogTests
         new System.Text.UTF8Encoding(false, true).GetBytes(sanitized);
     }
 
+    /// <summary>
+    /// #4286 review, Low 4: this used to check only <c>c &lt; ' ' || c == 0x7f</c> (C0 plus DEL) -- the C1
+    /// controls (U+0080-U+009F, including NEL/U+0085, which Kestrel can decode from a percent-encoded path
+    /// like <c>%C2%85</c>) and U+2028/U+2029 (Unicode LINE/PARAGRAPH SEPARATOR -- a line break to a reader
+    /// like Python's <c>str.splitlines()</c>, but not to <c>ReadLine</c> or grep) passed through unsanitized,
+    /// so a reader could disagree about where a forged Host-header line ended.
+    /// </summary>
+    [Fact]
+    public void AC1ControlOrUnicodeLineSeparator_MapsToADot()
+    {
+        Assert.Equal("before.after", DarlingHttpRefusalLog.Sanitize("before" + '\u0085' + "after"));
+        Assert.Equal("before.after", DarlingHttpRefusalLog.Sanitize("before" + (char)0x2028 + "after"));
+    }
+
+    /// <summary>#4286 review note: <c>value[take - 1]</c> would throw IndexOutOfRangeException when
+    /// maxLength is 0 -- no caller passes 0 today (64/128/256/MaxSubjectLength), but a never-throw logging
+    /// helper must degrade rather than take its caller down if one ever did.</summary>
+    [Fact]
+    public void MaxLengthZero_DoesNotThrow() =>
+        Assert.Equal("…", DarlingHttpRefusalLog.Sanitize("anything", 0));
+
     /// <summary>Every gate is named the way an operator would have to name it to fix it — the CIDR gate
     /// by its config key, not by "403".</summary>
     [Fact]

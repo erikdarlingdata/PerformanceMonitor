@@ -296,8 +296,9 @@ internal sealed class DarlingHttpRefusalLog
         /* #4281 review, finding 1 (Medium): a cut at exactly `take` can land between a surrogate pair's high
            and low half, leaving a lone high surrogate at the end. File.AppendAllText's UTF-8 encoder throws
            on a lone surrogate and drops the WHOLE log batch, not just this line -- so the cut must never
-           split a pair. */
-        if (take < value.Length && char.IsHighSurrogate(value[take - 1]))
+           split a pair. #4286 review note: `take` can only be 0 when maxLength is 0, which no caller passes
+           today, but value[take - 1] would throw IndexOutOfRangeException rather than degrade if one ever did. */
+        if (take > 0 && take < value.Length && char.IsHighSurrogate(value[take - 1]))
         {
             take--;
         }
@@ -306,7 +307,14 @@ internal sealed class DarlingHttpRefusalLog
         for (var i = 0; i < take; i++)
         {
             var c = value[i];
-            if (c < ' ' || c == (char)0x7F)
+            /* #4286 review, Low 4: char.IsControl covers C0, DEL and the C1 range (U+0080-U+009F, including
+               NEL/U+0085) that `c < ' ' || c == 0x7F` let through -- Kestrel decodes those from a
+               percent-encoded path (%C2%85). U+2028/U+2029 (Unicode LINE/PARAGRAPH SEPARATOR) are not
+               char.IsControl but split a line for readers like Python's str.splitlines() that ReadLine and
+               grep do not, so a forged entry could hide from ReadLine-based tooling while a splitlines()-based
+               one saw it as real. All are sanitized the same as CR/LF so a reader can never disagree with
+               another about where one log entry ends. */
+            if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029)
             {
                 builder.Append('.');
             }

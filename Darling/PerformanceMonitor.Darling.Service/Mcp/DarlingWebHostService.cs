@@ -9,6 +9,7 @@
 using System;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
@@ -1211,8 +1212,15 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 await next(context);
             }
-            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            catch (Exception ex) when ((ex is OperationCanceledException or IOException)
+                && context.RequestAborted.IsCancellationRequested)
             {
+                /* #4286 review, Low 2: a client that resets an upload or an HTTP/2 stream during a body read
+                   does not always surface as OperationCanceledException -- Kestrel can report it as an
+                   IOException (a TCP reset, or "The client reset the request stream." on HTTP/2), which used
+                   to fall to the generic arm below and write an unthrottled Error line for a caller who is
+                   already gone. Same filter ASP.NET Core's own exception handler middleware uses to classify a
+                   client abort. */
             }
             catch (BadHttpRequestException bad)
             {
@@ -1221,8 +1229,14 @@ public sealed class DarlingWebHostService : BackgroundService
                    must not cost the generic 500 or an Error line the way a real failure does. Debug only: the
                    default LoggerFilterOptions.MinLevel (Information) keeps it out of the file in production,
                    same as every other Debug call site, while still letting an operator opt in. No body beyond
-                   what Kestrel itself would have written before this backstop existed. */
-                _logger.LogDebug(bad, "Web dashboard request rejected ({StatusCode}): {Message}", bad.StatusCode, bad.Message);
+                   what Kestrel itself would have written before this backstop existed. #4286 review, Low 5:
+                   {Message} dropped -- a template argument becomes part of the FORMATTED message, which used
+                   to bypass DarlingFileLoggerProvider's sanitize entirely (it only cleaned the exception
+                   OBJECT's own Message). The exception object passed as the first argument still carries
+                   bad.Message to any provider that wants it, and the file sink now cleans the whole assembled
+                   line regardless (#4286 review, Low 5) -- but dropping the template argument is still the
+                   right fix, matching the ruled Debug line the review gives verbatim. */
+                _logger.LogDebug(bad, "Web dashboard request rejected ({StatusCode})", bad.StatusCode);
 
                 if (!context.Response.HasStarted)
                 {
