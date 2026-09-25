@@ -654,8 +654,9 @@ public sealed partial class ViewerDataService
 
                The FLOOR is free: an interval is always collected after it starts, so
                interval_start_time_utc <= collection_time, and therefore COALESCE(...) >= $2 already implies
-               collection_time >= $2. The extra day is slack against clock skew between the monitored
-               server's interval clock and ours.
+               collection_time >= $2. The extra hour (#3953: was a day) is slack against clock skew between
+               the monitored server's interval clock and ours — an hour covers it, and the wider margin was
+               only ever scanning extra chunks the floor already made redundant.
 
                The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
                collection_time exceeds its interval start by the interval's own length -- at most 1 day,
@@ -664,7 +665,7 @@ public sealed partial class ViewerDataService
                and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
                straddling an old window's edge could still omit that one bar; the data stays in the store,
                and the alternative (no ceiling) makes every historical window scan to the present. */
-            AND   collection_time >= $2 - interval '1 day'
+            AND   collection_time >= $2 - interval '1 hour'
             AND   collection_time <= $3 + interval '30 days'
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )

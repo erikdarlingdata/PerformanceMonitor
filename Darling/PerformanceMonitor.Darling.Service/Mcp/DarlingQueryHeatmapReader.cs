@@ -60,6 +60,15 @@ public enum HeatmapMetric
 /// nobody looked, and an existence probe on the data is the right denominator (see
 /// <see cref="HeatmapCoverageSql"/>).</para>
 ///
+/// <para>#4233: the preview is resolved for the rn = 1 row of each cell only, not every row in the
+/// window. <c>base</c> reads <c>query_stats</c> directly rather than <c>v_query_stats</c> (#1767's
+/// payload-resolving view), so no row pays for the <c>query_text_dim</c> join or a truncation it will
+/// never be shown - the raw inline <c>query_text</c> (pre-#1767 rows only) and the digest ride the
+/// window sorts in its place. The outer rn = 1 filter runs before the SELECT list, so
+/// <c>LEFT(COALESCE(query_text, (SELECT ... FROM query_text_dim ...)), $7)</c> - the same resolution
+/// <c>v_query_stats</c> would have performed, at the same #4198 bound width - executes only for the
+/// one row per cell the caller sees.</para>
+///
 /// <para>The SQL is built by a public method so the tests can pin the dialect and the shape without a live
 /// Postgres.</para>
 /// </summary>
@@ -180,9 +189,10 @@ internal static class DarlingQueryHeatmapReader
                     date_bin(($5::integer * INTERVAL '1 minute'), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
                     {metricExpr} AS metric_value,
                     query_hash,
-                    LEFT(query_text, $7) AS query_preview,
+                    query_text,
+                    query_text_digest,
                     delta_execution_count
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3
@@ -203,7 +213,8 @@ internal static class DarlingQueryHeatmapReader
                         ELSE 6
                     END AS bucket_index,
                     query_hash,
-                    query_preview,
+                    query_text,
+                    query_text_digest,
                     delta_execution_count
                 FROM base
             ),
@@ -212,7 +223,8 @@ internal static class DarlingQueryHeatmapReader
                     time_bin,
                     bucket_index,
                     query_hash,
-                    query_preview,
+                    query_text,
+                    query_text_digest,
                     COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
                     ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
                 FROM binned
@@ -222,7 +234,7 @@ internal static class DarlingQueryHeatmapReader
                 bucket_index,
                 query_count,
                 query_hash AS top_query_hash,
-                query_preview AS top_query_text
+                LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), $7) AS top_query_text
             FROM ranked
             WHERE rn = 1
             ORDER BY time_bin DESC, bucket_index
@@ -238,19 +250,21 @@ internal static class DarlingQueryHeatmapReader
     /// writes a row every cycle for whatever sits in the plan cache, so a server with zero rows in its whole
     /// history is a server nobody collected — unlike blocking or deadlocks, where zero rows is the healthy
     /// answer and a data probe would send someone to fix collection that works.</para>
-    /// <para>Probes <c>v_query_stats</c>, the same relation the read itself uses, so the probe cannot
-    /// disagree with the read about which rows exist. $1 server_id, $2 window start, $3 window end.</para>
+    /// <para>Probes <c>query_stats</c> directly (#4233 moved the read itself off <c>v_query_stats</c>
+    /// onto the fact table; the view's payload-dimension joins are LEFT JOINs, so they never drop a
+    /// fact row, and existence here is identical either way - this keeps the probe's FROM matching the
+    /// read's literally rather than by that argument). $1 server_id, $2 window start, $3 window end.</para>
     /// </summary>
     public const string HeatmapCoverageSql = """
         SELECT
             EXISTS (
                 SELECT 1
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
             ) AS has_any,
             EXISTS (
                 SELECT 1
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3

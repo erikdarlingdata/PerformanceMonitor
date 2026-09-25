@@ -425,23 +425,19 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            /* #4284: unlike the Queries tab's three comparison reads (ServerTab.Comparison.cs's
-               GetComparisonRange(DateTime, DateTime), UTC in/out), the correlated lanes' own reads
-               (GetCpuUtilizationAsync, GetTotalWaitTrendAsync's GetTimeRange custom-range branch) take
-               server-local fromDate/toDate -- the same basis this method already received them in. Derived
-               here, in that basis, with ShiftComparisonRange (the day-shift GetComparisonRange also uses)
-               instead of routing through GetComparisonRange itself, which is now UTC-only. Byte-identical to
-               this method's pre-#4284 derivation: pickers -> server time under a custom range, UtcNow under a
-               preset. #4296 tracks a separate, pre-existing mismatch this does not fix: under a PRESET
-               (non-custom) range on a server not on UTC, this still hands the lanes a window basis their
-               ghost-line time-shift (CorrelatedTimelineLanesControl.RefreshAsync ~line 221) doesn't expect. */
-            (DateTime From, DateTime To)? comparison = null;
-            if (CompareToCombo != null && CompareToCombo.SelectedIndex > 0)
-            {
-                var currentEnd = toDate ?? DateTime.UtcNow;
-                var currentStart = fromDate ?? currentEnd.AddHours(-hoursBack);
-                comparison = ShiftComparisonRange(CompareToCombo.SelectedIndex, currentStart, currentEnd);
-            }
+            /* #4284 derived this method's comparison range with ShiftComparisonRange, in the correlated
+               lanes' own server-local basis (GetCpuUtilizationAsync, GetTotalWaitTrendAsync, etc. take a
+               supplied fromDate/toDate as server-local, unlike the Queries tab's three comparison reads,
+               which are UTC-only) -- byte-identical to this method's pre-#4284 derivation under a custom
+               range, but still a raw DateTime.UtcNow under a preset one, which #4296 tracks as a separate,
+               pre-existing mismatch. #4296: GetOverviewComparisonRange (CorrelatedTimelineLanesControl.xaml.cs)
+               replaces that derivation with one that falls back to the server's own local now under a preset
+               range instead, and threads CurrentFrom through so RefreshAsync's timeShift/ComparisonLabel
+               reuse this SAME current-window start rather than resampling DateTime.UtcNow a second time. */
+            (DateTime From, DateTime To, DateTime CurrentFrom)? comparison = CompareToCombo == null
+                ? null
+                : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
+                    CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.UtcOffsetMinutes);
             await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, comparison);
         }
         catch (Exception ex)
