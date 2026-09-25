@@ -1731,11 +1731,16 @@ public sealed class DarlingWebHostService : BackgroundService
   </div>
   <label for='token'>Access token</label>
   <input id='token' name='token' type='password' autocomplete='off' autofocus>
+  <!-- #4221: an empty-action GET form already resubmits to the current pathname+search+hash per the HTML
+       form-submission algorithm (the fragment travels with it), so this survives sign-in without a
+       server-side change; the hidden field makes that intent explicit rather than leaving it spec-dependent. -->
+  <input type='hidden' name='return' id='return'>
   <button type='submit'>Enter</button>
 <!--SSO-->
   <div class='host' id='host'></div>
 </form>
-<script>document.getElementById('host').textContent = 'Accessing ' + location.host;</script>
+<script>document.getElementById('host').textContent = 'Accessing ' + location.host;
+document.getElementById('return').value = location.pathname + location.search + location.hash;</script>
 </body>
 </html>";
 
@@ -1744,7 +1749,7 @@ public sealed class DarlingWebHostService : BackgroundService
        the server runs it through SanitizeRedirectPath before trusting it. Sits INSIDE the form for layout
        only — it is an anchor, not a submit. */
     private const string SsoFragmentHtml = @"  <div class='sso'><a id='sso' href='/auth/oidc/login'>Sign in with SSO</a></div>
-  <script>document.getElementById('sso').href = '/auth/oidc/login?return=' + encodeURIComponent(location.pathname + location.search);</script>";
+  <script>document.getElementById('sso').href = '/auth/oidc/login?return=' + encodeURIComponent(location.pathname + location.search + location.hash);</script>";
 
     private static string Base64UrlEncode(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
