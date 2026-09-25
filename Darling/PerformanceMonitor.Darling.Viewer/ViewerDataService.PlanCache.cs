@@ -10,6 +10,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -52,20 +55,37 @@ public sealed partial class ViewerDataService
     /// The Plan Cache size trend read: single-use vs multi-use cache size (MB) per collection, summed
     /// across every (cacheobjtype, objtype) group, from the <c>v_plan_cache_stats</c> passthrough view —
     /// the Dashboard's Plan Cache chart shape (single-use vs multi-use bloat), windowed on the settable
-    /// range. The integer MB sums are CAST to double precision for the typed reader. $1 server_id,
-    /// $2 window start, $3 window end (all naive UTC).
+    /// range, then bucketed to <see cref="TrendBudget.Chart"/>'s point budget (#4234). The per-collection
+    /// sum (inner <c>per_collection</c>) is unchanged; the outer bucket AVERAGES that per-collection sum
+    /// across the collections a bucket holds (ruling item 2, a gauge — the plan cache's total single-use
+    /// MB at an instant, not an accumulating counter). 2,016 rows over 7 days at the collector's 5-minute
+    /// cadence, two objtype groups per collection, with no cap, is the issue's own measured number.
+    /// <c>first_collection_time</c>/<c>collection_count</c> let the C# reader stamp a bucket that merged
+    /// nothing at its one collection's own raw time (ruling item 3). $1 server_id, $2 window start, $3
+    /// window end (all naive UTC), $4 the bucket width in minutes.
     /// </summary>
-    public const string PlanCacheTrendSql = """
+    public static readonly string PlanCacheTrendSql = $"""
+        WITH per_collection AS
+        (
+            SELECT
+                collection_time,
+                CAST(SUM(single_use_size_mb) AS double precision) AS single_use_mb,
+                CAST(SUM(multi_use_size_mb) AS double precision) AS multi_use_mb
+            FROM v_plan_cache_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY collection_time
+        )
         SELECT
-            collection_time,
-            CAST(SUM(single_use_size_mb) AS double precision) AS single_use_mb,
-            CAST(SUM(multi_use_size_mb) AS double precision) AS multi_use_mb
-        FROM v_plan_cache_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY collection_time
-        ORDER BY collection_time
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(single_use_mb) AS single_use_mb,
+            AVG(multi_use_mb) AS multi_use_mb,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM per_collection
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -152,22 +172,49 @@ public sealed partial class ViewerDataService
         return new PlanCacheBloat(level, recommendation);
     }
 
-    /// <summary>The single-use vs multi-use plan-cache size trend over the window (empty when none).</summary>
+    /// <summary>
+    /// The single-use vs multi-use plan-cache size trend over the window, bucketed to
+    /// <see cref="TrendBudget.Chart"/>'s point budget (#4234). A bucket holding exactly one physical
+    /// collection is stamped at that collection's own raw time rather than the bucket grid when EVERY
+    /// bucket this call returned is such a singleton (ruling item 3). Empty when the window holds no
+    /// snapshot.
+    /// </summary>
     public async Task<List<PlanCacheTrendPoint>> GetPlanCacheTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var result = new List<PlanCacheTrendPoint>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(PlanCacheTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double SingleUse, double MultiUse)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new PlanCacheTrendPoint(
+            if (reader.GetInt64(4) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
                 reader.GetDateTime(0),
+                reader.GetDateTime(3),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+        }
+
+        var result = new List<PlanCacheTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            result.Add(new PlanCacheTrendPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.SingleUse,
+                row.MultiUse));
         }
 
         return result;
