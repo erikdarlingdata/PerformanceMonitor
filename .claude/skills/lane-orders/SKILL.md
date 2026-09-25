@@ -201,8 +201,10 @@ Never edit an existing migration.
 - Open the PR against `dev` **as a draft** (`gh pr create --draft`). Title: the outcome in plain language, plus
   `(#<issue>)`. The body starts with `Closes #<issue>.`, then `## Why`, `## What changes` and `## Test plan`
   (checkboxes, measured numbers). List anything you did not run (a live test, the full suite) as an unchecked box.
-- Write the PR body in one Write. Run the plain-English checker on it once, fix the real hits in one pass, and
-  stop. The coordinator polishes the prose; a lane that re-runs the checker does it at its largest context.
+- Write the PR body in one Write, from the diff and your numbers, and publish it. Do NOT run the plain-English
+  checker and do NOT rewrite the prose, in a PR body or an issue comment (Erik, 2026-09-25). A lane writes its
+  body at its largest context, so every rewrite turn costs the whole context: one lane spent 53 minutes and
+  278k tokens there. Nobody polishes lane prose afterwards either. The body must still be true.
 - **Don't mark it ready, don't merge, and don't enable auto-merge.** The coordinator does all three after
   verifying.
 - A user-visible change gets a CHANGELOG entry in `<CHANGELOG_BUFFER_DIR>/<PR>-reported.txt`, in this form:
