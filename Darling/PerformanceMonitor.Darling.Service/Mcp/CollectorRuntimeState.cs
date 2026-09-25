@@ -142,7 +142,8 @@ public sealed class CollectorRuntimeState
     /// <param name="Phase">Where the collector is relative to having started collecting.</param>
     /// <param name="Step">The startup step the phase is about; null for
     /// <see cref="CollectorPhase.Collecting"/>, which is not about a step.</param>
-    /// <param name="Detail">The failure's message, as the critical/warning log line reports it; null for
+    /// <param name="Detail">The step's fixed failure sentence (<see cref="FailureDetailFor"/>), the joined
+    /// configuration problems, or the not-Windows sentence, never exception text (#4316); null for
     /// <see cref="CollectorPhase.Collecting"/>.</param>
     /// <param name="Attempt">Which attempt is in flight, and how many the budget allows — both zero
     /// outside <see cref="CollectorPhase.Retrying"/>, where an attempt number is the only one of the two

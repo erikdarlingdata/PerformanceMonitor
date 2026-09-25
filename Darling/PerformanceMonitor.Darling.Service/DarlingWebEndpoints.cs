@@ -261,8 +261,9 @@ public static class DarlingWebEndpoints
 
         /* The four analysis-READ tools take a DarlingAnalysisService; the web host does not register one, so
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
-           persisted-finding read — need only the store; the optional plan fetcher / logger are for the excluded
-           analyze/drill path). Shared across requests, like the MCP host's singleton. */
+           persisted-finding read — need only the store; the optional plan fetcher is for the excluded
+           analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
+           requests, like the MCP host's singleton. */
         var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
