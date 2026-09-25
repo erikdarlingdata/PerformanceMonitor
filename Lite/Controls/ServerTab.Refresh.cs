@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Helpers;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -262,6 +263,14 @@ public partial class ServerTab : UserControl
                             var cEnd = toDate ?? DateTime.UtcNow;
                             var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                             await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+                            /* #4279: the banner probes UTC collection_time, so it takes the SAME UTC window
+                               GetTopQueriesByCpuAsync just read (LocalDataService.GetQueriesTabWindowUtc), not
+                               cStart/cEnd -- those are server-local under a custom range (GetCurrentWindow
+                               converts the pickers into server time) and stay that way here on purpose,
+                               because RefreshQueryStatsComparisonAsync's baseline (GetComparisonRange,
+                               ServerTab.Comparison.cs) is server-local under a custom range too. */
+                            var (bannerStart, bannerEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, bannerStart, bannerEnd);
                         }
                         break;
                     case 3: // Top Procedures by Duration
@@ -273,6 +282,9 @@ public partial class ServerTab : UserControl
                             var cEnd = toDate ?? DateTime.UtcNow;
                             var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                             await RefreshProcStatsComparisonAsync(cStart, cEnd);
+                            /* #4279: UTC probe, UTC bounds -- see the twin comment on the Top Queries case above. */
+                            var (bannerStart, bannerEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, bannerStart, bannerEnd);
                         }
                         break;
                     case 4: // Query Store by Duration
@@ -284,6 +296,9 @@ public partial class ServerTab : UserControl
                             var cEnd = toDate ?? DateTime.UtcNow;
                             var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                             await RefreshQueryStoreComparisonAsync(cStart, cEnd);
+                            /* #4279: UTC probe, UTC bounds -- see the twin comment on the Top Queries case above. */
+                            var (bannerStart, bannerEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, bannerStart, bannerEnd);
                         }
                         break;
                     case 5: // Plan Corrections
@@ -336,6 +351,9 @@ public partial class ServerTab : UserControl
                 var cEnd = toDate ?? DateTime.UtcNow;
                 var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                 await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+                /* #4279: UTC probe, UTC bounds -- see the twin comment on the sub-tab-switch case above. */
+                var (bannerStart, bannerEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, bannerStart, bannerEnd);
             }
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
             SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
@@ -344,6 +362,9 @@ public partial class ServerTab : UserControl
                 var cEnd2 = toDate ?? DateTime.UtcNow;
                 var cStart2 = fromDate ?? cEnd2.AddHours(-hoursBack);
                 await RefreshProcStatsComparisonAsync(cStart2, cEnd2);
+                /* #4279: UTC probe, UTC bounds -- see the twin comment on the sub-tab-switch case above. */
+                var (bannerStart2, bannerEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, bannerStart2, bannerEnd2);
             }
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
             SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
@@ -352,6 +373,9 @@ public partial class ServerTab : UserControl
                 var cEnd3 = toDate ?? DateTime.UtcNow;
                 var cStart3 = fromDate ?? cEnd3.AddHours(-hoursBack);
                 await RefreshQueryStoreComparisonAsync(cStart3, cEnd3);
+                /* #4279: UTC probe, UTC bounds -- see the twin comment on the sub-tab-switch case above. */
+                var (bannerStart3, bannerEnd3) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, bannerStart3, bannerEnd3);
             }
             _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
             SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
@@ -366,6 +390,44 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshQueriesAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// #4231: probes the shared window-floor helper (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>)
+    /// for one of the three raw-only relations and updates that tab's "Showing since &lt;time&gt;" banner —
+    /// the SAME probe and the same truncation verdict (<see cref="McpQueryTools.IsWindowTruncated"/>) the
+    /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
+    /// Called from the sub-tab switch and full-refresh paths below AND from the three OnXSlicerChanged
+    /// handlers in ServerTab.Slicers.cs — a slicer drag re-reads the same grid over a narrower window, which
+    /// can itself start after the raw table's floor, so it needs the same disclosure. No try/catch here: every
+    /// caller already runs inside its own (ServerTabCapabilityPinTests pins that every OnXSlicerChanged keeps
+    /// its own try/catch; RefreshQueriesAsync has one around the whole sub-tab switch).
+    ///
+    /// <para>#4279: <paramref name="startUtc"/>/<paramref name="endUtc"/> MUST be the same UTC window the
+    /// matching grid read (<see cref="LocalDataService.GetQueriesTabWindowUtc"/>, or a slicer's own
+    /// <c>SlicerRangeEventArgs.StartUtc</c>/<c>EndUtc</c>) -- <see cref="LocalDataService.GetQueryWindowFloorAsync"/>
+    /// compares them straight against UTC <c>collection_time</c>, with no offset conversion of its own. A
+    /// server-local pair here silently shifts the probed window by the server's UTC offset.</para>
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime startUtc, DateTime endUtc)
+    {
+        var floor = await Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, startUtc, endUtc));
+        var truncated = McpQueryTools.IsWindowTruncated(floor, startUtc);
+        SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc);
+    }
+
+    /// <summary>
+    /// #4231 Ruled comment: "the WPF ... grids show 'Showing since &lt;time&gt;' in the header when the window
+    /// is cut short" — same words Darling's twin uses. Formats with ServerTimeHelper.FormatServerTime, the way
+    /// QueryStatsComparisonBanner / ProcStatsComparisonBanner / QueryStoreComparisonBanner already format their
+    /// baseline range on these same tabs. internal (not private) so QueryWindowTruncationTests can pin the
+    /// truncated/not-truncated text without instantiating the UserControl (WPF objects still need an STA
+    /// thread to construct, which the test provides; the text itself is plain string formatting).
+    /// </summary>
+    internal static void SetWindowTruncatedBanner(TextBlock banner, bool truncated, DateTime effectiveStart)
+    {
+        banner.Visibility = truncated ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        banner.Text = truncated ? $"Showing since {ServerTimeHelper.FormatServerTime(effectiveStart)}" : string.Empty;
     }
 
     /// <summary>Tab 0 — Overview (Correlated Timeline Lanes)</summary>

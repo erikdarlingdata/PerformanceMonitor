@@ -716,6 +716,146 @@ public sealed class PayloadDimensionLiveTests
         }
     }
 
+    // ── (e2) #4249: the WHERE NOT EXISTS pre-filter takes no lock on an already-fresh row ──
+
+    /// <summary>
+    /// #4249: before this fix, Postgres locked every conflicting row to evaluate the <c>DO UPDATE
+    /// ... WHERE</c> guard above, even on the digests that guard was about to keep un-updated — a
+    /// <c>Heap/LOCK</c> WAL record and a dirtied page for content that was already fresh. None of
+    /// that is visible from the SQL text alone (a source pin can grep for the <c>WHERE NOT
+    /// EXISTS</c> shape but not for whether Postgres actually took a lock), so this proves it
+    /// against a real server, three ways:
+    ///
+    /// <para>(1) A second upsert of the SAME still-fresh batch, 30 minutes later, leaves every
+    /// row's <c>xmax</c> at 0 (never locked) and advances <c>pg_current_wal_lsn()</c> by under 1
+    /// KB for a 50-row batch — effectively a read-only transaction. This is the pin: reverting the
+    /// <c>WHERE NOT EXISTS</c> pre-filter (restoring the pre-#4249 shape) turns it red. Confirmed
+    /// once by hand with a raw-SQL rehearsal of both shapes against this rig: the OLD shape left a
+    /// real transaction id (781) in <c>xmax</c> on a row whose content and <c>last_seen</c> were
+    /// both unchanged; the NEW shape left <c>xmax</c> at 0. See PR #4288.</para>
+    ///
+    /// <para>(2) A row stamped two hours ago is still refreshed — the pre-filter's own staleness
+    /// read uses the same one-hour boundary the <c>ON CONFLICT ... WHERE</c> guard always used, so
+    /// a genuinely stale row still reaches the <c>UPDATE</c>.</para>
+    ///
+    /// <para>(3) A digest with no existing row at all is still inserted — the pre-filter is an
+    /// anti-join over existing rows, not a blanket skip of the statement.</para>
+    /// </summary>
+    [Fact]
+    public async Task PreFilter_SkipsLockingFreshRows_ButStillRefreshesStaleOnes_AndInsertsNewDigests()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var runId = Guid.NewGuid().ToString("N");
+
+        var freshPairs = Enumerable.Range(0, 50)
+            .Select(i =>
+            {
+                var payload = $"<ShowPlanXML prefilter=\"{runId}\" fresh=\"{i}\"/>";
+                return (Digest: PayloadDimensions.Digest(payload), Payload: payload);
+            })
+            .ToArray();
+        var stalePayload = $"<ShowPlanXML prefilter=\"{runId}\" stale=\"0\"/>";
+        var staleDigest = PayloadDimensions.Digest(stalePayload);
+        var newPayload = $"<ShowPlanXML prefilter=\"{runId}\" brandnew=\"0\"/>";
+        var newDigest = PayloadDimensions.Digest(newPayload);
+        var freshDigests = freshPairs.Select(p => p.Digest).ToArray();
+        var everyDigestWritten = freshDigests.Append(staleDigest).Append(newDigest).ToArray();
+
+        var t0 = new DateTime(2026, 3, 1, 12, 0, 0, DateTimeKind.Unspecified);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            async Task FlushAsync(IEnumerable<(byte[] Digest, string Payload)> pairs, DateTime collectionTime)
+            {
+                var batch = new PayloadDimensionBatch();
+                foreach (var (digest, payload) in pairs)
+                {
+                    batch.Add(PayloadDimensions.QueryPlanDimTable, digest, payload);
+                }
+
+                await using var transaction = await connection.BeginTransactionAsync(ct);
+                await PayloadDimensionWriter.FlushAsync(connection, transaction, batch, collectionTime, ct);
+                await transaction.CommitAsync(ct);
+            }
+
+            /* A dedicated ANY($1) command rather than the file's params-object ScalarAsync helper:
+               a byte[][] argument there is covariantly assignable to object[], so C# spreads it
+               across the params array (one digest per parameter) instead of binding it as ONE
+               bytea[] array parameter. Explicit typing sidesteps that entirely. */
+            async Task<long> LockedRowCountAsync(byte[][] digests)
+            {
+                await using var command = new NpgsqlCommand(
+                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND xmax <> 0", connection);
+                command.Parameters.Add(new NpgsqlParameter
+                { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
+                return (long)(await command.ExecuteScalarAsync(ct))!;
+            }
+
+            async Task<long> ChangedLastSeenCountAsync(byte[][] digests, DateTime expected)
+            {
+                await using var command = new NpgsqlCommand(
+                    "SELECT count(*) FROM query_plan_dim WHERE digest = ANY($1) AND last_seen <> $2", connection);
+                command.Parameters.Add(new NpgsqlParameter
+                { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
+                command.Parameters.Add(new NpgsqlParameter
+                { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = expected });
+                return (long)(await command.ExecuteScalarAsync(ct))!;
+            }
+
+            async Task<string> CurrentWalLsnAsync()
+                => (string)(await ScalarAsync(connection, "SELECT pg_current_wal_lsn()::text", ct))!;
+
+            /* pg_wal_lsn_diff returns numeric, which Npgsql maps to decimal, not a bigint type. */
+            async Task<long> WalBytesSinceAsync(string beforeLsn)
+                => (long)(decimal)(await ScalarAsync(
+                    connection, "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1::text::pg_lsn)", ct, beforeLsn))!;
+
+            // The initial collection cycle: 50 "hot" plans plus one that will go stale.
+            await FlushAsync(freshPairs.Append((staleDigest, stalePayload)), t0);
+            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+
+            // (1) Same batch, same digests, 30 minutes later -- still inside the one-hour
+            // freshness window. The pre-filter excludes every one of them before the statement
+            // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change, near-zero WAL.
+            var lsnBefore = await CurrentWalLsnAsync();
+            await FlushAsync(freshPairs, t0.AddMinutes(30));
+            var walBytes = await WalBytesSinceAsync(lsnBefore);
+
+            Assert.Equal(0, await LockedRowCountAsync(freshDigests));
+            Assert.Equal(0, await ChangedLastSeenCountAsync(freshDigests, t0));
+            Assert.True(walBytes < 1024, $"expected a near-zero WAL delta for an all-fresh batch, saw {walBytes} bytes");
+
+            // (2) and (3): two hours after t0, the stale row is refreshed and a brand-new digest
+            // is inserted, in the same flush.
+            await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(2));
+
+            var refreshedStale = (DateTime)(await ScalarAsync(
+                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, staleDigest))!;
+            Assert.Equal(t0.AddHours(2), refreshedStale);
+
+            var insertedNew = (DateTime)(await ScalarAsync(
+                connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, newDigest))!;
+            Assert.Equal(t0.AddHours(2), insertedNew);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var digest in everyDigestWritten)
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+                }
+            });
+        }
+    }
+
     // ── (f) the GC ──
 
     [Fact]
