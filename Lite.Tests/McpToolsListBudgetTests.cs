@@ -104,6 +104,8 @@ public sealed class McpToolsListBudgetTests
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
        covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
+    /* #4198 (lane TK): +229 bytes for get_collection_health's new full_detail opt-in parameter (description:
+       191 bytes; JSON schema scaffolding: ~38 bytes). The head is unchanged. */
     /* #4198 (lane TR): +203 bytes for get_query_store_regressions gaining full_text (its own preview
        opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
        over the old 86). */
@@ -122,7 +124,16 @@ public sealed class McpToolsListBudgetTests
        combined total with qs-regressions (#4264) changes on top. */
     /* #4198 (analysis-findings, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264);
        combined total with analysis-findings (#4266) changes on top. */
-    private const int TotalCeilingBytes = 91_663;
+    /* #4198 (collection-health, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266);
+       combined total with collection-health (#4268) changes on top. */
+    /* #4198 (lane TJ, get_query_store_top): +125 bytes for the new full_text opt-in parameter (84 bytes of
+       description plus its JSON schema wrapper; Darling's twin grew by a different amount, +136, per its own
+       schema shape). The head is unchanged (the new sentence lives in the tail get_tool_guide serves).
+       Default query_text preview dropped 2,000 chars -> 400; not a served description, so it does not count
+       here. */
+    /* #4198 (qs-top, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266+#4268+#4272);
+       combined total with qs-top (#4273) changes on top. */
+    private const int TotalCeilingBytes = 92_041;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

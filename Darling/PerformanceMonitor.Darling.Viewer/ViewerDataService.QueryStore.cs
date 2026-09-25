@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -398,6 +399,20 @@ public sealed partial class ViewerDataService
 
         return rows;
     }
+
+    /// <summary>
+    /// #4231: the raw floor for <c>query_store_stats</c> over [<paramref name="startUtc"/>,
+    /// <paramref name="endUtc"/>] — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied
+    /// floor query. The Queries tab's <c>LoadQueryStoreAsync</c> reads this
+    /// beside <see cref="GetQueryStoreTopQueriesAsync"/> so the grid header can disclose a window the raw tier
+    /// no longer fully holds, the same fact <c>get_query_store_top</c> reports over MCP (#2364). The same
+    /// window backs <see cref="GetQueryStoreSlicerDataAsync"/>'s initial (unsliced) read, so one floor read
+    /// covers both rather than a second round trip for the identical [start, end].
+    /// </summary>
+    public Task<DateTime?> GetQueryStoreWindowFloorAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Query-Store comparison — Lite's <c>GetQueryStoreComparisonAsync</c> ported. Uses execution-count

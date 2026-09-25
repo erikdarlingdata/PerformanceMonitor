@@ -165,6 +165,9 @@ public sealed class RepoFileAdoptionTests
            column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
            loader call on the NEXT line — anchors that a CRLF read would miss on every arm. */
         "QueryStoreClutterViewerSurfacesTests.cs",
+        /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
+           view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
+        "RawWindowFloorViewerPortTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
