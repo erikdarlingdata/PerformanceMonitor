@@ -36,11 +36,27 @@ public class FleetCollectionHealthByServerLiveEqualityTests
     private const int ServerCount = 3;
     private const int CollectorsPerServer = 4;
 
+    /// <summary>A registered but DISABLED server (#4226 regression case): <c>is_enabled = FALSE</c> in
+    /// <c>config_monitored_servers</c>, same as a server an operator has paused. Its card, badge and
+    /// per-server status-bar tab must still read its real 7-day history — only the status bar's
+    /// fleet-CUMULATIVE total is entitled to leave it out.</summary>
+    private const int DisabledServerId = 4;
+
+    /// <summary>A server with real <c>collection_log</c> history and NO row at all in
+    /// <c>config_monitored_servers</c> (#4226 regression case): the bootstrap window before the config store
+    /// is seeded (<c>IsConfigSeededAsync</c> false), where the fleet list comes from the OBSERVED registry
+    /// instead. Its rows must still come back — a statement scoped to config-registered servers would drop
+    /// this one entirely, and did, which is what
+    /// <c>ServerSummary_ReadsEnrichedThreadsMemoryBlockingCollectors_AgainstDevPostgres</c> caught.</summary>
+    private const int UnregisteredServerId = 5;
+
     /// <summary>Plants collection_log rows for <see cref="ServerCount"/> servers × <see cref="CollectorsPerServer"/>
     /// collectors, one every 6 minutes from 7 days + 37 minutes ago (a deliberately non-hour-aligned start, so
     /// the 7-day window's head is a PARTIAL hour) through right now (so the window's tail sits in the still-open
     /// CURRENT hour, never materialized). Collector 0 on server 1 is PERMISSIONS for the newest 90 minutes, so
-    /// the badge has something to count in both the raw head slice and, once refreshed, the composed read.</summary>
+    /// the badge has something to count in both the raw head slice and, once refreshed, the composed read. Plus
+    /// <see cref="DisabledServerId"/> (registered, disabled) and <see cref="UnregisteredServerId"/> (no
+    /// config_monitored_servers row at all), same cadence, one collector each, both SUCCESS throughout.</summary>
     private static async Task SeedAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using (var servers = new NpgsqlCommand(@"
@@ -51,6 +67,15 @@ FROM generate_series(1, @serverCount) s", connection))
             servers.Parameters.AddWithValue("serverCount", ServerCount);
             await servers.ExecuteNonQueryAsync(ct);
         }
+
+        await using (var disabled = new NpgsqlCommand(@"
+INSERT INTO config.config_monitored_servers (server_id, name, host, is_enabled)
+VALUES (@disabledServerId, 'v1b-eq-srv-disabled', 'v1b-eq-host-disabled', FALSE)", connection))
+        {
+            disabled.Parameters.AddWithValue("disabledServerId", DisabledServerId);
+            await disabled.ExecuteNonQueryAsync(ct);
+        }
+        /* UnregisteredServerId gets NO config_monitored_servers row — that absence is the case. */
 
         await using var plant = new NpgsqlCommand(@"
 INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
@@ -65,6 +90,16 @@ CROSS JOIN generate_series((now() AT TIME ZONE 'UTC') - INTERVAL '7 days 37 minu
         plant.Parameters.AddWithValue("serverCount", ServerCount);
         plant.Parameters.AddWithValue("collectorsPerServer", CollectorsPerServer);
         await plant.ExecuteNonQueryAsync(ct);
+
+        await using var plantExtra = new NpgsqlCommand(@"
+INSERT INTO collect.collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+SELECT 9900000 + row_number() OVER (), s, 'v1b-eq-srv-' || s, 'collector_0', t, 7, 'SUCCESS', 3
+FROM (VALUES (@disabledServerId), (@unregisteredServerId)) srv(s)
+CROSS JOIN generate_series((now() AT TIME ZONE 'UTC') - INTERVAL '7 days 37 minutes', (now() AT TIME ZONE 'UTC'), INTERVAL '6 minutes') t", connection);
+        plantExtra.CommandTimeout = 120;
+        plantExtra.Parameters.AddWithValue("disabledServerId", DisabledServerId);
+        plantExtra.Parameters.AddWithValue("unregisteredServerId", UnregisteredServerId);
+        await plantExtra.ExecuteNonQueryAsync(ct);
     }
 
     private sealed record Snapshot(
@@ -129,7 +164,19 @@ CROSS JOIN generate_series((now() AT TIME ZONE 'UTC') - INTERVAL '7 days 37 minu
             }
         }
 
-        for (var serverId = 1; serverId <= ServerCount; serverId++)
+        /* #4226 regression coverage: DisabledServerId and UnregisteredServerId alongside the enabled
+           1..ServerCount cohort — the composed read must produce rows for BOTH, the same as the old raw
+           per-server scans this replaced never cared whether config_monitored_servers even had a row for
+           the server, let alone whether it was enabled. */
+        var serverIdsToVerify = new List<int>();
+        for (var s = 1; s <= ServerCount; s++)
+        {
+            serverIdsToVerify.Add(s);
+        }
+        serverIdsToVerify.Add(DisabledServerId);
+        serverIdsToVerify.Add(UnregisteredServerId);
+
+        foreach (var serverId in serverIdsToVerify)
         {
             Assert.True(composedByServer.TryGetValue(serverId, out var composedCollectors), $"composed read produced no rows for server {serverId}");
 

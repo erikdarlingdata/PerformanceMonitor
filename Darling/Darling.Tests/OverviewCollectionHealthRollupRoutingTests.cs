@@ -78,16 +78,26 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
 
     /// <summary>The new fleet-by-server raw statement is shaped for
     /// <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/>: thirteen columns, <c>server_id</c> first,
-    /// grouped by <c>server_id, collector_name</c>, scoped to enabled servers (the viewer's existing
-    /// <c>FleetCollectionHealthSql</c> scope) rather than the service's <c>server_id &lt;&gt; 0</c>.</summary>
+    /// grouped by <c>server_id, collector_name</c>, scoped to <c>server_id &lt;&gt; 0</c> — the fleet-maintenance
+    /// sentinel exclusion the CAGG it composes with already bakes in
+    /// (<see cref="TimescaleSupport.CreateCollectionHealthHourlySql"/>) and the service's own by-server read
+    /// uses (<c>DarlingFleetReader.FleetCollectionHealthSql</c>).
+    ///
+    /// <para>Deliberately NOT scoped to <c>config_monitored_servers.is_enabled</c> (a regression this pin used
+    /// to require, until <c>ServerSummary_ReadsEnrichedThreadsMemoryBlockingCollectors_AgainstDevPostgres</c>
+    /// caught it): every caller keys this read by ONE server's own <c>server_id</c>, and that server's rows
+    /// must come back whether or not it is currently enabled or registered, the same as the raw per-server
+    /// scans this replaced. See the constant's own remarks.</para>
+    /// </summary>
     [Fact]
-    public void FleetCollectionHealthByServerSql_IsShapedForTheComposer_AndScopedToEnabledServers()
+    public void FleetCollectionHealthByServerSql_IsShapedForTheComposer_AndScopedToServerIdNotZero()
     {
         var sql = ViewerDataService.FleetCollectionHealthByServerSql;
 
         Assert.Contains("server_id,\r\n    collector_name,", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY server_id, collector_name", sql, StringComparison.Ordinal);
-        Assert.Contains("server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)", sql, StringComparison.Ordinal);
+        Assert.Contains("server_id <> 0", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config_monitored_servers", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE collection_time >= $1", sql, StringComparison.Ordinal);
 
         /* Composing must not throw — the anchor ComposeFleetSql derives the head slice from is present exactly

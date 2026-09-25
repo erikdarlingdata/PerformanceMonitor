@@ -482,10 +482,33 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// The per-(server, collector) breakdown <see cref="FleetCollectionHealthSql"/> groups by but does not
-    /// project (#4226): identical eleven aggregates, identical <c>is_enabled</c> scope, with <c>server_id</c>
-    /// added as column 0 so the Overview cards and the status bar can take their per-server counts from ONE
-    /// fleet-wide read instead of one raw <c>CollectionHealthSql</c> scan per server. Shaped for
-    /// <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — thirteen columns, in the order it requires.
+    /// project (#4226): identical eleven aggregates, with <c>server_id</c> added as column 0 so the Overview
+    /// cards, the status bar and the server-tab badge can take their per-server counts from ONE fleet-wide
+    /// read instead of one raw <c>CollectionHealthSql</c> / <see cref="PermissionDeniedCollectorCountSql"/>
+    /// scan per server. Shaped for <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — thirteen
+    /// columns, in the order it requires.
+    ///
+    /// <para><b>Scoped to <c>server_id &lt;&gt; 0</c> (the fleet-maintenance sentinel), NOT to
+    /// <c>config_monitored_servers.is_enabled</c> — a #4226 regression, found by
+    /// <c>ServerSummary_ReadsEnrichedThreadsMemoryBlockingCollectors_AgainstDevPostgres</c>.</b> An earlier
+    /// version of this statement copied <see cref="FleetCollectionHealthSql"/>'s <c>is_enabled</c> scope,
+    /// on the reasoning that the two shared "identical" scope — but that scope belongs to a DIFFERENT
+    /// consumer (the status bar's fleet-cumulative total, where a removed server's aged-out rows should
+    /// not read as erroring). Every caller of THIS statement, through
+    /// <see cref="GetFleetCollectionHealthByServerAsync"/>, keys its lookup by ONE server's own
+    /// <c>server_id</c> — the Overview card, the badge, and a per-server status-bar tab all need that
+    /// server's exact rows whether or not it is currently enabled, or even registered in
+    /// <c>config_monitored_servers</c> yet (the bootstrap window before the config store is seeded, see
+    /// <c>IsConfigSeededAsync</c>), exactly as their old raw per-server scans (<see cref="CollectionHealthSql"/>,
+    /// <see cref="PermissionDeniedCollectorCountSql"/>) never filtered by enable state either. The right
+    /// precedent was the service's own by-server fleet read this statement mirrors
+    /// (<c>DarlingFleetReader.FleetCollectionHealthSql</c>, moved here via <see cref="CollectionHealthRollupSupport"/>):
+    /// <c>server_id &lt;&gt; 0</c> only, same as the aggregate this composes with
+    /// (<see cref="TimescaleSupport.CreateCollectionHealthHourlySql"/>). The one caller that still wants
+    /// "enabled fleet only" — the status bar's cumulative branch, no tab scope selected — applies that
+    /// filter itself against the registry already in memory (<c>MainWindow.ServerManagement.cs</c>'s
+    /// <c>UpdateCollectorHealthTextAsync</c>), rather than baking it into the shared read every other
+    /// caller also pays for.</para>
     /// </summary>
     public const string FleetCollectionHealthByServerSql = $"""
         SELECT
@@ -512,7 +535,7 @@ public sealed partial class ViewerDataService
                      THEN collection_time END) AS last_zero_row_streak_break_time
         FROM v_collection_log
         WHERE collection_time >= $1
-        AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
+        AND   server_id <> 0
         GROUP BY server_id, collector_name
         """;
 
