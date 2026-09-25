@@ -106,7 +106,8 @@ public sealed class SerialLoopStoreSizeSourceTests
             + "one-shot, under ServiceCommandDeadlines.CliStoreReadSeconds (10s) rather than the serial "
             + "loop's 5s bound, and never called from the collection loop or at service startup: ruling 9 "
             + "keeps every store fact that scales with the store out of the startup profile log, so "
-            + "--check-settings is this regime's only caller"),
+            + "GatherStoreFactsAsync's only TWO callers are --check-settings and the get_store_host MCP "
+            + "read below, neither of them the collection loop"),
     };
 
     /// <summary>

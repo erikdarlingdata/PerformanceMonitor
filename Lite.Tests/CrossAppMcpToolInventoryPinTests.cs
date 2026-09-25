@@ -180,6 +180,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
            pg_stat_statements to read. A SKU boundary rather than a porting to-do. */
         "get_store_query_stats",
 
+        /* #4214 part 2: the store HOST profile read (get_store_host) — platform/RAM/data volume, PostgreSQL
+           and TimescaleDB facts, and a per-setting verdict against the managed sizing this store's host was
+           derived from. Darling-ONLY by architecture, the get_store_metrics reason: Lite has no managed
+           PostgreSQL store for a host profile to be OF, and never writes the managed conf blocks the verdict
+           compares against. A SKU boundary rather than a porting to-do. */
+        "get_store_host",
+
         /* #2674: the collector-cost read (get_collector_cost) over collect.collector_cost — the tool measuring
            its OWN per-collector cost on the monitored servers. Darling-ONLY by architecture, the same as
            get_store_metrics: it is an internal self-metric over the central store, which Lite has no twin of. */
