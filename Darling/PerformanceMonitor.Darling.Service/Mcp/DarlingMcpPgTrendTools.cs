@@ -261,7 +261,7 @@ public sealed class DarlingMcpPgTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetPgIoTrend(postgres, server_name, backend_type, context, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgIoMaxPoints));
+        GetPgIoTrend(postgres, server_name, backend_type, context, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgIoMcpAutoPoints, TrendBuckets.PgIoMaxPoints));
 
     /// <summary>
     /// get_pg_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes its own, the web

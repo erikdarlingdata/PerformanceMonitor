@@ -110,6 +110,8 @@ PerformanceMonitor.Darling.Service.exe --test-connection
 
 (`--validate-config` is an alias.) It validates the file, then connects to and probes each server, printing a `[PASS]`/`[FAIL]` line per server (SQL major version, engine edition, and whether the account has msdb access for failed-job alerts). It exits `0` only when the file is valid **and** every server is reachable, so it doubles as a deployment gate.
 
+**Which server list it probes.** Once the store is reachable, its own registry (`config_monitored_servers`) is authoritative — not `darling.json`'s `servers` array, which is only a first-bootstrap seed. A server that is in the file but was never registered, or was since removed from the registry, is not a probe failure: it prints as a `WARNING` and is skipped, because the store — not the file — governs which servers actually run. Only when the store itself cannot be reached does this fall back to validating `darling.json`'s own list, with a `NOTE` saying so.
+
 A PostgreSQL target reports what matters there instead — version, writer or reader, Aurora or not, and **how many of the PostgreSQL collectors will actually run against it**, naming the ones that will not:
 
 ```
@@ -121,6 +123,18 @@ A PostgreSQL target reports what matters there instead — version, writer or re
 That count comes from the same [engine and version gate](#postgresql-targets) the collector runner uses, not a separate list, so it is the real answer rather than an estimate — and it is the answer at *pre-flight*, before an empty table has to be explained weeks later. Add an explicit config path as a second argument if `darling.json` is not next to the exe and `DARLING_CONFIG` is not set. This is the same probe the Viewer's **Test Connection** button runs through the service.
 
 One identity caveat: the verb connects as **you**, the console user — not as the service account. For `"auth": "integrated"` servers a `[PASS]` proves the server is reachable and the config is well-formed, but the grants that matter at runtime are the *service account's*: the per-server connect lines in the service log are the real proof (see [Run the service as a domain account or gMSA](#run-the-service-as-a-domain-account-or-gmsa)).
+
+### Check Host/Store Sizing Settings
+
+For a managed store, check that the sizing-relevant settings (`shared_buffers`, `effective_cache_size`, `maintenance_work_mem`, `work_mem`, `timescaledb.max_background_workers`, `max_worker_processes`, `max_connections`, `max_wal_size`) still match what this host's current RAM, hypertable count and free disk would derive today:
+
+```
+PerformanceMonitor.Darling.Service.exe --check-settings [--json]
+```
+
+It prints the host facts (OS, containerization, CPUs, RAM) and the store facts (versions, size, lifetime buffer hit ratio, temp bytes, and how many bytes of uncompressed TimescaleDB chunks sit against RAM). Then it prints one row per setting: its live value, where that value came from, what this host would derive for it right now, and a verdict. The four verdicts are `matches`; `stale-after-hardware-change` (a managed block set it once, but re-deriving from the CURRENT host gives a different number — the case a RAM upgrade or an added hypertable creates, and the reason this verb exists); `operator-override` (an `ALTER SYSTEM`, or a hand-edited line after the managed blocks, is what is actually in force); and `not-managed` (a bring-your-own store, where this class never wrote a block to compare against). `--json` prints the same facts as JSON for scripting. This is diagnostic only: it never writes a setting, and the service always starts regardless of what it finds.
+
+Exit codes separate the failure kinds so an install/upgrade script can gate on them precisely: `0` nothing is stale, `1` the config failed to load or validate, `2` the store could not be reached, `3` at least one setting is `stale-after-hardware-change`.
 
 ### Run It — Console Mode
 

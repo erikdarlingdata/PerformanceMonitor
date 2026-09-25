@@ -1632,7 +1632,10 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
         return (smtp, webhooks);
     }
 
-    private static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
+    /// <summary>Internal, not private (#4214): <c>--validate-config</c>'s registry-based pre-flight calls this
+    /// directly with its own connection, rather than the file's darling.json list, so it tests the servers the
+    /// store will actually collect from.</summary>
+    internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct)
     {
         var servers = new List<MonitoredServer>();

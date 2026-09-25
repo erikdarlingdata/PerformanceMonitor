@@ -78,13 +78,22 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit.")]
+    /// <summary>
+    /// #4198: deadlock_graph_xml is the wide field on this tool — see Darling's
+    /// <c>DarlingMcpBlockingTools.DeadlockGraphPreviewLength</c> twin for the measured bytes. Previewed to
+    /// this length per graph at default (<c>full_graph: true</c> opts back in), the same shape
+    /// <c>get_store_query_stats</c> uses for <c>full_text</c>.
+    /// </summary>
+    private const int DeadlockGraphPreviewLength = 2000;
+
+    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit. deadlock_graph_xml is a preview by default (deadlock_graph_xml_truncated: true) — pass full_graph for the whole graph.")]
     public static async Task<string> GetDeadlockDetail(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks WITH a graph to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
+        [Description("Return each graph's full XML instead of a 2000-character preview. Default false.")] bool full_graph = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -117,7 +126,8 @@ public sealed class McpBlockingTools
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 victim_process_id = r.VictimProcessId,
-                deadlock_graph_xml = r.DeadlockGraphXml
+                deadlock_graph_xml = full_graph ? r.DeadlockGraphXml : McpHelpers.Truncate(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
+                deadlock_graph_xml_truncated = !full_graph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
             });
 
             return JsonSerializer.Serialize(new
@@ -140,13 +150,20 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_blocked_process_reports"), Description("Blocked process report XE + DMV fallback events, newest first, window ends at as_of. not_collected wins if the engine can't run blocked_process_report; else empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: truncated true means raise limit or narrow the window, not widen hours_back. wait_time_ms is milliseconds. Timestamps are UTC; last_tran/last_batch stamps are de-skewed for direct comparison to event_time. <<GUIDE>> Gets detailed blocked process reports from extended events (parsed via sp_HumanEventsBlockViewer) plus the always-on DMV blocking-snapshot fallback, NEWEST FIRST. Provides detailed blocked/blocking session info: isolation levels, transaction names, full query text for both sessions. Use for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, reports_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
+    /// <summary>See <c>DarlingMcpBlockingTools.DefaultLimit</c>'s doc comment (#4198): the default row limit
+    /// halves (30 -> 15) and blocked_sql_text/blocking_sql_text preview to
+    /// <see cref="SqlTextPreviewLength"/> (150) rather than the old 2000, with <c>full_text</c> the opt-in
+    /// back to the whole text. Lite has no web viewer mirror to hold the old cap for, unlike Darling's twin.</summary>
+    private const int SqlTextPreviewLength = 150;
+
+    [McpServerTool(Name = "get_blocked_process_reports"), Description("Blocked process report XE + DMV fallback events, newest first, window ends at as_of. not_collected wins if the engine can't run blocked_process_report; else empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: truncated true means raise limit or narrow the window, not widen hours_back. wait_time_ms is milliseconds. Timestamps are UTC; last_tran/last_batch stamps are de-skewed for direct comparison to event_time. blocked_sql_text/blocking_sql_text are a preview by default (*_truncated: true) — pass full_text for the whole text. <<GUIDE>> Gets detailed blocked process reports from extended events (parsed via sp_HumanEventsBlockViewer) plus the always-on DMV blocking-snapshot fallback, NEWEST FIRST. Provides detailed blocked/blocking session info: isolation levels, transaction names, full query text for both sessions. Use for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, reports_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct.")]
     public static async Task<string> GetBlockedProcessReports(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return, newest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
+        [Description("Maximum rows to return, newest first. Default 15. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 15,
+        [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -199,13 +216,15 @@ public sealed class McpBlockingTools
                 blocked_client_app = r.BlockedClientApp,
                 blocked_host_name = r.BlockedHostName,
                 blocked_login_name = r.BlockedLoginName,
-                blocked_sql_text = McpHelpers.Truncate(r.BlockedSqlText, 2000),
+                blocked_sql_text = full_text ? r.BlockedSqlText : McpHelpers.Truncate(r.BlockedSqlText, SqlTextPreviewLength),
+                blocked_sql_text_truncated = !full_text && r.BlockedSqlText != null && r.BlockedSqlText.Length > SqlTextPreviewLength,
                 blocking_status = r.BlockingStatus,
                 blocking_isolation_level = r.BlockingIsolationLevel,
                 blocking_client_app = r.BlockingClientApp,
                 blocking_host_name = r.BlockingHostName,
                 blocking_login_name = r.BlockingLoginName,
-                blocking_sql_text = McpHelpers.Truncate(r.BlockingSqlText, 2000),
+                blocking_sql_text = full_text ? r.BlockingSqlText : McpHelpers.Truncate(r.BlockingSqlText, SqlTextPreviewLength),
+                blocking_sql_text_truncated = !full_text && r.BlockingSqlText != null && r.BlockingSqlText.Length > SqlTextPreviewLength,
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
                 blocked_last_tran_started = r.BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),

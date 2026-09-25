@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -90,6 +91,12 @@ internal static class DarlingDefaultTraceReader
     /// both sides by the post-transition offset and is off by an hour on the far side. That is the same
     /// single-snapshot approximation the viewer's read and #2992's <c>creation_time</c> de-skew make, and it
     /// is stated here rather than implied.</para>
+    ///
+    /// <para>$4 is the <see cref="EventWindowFloor"/> for $2, bound against <c>collection_time</c> directly
+    /// rather than the de-skewed expression — <c>default_trace_events</c> is a hypertable partitioned on
+    /// <c>collection_time</c>, which this event-time (even de-skewed) window alone gives the planner nothing
+    /// to exclude a chunk on (#4229). The de-skewed event time is always ≤ <c>collection_time</c> (store UTC
+    /// at collection), so the floor cannot drop a qualifying row.</para>
     /// </summary>
     public const string EventsByWindowSql = """
         WITH svr AS (
@@ -121,6 +128,7 @@ internal static class DarlingDefaultTraceReader
         WHERE dte.server_id = $1
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
+        AND   dte.collection_time >= $4
         ORDER BY event_time_utc DESC
         """;
 
@@ -133,6 +141,7 @@ internal static class DarlingDefaultTraceReader
         await using var command = postgres.CreateCommand(EventsByWindowSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

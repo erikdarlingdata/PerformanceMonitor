@@ -7,7 +7,10 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
@@ -18,6 +21,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,6 +29,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -770,8 +775,16 @@ public sealed class DarlingWebHostService : BackgroundService
             /* The VIEWER-role store pool the read endpoints query (registered for DI + passed to MapAll). */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
 
+            /* #4188: Brotli/gzip for the JSON API and the static JS/CSS/HTML. A services-collection step, so it
+               has to run on the BUILDER, ahead of Build() - see ConfigureResponseCompression's own doc for why
+               this is a method the live-HTTP test calls too rather than a block copied into it. */
+            ConfigureResponseCompression(builder.Services);
+
             _app = builder.Build();
-            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient);
+            /* #4220: web.publicBaseUrl's host, admitted as one extra allowed Host header value — see
+               ConfigurePipeline's publicBaseUrlHost param and TriageLink.TryGetHost. */
+            var publicBaseUrlHost = TriageLink.TryGetHost(web.PublicBaseUrl);
+            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -845,10 +858,14 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <para>#1648 lifted the decision itself into the shared
     /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> (via <see cref="DarlingHostBinding"/>) so the two
     /// MCP hosts — Darling's and Lite's — install the SAME guard instead of going without one. This forwarder
-    /// stays so this host's behavior and its existing tests are byte-for-byte unchanged.</para>
+    /// stays so this host's behavior and its existing tests are byte-for-byte unchanged for every 2-arg caller.</para>
+    ///
+    /// <para><paramref name="extraAllowedHost"/> (#4220): this web host, and only this web host, also admits
+    /// <c>web.publicBaseUrl</c>'s host — see <see cref="DarlingHostBinding.IsAllowedHost"/> for why that is
+    /// safe. Defaults to null.</para>
     /// </summary>
-    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp)
-        => DarlingHostBinding.IsAllowedHost(host, networkListenIp);
+    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp, string? extraAllowedHost = null)
+        => DarlingHostBinding.IsAllowedHost(host, networkListenIp, extraAllowedHost);
 
     /// <summary>
     /// PURE route-auth decision. This method is only ever reached in NETWORK mode — the caller registers the
@@ -894,6 +911,54 @@ public sealed class DarlingWebHostService : BackgroundService
         return WebAuthAction.ShowLogin;
     }
 
+    /// <summary>
+    /// Registers Brotli + gzip response compression (#4188) for the JSON API and the static JS/CSS/HTML the
+    /// dashboard ships. A services-collection step — <c>AddResponseCompression</c> has to run on the
+    /// <c>WebApplicationBuilder</c>, before <c>Build()</c>, unlike <see cref="ConfigurePipeline"/>'s <c>Use*</c>
+    /// calls which run on the built <c>app</c> — so it is its own static method, called from the production
+    /// builder in <c>TryStartServerAsync</c> right before <c>builder.Build()</c> and from the live-HTTP test
+    /// that builds the SAME pipeline (<c>DarlingWebResponseCompressionTests</c>), so that test proves the real
+    /// registration rather than a hand-copied one that could drift from it, exactly the reasoning #4128 gives
+    /// for extracting <see cref="ConfigurePipeline"/> itself.
+    ///
+    /// <para><b>BREACH.</b> Compressing a response lets an attacker who controls part of the request and can
+    /// observe the compressed length recover a FIXED secret carried in the SAME response, when the two sit
+    /// side by side (the classic case: a reflected query string next to a CSRF token). Nothing on this host
+    /// does that: the session identity lives in the HttpOnly cookie, never in a response body, the mutation
+    /// routes are gated by an <c>application/json</c> content-type check rather than a body-embedded token
+    /// (see <see cref="DarlingWebEndpoints.MapAll"/>'s CSRF notes), and the one page that renders before auth
+    /// — the login form — is a static template that echoes no query string, header, or path segment (its
+    /// <c>#host</c> div is filled by client-side script, not server-rendered). <c>EnableForHttps</c> is
+    /// therefore safe with what this host serves today; an endpoint added later that echoes request input
+    /// beside a secret in one body would need to opt out.</para>
+    ///
+    /// <para>MIME types: the framework defaults (<c>text/html</c>/<c>text/css</c>/JS/etc.) minus
+    /// <c>application/json</c> and <c>text/json</c>. Both providers run at
+    /// <see cref="CompressionLevel.Fastest"/>. JSON is excluded explicitly because
+    /// <see cref="ResponseCompressionDefaults.MimeTypes"/> already includes it — just omitting the
+    /// <c>Append</c> call is not enough. The <c>/api/*</c> routes carry the session cookie alongside
+    /// attacker-readable paths, so compressing JSON beside a fixed secret would open a BREACH oracle.
+    /// The <c>/api/*</c> responses also carry <c>Cache-Control: no-store</c>, which further limits
+    /// exposure.</para>
+    /// </summary>
+    internal static void ConfigureResponseCompression(IServiceCollection services)
+    {
+        services.AddResponseCompression(options =>
+        {
+            options.EnableForHttps = true;
+            options.Providers.Add<BrotliCompressionProvider>();
+            options.Providers.Add<GzipCompressionProvider>();
+            // Exclude JSON — BREACH: the /api/* routes reflect attacker-controlled paths alongside the session
+            // cookie. ResponseCompressionDefaults.MimeTypes includes application/json and text/json, so we
+            // must explicitly override the list rather than simply omitting the Append call.
+            options.MimeTypes = ResponseCompressionDefaults.MimeTypes
+                .Except(new[] { "application/json", "text/json" }, StringComparer.OrdinalIgnoreCase);
+        });
+
+        services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+        services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+    }
+
     /* ---------------------------------------------------------------------------------------------------
        OIDC sign-in (#2550). The flow endpoints, the per-request decision that routes to them, and the
        handler. DecideWebAuth above is untouched — its matrix is the pinned pre-OIDC behavior, and
@@ -902,15 +967,19 @@ public sealed class DarlingWebHostService : BackgroundService
        --------------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Everything AFTER <c>builder.Build()</c>: the Host-allowlist/DNS-rebinding guard (both modes), the
-    /// network-mode auth middleware, then <see cref="DarlingWebEndpoints.MapAll"/> -> <c>UseDefaultFiles</c>
-    /// -> <c>UseStaticFiles</c>. Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a
+    /// Everything AFTER <c>builder.Build()</c>: response compression (#4188), the Host-allowlist/DNS-rebinding
+    /// guard (both modes), the network-mode auth middleware, an <c>/api/*</c> no-store stamp, then
+    /// <see cref="DarlingWebEndpoints.MapAll"/> -> <c>UseDefaultFiles</c> -> <c>UseStaticFiles</c> (no-cache).
+    /// Extracted (#4128) so a live-HTTP test can build the SAME pipeline against a
     /// <c>TestServer</c> instead of a second, hand-copied one that could silently drift from production. The
     /// production call site passes exactly these values, in exactly this order — see <c>TryStartServerAsync</c>.
     /// Instance method, not static: the gates call back into <see cref="HandleAuthFlowAsync"/> and
     /// <see cref="ReportSignInRefusal"/>, and read <c>_logger</c>/<c>_collectorState</c>/<c>_baselineCache</c>,
     /// exactly as before the extraction — only the receiver (this vs. a test-constructed instance) changes.
     /// </summary>
+    /// <param name="publicBaseUrlHost">#4220: <c>web.publicBaseUrl</c>'s host, or null when unset/unparseable
+    /// — the one extra Host value the DNS-rebinding guard admits beside the loopback names and
+    /// <paramref name="networkListenIp"/>. See <see cref="DarlingHostBinding.IsAllowedHost"/>.</param>
     internal void ConfigurePipeline(
         WebApplication app,
         NpgsqlDataSource postgres,
@@ -918,18 +987,26 @@ public sealed class DarlingWebHostService : BackgroundService
         IPAddress? networkListenIp,
         IPNetwork allowedCidr,
         string accessToken,
-        DarlingWebOidcClient? oidcClient)
+        DarlingWebOidcClient? oidcClient,
+        string? publicBaseUrlHost = null)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
            started server so a rebind starts with a clean budget. */
         var refusals = new DarlingHttpRefusalLog();
 
-        /* Pipeline order: the Host-allowlist middleware runs FIRST on EVERY request (both modes) as the
-           DNS-rebinding guard, then (network mode only) the auth middleware, then DarlingWebEndpoints.MapAll
+        /* Pipeline order: response compression (#4188) runs FIRST of all, ahead of every gate below — it only
+           transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
+           nothing to wrap the gates' own refusal bodies and the login page in it too. Then the Host-allowlist
+           middleware runs on EVERY request (both modes) as the DNS-rebinding guard — it must stay FIRST after
+           compression, ahead of the #4276 backstop too (see HostHeaderGuardTests, #1648): that guard is the
+           fix for a previously-exploited hole, and a handler ahead of it would itself be new unauthenticated
+           surface on the tokenless loopback bind. Then (network mode only) the auth middleware, then the
+           #4276 failure backstop, then the no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll
            -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
            UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
            for non-API paths. */
+        app.UseResponseCompression();
 
         /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
            leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
@@ -938,16 +1015,18 @@ public sealed class DarlingWebHostService : BackgroundService
            address we actually bind — a loopback name/IP (localhost / 127.0.0.1 / [::1]) or, in network mode,
            the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass
            there; a rebound foreign hostname pointed at 127.0.0.1:5153 is rejected 400 before any auth
-           decision, route handler, or static file. */
+           decision, route handler, or static file. publicBaseUrlHost (#4220) is also admitted, in BOTH
+           modes, because it is operator config on this box, not attacker-reachable — see
+           DarlingHostBinding.IsAllowedHost. */
         app.Use(async (context, next) =>
         {
-            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp))
+            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp, publicBaseUrlHost))
             {
                 refusals.Report(
                     _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
                     context.Connection.RemoteIpAddress,
                     $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
-                    + " (a loopback name/IP, or web.network.listen when LAN-exposed)",
+                    + " (a loopback name/IP, web.network.listen when LAN-exposed, or web.publicBaseUrl's host)",
                     DateTime.UtcNow);
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 return;
@@ -1108,9 +1187,71 @@ public sealed class DarlingWebHostService : BackgroundService
             });
         }
 
+        /* #4276: one backstop exception handler, ahead of every route below (DarlingWebEndpoints.MapAll has no
+           Map* of its own outside that one call, so this covers all of them — see
+           DarlingWebFailureHandlingTests' source pin), so a route with no try/catch of its own (the issue's
+           own examples, /api/ag and /api/fleet, plus any future one) cannot reach ASP.NET Core's own error
+           handling — which writes into the providers ClearProviders silenced above, so the browser got an
+           empty 500 with no trace anywhere. AFTER the Host-allowlist guard and the auth gate on purpose (see
+           the pipeline-order comment above app.UseResponseCompression): both already handle their own
+           exceptions (HandleAuthFlowAsync's try/catch above), so this only ever fires for an UNANTICIPATED
+           throw from a gate, or an uncaught one from a route MapAll wires. A client that closed the page is
+           not a failure — DarlingWebFailureLog never sees it, and nothing is written to a caller who is
+           gone. */
+        app.Use(async (context, next) =>
+        {
+            var route = context.Request.Path.Value ?? "/";
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                await next(context);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                DarlingWebFailureLog.Report(_logger, route, stopwatch.ElapsedMilliseconds, ex);
+
+                /* Only log, per the ruling, once the response has already started — there is no header or
+                   body left to change at that point. */
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.StatusCode = DarlingWebFailureLog.StatusCode(ex);
+                    context.Response.ContentType = "application/json; charset=utf-8";
+                    await context.Response.WriteAsync(DarlingWebFailureLog.Body(ex).ToJsonString());
+                }
+            }
+        });
+
+        /* API responses never cache (#4188): the store mutates continuously, so a stale GET is a stale
+           dashboard. no-store rather than no-cache/must-revalidate — these bodies carry no ETag, so "cache but
+           always revalidate" would have nothing to revalidate against and a client that honored only the
+           weaker no-cache could still serve a stale body from disk on its next launch. Set ahead of MapAll so
+           it covers every route MapAll adds (including ones added on a parallel branch) without being
+           duplicated at each one; a handler is free to override it, none does. */
+        app.Use(async (context, next) =>
+        {
+            if (context.Request.Path.StartsWithSegments("/api"))
+            {
+                context.Response.Headers.CacheControl = "no-store";
+            }
+
+            await next(context);
+        });
+
         DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache);
         app.UseDefaultFiles();
-        app.UseStaticFiles();
+
+        /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes
+           revalidation MANDATORY instead of left to the browser's heuristic guess, which is the minimum fix
+           for "never serve a stale app after an upgrade" — the shell does not version its <script>/<link> URLs
+           (no ?v= / content hash), so a longer max-age would risk a browser skipping the revalidation entirely
+           and running old JS against a new API. Revalidation itself stays cheap (a 304, no body). */
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache",
+        });
     }
 
     /// <summary>The verdict for one network-mode request, with the sign-in flow added (#2550). The first four
@@ -1684,6 +1825,7 @@ public sealed class DarlingWebHostService : BackgroundService
 
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
@@ -1698,6 +1840,7 @@ public sealed class DarlingWebHostService : BackgroundService
     {
         context.Response.StatusCode = statusCode;
         context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(
             "<!doctype html><html lang='en'><head><meta charset='utf-8'><title>Darling Web</title></head>"
             + "<body style='background:#181b1f;color:#E4E6EB;font-family:system-ui'>"
@@ -1710,6 +1853,7 @@ public sealed class DarlingWebHostService : BackgroundService
     {
         context.Response.StatusCode = StatusCodes.Status200OK;
         context.Response.ContentType = "text/html; charset=utf-8";
+        context.Response.Headers.CacheControl = "no-store";
         return context.Response.WriteAsync(BuildLoginPageHtml(oidcEnabled));
     }
 

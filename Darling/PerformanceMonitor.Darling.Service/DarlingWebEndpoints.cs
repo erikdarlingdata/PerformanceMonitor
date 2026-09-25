@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -287,21 +288,42 @@ public static class DarlingWebEndpoints
             return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 
+        /* The nav-gate probe (#4189): refreshAgNav's only question is "is this nonzero", and answering it from
+           /api/ag cost every page load a 140-266 KB, 1.5-2.6s topology read, repeated every 60s poll for as
+           long as the answer stayed no. Same distinct-group definition, one aggregate query instead. */
+        app.MapGet("/api/ag/count", async (HttpContext context) =>
+        {
+            var count = await DarlingAgReader.GetAvailabilityGroupCountAsync(
+                postgres, null, context.RequestAborted);
+            return Results.Json(new AvailabilityGroupCountResult { AvailabilityGroupCount = count }, DarlingAgReader.JsonOptions);
+        });
+
         /* One GET per read-only tool, calling the tool method directly (no SQL/projection re-implementation). */
         foreach (var (name, handler) in BuildReadDispatch(logger))
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
+                var stopwatch = Stopwatch.StartNew();
                 string result;
                 try
                 {
                     result = await handler(context, postgres, analysis);
                 }
+                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                {
+                    /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
+                       top-of-pipeline backstop (which already owns this exact classification) sees the same
+                       exception rather than this catch turning it into a written body for a caller who is gone. */
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope; this is only a
                        backstop for a binding-layer throw, built by the same helper so it maps the same way
-                       (-> HTTP 500) and no bare "Error during ..." sentence is produced anywhere any more. */
+                       (-> HTTP 500) and no bare "Error during ..." sentence is produced anywhere any more.
+                       #4276: also the one log line this surface was missing — through the same helper the
+                       top-of-pipeline backstop uses, so the wording and the timeout/error split cannot drift. */
+                    DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
                     result = McpHelpers.FormatError(name, ex);
                 }
 
@@ -1922,13 +1944,13 @@ public static class DarlingWebEndpoints
             ["get_blocked_process_xml"] = R(CatBlocking, "Blocked-process-report XML captures.", PServer(), PHours(24), PLimit(5), PAsOf()),
             ["get_blocking"] = R(CatBlocking, "Blocking chains observed in the window.", PServer(), PHours(24), PLimit(30), PAsOf()),
             ["get_blocking_trend"] = R(CatBlocking, "Blocking-event counts over time.", PServer(), PHours(24), PAsOf()),
-            ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PAsOf()),
+            ["get_deadlock_detail"] = R(CatBlocking, "Deadlock graph detail for recent deadlocks.", PServer(), PHours(24), PLimit(5), PBool("full_graph", true), PAsOf()),
             ["get_deadlock_trend"] = R(CatBlocking, "Deadlock counts over time.", PServer(), PHours(24), PAsOf()),
             ["get_deadlocks"] = R(CatBlocking, "Recent deadlocks with victim/resource summary.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_lock_wait_trend"] = R(CatBlocking, "The LCK% family's summed wait ms/sec over time - the aggregate lock-wait lane - with a legend of the types that waited.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
 
             /* ── automatic plan correction (DarlingMcpPlanCorrectionTools, #2028) ── */
-            ["get_plan_corrections"] = R(CatAnalysis, "Automatic plan correction activity + per-database FORCE_LAST_GOOD_PLAN state.", PServer(), PHours(24), PLimit(50), PAsOf()),
+            ["get_plan_corrections"] = R(CatAnalysis, "Automatic plan correction activity + per-database FORCE_LAST_GOOD_PLAN state.", PServer(), PHours(24), PLimit(50), PAsOf(), PBool("full_text", true)),
 
             /* ── config: current + history (DarlingMcpConfigTools / DarlingMcpConfigHistoryTools) ── */
             ["get_database_config"] = R(CatConfig, "Database-level configuration for a server.", PServer(), PText("database_name")),
@@ -1951,9 +1973,9 @@ public static class DarlingWebEndpoints
             ["get_memory_stats"] = R(CatData, "Server memory summary counters.", PServer()),
             ["get_perfmon_stats"] = R(CatData, "Perfmon counter values, filtered by counter/instance.", PServer(), PText("counter_name"), PText("instance_name")),
             ["get_query_heatmap"] = R(CatData, "Query counts per (time bin x log-magnitude bucket) - the viewer's Query Heatmap as a table.", PServer(), PHours(24), PText("metric"), PText("database_name"), PInt("bucket_minutes", 5), PLimit(500), PAsOf()),
-            ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PText("database_name"), PLimit(50), PAsOf()),
+            ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PText("database_name"), PLimit(50), PBool("full_text", true), PAsOf()),
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf()),
-            ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PText("execution_type"), PText("module_name")),
+            ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PText("execution_type"), PText("module_name"), PBool("full_text", false)),
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
             ["get_server_properties"] = R(CatData, "Server properties/inventory for a server.", PServer()),
             ["get_tempdb_trend"] = R(CatData, "tempdb space usage over time.", PServer(), PHours(24), PAsOf(), PInt("bucket_minutes")),
@@ -1969,7 +1991,7 @@ public static class DarlingWebEndpoints
             ["get_pg_autovacuum_health"] = R(CatData, "PostgreSQL tables behind on vacuum or analyze, ranked by how far past each table's own threshold.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_io_stats"] = R(CatData, "PostgreSQL I/O by backend type, object and context, differenced across the window.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_wait_stats"] = R(CatData, "Top PostgreSQL wait events in the window (Aurora targets).", PServer(), PHours(24), PLimit(20), PAsOf()),
-            ["get_pg_cpu_utilization"] = R(CatData, "Instance CPU utilization over time from AWS Performance Insights (Aurora/RDS targets).", PServer(), PHours(4), PAsOf()),
+            ["get_pg_cpu_utilization"] = R(CatData, "Instance CPU utilization over time from AWS Performance Insights (Aurora/RDS targets).", PServer(), PHours(4), PAsOf(), PInt("bucket_minutes")),
             ["get_pg_wait_sampling"] = R(CatData, "Sampled PostgreSQL waits by query shape, from pg_wait_sampling - the stock-PostgreSQL counterpart of get_pg_wait_stats. Sample counts, not measured durations; event_type CPU means running rather than waiting.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_kernel_stats"] = R(CatData, "Per-query OS CPU (user and system), device bytes and major faults, from pg_stat_kcache. The CPU half of the elapsed time get_pg_top_queries reports.", PServer(), PHours(24), PLimit(20), PAsOf()),
             ["get_pg_predicate_stats"] = R(CatData, "Which columns queries actually filter on and how selectively, from pg_qualstats. SAMPLED counts - the evidence behind an index recommendation.", PServer(), PHours(24), PLimit(25), PAsOf()),
@@ -2037,7 +2059,7 @@ public static class DarlingWebEndpoints
             ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer()),
             ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0)),
             ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PText("database_name"), PLimit(200)),
-            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer()),
+            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200)),
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
@@ -2204,6 +2226,126 @@ public static class DarlingWebEndpoints
             /* the v2 composed-panel viz vocabulary (bar/pie/stacked/stacked-bar/area added over v1's KnownViz). */
             ["viz"] = ToJsonStringArray(ComposeSpec.ComposeVizList),
         };
+    }
+
+    /// <summary>
+    /// The MCP <c>describe_custom_view_catalog</c> tool's DEFAULT shape (#4198 — the full catalog measured 98,173
+    /// bytes at default arguments, three times the tool's 32 KB response budget). Re-groups
+    /// <see cref="BuildComposeCatalogNode"/>'s flat <c>measures</c> by <c>source</c> (collector table) and keeps
+    /// only the fields an author needs to pick a measure and know its legal vocabulary: <c>key</c>,
+    /// <c>displayName</c> (the one-line purpose), <c>kind</c>, <c>unitFamily</c>, <c>validAggregates</c> (this one
+    /// VARIES within a source — e.g. a ratio measure's is empty where its source's scalars allow sum/avg/min/max —
+    /// so, unlike <c>allowedDimensions</c>, it cannot be hoisted to the source level without hiding a real
+    /// restriction). Left out: <c>category</c>/<c>archetype</c> (neither is part of the vocabulary a panel spec
+    /// names — <see cref="ComposeSpec"/>'s required panel fields are measure/aggregate/unit, never these),
+    /// <c>nativeUnit</c>/<c>defaultUnit</c>/<c>defaultAggregate</c> (suggestions, not requirements — any unit in
+    /// the measure's family and any aggregate in its validAggregates is legal), <c>allowedDimensions</c> (uniform
+    /// across every measure of a source — pinned by <c>DarlingComposeTests</c> — so it is the source's dimension
+    /// list, one <see cref="FilterComposeCatalogNodeBySource"/> call away), and <c>appliesTo</c> (server-type
+    /// availability is a UI greying hint for the web composer, per design D4 — it gates nothing at compose time).
+    /// Every dropped field is reachable per-source via <c>source=&lt;name&gt;</c>
+    /// (<see cref="FilterComposeCatalogNodeBySource"/>) or for the whole catalog via <c>full_detail=true</c>
+    /// (this method's own return, unfiltered).
+    ///
+    /// <para>Takes the ALREADY-BUILT full node so the compact view is a pure re-shape of it, never a second read
+    /// of <see cref="MeasureCatalog"/> — it can't drift from what <c>full_detail=true</c> and <c>/api/catalog</c>
+    /// (which never compacts; the web Custom Views editor needs the fields this trims) both serve.</para>
+    /// </summary>
+    internal static JsonObject BuildComposeCatalogCompactNode(JsonObject full)
+    {
+        var sources = new JsonArray();
+        foreach (var sourceGroup in full["measures"]!.AsArray()
+                     .Select(m => m!.AsObject())
+                     .GroupBy(m => m["source"]!.GetValue<string>(), StringComparer.Ordinal))
+        {
+            var measures = new JsonArray();
+            foreach (var m in sourceGroup)
+            {
+                measures.Add(new JsonObject
+                {
+                    ["key"] = m["key"]!.GetValue<string>(),
+                    ["displayName"] = m["displayName"]!.GetValue<string>(),
+                    ["kind"] = m["kind"]!.GetValue<string>(),
+                    ["unitFamily"] = m["unitFamily"]!.GetValue<string>(),
+                    ["validAggregates"] = JsonNode.Parse(m["validAggregates"]!.ToJsonString()),
+                });
+            }
+
+            sources.Add(new JsonObject { ["source"] = sourceGroup.Key, ["measures"] = measures });
+        }
+
+        var annotationSources = new JsonArray();
+        foreach (var a in full["annotationSources"]!.AsArray())
+        {
+            var ao = a!.AsObject();
+            annotationSources.Add(new JsonObject
+            {
+                ["key"] = ao["key"]!.GetValue<string>(),
+                ["displayName"] = ao["displayName"]!.GetValue<string>(),
+                ["category"] = ao["category"]!.GetValue<string>(),
+            });
+        }
+
+        return new JsonObject
+        {
+            ["sources"] = sources,
+            ["annotationSources"] = annotationSources,
+            ["universalDimensions"] = JsonNode.Parse(full["universalDimensions"]!.ToJsonString()),
+            ["unitFamilies"] = JsonNode.Parse(full["unitFamilies"]!.ToJsonString()),
+            ["aggregates"] = JsonNode.Parse(full["aggregates"]!.ToJsonString()),
+            ["timeBuckets"] = JsonNode.Parse(full["timeBuckets"]!.ToJsonString()),
+            ["filterOps"] = JsonNode.Parse(full["filterOps"]!.ToJsonString()),
+            ["viz"] = JsonNode.Parse(full["viz"]!.ToJsonString()),
+            ["compact"] = true,
+            ["note"] = "Compact by default (#4198): each source lists its measures' key/displayName/kind/unitFamily/validAggregates " +
+                "only. Call describe_custom_view_catalog(source=\"<name>\") for that source's FULL per-measure detail " +
+                "(category, archetype, nativeUnit, defaultUnit, defaultAggregate, allowedDimensions, appliesTo) plus its own " +
+                "dimensions, or full_detail=true for the complete catalog (measures/dimensions/annotationSources as flat arrays, " +
+                "every field, exactly like this tool returned before #4198).",
+        };
+    }
+
+    /// <summary>
+    /// The MCP <c>describe_custom_view_catalog</c> tool's <c>source=&lt;name&gt;</c> drill-down (#4198): the FULL
+    /// per-entry detail <see cref="BuildComposeCatalogNode"/> serves, filtered to one source (collector table)'s
+    /// measures and dimensions. <c>annotationSources</c> rides along whole either way — five entries total, cheap
+    /// regardless of the filter, and its underlying source table is not itself a served field to filter on. An
+    /// unmatched <paramref name="source"/> comes back with empty <c>measures</c>/<c>dimensions</c> and a
+    /// <c>note</c> pointing at the default (unfiltered) call for the real source names, rather than an error
+    /// envelope — this tool has never returned one, and a typo should not change the shape the caller parses.
+    /// </summary>
+    internal static JsonObject FilterComposeCatalogNodeBySource(JsonObject full, string source)
+    {
+        var measures = new JsonArray(full["measures"]!.AsArray()
+            .Where(m => string.Equals(m!["source"]!.GetValue<string>(), source, StringComparison.Ordinal))
+            .Select(m => JsonNode.Parse(m!.ToJsonString())!)
+            .ToArray());
+
+        var dimensions = new JsonArray(full["dimensions"]!.AsArray()
+            .Where(d => string.Equals(d!["source"]!.GetValue<string>(), source, StringComparison.Ordinal))
+            .Select(d => JsonNode.Parse(d!.ToJsonString())!)
+            .ToArray());
+
+        var result = new JsonObject
+        {
+            ["source"] = source,
+            ["measures"] = measures,
+            ["dimensions"] = dimensions,
+            ["annotationSources"] = JsonNode.Parse(full["annotationSources"]!.ToJsonString()),
+            ["universalDimensions"] = JsonNode.Parse(full["universalDimensions"]!.ToJsonString()),
+            ["unitFamilies"] = JsonNode.Parse(full["unitFamilies"]!.ToJsonString()),
+            ["aggregates"] = JsonNode.Parse(full["aggregates"]!.ToJsonString()),
+            ["timeBuckets"] = JsonNode.Parse(full["timeBuckets"]!.ToJsonString()),
+            ["filterOps"] = JsonNode.Parse(full["filterOps"]!.ToJsonString()),
+            ["viz"] = JsonNode.Parse(full["viz"]!.ToJsonString()),
+        };
+
+        if (measures.Count == 0)
+        {
+            result["note"] = $"No measures found for source '{source}'. Call describe_custom_view_catalog() with no arguments to list the valid source names.";
+        }
+
+        return result;
     }
 
     /// <summary>Collector definition by its destination table, for the per-measure availability lookup (a
@@ -2594,10 +2736,14 @@ public static class DarlingWebEndpoints
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c)),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28), as_of: AsOf(c)),
             ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0), as_of: AsOf(c)),
-            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), QueryBool(c, "include_drilldown", false), as_of: AsOf(c)),
+            // #4198: the tool's own default (limit 18, previews) is sized for a chat caller's token budget.
+            // The viewer's two "Analysis Findings" tables render no preview-cut field and never asked for a
+            // budget, so this row keeps asking for what dev always returned: every chain, full text. See
+            // DarlingWebEndpointsTests.GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText.
+            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c)),
 
             /* ── sessions ── */
-            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), as_of: AsOf(c)),
+            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c)),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c)),
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c)),
 
@@ -2621,9 +2767,17 @@ public static class DarlingWebEndpoints
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),
+            /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
+               OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
+               though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
+               tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength),
             ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
-            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
+            /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
+               store's tools/list-driven call under the shared response budget), but the web viewer has
+               always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
+               budget cut does not silently shrink what the viewer renders. */
+            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c)),
             ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -2631,7 +2785,11 @@ public static class DarlingWebEndpoints
                 : UnparseableParam("bucket_minutes"),
 
             /* ── automatic plan correction (#2028) ── */
-            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
+            /* #4257: full_text defaults false on the MCP signature (a 150-character query_text preview
+               keeps a busy production server's default call under the shared response budget), but the
+               web viewer has always shown the whole query text. The row pins its OWN default to true so
+               #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
+            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true)),
 
             /* ── config (current + history) ── */
             ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name")),
@@ -2644,9 +2802,18 @@ public static class DarlingWebEndpoints
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
 
             /* ── core data reads ── */
-            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c)),
+            /* #4198: full_detail=true keeps the web viewer's payload exactly what it was before the default
+               cut — every field on every collector row, never the compact shape a boring-healthy row gets
+               by default. */
+            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true),
+            /* #4198: full_text: true, because error_message carried no preview cap before this PR — the
+               web viewer keeps that behavior (an operator reading the Collection Log grid gets the whole
+               error, the same way get_deadlock_detail's row passes TrendBudget.Chart-style overrides to
+               hold its OWN pre-existing behavior steady). limit stays explicit at the pre-#4198 200, also
+               unaffected by the new lower MCP default. */
+
             ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
-                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs)
+                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs, full_text: true)
                 : UnparseableParam("min_duration_ms"),
             ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c)),
             ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
@@ -2660,9 +2827,17 @@ public static class DarlingWebEndpoints
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name")),
             ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c)),
-            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), as_of: AsOf(c)),
+            /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
+               production store's default call under the shared response budget), but the web viewer has
+               always shown the whole query text. The row pins its OWN default to true so the MCP-side
+               budget cut does not silently shrink what the viewer renders. */
+            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c)),
             ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c)),
-            ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name")),
+            /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
+               all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
+               still lets an operator ask for the whole statement via ?full_text=true, but the default (no
+               query override) reproduces the page exactly as it always rendered. */
+            ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000),
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c)),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
@@ -2683,7 +2858,9 @@ public static class DarlingWebEndpoints
             ["get_pg_autovacuum_health"] = (c, pg, an) => DarlingMcpPgAutovacuumTools.GetPgAutovacuumHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_io_stats"] = (c, pg, an) => DarlingMcpPgIoTools.GetPgIoStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_wait_stats"] = (c, pg, an) => DarlingMcpPgWaitTools.GetPgWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
-            ["get_pg_cpu_utilization"] = (c, pg, an) => DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), as_of: AsOf(c)),
+            ["get_pg_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
+                ? DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                : UnparseableParam("bucket_minutes"),
             ["get_pg_wait_sampling"] = (c, pg, an) => DarlingMcpPgWaitSamplingTools.GetPgWaitSampling(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_kernel_stats"] = (c, pg, an) => DarlingMcpPgKernelStatsTools.GetPgKernelStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_predicate_stats"] = (c, pg, an) => DarlingMcpPgPredicateTools.GetPgPredicateStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
@@ -2777,7 +2954,14 @@ public static class DarlingWebEndpoints
             ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c)),
             ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0)),
             ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), Str(c, "database_name"), Rows(c, "limit", 200)),
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c)),
+            /* #4258: limit defaults to 75 on the MCP signature now (was an uncapped-looking 200-row hard
+               fetch with no parameter at all), sized under the shared response budget. The web viewer has
+               always effectively received that old 200-row fetch (there was no smaller cap anywhere in the
+               path), so the row pins its OWN limit at 200 - the same value get_index_usage's row above pins
+               for the identical reason - rather than silently dropping to the new MCP default. 200 is well
+               under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
+               reclamped by either validation layer. */
+            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200)),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c)),
 
             /* ── plan cache / scheduler ── */

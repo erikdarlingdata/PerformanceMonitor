@@ -237,7 +237,13 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition.")]
+    /// <summary>
+    /// #4198: the default page's <c>query_text</c> preview length. Mirrors
+    /// <c>DarlingMcpDataTools.QueryTextPreviewLength</c> -- see that constant's remarks for why 400.
+    /// </summary>
+    private const int QueryTextPreviewLength = 400;
+
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement.")]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -247,7 +253,8 @@ public sealed class McpQueryTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
-        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null)
+        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -320,7 +327,8 @@ public sealed class McpQueryTools
                 avg_physical_reads = r.AvgPhysicalReads,
                 avg_rowcount = r.AvgRowcount,
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
-                query_text = McpHelpers.Truncate(r.QueryText, 2000)
+                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, QueryTextPreviewLength),
+                query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength
             });
 
             return JsonSerializer.Serialize(new
@@ -336,14 +344,26 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs baseline, every capture before it. get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0 (severity is null with the former). additional_duration_ms is the ranking key. empty: no regression (all clear), or a baseline with nothing yet in the window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
+    /// <summary>
+    /// #4198: query_text is this tool's own wide field - up to 50 rows of numeric columns plus a full,
+    /// unbounded Query Store text each measured 211 KB at default arguments on a busy production store (the
+    /// Darling twin's own measurement; the read and its payload shape are identical). Previewed to this
+    /// length per row at default (<c>full_text: true</c> opts back in), the same preview-plus-opt-in shape
+    /// <c>get_store_query_stats</c> uses for its own <c>full_text</c>. Named apart from get_query_store_top's
+    /// preview constant in this class; the Darling twin is
+    /// <c>DarlingMcpQueryStoreRegressionTools.QueryTextPreviewLength</c>.
+    /// </summary>
+    private const int RegressionsQueryTextPreviewLength = 240;
+
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
     public static async Task<string> GetQueryStoreRegressions(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Size of the RECENT window, in hours back from now. Everything collected before it is the baseline. Default 24.")] int hours_back = 24,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
-        [Description("Maximum rows to return, worst first. Default 50 (the number the desktop viewer shows).")] int limit = 50,
+        [Description("Maximum rows to return, worst first. Default 30, sized to keep a default call under the shared response budget. Read truncated to know whether the window held more.")] int limit = 30,
+        [Description("Return each row's full query text instead of a 240-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -363,6 +383,9 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStoreRegressionsAsync(
                 resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd);
 
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var baselineStart = windowStart.AddDays(-LocalDataService.BaselineLookbackDays);
+
             if (rows.Count == 0)
                 return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
 
@@ -373,12 +396,11 @@ public sealed class McpQueryTools
                 server = resolved.ServerName,
                 hours_back,
                 database_name,
-                /*
-                    Named so the caller cannot mistake which side is which. "baseline" is NOT a fixed
-                    lookback: it is everything collected before the window, so a longer hours_back makes
-                    the recent window bigger AND the baseline shorter.
-                */
-                baseline_is = "every Query Store capture collected BEFORE the recent window",
+                /* A fixed lookback ending at the recent window's start, not "every capture ever collected
+                   before it" - the baseline no longer grows with retention (Lite's twin of Darling's #4195). */
+                baseline_start = baselineStart.ToString("o"),
+                baseline_end = windowStart.ToString("o"),
+                baseline_is = $"Query Store captures from baseline_start to the recent window's start ({LocalDataService.BaselineLookbackDays} days)",
                 gate = "average CPU regressed by more than 25%",
                 regression_count = Math.Min(rows.Count, limit),
                 truncated,
@@ -390,21 +412,21 @@ public sealed class McpQueryTools
                        row with NO duration ratio is a verdict about a number that does not exist. Null there
                        (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
                     severity = r.DurationRegressionPercent is null ? null : r.Severity,
-                    baseline_duration_ms = r.BaselineDurationMs,
-                    recent_duration_ms = r.RecentDurationMs,
-                    duration_regression_percent = r.DurationRegressionPercent,
-                    baseline_cpu_ms = r.BaselineCpuMs,
-                    recent_cpu_ms = r.RecentCpuMs,
-                    cpu_regression_percent = r.CpuRegressionPercent,
-                    baseline_reads = r.BaselineReads,
-                    recent_reads = r.RecentReads,
-                    io_regression_percent = r.IoRegressionPercent,
+                    baseline_duration_ms = Round(r.BaselineDurationMs),
+                    recent_duration_ms = Round(r.RecentDurationMs),
+                    duration_regression_percent = Round(r.DurationRegressionPercent),
+                    baseline_cpu_ms = Round(r.BaselineCpuMs),
+                    recent_cpu_ms = Round(r.RecentCpuMs),
+                    cpu_regression_percent = Round(r.CpuRegressionPercent),
+                    baseline_reads = Round(r.BaselineReads),
+                    recent_reads = Round(r.RecentReads),
+                    io_regression_percent = Round(r.IoRegressionPercent),
                     /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
                        publish that as 0 — "no change" — for the row that changed the most. */
                     undefined_percents = UndefinedPercentNotes(r),
                     /* The ranking key, and the one number that says whether this regression MATTERS. It is
                        an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
-                    additional_duration_ms = r.AdditionalDurationMs,
+                    additional_duration_ms = Round(r.AdditionalDurationMs),
                     baseline_exec_count = r.BaselineExecCount,
                     recent_exec_count = r.RecentExecCount,
                     /* A plan count that moved between the two sides is the first thing to check: a query
@@ -412,7 +434,8 @@ public sealed class McpQueryTools
                     baseline_plan_count = r.BaselinePlanCount,
                     recent_plan_count = r.RecentPlanCount,
                     last_execution_time = r.LastExecutionTime?.ToString("o"),
-                    query_text = r.QueryTextSample,
+                    query_text = full_text ? r.QueryTextSample : McpHelpers.Truncate(r.QueryTextSample, RegressionsQueryTextPreviewLength),
+                    query_text_truncated = !full_text && r.QueryTextSample.Length > RegressionsQueryTextPreviewLength,
                 }),
             }, McpHelpers.JsonOptions);
         }
@@ -421,6 +444,17 @@ public sealed class McpQueryTools
             return McpHelpers.FormatError("get_query_store_regressions", ex);
         }
     }
+
+    /// <summary>
+    /// #4198: the reader's ms/percent/read figures come straight off an <c>AVG()</c> over microsecond
+    /// integers, so most rows serialize with a long, meaningless decimal tail (a double's round-trip
+    /// representation, not a display one) - real weight across ten numeric fields on up to 30 rows. Rounded
+    /// to 2 decimal places here, at the JSON edge only; every existing pin uses whole-number fixtures that
+    /// round trip unchanged.
+    /// </summary>
+    private static double Round(double value) => Math.Round(value, 2);
+
+    private static double? Round(double? value) => value is null ? null : Math.Round(value.Value, 2);
 
     /// <summary>
     /// Which of a row's three regression percents are undefined, and why (#3541 A12, contract rule 5). Each
@@ -468,7 +502,7 @@ public sealed class McpQueryTools
         {
             return McpHelpers.Status(
                 "unavailable",
-                $"Every Query Store capture for {serverName} falls INSIDE the last {hours_back} hour(s), so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Shorten hours_back so more of the collected history falls before the window, or wait until this server has history older than it.");
+                $"{serverName} has no Query Store capture in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.");
         }
 
         if (!hasRecent)
@@ -492,8 +526,9 @@ public sealed class McpQueryTools
         [Description("Which per-execution metric to bucket by: duration, cpu, logical_reads, logical_writes or execution_count. Default duration.")] string? metric = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = LocalDataService.ViewerHeatmapBucketMinutes,
-        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultHeatmapCellLimit,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum CELLS to return, most recent bins first. Default 100. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultHeatmapCellLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -531,8 +566,9 @@ public sealed class McpQueryTools
                after the call returned, so the two disagreed by however long the read took — on the one
                read whose entire output is a time axis (review catch). One instant now decides both. */
             var databases = string.IsNullOrWhiteSpace(database_name) ? null : new[] { database_name };
+            var previewLength = full_text ? FullTextHeatmapPreviewLength : DefaultHeatmapPreviewLength;
             var rows = await dataService.GetQueryHeatmapCellsAsync(
-                resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases, asOfUtc: windowEnd);
+                resolved.ServerId, parsedMetric, hours_back, bucket_minutes, limit + 1, databases, asOfUtc: windowEnd, previewLength);
 
             if (rows.Count == 0)
                 return await EmptyHeatmapAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
@@ -579,6 +615,10 @@ public sealed class McpQueryTools
                 /* The same bin width the desktop viewer hardcodes, so the two surfaces cannot disagree
                    about the same server over the same window. */
                 bucket_minutes_matches_desktop_viewer = bucket_minutes == LocalDataService.ViewerHeatmapBucketMinutes,
+                /* Echoed rather than left implicit in the cell-level flags alone (#4198): a caller who never
+                   looks at an individual cell still learns, from this one field, that a second call with
+                   full_text=true gets more than what came back. */
+                full_text,
                 /* A bare bucket_index is unreadable, and the labels differ by metric family: duration and
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
@@ -600,6 +640,9 @@ public sealed class McpQueryTools
                     query_count = c.QueryCount,
                     top_query_hash = c.TopQueryHash,
                     top_query_text = c.TopQueryText,
+                    /* #4198: honest about the preview it just spent bytes on. True whenever the stored
+                       statement is longer than this call's preview width, at either preview length. */
+                    top_query_text_truncated = c.TopQueryTextTruncated,
                 }),
             }, McpHelpers.JsonOptions);
         }
@@ -609,9 +652,20 @@ public sealed class McpQueryTools
         }
     }
 
-    /// <summary>The web panel's cap and this tool's default: 500 cells, which is a full day of 5-minute
-    /// bins on a server whose queries land in two or three magnitude buckets per bin.</summary>
-    private const int DefaultHeatmapCellLimit = 500;
+    /// <summary>This tool's default cell cap (#4198, down from the web panel's own 500): at 500 cells the
+    /// fixed per-cell fields alone (time bin, bucket, count, hash) ran to roughly 75 KB before one byte of
+    /// query text, already more than double the shared 32 KB response budget
+    /// (<see cref="McpResponseBudget.DefaultBytes"/>) — so the cap had to fall regardless of the text width
+    /// chosen. Darling twin: <c>DarlingMcpQueryHeatmapTools.DefaultCellLimit</c>.</summary>
+    private const int DefaultHeatmapCellLimit = 100;
+
+    /// <summary>The default <c>top_query_text</c> preview width, in characters (#4198). Darling twin:
+    /// <c>DarlingMcpQueryHeatmapTools.DefaultPreviewLength</c>.</summary>
+    private const int DefaultHeatmapPreviewLength = 80;
+
+    /// <summary>What <c>full_text = true</c> asks for: a generous bound, not a literally unbounded fetch.
+    /// Darling twin: <c>DarlingMcpQueryHeatmapTools.FullTextPreviewLength</c>.</summary>
+    private const int FullTextHeatmapPreviewLength = 32_000;
 
     /// <summary>The seven log-magnitude rows of the grid — the viewer's, not a new banding.</summary>
     private const int HeatmapBucketCount = 7;

@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -269,7 +270,11 @@ public sealed partial class ViewerDataService
     /// window on <c>event_time</c> (the XE <c>@timestamp</c> — the event's real time, which for the ring-
     /// buffer categories can lag when it was collected), not <c>collection_time</c>, so "last 24 hours"
     /// means events that happened in the last 24 hours. Naive-UTC bounds (the store's timestamps are
-    /// <c>timestamp without time zone</c>). $1 server_id, $2/$3 window (naive UTC), $4 event_type.
+    /// <c>timestamp without time zone</c>). $1 server_id, $2/$3 window (naive UTC), $4 event_type. $5 is the
+    /// <see cref="EventWindowFloor"/> for $2 — <c>v_system_health_events</c> is a hypertable partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a
+    /// chunk on (#4229); the floor lets it skip every chunk older than the window, without being able to drop
+    /// a row (an event is collected after it happens).
     /// </summary>
     public const string SystemHealthEventsByTypeSql = """
         SELECT
@@ -280,6 +285,7 @@ public sealed partial class ViewerDataService
         AND   event_time <= $3
         AND   event_type = $4
         AND   event_xml IS NOT NULL
+        AND   collection_time >= $5
         ORDER BY event_time DESC
         """;
 
@@ -334,13 +340,15 @@ public sealed partial class ViewerDataService
         return map;
     }
 
-    /// <summary>The four System Events parameters ($1 server_id, $2/$3 naive-UTC window, $4 XE event_type).</summary>
+    /// <summary>The five System Events parameters ($1 server_id, $2/$3 naive-UTC window, $4 XE event_type,
+    /// $5 the <see cref="EventWindowFloor"/> for $2).</summary>
     private static void AddSystemEventParameters(NpgsqlCommand command, int serverId, DateTime startUtc, DateTime endUtc, string eventType)
     {
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = eventType });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
     }
 
     /// <summary>Reads the raw event_xml blobs for one XE event type over the window.</summary>
@@ -607,7 +615,11 @@ public sealed partial class ViewerDataService
     /// share the same UTC frame as the system_health rows and render/sort consistently on the tab. $1
     /// server_id, $2/$3 window (naive UTC). The ErrorLog severity gate is applied on read
     /// (<see cref="SystemEventSignificance.IsSignificantDefaultTraceEvent"/>), the same significance surface
-    /// the tab uses everywhere else.
+    /// the tab uses everywhere else. $5 is the <see cref="EventWindowFloor"/> for $2, bound against
+    /// <c>collection_time</c> directly rather than the de-skewed expression — <c>default_trace_events</c> is a
+    /// hypertable partitioned on <c>collection_time</c>, which this event-time (even de-skewed) window alone
+    /// gives the planner nothing to exclude a chunk on (#4229). The de-skewed event time is always
+    /// ≤ <c>collection_time</c> (store UTC at collection), so the floor cannot drop a qualifying row.
     /// </summary>
     public const string DefaultTraceEventsByWindowSql = """
         WITH svr AS (
@@ -638,6 +650,7 @@ public sealed partial class ViewerDataService
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) >= $2
         AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
         AND   ($4::text[] IS NULL OR dte.database_name = ANY($4))
+        AND   dte.collection_time >= $5
         ORDER BY event_time_utc DESC
         """;
 
@@ -658,6 +671,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
