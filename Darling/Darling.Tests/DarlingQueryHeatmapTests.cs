@@ -627,9 +627,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     /// <item>(a) a winner whose text lives only in query_text_dim - digest set, inline query_text NULL</item>
     /// <item>(b) a pre-#1767 winner - inline query_text set, digest NULL</item>
     /// <item>(c) a tie inside one cell - two rows with equal delta_execution_count, so ROW_NUMBER's
-    /// tiebreak is unspecified by either query. This does not assert WHICH row wins; both queries scan the
-    /// same base rows in the same order, so the pin is that the OLD SQL and the NEW builder agree with each
-    /// other, which is what "no behavior change" actually means for an unordered tie.</item>
+    /// tiebreak is unspecified by either query, and the old and the new SQL have different plans, so
+    /// PostgreSQL does not promise they pick the same row. The pin is only that each query's winner is
+    /// one of the two tied rows, with the hash and preview text that belong to that same row.</item>
     /// </list>
     /// </summary>
     [Fact]
@@ -673,11 +673,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             Assert.Equal(3, oldRows.Count);
             Assert.Equal(oldRows.Count, newRows.Count);
 
+            var tieBin = t0.AddMinutes(10);
+            var tiedPreviewByHash = new Dictionary<string, string>
+            {
+                ["0xTIEA"] = "SELECT tie_a",
+                ["0xTIEB"] = "SELECT tie_b",
+            };
+
             for (var i = 0; i < oldRows.Count; i++)
             {
                 Assert.Equal(oldRows[i].TimeBin, newRows[i].TimeBin);
                 Assert.Equal(oldRows[i].BucketIndex, newRows[i].BucketIndex);
                 Assert.Equal(oldRows[i].Count, newRows[i].Count);
+
+                if (newRows[i].TimeBin == tieBin)
+                {
+                    /* PostgreSQL does not order a ROW_NUMBER tie, and the two plans differ, so the old and
+                       the new SQL can pick different tied rows. Each must pick one of the two, with the
+                       hash and preview text of that row. */
+                    Assert.Contains(oldRows[i].Hash, tiedPreviewByHash.Keys);
+                    Assert.Equal(tiedPreviewByHash[oldRows[i].Hash], oldRows[i].Text);
+                    Assert.Contains(newRows[i].Hash, tiedPreviewByHash.Keys);
+                    Assert.Equal(tiedPreviewByHash[newRows[i].Hash], newRows[i].Text);
+                    continue;
+                }
+
                 Assert.Equal(oldRows[i].Hash, newRows[i].Hash);
                 Assert.Equal(oldRows[i].Text, newRows[i].Text);
             }
