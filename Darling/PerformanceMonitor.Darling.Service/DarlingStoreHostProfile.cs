@@ -839,7 +839,9 @@ WHERE NOT is_compressed";
 
     /// <summary>The <c>--check-settings</c>-only "Cloud:" line (ruling 5) — never printed by
     /// <see cref="FormatStartupProfileText"/>, whose profile never probes (ruling 3), so there is no "probed,
-    /// found nothing" versus "never probed" line to confuse.</summary>
+    /// found nothing" versus "never probed" line to confuse. <paramref name="cloud"/>'s instance type/VM size
+    /// is whatever the link-local metadata service reported, not verified against anything this host
+    /// actually runs on.</summary>
     internal static string DescribeCloud(CloudIdentity cloud) =>
         cloud.Provider is null ? "not detected" : $"{cloud.Provider} ({cloud.InstanceType})";
 
