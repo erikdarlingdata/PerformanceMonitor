@@ -421,40 +421,55 @@ public sealed partial class ViewerDataService
     /// issuecomment-5836972848), so <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s decision and the read
     /// it authorizes see the same snapshot. Returns null (never an empty list) when the gate says raw, so the
     /// caller can tell "read raw instead" from "the table legitimately has nothing" — an empty list from the
-    /// table IS a valid answer and must not fall back to raw.
+    /// table IS a valid answer and must not fall back to raw. Any fault opening the connection, starting the
+    /// transaction, running the gate, or reading the table also returns null (except cancellation, which
+    /// propagates): the gate already does this for its own statements (<see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s
+    /// catch), and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
     private async Task<List<ViewerQueryStoreRow>?> TryGetQueryStoreTopQueriesFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
 
-        var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
-            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
-        if (!useTable)
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+                connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
+            if (!useTable)
+            {
+                return null;
+            }
+
+            var rows = new List<ViewerQueryStoreRow>();
+            await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+            });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(ReadQueryStoreTopRow(reader));
+            }
+
+            return rows;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return null;
         }
-
-        var rows = new List<ViewerQueryStoreRow>();
-        await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new Npgsql.NpgsqlParameter
-        {
-            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
-            Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
-        });
-        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
-        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(ReadQueryStoreTopRow(reader));
-        }
-
-        return rows;
     }
 
     /// <summary>Shared by <see cref="GetQueryStoreTopQueriesAsync"/>'s raw and table paths: both
