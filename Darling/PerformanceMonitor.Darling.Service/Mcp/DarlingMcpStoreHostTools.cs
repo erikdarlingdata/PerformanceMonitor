@@ -91,6 +91,12 @@ public sealed class DarlingMcpStoreHostTools
                 ? Math.Round(100.0 * profile.Store.UncompressedChunkBytes / profile.Memory.EffectiveBytes, 1)
                 : (double?)null;
 
+            /* Round-1 review, Medium 1: resolved once, reused for every settings row below rather than
+               re-resolved per row — same managed data directory GatherSettingProfilesAsync itself resolved
+               for this call, so FormatSourceForMcp's containment test agrees with what actually attributed
+               each row. */
+            var mcpDataDirectory = postgresConfig.Managed ? DarlingManagedPostgres.ResolveDataDirectory(postgresConfig) : null;
+
             return JsonSerializer.Serialize(new
             {
                 platform = profile.Platform,
@@ -134,7 +140,7 @@ public sealed class DarlingMcpStoreHostTools
                     name = s.Name,
                     current = s.CurrentValueDisplay,
                     derived = s.DerivedValueDisplay,
-                    source = s.SourceDescription,
+                    source = DarlingStoreHostProfile.FormatSourceForMcp(s, mcpDataDirectory),
                     verdict = DarlingStoreHostProfile.DescribeVerdict(s.Verdict).Replace('-', '_'),
                 }),
                 any_stale = anyStale,

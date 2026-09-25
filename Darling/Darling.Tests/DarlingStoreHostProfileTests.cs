@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -193,6 +194,58 @@ public sealed class DarlingStoreHostProfileTests
             PerformanceMonitor.Darling.Service.ConfSettingOrigin.Unset, null, 0, null);
         var (_, verdict) = DarlingStoreHostProfile.ClassifyVerdict(attribution, 0, 1024);
         Assert.Equal(HostSettingVerdict.OperatorOverride, verdict);
+    }
+
+    /* ------------------------------------- FormatSourceForMcp (round-1 review, Medium 1) ------------------------------------- */
+    /* Three shapes: a file inside the managed data directory redacts to a directory-relative path, a file
+       outside it (an include elsewhere) redacts to the bare file name only, and anything with no SourceFile
+       (not-managed / unreadable / not-visible) passes SourceDescription through unchanged — it is already a
+       kind word, never a path. */
+
+    [Fact]
+    public void FormatSourceForMcp_FileInsideDataDirectory_ReturnsRelativePathNoParentNoRoot()
+    {
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "pmdarling-test-pgdata");
+        var confFile = Path.Combine(dataDirectory, "postgresql.conf");
+        var setting = new HostSettingProfile(
+            "shared_buffers", "1024MB", 1024, "unused-when-sourcefile-set", "1024MB", 1024,
+            HostSettingVerdict.Matches, confFile, 42);
+
+        var source = DarlingStoreHostProfile.FormatSourceForMcp(setting, dataDirectory);
+
+        Assert.Equal("managed block (postgresql.conf:42)", source);
+        Assert.DoesNotContain("..", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(dataDirectory, source, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FormatSourceForMcp_FileOutsideDataDirectory_ReturnsBareFileNameOnly()
+    {
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "pmdarling-test-pgdata");
+        var includedFile = Path.Combine(Path.GetTempPath(), "pmdarling-test-elsewhere", "included.conf");
+        var setting = new HostSettingProfile(
+            "work_mem", "4MB", 4, "unused-when-sourcefile-set", "4MB", 4,
+            HostSettingVerdict.OperatorOverride, includedFile, 7);
+
+        var source = DarlingStoreHostProfile.FormatSourceForMcp(setting, dataDirectory);
+
+        Assert.Equal("operator override (included.conf:7)", source);
+        Assert.DoesNotContain(dataDirectory, source, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(Path.DirectorySeparatorChar.ToString(), source, StringComparison.Ordinal);
+        Assert.DoesNotContain(Path.AltDirectorySeparatorChar.ToString(), source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(HostSettingVerdict.NotManaged, "not-managed (bring-your-own store; pg_settings.source = configuration file)")]
+    [InlineData(HostSettingVerdict.NotManaged, "unreadable — this connection's role, or this build of TimescaleDB, does not expose it")]
+    public void FormatSourceForMcp_NoSourceFile_ReturnsSourceDescriptionVerbatim(HostSettingVerdict verdict, string sourceDescription)
+    {
+        var setting = new HostSettingProfile(
+            "max_connections", "100", 100, sourceDescription, "100", 100, verdict);
+
+        var source = DarlingStoreHostProfile.FormatSourceForMcp(setting, dataDirectory: null);
+
+        Assert.Equal(sourceDescription, source);
     }
 
     /* --------------------------------------------- pg_settings unit normalization --------------------------------------------- */

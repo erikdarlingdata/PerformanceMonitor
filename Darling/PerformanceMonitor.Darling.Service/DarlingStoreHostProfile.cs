@@ -97,7 +97,13 @@ internal readonly record struct HostStoreFacts(
     int UncompressedChunkCount);
 
 /// <summary>One row of the <c>--check-settings</c> table: a setting's live value, where it came from, what
-/// this host would derive for it right now, and the verdict those two facts collapse to.</summary>
+/// this host would derive for it right now, and the verdict those two facts collapse to.
+/// <see cref="SourceFile"/>/<see cref="SourceLine"/> (round-1 review, Medium 1) are the same file/line
+/// <see cref="SourceDescription"/> already embeds as text for the CLI/local-log surfaces; they exist
+/// separately so <see cref="DarlingStoreHostProfile.FormatSourceForMcp"/> can redact the path for a
+/// remote MCP/web caller without touching <see cref="SourceDescription"/> itself. Default to null/0 —
+/// only the managed-attribution branch of <see cref="DarlingStoreHostProfile.GatherSettingProfilesAsync"/>
+/// ever sets them.</summary>
 internal readonly record struct HostSettingProfile(
     string Name,
     string CurrentValueDisplay,
@@ -105,7 +111,9 @@ internal readonly record struct HostSettingProfile(
     string SourceDescription,
     string DerivedValueDisplay,
     long DerivedValueNormalized,
-    HostSettingVerdict Verdict);
+    HostSettingVerdict Verdict,
+    string? SourceFile = null,
+    int SourceLine = 0);
 
 /// <summary>The whole host/store/settings snapshot one <c>--check-settings</c> run or one service-start log
 /// line reports (#4214).</summary>
@@ -549,6 +557,54 @@ WHERE NOT is_compressed";
         }
     }
 
+    /// <summary>The MCP/web-safe rendering of one setting's source (round-1 review, Medium 1). The CLI/local
+    /// surfaces (<see cref="FormatProfileText"/>, <see cref="FormatStartupProfileText"/>, the stale-setting
+    /// warning in <c>DarlingWorker</c>) print <see cref="HostSettingProfile.SourceDescription"/> verbatim,
+    /// which for a managed block or an operator override is a full local filesystem path — fine on a shell the
+    /// operator already has, not fine handed to a remote MCP/web caller. <paramref name="dataDirectory"/> is
+    /// the SAME managed data directory <see cref="GatherSettingProfilesAsync"/> resolved for this call; pass it
+    /// once from the caller and reuse it for every row rather than re-resolving per setting.</summary>
+    internal static string FormatSourceForMcp(HostSettingProfile setting, string? dataDirectory)
+    {
+        if (setting.SourceFile is null)
+        {
+            /* not-managed, unreadable, and bring-your-own sources are already a kind word (pg_settings.source,
+               or one of the fixed unreadable/not-visible/no-block strings) — never a path, so nothing to
+               redact. */
+            return setting.SourceDescription;
+        }
+
+        var kind = setting.Verdict is HostSettingVerdict.Matches or HostSettingVerdict.StaleAfterHardwareChange
+            ? "managed block"
+            : "operator override";
+
+        return FormattableString.Invariant($"{kind} ({SanitizeSourcePathForMcp(setting.SourceFile, dataDirectory)}:{setting.SourceLine})");
+    }
+
+    /// <summary>Redacts a conf file's absolute path to a data-directory-relative path when it lives inside
+    /// <paramref name="dataDirectory"/>, or to the bare file name when it does not (an include living outside
+    /// the data directory, or <paramref name="dataDirectory"/> unresolved) — never a raw absolute path, and
+    /// never a leading <c>..\</c>/<c>../</c> from <see cref="Path.GetRelativePath"/> for an outside file, which
+    /// would still leak the parent directory tree.</summary>
+    private static string SanitizeSourcePathForMcp(string file, string? dataDirectory)
+    {
+        var fullFile = Path.GetFullPath(file);
+        if (dataDirectory is not null)
+        {
+            var fullDataDirectory = Path.GetFullPath(dataDirectory);
+            var withSeparator = fullDataDirectory.EndsWith(Path.DirectorySeparatorChar)
+                ? fullDataDirectory
+                : fullDataDirectory + Path.DirectorySeparatorChar;
+
+            if (fullFile.StartsWith(withSeparator, StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.GetRelativePath(fullDataDirectory, fullFile);
+            }
+        }
+
+        return Path.GetFileName(fullFile);
+    }
+
     /// <summary>Converts a <c>pg_settings</c> (setting, unit) pair to the normalized unit each row of the
     /// table compares in: whole MB for a memory/WAL setting, the bare count for a connection/worker setting.
     /// Null for an unrecognized unit — the caller reports the row as unreadable rather than guessing.</summary>
@@ -650,7 +706,9 @@ WHERE NOT is_compressed";
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValue);
-            results.Add(new HostSettingProfile(name, currentDisplay, currentValue ?? 0, sourceDescription, derivedDisplay, derivedValue, verdict));
+            results.Add(new HostSettingProfile(
+                name, currentDisplay, currentValue ?? 0, sourceDescription, derivedDisplay, derivedValue, verdict,
+                attribution.File, attribution.Line));
         }
 
         return results;
