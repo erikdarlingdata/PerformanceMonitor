@@ -757,6 +757,46 @@ public sealed class DarlingAnalysisService
     }
 
     /// <summary>
+    /// audit_config's own read (#4192): the resolved engine's narrow family collection, never the full
+    /// collect + detect + score pass <see cref="CollectAndScoreFactsAsync"/> runs. No coverage witness, no
+    /// anomaly detector, no scorer — audit_config projects 8 point-in-time facts (SQL Server) or the
+    /// CONFIG_PG_*/host-memory facts (PostgreSQL) and discards WindowCoverage already, so the full pass was
+    /// paying for, and this skips, every other family plus the detector's baseline reads. Falls back to the
+    /// full <see cref="IFactCollector.CollectFactsAsync"/> for an engine that is neither of Darling's two
+    /// concrete collectors (there is none today; the fallback keeps this correct rather than throwing if one
+    /// is ever added without a narrow read of its own).
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null)
+    {
+        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
+        var context = new AnalysisContext
+        {
+            ServerId = serverId,
+            ServerName = serverName,
+            TimeRangeStart = timeRangeEnd.AddHours(-1),
+            TimeRangeEnd = timeRangeEnd,
+            AsOfUtc = asOfUtc
+        };
+
+        try
+        {
+            var (engine, _) = await ResolveEngineAsync(serverId, context.CancellationToken);
+            return engine.Collector switch
+            {
+                PgFactCollector sql => await sql.CollectConfigAuditFactsAsync(context),
+                PgTargetFactCollector pg => await pg.CollectConfigAuditFactsAsync(context),
+                _ => await engine.Collector.CollectFactsAsync(context),
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[DarlingAnalysisService] Config-audit fact collection failed for {Server}: {Message}",
+                serverName, ex.Message);
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Compares analysis of two time periods, returning facts from both for comparison, each with its
     /// window's observed coverage (#3538 A2) so the caller can say when one side was only partly
     /// collected — the case the empty-window caveats never reached, where a half-collected window

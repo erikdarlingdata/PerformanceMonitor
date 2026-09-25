@@ -187,6 +187,24 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     }
 
     /// <summary>
+    /// audit_config's own collection (#4192): exactly the three families its CONFIG_PG_* facts and its
+    /// PG_HOST_MEMORY_PRESSURE fact come from — <see cref="CollectConfigFactsAsync"/> (the pg_settings reads),
+    /// <see cref="CollectMemoryFactsAsync"/> (the composition check and the host-memory pressure fact) and
+    /// <see cref="CollectVacuumFactsAsync"/> (the per-table autovacuum reloption) — none of
+    /// <see cref="CollectFactsAsync"/>'s other families and no anomaly detector or scorer after it. No coverage
+    /// witness runs here: audit_config already discards WindowCoverage because every fact it reads is a
+    /// latest-snapshot read.
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(AnalysisContext context)
+    {
+        var facts = new List<Fact>();
+        await CollectConfigFactsAsync(context, facts);
+        await CollectMemoryFactsAsync(context, facts);
+        await CollectVacuumFactsAsync(context, facts);
+        return facts;
+    }
+
+    /// <summary>
     /// Every query this collector executes, for the ungated dialect / hygiene pins in Darling.Tests
     /// (<c>$N</c> positional only, no bare <c>now()</c> / <c>CURRENT_TIMESTAMP</c>, every <c>FROM</c> /
     /// <c>JOIN</c> target a collector table or <c>servers</c>).
