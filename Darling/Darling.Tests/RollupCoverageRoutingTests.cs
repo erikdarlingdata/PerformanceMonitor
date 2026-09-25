@@ -477,6 +477,78 @@ public sealed class RollupCoverageRoutingTests
     }
 
     /// <summary>
+    /// #3653 A6, lane LA-8: no reader outside <c>TimescaleSupport.cs</c> (the builder) may splice a DAILY
+    /// rollup's name directly into a FROM clause by string interpolation — <c>$"collect.{...DailyView} AS f"</c>
+    /// or similar — instead of going through <see cref="RollupCoverage.StitchedRelationSql"/>. A bare splice
+    /// like that can never grow a stitch: it will read only the legacy daily forever, even once a successor
+    /// daily exists and is backfilled, which is exactly the shape the three FinOps splices and
+    /// <c>ComposeSourceRouter</c>'s daily arm were in before this lane routed them.
+    ///
+    /// <para>Matched over comment-stripped text, on the literal <c>collect.{TimescaleSupport.&lt;X&gt;DailyView}</c>
+    /// substring for each of the three superseded legacy dailies (<see cref="TimescaleSupport.SupersededDailyRollups"/>),
+    /// the same shape the fixed call sites used to write. <see cref="IsExcludedFromScan"/> keeps the test
+    /// project and build output out of the walk, same carve-out as
+    /// <see cref="NoReaderOutsideTheBuilder_CallsHourlyRelationForDirectly"/> above; <c>TimescaleSupport.cs</c>
+    /// is excluded the same way — it is the builder, and <c>s_stitchColumnsByLegacy</c>'s doc comments and the
+    /// registry itself necessarily say these names beside <c>collect.</c> text.</para>
+    /// </summary>
+    [Fact]
+    public void NoReaderOutsideTheBuilder_SplicesADailyViewNameBySubstitution()
+    {
+        var root = FindRepoRoot();
+
+        Assert.True(root is not null,
+            "Could not locate the repository root (walked up from the test binary looking for " +
+            "PerformanceMonitor.sln). This test scans the source tree, so it cannot run without it — fix the " +
+            "walk-up rather than skipping.");
+
+        var patterns = new[]
+        {
+            "collect.{TimescaleSupport.QueryStatsDailyView}",
+            "collect.{TimescaleSupport.ProcedureStatsDailyView}",
+            "collect.{TimescaleSupport.QueryStatsDbDailyView}",
+            /* The unqualified spellings, for a file that opens with "using static TimescaleSupport;" or that
+               already holds a local named identically via a using alias — belt and suspenders over the
+               qualified form above, which is what every real call site actually wrote before this lane. */
+            "collect.{QueryStatsDailyView}",
+            "collect.{ProcedureStatsDailyView}",
+            "collect.{QueryStatsDbDailyView}",
+        };
+
+        var offenders = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root!, "Darling"), "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(root!, file);
+            if (IsExcludedFromScan(relative)
+                || string.Equals(Path.GetFileName(relative), "TimescaleSupport.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = StripComments(File.ReadAllText(file));
+            foreach (var pattern in patterns)
+            {
+                var index = 0;
+                while ((index = text.IndexOf(pattern, index, StringComparison.Ordinal)) >= 0)
+                {
+                    var line = text.AsSpan(0, index).Count('\n') + 1;
+                    offenders.Add($"{relative}:{line} ({pattern})");
+                    index += pattern.Length;
+                }
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "These call sites splice a legacy DAILY rollup's name directly into a FROM clause by string " +
+            "interpolation instead of routing through RollupCoverage.StitchedRelationSql (#3653 A6, lane " +
+            "LA-8). A reader built this way can never read an interval-honest successor daily once one exists " +
+            "and is backfilled — it is stuck on the frozen legacy forever, invisibly. Route through " +
+            "StitchedRelationSql(legacyDaily, alias, windowStartUtc, RollupCoverage.StitchTier.Daily) instead; " +
+            "the daily view constants stay reserved for probes, logs, and the registry itself.\n\n" +
+            string.Join("\n", offenders));
+    }
+
+    /// <summary>
     /// True when a path is generated build output, or the test project's own source. Compared as whole
     /// path SEGMENTS against BOTH separator characters, so the scanned set is the same wherever this runs
     /// and a directory merely named <c>Objects</c> stays in it.
