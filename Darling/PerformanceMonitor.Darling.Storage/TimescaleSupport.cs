@@ -5431,14 +5431,15 @@ WITH NO DATA";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                /* A frozen rollup (policyFor is null) already exists by the time its own detach can throw — its
-                   CREATE ran first, in this same try. "Falls back to raw scans" is false for that case: the
-                   view keeps serving composer queries same as ever, just still on its pre-freeze refresh
-                   schedule instead of frozen, until a later start's retry detaches it. */
+                /* A frozen rollup (policyFor is null) has no raw-scan fallback to name: on an existing store its
+                   CREATE is a no-op and the throw is the policy detach, so the view keeps serving composer
+                   queries on its pre-freeze refresh schedule until a later start's retry detaches it. The same
+                   catch also sees a failed CREATE (a fresh store) or width step, so the line names both steps
+                   rather than claiming the view exists. */
                 if (IsFrozenRollupAggregate(view))
                 {
                     logger?.LogWarning(
-                        "Could not detach the refresh policy from frozen rollup {View}; it keeps refreshing on its old schedule until a later start detaches it: {Message}",
+                        "Could not create frozen rollup {View} or detach its refresh policy; a later start retries it, and until then it keeps any refresh policy it had: {Message}",
                         view, ex.Message);
                 }
                 else
