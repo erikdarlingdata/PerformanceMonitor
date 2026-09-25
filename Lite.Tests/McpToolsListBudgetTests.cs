@@ -83,6 +83,10 @@ public sealed class McpToolsListBudgetTests
     /* #4199 (M2b): +162 bytes for get_collection_log's fleet-form server_name/limit descriptions, after
        trimming both to the D2 200-char parameter cap and moving the rest to the tool's tail (get_tool_guide),
        which is not served in tools/list and so is not counted here. Matches Darling's twin change exactly. */
+/* #4198 (get_plan_corrections): +137 bytes, matching Darling's twin change exactly — the new full_text
+       opt-in parameter only (the head is unchanged; the preview explanation lives in the tail get_tool_guide
+       serves). Default row limit dropped 50 -> 25 and the preview 2,000 chars -> 150; neither is a served
+       description, so neither counts here. */
     /* #4198 (lane TB): +253 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
@@ -90,7 +94,7 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TR): +203 bytes for get_query_store_regressions gaining full_text (its own preview
        opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
        over the old 86). */
-    private const int TotalCeilingBytes = 90_337;
+    private const int TotalCeilingBytes = 90_474;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
