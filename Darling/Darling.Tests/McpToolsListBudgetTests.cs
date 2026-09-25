@@ -152,7 +152,14 @@ public sealed class McpToolsListBudgetTests
        combined total with collection-health (#4268) changes on top. */
     /* #4198 (custom-view-catalog, merge): re-measured after merging origin/dev (dev includes #4261+#4258+#4265+#4267+#4264+#4266+#4268);
        combined total with custom-view-catalog (#4272) changes on top. */
-    private const int TotalCeilingBytes = 174_236;
+    /* #4198 (lane TJ, get_query_store_top): +136 bytes for the new full_text opt-in parameter (84 bytes of
+       description plus its JSON schema wrapper). The head is unchanged (its new sentence lives after
+       <<GUIDE>>, in the tail get_tool_guide serves, not the served head); the default query_text preview
+       dropped 2,000 chars -> 400, which took the default call from 48 KB (#4198's measurement) to under the
+       shared 32 KB budget and is not a served description either. */
+    /* #4198 (qs-top, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266+#4268+#4272);
+       combined total with qs-top (#4273) changes on top. */
+    private const int TotalCeilingBytes = 174_373;
 
 
     private const int ConvertedHeadCap = 1_000;
