@@ -146,14 +146,16 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.DoesNotContain("ELSE 0", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
     }
 
-    /// <summary>#3540: the latency reads drop rows whose stored interval is 0 — the calculator's "no delta
-    /// knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0 keeps
-    /// pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read.</summary>
+    /// <summary>#3540: the latency reads null out rows whose stored interval is 0 — the calculator's "no
+    /// delta knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0
+    /// keeps pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read (#4234:
+    /// bucketed, so both null the marker out of a <c>rated</c> CTE rather than filtering the row out of the
+    /// FROM clause — the row still counts toward <c>collection_count</c>).</summary>
     [Fact]
     public void FileIoLatencyReads_DropTheUnknowableMarker_KeepPreV127Rows()
     {
         Assert.Contains("CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN f.delta_reads END AS rated_reads", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN delta_reads END AS rated_reads", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
