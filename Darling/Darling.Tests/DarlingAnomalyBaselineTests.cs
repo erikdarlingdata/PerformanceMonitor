@@ -486,17 +486,25 @@ public sealed class DarlingAnomalyBaselineTests
         /* #3653 B (#4169): both detectors now read peakRate/avgRate off WindowTiles.WholeWindow(tiles).Peak/
            .Mean, fed by a tiled read, rather than off a single-row reader ordinal directly. Pin that shape
            directly, on BOTH SKUs, rather than against a stale reader-ordinal regex that assumed a single
-           collapsed row on one side. The window-total accumulation is checked separately below, per side:
-           the two detectors sum it differently (PG in a second pass, Lite in the same pass as the tile
-           read), which is a real structural difference the coordinator has not yet ruled symmetric. */
+           collapsed row on one side. */
         foreach (var (name, code) in new[] { ("pg", pg), ("lite", liteCode) })
         {
             Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+whole\s*=\s*WindowTiles\.WholeWindow\(tiles\)"), $"{name}: missing 'var whole = WindowTiles.WholeWindow(tiles)'");
             Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+peakRate\s*=\s*whole\.Peak"), $"{name}: missing 'var peakRate = whole.Peak'");
             Assert.True(System.Text.RegularExpressions.Regex.IsMatch(code, @"var\s+avgRate\s*=\s*whole\.Mean"), $"{name}: missing 'var avgRate = whole.Mean'");
         }
-        // Lite sums the same ordinal-3 column inside its tile read loop; Darling re-reads it (#3653 B).
-        Assert.Matches(@"totalWaitMs\s*\+=\s*totalReader\.IsDBNull\(3\)", pg);
+
+        /* #3653 A8 hygiene: PG used to re-run WaitRateTileWindowSql a SECOND time, word for word, just to sum
+           total_wait_ms (ordinal 3) into totalWaitMs — a real structural difference from Lite's twin (which
+           has always summed the same column inside its tile-read loop) that #3653 B's own pin above left
+           unresolved pending a coordinator ruling. That ruling is this: read once, like Lite. Both sides now
+           sum ordinal 3 off the SAME reader the tiles themselves come from (rateReader), inside the SAME
+           loop, so this pin both requires the new shape AND forbids the old one's tell (a second reader
+           variable, totalReader, reading the identical SQL again) from coming back. Live-measured with
+           pg_stat_statements: this statement ran twice per analysis pass before the fix, once after. */
+        Assert.Matches(@"totalWaitMs\s*\+=\s*rateReader\.IsDBNull\(3\)", pg);
+        Assert.Matches(@"windowTotalWaitMs\s*\+=\s*rateReader\.IsDBNull\(3\)", liteCode);
+        Assert.DoesNotMatch(@"totalReader", pg);
     }
 
     /// <summary>
