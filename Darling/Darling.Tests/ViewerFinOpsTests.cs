@@ -122,12 +122,23 @@ public sealed class ViewerFinOpsSqlTests
         }
     }
 
+    /// <summary>
+    /// #4227: the total and average grids used to be two statements, each with its own SQL-side
+    /// ORDER BY/LIMIT and, for the average grid, a HAVING that excluded zero-execution databases. Merged into
+    /// one statement, both grids rank and LIMIT client-side (<c>ViewerDataService.GetTopResourceConsumersAsync</c>),
+    /// so the SQL now returns every database and marks a zero-execution one with a NULL avg_cpu_ms instead.
+    /// </summary>
     [Fact]
-    public void TopResourceConsumersSql_ParameterizeTheLimit()
+    public void TopResourceConsumersSql_ReturnsEveryDatabase_RankingAndZeroExecutionExclusionMoveToTheCaller()
     {
-        Assert.Contains("LIMIT $3", ViewerDataService.TopResourceConsumersByTotalSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $3", ViewerDataService.TopResourceConsumersByAvgSql, StringComparison.Ordinal);
-        Assert.Contains("HAVING SUM(delta_execution_count) > 0", ViewerDataService.TopResourceConsumersByAvgSql, StringComparison.Ordinal);
+        var sql = ViewerDataService.TopResourceConsumersSql;
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("HAVING", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN c.execution_count > 0 THEN CAST(c.cpu_time_ms * 1.0 / c.execution_count AS DECIMAL(19,2)) END", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN c.execution_count > 0 THEN CAST(c.io_total_mb * 1.0 / c.execution_count AS DECIMAL(19,4)) END", sql, StringComparison.Ordinal);
+        /* The ByTotal grid's NULL-database_name exclusion is NOT baked in here — see the constant's remarks —
+           because the ByAvg grid never had it; both stay client-side in GetTopResourceConsumersAsync. */
+        Assert.DoesNotContain("database_name IS NOT NULL", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -221,11 +232,30 @@ public sealed class ViewerFinOpsSqlTests
     public void ObjectGrowthReads_RankTopN_AndBuildDailySeries()
     {
         Assert.Contains("FROM v_index_object_stats", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $5", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
         Assert.Contains("date_trunc('day', ios.collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
-        Assert.Contains("LIMIT $4", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT $6", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
         Assert.Contains("GREATEST(last_user_seek, last_user_scan, last_user_lookup, last_user_update)",
             ViewerDataService.ObjectIndexDetailSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4227: the summary and series statements each used to recompute their own <c>bounds</c> CTE
+    /// (<c>MAX</c>/<c>MIN(collection_time)</c>) — 89ms and 21.3k buffers apiece on a seeded store, because no
+    /// index led (server_id, collection_time). <see cref="ViewerDataService.GetObjectGrowthHeatmapDataAsync"/>
+    /// now computes it once via <see cref="ViewerDataService.ObjectGrowthBoundsSql"/> and passes both instants
+    /// down as plain parameters, so neither statement's own SQL text may still compute MAX/MIN(collection_time).
+    /// </summary>
+    [Fact]
+    public void ObjectGrowthSummaryAndSeriesSql_DoNotRecomputeTheirOwnBounds()
+    {
+        Assert.DoesNotContain("MAX(collection_time)", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(collection_time)", ViewerDataService.ObjectGrowthSummarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MIN(collection_time)", ViewerDataService.ObjectGrowthSeriesSql, StringComparison.Ordinal);
+
+        Assert.Contains("MAX(collection_time)", ViewerDataService.ObjectGrowthBoundsSql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time)", ViewerDataService.ObjectGrowthBoundsSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -414,14 +444,14 @@ public sealed class ViewerFinOpsSqlTests
     [InlineData(nameof(ViewerDataService.MemoryGrantEfficiencySql))]
     [InlineData(nameof(ViewerDataService.DatabaseResourceUsageSql))]
     [InlineData(nameof(ViewerDataService.ApplicationConnectionsSql))]
-    [InlineData(nameof(ViewerDataService.TopResourceConsumersByTotalSql))]
-    [InlineData(nameof(ViewerDataService.TopResourceConsumersByAvgSql))]
+    [InlineData(nameof(ViewerDataService.TopResourceConsumersSql))]
     [InlineData(nameof(ViewerDataService.WaitCategorySummarySql))]
     [InlineData(nameof(ViewerDataService.ExpensiveQueriesSql))]
     [InlineData(nameof(ViewerDataService.HighImpactQueriesSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeSummarySql))]
     [InlineData(nameof(ViewerDataService.StorageGrowthSql))]
+    [InlineData(nameof(ViewerDataService.ObjectGrowthBoundsSql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSummarySql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSeriesSql))]
     [InlineData(nameof(ViewerDataService.ObjectIndexDetailSql))]
