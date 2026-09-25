@@ -132,7 +132,9 @@ public sealed class McpToolsListBudgetTests
        combined total with blocking (#4267) changes on top. */
     /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
        combined total with qs-regressions (#4264) changes on top. */
-    private const int TotalCeilingBytes = 173_157;
+    /* #4214 part 2: +616 bytes for the new get_store_host tool (no parameters - a store-level snapshot, like
+       get_store_metrics), pinned at McpToolsListBudget/DarlingMcpStoreHostTools.txt. */
+    private const int TotalCeilingBytes = 173_773;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
