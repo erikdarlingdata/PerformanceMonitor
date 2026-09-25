@@ -247,6 +247,11 @@ public sealed partial class ViewerDataService
     /// equality-bound, so <c>ORDER BY collection_time DESC</c> would be a no-op here; <c>LIMIT 1</c> plus the
     /// <c>IS NOT NULL</c> guard exist only to protect against a hypothetical duplicate row sharing that key
     /// (query_snapshots has no enforced uniqueness on it) shadowing the real one.
+    ///
+    /// <para><c>COALESCE(request_id, 0)</c>: <see cref="ReadQuerySnapshotRow"/> maps a NULL
+    /// <c>request_id</c> to 0 for every row it reads (ordinal 34), so a row collected with no request_id
+    /// must be matched the same way here, or it can never be fetched — a plain <c>request_id = $4</c> never
+    /// matches NULL, whatever value 0 is bound as. Mirrors Lite's #4297 fetcher (#4239).</para>
     /// </summary>
     public const string QuerySnapshotEstimatedPlanSql = """
         SELECT query_plan
@@ -254,20 +259,20 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   collection_time = $2
         AND   session_id = $3
-        AND   request_id = $4
+        AND   COALESCE(request_id, 0) = $4
         AND   query_plan IS NOT NULL
         LIMIT 1
         """;
 
     /// <summary>The stored live/actual execution plan for one snapshot row. See
-    /// <see cref="QuerySnapshotEstimatedPlanSql"/> for the key-uniqueness note.</summary>
+    /// <see cref="QuerySnapshotEstimatedPlanSql"/> for the key-uniqueness and NULL-request_id notes.</summary>
     public const string QuerySnapshotLivePlanSql = """
         SELECT live_query_plan
         FROM query_snapshots
         WHERE server_id = $1
         AND   collection_time = $2
         AND   session_id = $3
-        AND   request_id = $4
+        AND   COALESCE(request_id, 0) = $4
         AND   live_query_plan IS NOT NULL
         LIMIT 1
         """;

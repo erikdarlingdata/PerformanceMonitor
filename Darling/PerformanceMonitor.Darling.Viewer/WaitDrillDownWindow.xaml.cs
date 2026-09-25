@@ -358,7 +358,21 @@ public partial class WaitDrillDownWindow : Window
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not ViewerQuerySnapshotRow row) return;
 
-        var (planXml, isActual) = await FetchSnapshotPlanAsync(row);
+        string? planXml;
+        bool isActual;
+        try
+        {
+            (planXml, isActual) = await FetchSnapshotPlanAsync(row);
+        }
+        catch (Exception ex)
+        {
+            /* #4239: FetchSnapshotPlanAsync is a Postgres round-trip inside an async void handler — an
+               unguarded await here would let a store error (connection drop, timeout) reach the dispatcher
+               as an unhandled exception. Same fetch-failure idiom as ViewerServerTab.Plans.cs. */
+            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
         if (string.IsNullOrEmpty(planXml))
         {
             MessageBox.Show(this,
@@ -428,9 +442,20 @@ public partial class WaitDrillDownWindow : Window
         /* #4239: fetch the row's stored plan BEFORE the modification-detection gate below — a stored-row read
            no longer carries plan XML in-row, so without this fetch estimatedPlanXml would always be null and
            every snapshot would show as "may modify data" regardless of what was actually captured. A null
-           result here (truly no plan was captured for this request) still fails safe to "may modify" — the
-           one deliberate behavior change from before #4239, called out in the PR body. */
-        var (estimatedPlanXml, _) = await FetchSnapshotPlanAsync(row);
+           RESULT here (truly no plan was captured for this request) still fails safe to "may modify" — the
+           one deliberate behavior change from before #4239, called out in the PR body. A thrown EXCEPTION
+           (store error) is different: it aborts the whole re-execute flow below rather than silently falling
+           through to "may modify", since the fetch failure means the modification check itself is unreliable. */
+        string? estimatedPlanXml;
+        try
+        {
+            (estimatedPlanXml, _) = await FetchSnapshotPlanAsync(row);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
         var argsJson = ViewerDataService.BuildActualPlanArgsForSnapshot(row.CollectionTime, row.SessionId, row.DatabaseName);
         var label = $"Actual Plan - SPID {row.SessionId}";
 
