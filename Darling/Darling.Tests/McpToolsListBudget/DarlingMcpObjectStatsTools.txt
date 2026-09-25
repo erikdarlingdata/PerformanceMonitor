@@ -8,6 +8,7 @@ param get_index_usage.limit 35
 param get_index_usage.server_name 28
 
 tool get_object_locking 661
+param get_object_locking.limit 35
 param get_object_locking.server_name 28
 
 tool get_table_index_sizes 794

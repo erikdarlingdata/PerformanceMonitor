@@ -199,6 +199,10 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfSubjects =
     {
+        /* #4198 (lane W2): its source-text pin asserts a single-line entry in the endpoint dispatch
+           table (the `get_active_queries` row in DarlingWebEndpoints.cs) — the pin contains no line
+           break, so LF normalization does not affect what the assertion can match. */
+        "DarlingWebEndpointsTests.cs",
         /* The equivalence test FOR the reader, parameterised over both spellings and calling each of them
            directly. It compares the reader's output against the bytes on disk put through the same
            transform, so it performs the CRLF-to-LF normalisation itself rather than depending on the

@@ -786,13 +786,21 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_findings"), Description("Persisted findings from PAST analysis runs, not a new analysis: deduplicated to the LATEST occurrence per chain plus occurrence stats (occurrences, first_seen, last_seen, peak_severity). empty: no findings in the window, a true zero; run analyze_server for new ones. truncated (see truncation_note) flags a read cap, so occurrence stats may under-report. confidence_basis flags rows persisted before this scoring existed as path-shape, not corroboration. remediation_command/structured_remediation are advisory, never executed. Recurrence fields are LABELS at unchanged severity. <<GUIDE>> Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. Each finding's confidence is an EVIDENCE score (see analyze_server): 0.20 for the fired symptom alone, plus corroboration from matched amplifier checks and chain depth. Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape and they must not be read as corroborated. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed). Three recurrence fields ride on every entry, read off the representative's frozen advice where the analysis pass wrote them: recurring_at_this_hour is true when the chain fired in the same hour×weekday slot on the server's clock for three or more consecutive weeks counting the latest, recurrence_weeks is that count (null when not labelled), and maintenance_window_moved is true when a long-running Agent job the chain is tied to ran in a different slot last week than this. These are LABELS at unchanged severity — a weekly problem is still a problem — and the advice text carries the sentence that states the slot. include_drilldown's drill_down rows are things like the parameter-sensitive plans or top spill queries behind the finding; they default off because they can be bulky and the summary usually suffices.")]
+    /// <summary>See Darling's <c>DarlingMcpTools.DefaultFindingLimit</c> twin for the #4198 measurement this was sized from.</summary>
+    private const int DefaultFindingLimit = 18;
+
+    /// <summary>See <see cref="DefaultFindingLimit"/>.</summary>
+    private const int FindingTextPreviewLength = 160;
+
+    [McpServerTool(Name = "get_analysis_findings"), Description("Persisted findings from PAST analysis runs, not a new analysis: deduplicated to the LATEST occurrence per chain plus occurrence stats (occurrences, first_seen, last_seen, peak_severity). empty: no findings in the window, a true zero; run analyze_server for new ones. truncated (see truncation_note) flags a read cap, so occurrence stats may under-report. confidence_basis flags rows persisted before this scoring existed as path-shape, not corroboration. remediation_command/structured_remediation are advisory, never executed. Recurrence fields are LABELS at unchanged severity. <<GUIDE>> Gets persisted findings from previous analysis runs without running a new analysis, deduplicated to one entry per diagnostic chain (story_path_hash + incident_id) - the engine re-persists the same stories every cycle, so each entry is the chain's LATEST occurrence plus occurrence stats (occurrences, first_seen, last_seen, peak_severity) spanning the window. Use this to review historical findings or check if anything has changed since the last analysis. Each finding's confidence is an EVIDENCE score (see analyze_server): 0.20 for the fired symptom alone, plus corroboration from matched amplifier checks and chain depth. Rows persisted before this definition carried a PATH-LENGTH statistic under the same name, with a lone symptom at 1.0 — confidence_basis labels those rows path-shape and they must not be read as corroborated. A remediable finding carries remediation_command: the full copy-paste T-SQL remediation (identical to the viewer card), rendered from the finding's persisted action and including a two-sided risk-disclosure comment header on destructive changes; it is advisory only and never executed. A force-plan remediation additionally carries structured_remediation: the same decision as machine-readable fields — eligible, named blockers (parameter_sensitivity_cofired, secondary_replica_evidence, and from the store's forcing and automatic-plan-correction state read at the moment of the call: apc_owns_it, already_forced, forcing_failed_on_this_plan, apc_withdrew_it, apc_resolved_differently — each with blocker_evidence quoting the values and snapshot time), the raw forcing_state, apc_mode/guidance when FORCE_LAST_GOOD_PLAN is on for the database (the engine is doing this; intervene only if it reverts or expires), a state_note whenever that state could not be read (eligible is then the finding-only verdict, not a clearance), evidence numbers, and split force_sql/unforce_sql/verify_sql artifacts — so agents consume the verdict as data instead of parsing comment prose. Set include_drilldown to also return each chain's persisted evidence rows (the specific plans/queries behind the finding, capped at write time with an explicit _truncation_note; null on findings persisted before the column existed). limit pages the returned chains (default 18, still-firing first then by severity); findings_truncated (see findings_truncated_note) flags when the window held more chains than were returned — raise limit or narrow hours_back rather than assume nothing else fired. confidence_basis and advice's investigation/remediation preview to 160 characters by default (confidence_basis_truncated/advice_truncated flag it); full_text returns both untruncated for every returned finding. remediation_command is never previewed, at any setting. Three recurrence fields ride on every entry, read off the representative's frozen advice where the analysis pass wrote them: recurring_at_this_hour is true when the chain fired in the same hour×weekday slot on the server's clock for three or more consecutive weeks counting the latest, recurrence_weeks is that count (null when not labelled), and maintenance_window_moved is true when a long-running Agent job the chain is tied to ran in a different slot last week than this. These are LABELS at unchanged severity — a weekly problem is still a problem — and the advice text carries the sentence that states the slot. include_drilldown's drill_down rows are things like the parameter-sensitive plans or top spill queries behind the finding; they default off because they can be bulky and the summary usually suffices.")]
     public static async Task<string> GetAnalysisFindings(
         AnalysisService analysisService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of finding history to retrieve. Default 24.")] int hours_back = 24,
+        [Description("Maximum diagnostic chains to return, still-firing first then by severity. Default 18. findings_truncated flags a cut here.")] int limit = 18,
         [Description("If true, each finding carries drill_down: the persisted evidence rows behind the chain's latest occurrence. Default false.")] bool include_drilldown = false,
+        [Description("Return each finding's confidence_basis and advice untruncated instead of a preview. Default false. remediation_command is always the full command.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -837,6 +845,12 @@ public sealed class McpAnalysisTools
                stats. The store keeps every row — this shapes the read only. */
             var groups = FindingOccurrences.Collapse(findings);
 
+            /* #4198: the group PAGE default cap — see Darling's twin comment for the measured numbers. */
+            var totalFindingCount = groups.Count;
+            var findingsTruncated = totalFindingCount > limit;
+            if (findingsTruncated)
+                groups = groups.Take(limit).ToList();
+
             // Correlate-and-focus slice 1 (review §1d): "what else fired", scoped per analysis run
             // (this read can span multiple runs, unlike analyze_server's single run). Only runs
             // that produced a group REPRESENTATIVE are ever looked up below — in steady state just
@@ -862,6 +876,7 @@ public sealed class McpAnalysisTools
             {
                 server = resolved.ServerName,
                 finding_count = groups.Count,
+                total_finding_count = totalFindingCount,
                 total_occurrences = findings.Count,
                 // No silent caps: a read the window-covering limit CUT has had its OLDEST rows dropped by
                 // the store's newest-first LIMIT, so occurrence stats may under-report — say so instead of
@@ -870,6 +885,12 @@ public sealed class McpAnalysisTools
                 truncated,
                 truncation_note = truncated
                     ? $"TRUNCATED: the window held more than the {FindingOccurrences.WindowCoveringLimit}-row read cap; the oldest occurrences in the window were dropped, so total_occurrences, occurrences and first_seen may under-report. Use a smaller hours_back for exact stats."
+                    : null,
+                // #4198: a DIFFERENT cut from truncated above — the group PAGE (limit), not the raw store
+                // read. See Darling's twin comment.
+                findings_truncated = findingsTruncated,
+                findings_truncated_note = findingsTruncated
+                    ? $"TRUNCATED: {totalFindingCount} diagnostic chains were active in this window; only the top {limit} (still-firing first, then by severity) are returned. Raise limit, or narrow hours_back, to see the rest."
                     : null,
                 findings = groups.Select(g =>
                 {
@@ -887,6 +908,9 @@ public sealed class McpAnalysisTools
                     // card without re-running analyze_server.
                     var advice = FactAdvice.GetComposedForFinding(f);
                     var recurrence = RecurrenceLabeler.TryReadLabel(f.StoryText);
+                    // #4198: confidenceBasis is near-fixed methodology prose, repeated on every finding —
+                    // previewed like the other free-text field below (full_text opts back in).
+                    var confidenceBasis = StoryConfidence.DescribeBasis(f.RootFactKey, f.Confidence, f.FactCount);
                     return new
                     {
                         finding_id = f.FindingId,
@@ -897,7 +921,8 @@ public sealed class McpAnalysisTools
                         // (matched amplifier share + path depth); a row persisted under the old path-shape
                         // formula is labelled as such, derived from the finding's own shape at read time
                         // because the store carries no version marker (no schema change).
-                        confidence_basis = StoryConfidence.DescribeBasis(f.RootFactKey, f.Confidence, f.FactCount),
+                        confidence_basis = full_text ? confidenceBasis : McpHelpers.Truncate(confidenceBasis, FindingTextPreviewLength),
+                        confidence_basis_truncated = !full_text && confidenceBasis.Length > FindingTextPreviewLength,
                         category = f.Category,
                         root_fact = new { key = f.RootFactKey, value = f.RootFactValue },
                         leaf_fact = f.LeafFactKey != null
@@ -929,16 +954,22 @@ public sealed class McpAnalysisTools
                             start = g.TimeRangeStart?.ToString("o"),
                             end = g.TimeRangeEnd?.ToString("o")
                         },
+                        // #4198: investigation/remediation are free prose, repeated on every finding —
+                        // previewed by default (full_text opts back in); headline stays whole.
                         advice = advice is null ? null : new
                         {
                             headline = advice.Headline,
-                            investigation = advice.Investigation,
-                            remediation = advice.Remediation
+                            investigation = full_text ? advice.Investigation : McpHelpers.Truncate(advice.Investigation, FindingTextPreviewLength),
+                            remediation = full_text ? advice.Remediation : McpHelpers.Truncate(advice.Remediation, FindingTextPreviewLength)
                         },
+                        advice_truncated = advice != null && !full_text
+                            && (advice.Investigation.Length > FindingTextPreviewLength || advice.Remediation.Length > FindingTextPreviewLength),
                         // The SAME copy-paste remediation command the viewer cards render, from the
                         // persisted action via the shared renderer (all seven shapes + the two-sided
                         // risk-disclosure comment header on the destructive ones). Null when the finding
                         // has no remediable action. PRODUCE ONLY — the read-only MCP never executes it.
+                        // #4198: NEVER previewed — see Darling's twin comment (a half a risk-disclosure
+                        // header is worse than none).
                         remediation_command = FactRemediation.RenderCopyPasteCommand(f.Remediation),
                         // #2138: the machine-first projection — see analyze_server's twin field.
                         structured_remediation = FactRemediation.BuildStructuredRemediation(f.Remediation, forcePlanStates, forcePlanStateNote)

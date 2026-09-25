@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 
 namespace Darling.Tests;
@@ -32,6 +33,16 @@ internal sealed class CapturingTestLogger : ILogger
             {
                 return _lines.Count == 0 ? "(no log lines captured)" : string.Join(" | ", _lines);
             }
+        }
+    }
+
+    /// <summary>How many lines were logged at exactly this level — #4276's tests count Warning/Error lines
+    /// rather than parsing <see cref="Joined"/>.</summary>
+    public int CountAtLevel(LogLevel level)
+    {
+        lock (_lines)
+        {
+            return _lines.Count(line => line.StartsWith(level.ToString() + ":", StringComparison.Ordinal));
         }
     }
 

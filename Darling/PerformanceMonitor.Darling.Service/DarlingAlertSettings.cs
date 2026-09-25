@@ -422,8 +422,16 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
 
     /// <summary>#2710: the triage-link base — <c>web.publicBaseUrl</c>, read live through the by-reference
     /// config seam like every sibling. File-authoritative on purpose (see the WebConfig doc comment): a store
-    /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.</summary>
-    public string TriageBaseUrl => _config.Web.PublicBaseUrl ?? "";
+    /// config reload overwrites only Web.Enabled/Web.Port, so this survives it.
+    ///
+    /// <para>Ruled (#4220, 2026-09-25): the only reason to omit the link is that there is nothing to open, so
+    /// this gates on <c>Web.Enabled</c> (live, for the same reason above) and nothing else. A loopback-only
+    /// bind, a host the Host guard would otherwise have rejected (fixed at the guard instead — see
+    /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/>), and a base shaped like it carries a
+    /// credential are the operator's own configuration and still get a link; the last of those gets a
+    /// one-time startup warning instead (<c>PerformanceMonitor.Notifications.TriageLink.DescribeCredentialShapedBaseWarning</c>).</para>
+    /// </summary>
+    public string TriageBaseUrl => _config.Web.Enabled ? (_config.Web.PublicBaseUrl ?? "") : "";
 }
 
 /// <summary>

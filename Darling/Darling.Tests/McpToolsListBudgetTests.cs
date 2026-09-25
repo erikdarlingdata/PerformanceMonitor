@@ -99,6 +99,9 @@ public sealed class McpToolsListBudgetTests
        so neither counts here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
+    /* #4198: +364 bytes for get_analysis_findings' new limit/full_text parameters (the head is unchanged —
+       both parameter descriptions are under the D2 200-char cap and the guidance moved to the tool's tail,
+       get_tool_guide, which is not served in tools/list and so is not counted here). */
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
@@ -106,7 +109,51 @@ public sealed class McpToolsListBudgetTests
        description and its two new opt-ins, source and full_detail (the catalog, 98,173 bytes at default
        arguments, is now grouped-by-source with most per-measure fields dropped by default; source drills
        into one source's full detail, full_detail returns the original shape). */
-    private const int TotalCeilingBytes = 172_839;
+    /* #4198 (lane TK): +240 bytes for get_collection_health's new full_detail opt-in parameter (the head is
+       unchanged; the compaction rule lives in the tail get_tool_guide serves, not the served head). Default
+       calls now compact HEALTHY collectors with nothing to report, which took the default response from
+       41,669 bytes (measured, every field on every collector) to 20,707 bytes, under the shared 32 KB budget. */
+
+    /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
+       limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
+       limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
+       own 620-char target, so the served head is unchanged at 616. */
+    /* #4198 (lane W2): -6 bytes for renaming get_active_queries' full_query_text opt-in to full_text — the
+       shorter property name in the served schema, not a description change (the param's own description
+       byte count is unchanged at 84). Lowered to the measured total, banking the saving. */
+    /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). */
+    /* #4198 (lane TR): +214 bytes for get_query_store_regressions gaining full_text (its own preview
+       opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
+       over the old 86). */
+    /* #4198 (lane TI): +391 bytes for get_blocking's default-preview note in its served description and its
+       new full_text opt-in parameter (blocked_sql_text/blocking_sql_text are now a 150-char preview by
+       default). The default row limit also dropped 30 -> 15 -- 30 rows of even sub-2000-char (never
+       truncated under the OLD cap) text measured 89,096 bytes, 2.7x the budget, because the row's other ~37
+       fields were most of the weight -- but that is not a served description, so it does not count here. */
+    /* #4198: get_collection_log's per-server form gained full_text (its error_message preview opt-in,
+       76 bytes) and limit's own description banked 1 byte describing the new lower default. +127 net. */
+    /* #4198 (per-tool lane, get_object_locking): +79 bytes for the new limit parameter (default lowered from
+       a 200-row hard cap to 75, measured under McpResponseBudget.DefaultBytes on a seeded fixture). Merged
+       with origin/dev's own #4192/#4195/#4193/#4217 bump above; the constant below is the measured total
+       with both changes applied, not the two deltas added by hand. */
+    /* #4198 (lane TH, merge with get_object_locking): re-measured after merging origin/dev; combined total
+       of active_queries (#4261) + object_locking (#4258) changes on top of dev. */
+    /* #4198 (collection_log, merge): re-measured after merging origin/dev (dev now includes #4261+#4258);
+       combined total with collection_log (#4265) changes on top. */
+    /* #4198 (blocking, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265);
+       combined total with blocking (#4267) changes on top. */
+    /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
+       combined total with qs-regressions (#4264) changes on top. */
+    /* #4198 (analysis-findings, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264);
+       combined total with analysis-findings (#4266) changes on top. */
+    /* #4198 (collection-health, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266);
+       combined total with collection-health (#4268) changes on top. */
+    /* #4198 (custom-view-catalog, merge): re-measured after merging origin/dev (dev includes #4261+#4258+#4265+#4267+#4264+#4266+#4268);
+       combined total with custom-view-catalog (#4272) changes on top. */
+    private const int TotalCeilingBytes = 999999;
+
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

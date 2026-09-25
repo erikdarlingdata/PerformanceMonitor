@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
 using System.Linq;
@@ -28,6 +29,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -779,7 +781,10 @@ public sealed class DarlingWebHostService : BackgroundService
             ConfigureResponseCompression(builder.Services);
 
             _app = builder.Build();
-            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient);
+            /* #4220: web.publicBaseUrl's host, admitted as one extra allowed Host header value — see
+               ConfigurePipeline's publicBaseUrlHost param and TriageLink.TryGetHost. */
+            var publicBaseUrlHost = TriageLink.TryGetHost(web.PublicBaseUrl);
+            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -853,10 +858,14 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <para>#1648 lifted the decision itself into the shared
     /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> (via <see cref="DarlingHostBinding"/>) so the two
     /// MCP hosts — Darling's and Lite's — install the SAME guard instead of going without one. This forwarder
-    /// stays so this host's behavior and its existing tests are byte-for-byte unchanged.</para>
+    /// stays so this host's behavior and its existing tests are byte-for-byte unchanged for every 2-arg caller.</para>
+    ///
+    /// <para><paramref name="extraAllowedHost"/> (#4220): this web host, and only this web host, also admits
+    /// <c>web.publicBaseUrl</c>'s host — see <see cref="DarlingHostBinding.IsAllowedHost"/> for why that is
+    /// safe. Defaults to null.</para>
     /// </summary>
-    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp)
-        => DarlingHostBinding.IsAllowedHost(host, networkListenIp);
+    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp, string? extraAllowedHost = null)
+        => DarlingHostBinding.IsAllowedHost(host, networkListenIp, extraAllowedHost);
 
     /// <summary>
     /// PURE route-auth decision. This method is only ever reached in NETWORK mode — the caller registers the
@@ -968,6 +977,9 @@ public sealed class DarlingWebHostService : BackgroundService
     /// <see cref="ReportSignInRefusal"/>, and read <c>_logger</c>/<c>_collectorState</c>/<c>_baselineCache</c>,
     /// exactly as before the extraction — only the receiver (this vs. a test-constructed instance) changes.
     /// </summary>
+    /// <param name="publicBaseUrlHost">#4220: <c>web.publicBaseUrl</c>'s host, or null when unset/unparseable
+    /// — the one extra Host value the DNS-rebinding guard admits beside the loopback names and
+    /// <paramref name="networkListenIp"/>. See <see cref="DarlingHostBinding.IsAllowedHost"/>.</param>
     internal void ConfigurePipeline(
         WebApplication app,
         NpgsqlDataSource postgres,
@@ -975,7 +987,8 @@ public sealed class DarlingWebHostService : BackgroundService
         IPAddress? networkListenIp,
         IPNetwork allowedCidr,
         string accessToken,
-        DarlingWebOidcClient? oidcClient)
+        DarlingWebOidcClient? oidcClient,
+        string? publicBaseUrlHost = null)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
@@ -985,9 +998,12 @@ public sealed class DarlingWebHostService : BackgroundService
         /* Pipeline order: response compression (#4188) runs FIRST of all, ahead of every gate below — it only
            transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
            nothing to wrap the gates' own refusal bodies and the login page in it too. Then the Host-allowlist
-           middleware runs on EVERY request (both modes) as the DNS-rebinding guard, then (network mode only)
-           the auth middleware, then the no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll ->
-           UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
+           middleware runs on EVERY request (both modes) as the DNS-rebinding guard — it must stay FIRST after
+           compression, ahead of the #4276 backstop too (see HostHeaderGuardTests, #1648): that guard is the
+           fix for a previously-exploited hole, and a handler ahead of it would itself be new unauthenticated
+           surface on the tokenless loopback bind. Then (network mode only) the auth middleware, then the
+           #4276 failure backstop, then the no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll
+           -> UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
            UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
            for non-API paths. */
         app.UseResponseCompression();
@@ -999,16 +1015,18 @@ public sealed class DarlingWebHostService : BackgroundService
            address we actually bind — a loopback name/IP (localhost / 127.0.0.1 / [::1]) or, in network mode,
            the configured listen IP. networkListenIp is null in loopback mode, so ONLY loopback Hosts pass
            there; a rebound foreign hostname pointed at 127.0.0.1:5153 is rejected 400 before any auth
-           decision, route handler, or static file. */
+           decision, route handler, or static file. publicBaseUrlHost (#4220) is also admitted, in BOTH
+           modes, because it is operator config on this box, not attacker-reachable — see
+           DarlingHostBinding.IsAllowedHost. */
         app.Use(async (context, next) =>
         {
-            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp))
+            if (!IsAllowedHost(context.Request.Host.Host, networkListenIp, publicBaseUrlHost))
             {
                 refusals.Report(
                     _logger, "Web dashboard", DarlingRefusalGate.HostAllowlist, StatusCodes.Status400BadRequest,
                     context.Connection.RemoteIpAddress,
                     $"the Host header '{DarlingHttpRefusalLog.Sanitize(context.Request.Host.Host)}' is not an address this endpoint binds"
-                    + " (a loopback name/IP, or web.network.listen when LAN-exposed)",
+                    + " (a loopback name/IP, web.network.listen when LAN-exposed, or web.publicBaseUrl's host)",
                     DateTime.UtcNow);
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 return;
@@ -1168,6 +1186,43 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             });
         }
+
+        /* #4276: one backstop exception handler, ahead of every route below (DarlingWebEndpoints.MapAll has no
+           Map* of its own outside that one call, so this covers all of them — see
+           DarlingWebFailureHandlingTests' source pin), so a route with no try/catch of its own (the issue's
+           own examples, /api/ag and /api/fleet, plus any future one) cannot reach ASP.NET Core's own error
+           handling — which writes into the providers ClearProviders silenced above, so the browser got an
+           empty 500 with no trace anywhere. AFTER the Host-allowlist guard and the auth gate on purpose (see
+           the pipeline-order comment above app.UseResponseCompression): both already handle their own
+           exceptions (HandleAuthFlowAsync's try/catch above), so this only ever fires for an UNANTICIPATED
+           throw from a gate, or an uncaught one from a route MapAll wires. A client that closed the page is
+           not a failure — DarlingWebFailureLog never sees it, and nothing is written to a caller who is
+           gone. */
+        app.Use(async (context, next) =>
+        {
+            var route = context.Request.Path.Value ?? "/";
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                await next(context);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                DarlingWebFailureLog.Report(_logger, route, stopwatch.ElapsedMilliseconds, ex);
+
+                /* Only log, per the ruling, once the response has already started — there is no header or
+                   body left to change at that point. */
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.StatusCode = DarlingWebFailureLog.StatusCode(ex);
+                    context.Response.ContentType = "application/json; charset=utf-8";
+                    await context.Response.WriteAsync(DarlingWebFailureLog.Body(ex).ToJsonString());
+                }
+            }
+        });
 
         /* API responses never cache (#4188): the store mutates continuously, so a stale GET is a stale
            dashboard. no-store rather than no-cache/must-revalidate — these bodies carry no ETag, so "cache but
