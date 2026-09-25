@@ -21,6 +21,11 @@ internal readonly record struct TrendBudget(int AutoPoints, int MaxPoints)
     /// <summary>An MCP answer: sized for a model's context, capped at the read's own ceiling.</summary>
     public static TrendBudget Mcp(int maxPoints) => new(TrendBuckets.McpPointBudget, maxPoints);
 
+    /// <summary>An MCP answer for a read whose point is too wide for the shared <see cref="TrendBuckets.McpPointBudget"/>
+    /// auto target to stay under <see cref="McpResponseBudget.DefaultBytes"/> (#4198): its own narrower auto
+    /// target, still capped at the read's own ceiling for an explicit width.</summary>
+    public static TrendBudget Mcp(int autoPoints, int maxPoints) => new(autoPoints, maxPoints);
+
     /// <summary>The web viewer's charts over <c>/api/read</c>: a browser draws far more points than a model should
     /// read, and a chart at the MCP budget would plot a day of file I/O as a couple of dozen hourly dots. Still a
     /// bound, so a week-long chart no longer ships every collection.</summary>
@@ -82,6 +87,16 @@ internal static class TrendBuckets
 
     /// <summary><c>get_pg_io_trend</c>: about 400 bytes a point, the widest of the five.</summary>
     public const int PgIoMaxPoints = 650;
+
+    /// <summary><c>get_pg_io_trend</c>'s own MCP auto-sizing target (#4198), narrower than the shared
+    /// <see cref="McpPointBudget"/> every other trend tool leaves its default to. Its point's ~400 bytes
+    /// (measured 397-401 marginal on <c>Darling.Tests.PgIoTrendDefaultBudgetLiveTests</c>' fixture) means the
+    /// shared 200-point target put a default 24-hour call's 10-minute bucketing at 145 points and 56-59 KB,
+    /// over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 70 keeps every window this family's own
+    /// census (<c>TrendPayloadBudgetLiveTests</c>) exercises - 1h/4h/24h/72h/168h - on the ladder rung at or
+    /// below 30 minutes, measured 22.3 KB at the 24-hour default (49 points), comfortably under budget while
+    /// still auto-sizing to one-minute points on windows an hour or shorter, where that already fits.</summary>
+    public const int PgIoMcpAutoPoints = 70;
 
     /// <summary><c>get_pg_database_trend</c>: about 270 bytes a point.</summary>
     public const int PgDatabaseMaxPoints = 1000;

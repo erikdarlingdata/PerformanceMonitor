@@ -78,13 +78,22 @@ public sealed class McpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit.")]
+    /// <summary>
+    /// #4198: deadlock_graph_xml is the wide field on this tool — see Darling's
+    /// <c>DarlingMcpBlockingTools.DeadlockGraphPreviewLength</c> twin for the measured bytes. Previewed to
+    /// this length per graph at default (<c>full_graph: true</c> opts back in), the same shape
+    /// <c>get_store_query_stats</c> uses for <c>full_text</c>.
+    /// </summary>
+    private const int DeadlockGraphPreviewLength = 2000;
+
+    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit. deadlock_graph_xml is a preview by default (deadlock_graph_xml_truncated: true) — pass full_graph for the whole graph.")]
     public static async Task<string> GetDeadlockDetail(
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks WITH a graph to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
+        [Description("Return each graph's full XML instead of a 2000-character preview. Default false.")] bool full_graph = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -117,7 +126,8 @@ public sealed class McpBlockingTools
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 victim_process_id = r.VictimProcessId,
-                deadlock_graph_xml = r.DeadlockGraphXml
+                deadlock_graph_xml = full_graph ? r.DeadlockGraphXml : McpHelpers.Truncate(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
+                deadlock_graph_xml_truncated = !full_graph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
             });
 
             return JsonSerializer.Serialize(new
