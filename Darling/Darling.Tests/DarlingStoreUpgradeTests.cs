@@ -909,6 +909,64 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// Items 2 and 4 (#4280 round-2 part 2): the marker's states parse correctly and hold names never values,
+    /// and <see cref="DarlingStoreUpgrade.ResetAutoConfCarryAsync"/> — the ONE routine both item 2's real-start
+    /// fallback and item 4's leftover-"carrying" recovery call, rather than reset-and-drop a new way each —
+    /// resets to header-only, logs names only, and deletes the marker. Uses the static/instance helpers
+    /// directly (the "static helper" the brief's test plan allows) rather than a full EnsureRunningAsync
+    /// bootstrap, which needs a second pg-runtime fixture (DARLING_TEST_PGRUNTIME_OLD/NEWZIP) this lane's rig
+    /// does not have.
+    /// </summary>
+    [Fact]
+    public async Task AutoConfCarryMarker_StatesAndReset_HoldNamesNeverValues_AndDeleteOnAGoodStart()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-marker-");
+        try
+        {
+            var dataDirectory = root.FullName;
+            var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+            File.WriteAllText(autoConfPath, "work_mem = '256MB'\nshared_buffers = '999MB'\n");
+
+            var markerPath = Path.Combine(dataDirectory, DarlingStoreUpgrade.AutoConfCarryStateMarkerFileName);
+            File.WriteAllText(markerPath, "carrying\nwork_mem\nshared_buffers\n");
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+
+            var carrying = upgrade.TryReadAutoConfCarryMarker(dataDirectory);
+            Assert.NotNull(carrying);
+            Assert.Equal(DarlingStoreUpgrade.AutoConfCarryStateCarrying, carrying!.Value.State);
+            Assert.Equal(new[] { "work_mem", "shared_buffers" }, carrying.Value.Names);
+
+            await upgrade.ResetAutoConfCarryAsync(dataDirectory, carrying.Value, "test reason, never a setting value");
+
+            Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(autoConfPath));
+            Assert.False(File.Exists(markerPath), "ResetAutoConfCarryAsync must delete the marker.");
+
+            var logged = log.ToString();
+            Assert.Contains("work_mem", logged);
+            Assert.Contains("shared_buffers", logged);
+            Assert.DoesNotContain("256MB", logged);
+            Assert.DoesNotContain("999MB", logged);
+
+            /* trial-passed parses too, and TryDeleteAutoConfCarryMarker — what EnsureRunningAsync calls after
+               a good real start, the already-running path included — removes it without touching auto.conf. */
+            File.WriteAllText(markerPath, "trial-passed\nwork_mem\n");
+            var passed = upgrade.TryReadAutoConfCarryMarker(dataDirectory);
+            Assert.Equal(DarlingStoreUpgrade.AutoConfCarryStateTrialPassed, passed!.Value.State);
+            DarlingStoreUpgrade.TryDeleteAutoConfCarryMarker(dataDirectory);
+            Assert.False(File.Exists(markerPath));
+
+            /* A missing marker is a no-op read (#4280 items 2/4) — never blocks a start. */
+            Assert.Null(upgrade.TryReadAutoConfCarryMarker(dataDirectory));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /// <summary>Matches the private <c>header</c> constant in <see cref="DarlingStoreUpgrade.CarryAutoConfAsync"/>
     /// exactly, for the two tests above to assert the reset-on-exception file state against.</summary>
     private const string AutoConfHeaderOnly =
