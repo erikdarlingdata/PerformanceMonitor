@@ -280,6 +280,12 @@ public sealed class ViewerTrendRoutingPortTests
         var raw = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Raw, start, false));
         Assert.Equal("Source: raw (one point per collection)", raw);
 
+        /* #4234: a raw series whose buckets merged collections names its width instead of claiming one
+           point per collection. */
+        Assert.Equal("Source: raw (one point per 15 minutes)", ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Raw, start, false, BucketMinutes: 15)));
+        Assert.Equal("Source: raw (one point per minute)", ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Raw, start, false, BucketMinutes: 1)));
+        Assert.Equal("Source: raw (one point per 2 hours)", ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Raw, start, false, BucketMinutes: 120)));
+
         var hourly = ViewerServerTab.DescribeTrendCoverage(new QueryTrendSeries(new List<QueryTrendPoint>(), RetentionTier.Hourly, start, false));
         Assert.Equal("Source: hourly rollup (one point per hour)", hourly);
         Assert.DoesNotContain("data begins", hourly, StringComparison.Ordinal);

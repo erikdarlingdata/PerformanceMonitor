@@ -90,6 +90,31 @@ public sealed class ViewerQueryTrendBucketingLiveTests
         });
     }
 
+    /// <summary>
+    /// #4234 (lane T2e): a bucketed series' "data begins" instant must be the first SERVED COLLECTION's own
+    /// time, not the bucket it landed in — a bucket start is not a collection the store held. Off the minute
+    /// grid (:37 seconds) so a date_bin bucket start (always on the grid) can never equal <c>seedStart</c> by
+    /// accident; the only way <see cref="QueryTrendSeries.EffectiveStartUtc"/> can equal it is if the reader
+    /// carries the row's own <c>first_collection_time</c> through, not <c>bucket_start</c>.
+    /// </summary>
+    [Fact]
+    public async Task QueryDurationTrend_SevenDayWindow_SeedStartsThreeDaysIn_EffectiveStartUtcIsFirstCollection_NotABucketStart()
+    {
+        await RunAsync(async (connection, viewer, ct) =>
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+            var seedStart = start.AddDays(3).AddSeconds(37);
+            await BulkSeedQueryStatsAsync(connection, ct, CollectionIdGenerator.Next() * 1_000_000L, seedStart, end);
+
+            var series = await viewer.GetQueryDurationTrendAsync(ServerId, start, end, null, end, ct);
+
+            Assert.True(series.BucketMinutes > 0, $"expected the multi-day seed to force bucketing, got BucketMinutes={series.BucketMinutes}");
+            Assert.True(series.Truncated, "expected the tier's head (3 days into the window) to be disclosed as truncated");
+            Assert.Equal(seedStart, series.EffectiveStartUtc);
+        });
+    }
+
     [Fact]
     public async Task ProcedureDurationTrend_SevenDayWindow_ReturnsAtMostBudgetRows()
     {
@@ -144,6 +169,8 @@ public sealed class ViewerQueryTrendBucketingLiveTests
             Assert.Equal(10.0, series.Points[0].Value, precision: 6);
             Assert.Equal(20.0, series.Points[1].Value, precision: 6);
             Assert.Equal(30.0, series.Points[2].Value, precision: 6);
+            /* Every bucket held exactly one collection — the width has nothing to disclose (#4234). */
+            Assert.Equal(0, series.BucketMinutes);
         });
     }
 
