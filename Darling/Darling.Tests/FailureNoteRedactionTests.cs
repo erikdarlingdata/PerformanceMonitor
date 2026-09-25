@@ -66,6 +66,48 @@ public sealed class FailureNoteRedactionTests
         Assert.DoesNotContain("secret", plainText, StringComparison.Ordinal);
     }
 
+    // ── only AnalysisContext may construct a CollectionFailure ─────────────────────────
+
+    /// <summary>
+    /// #4316 round 2 L1-r2 b, the minimum: <see cref="CollectionFailure"/> stays a public positional record
+    /// and <see cref="AnalysisContext.CollectionFailures"/> stays a public <c>List&lt;&gt;</c> — narrowing
+    /// either is a bigger change than this round makes — so nothing stops a collector from writing
+    /// <c>context.CollectionFailures.Add(new CollectionFailure(family, read, outcome, ex.Message))</c> and
+    /// putting an exception's own message straight back into a collection-failure record. This is the
+    /// backstop instead: a structural census, over every production <c>.cs</c> file this repository ships
+    /// under <c>PerformanceMonitor.Analysis</c>, <c>PerformanceMonitor.Common</c>, <c>Darling</c> and
+    /// <c>Lite</c> (every test project, and every <c>bin</c>/<c>obj</c>, excluded — over
+    /// comment/string-stripped source, so a remark that quotes the pattern cannot trip it), that only
+    /// <c>AnalysisContext.cs</c> ever spells <c>new CollectionFailure(</c> or <c>CollectionFailures.Add(</c>.
+    /// </summary>
+    [Fact]
+    public void OnlyAnalysisContext_ConstructsOrAppendsACollectionFailure()
+    {
+        var root = RepoRoot();
+        var sanctioned = Path.Combine(root, "PerformanceMonitor.Analysis", "AnalysisContext.cs");
+
+        var offenders = (
+            from scanRoot in new[] { "PerformanceMonitor.Analysis", "PerformanceMonitor.Common", "Darling", "Lite" }
+            from file in Directory.EnumerateFiles(Path.Combine(root, scanRoot), "*.cs", SearchOption.AllDirectories)
+            where !string.Equals(file, sanctioned, StringComparison.OrdinalIgnoreCase)
+            let relative = Path.GetRelativePath(root, file)
+            where !relative.Split('/', '\\').Any(segment =>
+                string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase)
+                || segment.EndsWith(".Tests", StringComparison.OrdinalIgnoreCase))
+            let code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file))
+            where code.Contains("new CollectionFailure(", StringComparison.Ordinal)
+                  || code.Contains("CollectionFailures.Add(", StringComparison.Ordinal)
+            select relative
+        ).ToArray();
+
+        Assert.True(
+            offenders.Length == 0,
+            "Only PerformanceMonitor.Analysis/AnalysisContext.cs may construct a CollectionFailure or append "
+          + "to a CollectionFailures list — anywhere else is a seat a collector could put ex.Message into. "
+          + "Found the pattern outside it in: " + string.Join(", ", offenders));
+    }
+
     // ── the force-plan target-state reader, and the bot's own copy of the same read ────
 
     [Theory]
