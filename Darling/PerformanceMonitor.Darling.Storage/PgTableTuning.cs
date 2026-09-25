@@ -88,6 +88,10 @@ public static class PgTableTuning
     /// </summary>
     private const string DropLockTimeoutSeconds = "5s";
 
+    /// <summary>CommandTimeout for the post-failure recovery <c>ROLLBACK</c> in <see cref="ApplyAsync"/> — a
+    /// ROLLBACK never waits on a lock, so this is a generous ceiling, not a measured budget.</summary>
+    private const int DropLockTimeoutRollbackSeconds = 10;
+
     /// <summary>
     /// Builds a guarded <c>DROP INDEX IF EXISTS</c> statement: its own transaction, a short
     /// <see cref="DropLockTimeoutSeconds"/> lock_timeout, reset by the transaction boundary either way. NOT
@@ -328,7 +332,7 @@ public static class PgTableTuning
                    failure will say so. */
                 try
                 {
-                    using var rollback = new NpgsqlCommand("ROLLBACK", connection);
+                    using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = DropLockTimeoutRollbackSeconds };
                     await rollback.ExecuteNonQueryAsync(cancellationToken);
                 }
                 catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
