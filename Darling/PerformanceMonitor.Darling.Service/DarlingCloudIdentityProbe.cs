@@ -86,8 +86,13 @@ internal static class DarlingCloudIdentityProbe
     internal static readonly Regex ValuePattern = new(@"^[A-Za-z0-9._-]{1,64}$", RegexOptions.Compiled);
 
     /// <summary>The production entry point: builds this probe's own handler (ruling 2) and runs it.</summary>
-    internal static Task<CloudIdentity> ProbeAsync(CancellationToken cancellationToken) =>
-        ProbeAsync(CreateHandler(), cancellationToken);
+    internal static async Task<CloudIdentity> ProbeAsync(CancellationToken cancellationToken)
+    {
+        /* The two-argument overload never disposes the handler it is given (tests pass their own fake), so
+           the production path owns and disposes the handler it creates. */
+        using var handler = CreateHandler();
+        return await ProbeAsync(handler, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>This probe's own handler (ruling 2) — never a handler shared with any other outbound call in
     /// the process. <see cref="DarlingCloudIdentityProbeSourcePinTests"/> pins these two settings against the

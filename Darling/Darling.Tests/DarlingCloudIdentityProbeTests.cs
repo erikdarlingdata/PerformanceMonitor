@@ -276,6 +276,17 @@ public sealed class DarlingCloudIdentityProbeSourcePinTests
         Assert.Contains("AllowAutoRedirect = false", stripped, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void OneArgumentProbeAsync_DisposesTheHandlerItCreates()
+    {
+        var stripped = CSharpSourceWalker.StripCommentsAndStrings(
+            ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCloudIdentityProbe.cs"));
+
+        var body = ExtractMethodBody(stripped, "Task<CloudIdentity> ProbeAsync(CancellationToken cancellationToken)");
+
+        Assert.Contains("using var handler = CreateHandler()", body, StringComparison.Ordinal);
+    }
+
     private static string ExtractMethodBody(string strippedSource, string signatureAnchor)
     {
         var at = strippedSource.IndexOf(signatureAnchor, StringComparison.Ordinal);
