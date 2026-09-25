@@ -95,7 +95,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             await SeedBatchHourAsync(connection, serverId, serverName, T, 3, seededHigh: true, ct);
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_BATCH_REQUESTS"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_BATCH_REQUESTS");
 
             var tileLocalHour = fact.Metadata["tile_local_hour"];
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
@@ -194,7 +194,7 @@ public sealed class SqlServerStoreTileBehaviourBatchQueryMemoryTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_MEMORY_PRESSURE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_MEMORY_PRESSURE");
 
             var tileLocalHour = fact.Metadata["tile_local_hour"];
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");

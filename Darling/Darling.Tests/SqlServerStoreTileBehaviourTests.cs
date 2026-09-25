@@ -100,7 +100,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             await SeedCpuHourAsync(connection, serverId, serverName, T, 3, seededHigh: true, ct);
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_CPU_SPIKE");
 
             var tileLocalHour = fact.Metadata["tile_local_hour"];
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
@@ -194,7 +194,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_CPU_SPIKE");
 
             // The robust (modified-z) frame runs here too (see scenario 1's note), so the Sidak raise is over
             // ModifiedZThreshold (3.5), not the classical DefaultDeviationThreshold (2.0).
@@ -319,7 +319,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_CPU_SPIKE");
 
             Assert.False(fact.Metadata.ContainsKey("tile_local_hour"), "the never-blind fallback must not carry tile keys");
             Assert.False(fact.Metadata.ContainsKey("tile_day_of_week"));
@@ -415,7 +415,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_WAIT_PROFILE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_WAIT_PROFILE");
 
             var tileLocalHour = fact.Metadata["tile_local_hour"];
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");

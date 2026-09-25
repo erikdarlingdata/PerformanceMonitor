@@ -659,12 +659,24 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // Current window: all-types wait ms/sec per collection (interval via LAG), tiled by target-local
             // hour (#3653 A8 option B, lane L2a) — the ordinals are WaitRateTileWindowSql's column order, pinned.
-            List<WindowTile> tiles;
+            // #3653 A8 hygiene: total_wait_ms (ordinal 3) is not one of WindowTile's fields (it isn't a
+            // peak/mean/sample statistic), so it is summed in THIS SAME reader pass, from the same rows the
+            // tiles are built from — a second NpgsqlCommand re-running the identical SQL used to do this read,
+            // doubling the store round trip every pass took (live-measured: pg_stat_statements showed 2 calls
+            // to this statement per pass before this fix, 1 after). Lite's twin (AnomalyDetector.cs
+            // DetectWaitAnomalies) already reads once, in one loop; this brings the SQL Server store side to
+            // the same shape.
+            List<WindowTile> tiles = new();
+            double totalWaitMs = 0;
             using (var rateCmd = new NpgsqlCommand(WaitRateTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
             {
                 BindTiledWindow(rateCmd, context, map);
                 using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
-                tiles = await ReadTilesAsync(rateReader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, peakTimeOrdinal: -1, context.CancellationToken);
+                while (await rateReader.ReadAsync(context.CancellationToken))
+                {
+                    tiles.Add(WindowTiles.ReadTile(rateReader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, peakTimeOrdinal: -1));
+                    totalWaitMs += rateReader.IsDBNull(3) ? 0.0 : Convert.ToDouble(rateReader.GetValue(3));
+                }
             }
 
             var whole = WindowTiles.WholeWindow(tiles);
@@ -672,18 +684,6 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             var peakRate = whole.Peak;
             var avgRate = whole.Mean;
-            /* total_wait_ms is not one of WindowTile's fields (it isn't a peak/mean/sample statistic), so it is
-               summed across tiles here, once, from the same rows the tiles came from. */
-            double totalWaitMs = 0;
-            using (var totalCmd = new NpgsqlCommand(WaitRateTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
-            {
-                BindTiledWindow(totalCmd, context, map);
-                using var totalReader = await totalCmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await totalReader.ReadAsync(context.CancellationToken))
-                {
-                    totalWaitMs += totalReader.IsDBNull(3) ? 0.0 : Convert.ToDouble(totalReader.GetValue(3));
-                }
-            }
 
             // The coordinator's ruling for this family (#3653 A8 option B, lane L2a): the start-bucket arm
             // choice stays exactly as it is today (robust z / classical ratio / no-baseline). Only the
