@@ -2514,6 +2514,13 @@ public sealed class DarlingManagedPostgres
            completely unmentioned. Never throws, never deletes. */
         DarlingInstallDirectoryReport.Report(AppContext.BaseDirectory, _logger);
 
+        /* Declared before the upgrade branch (#4280 round-2 part 2, item 2), not called eagerly: cert
+           generation only needs to run once BuildServerRuntimeOptions or the auto.conf carry trial actually
+           needs the SSL options, and BuildNetworkPlan itself never throws, so deferring it costs nothing.
+           NetworkPlan/NetworkMode stay private to this class — every consumer outside it (UpgradeContext's own
+           delegate included) sees only the Func<string> built from networkPlan.Value below. */
+        var networkPlan = new Lazy<NetworkPlan>(BuildNetworkPlan);
+
         /* #3908: whether this start found a cluster, captured before initdb can create one. A new cluster has no
            extension for the quiesced update to move. */
         var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
@@ -2535,7 +2542,7 @@ public sealed class DarlingManagedPostgres
                start just below, a reverted upgrade's restart, or a plain start of a store still on 17), make
                sure its conf is one 17 will open. */
             HealLegacyMaintenanceWorkMem(_dataDirectory);
-            await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);
+            await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);
         }
 
         /* #4280: a server CarryAutoConfAsync's auto.conf trial left on a private port (the confirmed stop in
@@ -2546,6 +2553,20 @@ public sealed class DarlingManagedPostgres
         if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
         {
             throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+        }
+
+        /* #4280 item 4: a "carrying" marker here means a PREVIOUS start's carry never reached trial-passed —
+           crash, power loss, or an SCM kill between the marker write and the trial. Read once and kept for the
+           real-start fallback below too: nothing between here and there touches this marker, and a
+           "trial-passed" marker is this same call's own carry (or a previous one that got as far as a verified
+           trial), which item 4 leaves alone — only item 2's fallback, at the real start, consumes that one. */
+        var autoConfCarryMarker = _storeUpgrade.TryReadAutoConfCarryMarker(_dataDirectory);
+        if (autoConfCarryMarker is { State: DarlingStoreUpgrade.AutoConfCarryStateCarrying })
+        {
+            await _storeUpgrade.ResetAutoConfCarryAsync(
+                _dataDirectory, autoConfCarryMarker.Value,
+                "a previous start's postgresql.auto.conf carry never finished");
+            autoConfCarryMarker = null;
         }
 
         EnsureConfAppended(_dataDirectory);
@@ -2598,12 +2619,11 @@ public sealed class DarlingManagedPostgres
            network path is caught internally (BuildNetworkPlan swallows cert-gen failure into a degrade;
            ReconcileNetworkAsync never throws) because EnsureRunningAsync's contract is throw => service-exit,
            and a typo in an optional, default-off endpoint must NEVER take collection down (Round 4 #3). */
-        var networkPlan = BuildNetworkPlan();
-        if (networkPlan.DegradeReason is not null)
+        if (networkPlan.Value.DegradeReason is not null)
         {
             _logger.LogCritical(
                 "Store network exposure DISABLED (degraded to loopback-only): {Reason}. Fix postgres.network and restart to expose the store.",
-                networkPlan.DegradeReason);
+                networkPlan.Value.DegradeReason);
         }
 
         if (alreadyRunning)
@@ -2616,8 +2636,32 @@ public sealed class DarlingManagedPostgres
         }
         else
         {
-            await StartServerAsync(binDirectory, networkPlan, cancellationToken);
+            try
+            {
+                await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
+            }
+            catch (Exception) when (autoConfCarryMarker is { State: DarlingStoreUpgrade.AutoConfCarryStateTrialPassed })
+            {
+                /* #4280 item 2: the trial proved these names alone, on a private port with its own SSL
+                   options — the real start can still fail for a reason outside that scope (the configured
+                   port, the actual network exposure, timing). One retry on an empty postgresql.auto.conf,
+                   the same recovery the trial's own combined check uses; a second failure throws as-is,
+                   unwrapped, same as before this fallback existed. */
+                await _storeUpgrade.ResetAutoConfCarryAsync(
+                    _dataDirectory, autoConfCarryMarker.Value,
+                    "the real start failed even though these settings passed an isolated trial");
+                await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
+            }
+
             _startedByThisProcess = true;
+        }
+
+        /* Covers all three ways this point is reached with nothing left pending: already running (no start
+           attempted here), the real start succeeding outright, or the fallback's retry succeeding (which
+           already deleted the marker as part of ResetAutoConfCarryAsync above — a harmless no-op here). */
+        if (autoConfCarryMarker is not null)
+        {
+            DarlingStoreUpgrade.TryDeleteAutoConfCarryMarker(_dataDirectory);
         }
 
         var connectionString = BuildConnectionString(_config.Port, password);
@@ -2662,7 +2706,7 @@ public sealed class DarlingManagedPostgres
         /* Reconcile pg_hba + reload + verify, the adopted-listener guard, and the firewall against the LIVE
            server — symmetric (present when exposed, absent when loopback/degraded). Never throws (Round 4 #3):
            a network reconcile failure logs + degrades, it does not abort the bootstrap. */
-        await ReconcileNetworkAsync(binDirectory, networkPlan, connectionString, cancellationToken);
+        await ReconcileNetworkAsync(binDirectory, networkPlan.Value, connectionString, cancellationToken);
 
         return connectionString;
     }
@@ -3457,7 +3501,7 @@ public sealed class DarlingManagedPostgres
     /// </list>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private async Task EnsureDataDirectoryMajorAsync(string binDirectory, CancellationToken cancellationToken)
+    private async Task EnsureDataDirectoryMajorAsync(string binDirectory, Lazy<NetworkPlan> networkPlan, CancellationToken cancellationToken)
     {
         var dataMajor = DarlingStoreUpgrade.ParseDataDirectoryMajor(
             await File.ReadAllTextAsync(Path.Combine(_dataDirectory, "PG_VERSION"), cancellationToken));
@@ -3532,7 +3576,15 @@ public sealed class DarlingManagedPostgres
                 dataMajor.Value,
                 bundledMajor.Value,
                 _bundledTimescaleVersion ?? string.Empty,
-                EnsureConfAppended),
+                EnsureConfAppended,
+                /* Func<string>, never the NetworkPlan/NetworkMode types themselves — both are private to this
+                   class, and UpgradeContext is read by DarlingStoreUpgrade (#4280 round-2 part 2, item 2). The
+                   auto.conf carry trial appends this to its own start so a carried setting that only fails
+                   under SSL (the round-1 review's ssl_ca_file example) is caught before the real start ever
+                   sees it, not just before an SSL-less trial would have. */
+                () => networkPlan.Value.Mode == NetworkMode.Exposed
+                    ? BuildSslServerOptions(networkPlan.Value.CertPath, networkPlan.Value.KeyPath)
+                    : string.Empty),
             cancellationToken);
 
         LastUpgradeOutcome = outcome;
@@ -4258,14 +4310,29 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append("-p ").Append(port);
         builder.Append(" -c listen_addresses=").Append(BuildListenAddresses(networkListenIp));
+        builder.Append(BuildSslServerOptions(sslCertFile, sslKeyFile));
+        return builder.ToString();
+    }
 
-        if (!string.IsNullOrWhiteSpace(sslCertFile) && !string.IsNullOrWhiteSpace(sslKeyFile))
+    /// <summary>
+    /// The SSL trio ("-c ssl=on -c ssl_cert_file=... -c ssl_key_file=..."), leading space and all — the same
+    /// shape as <see cref="DarlingStoreUpgrade"/>'s own extraServerOptions constants, so it drops straight
+    /// into StartClusterAsync's extraServerOptions parameter. Factored out of
+    /// <see cref="BuildServerRuntimeOptions"/> (no behavior change there) so the auto.conf carry trial (#4280
+    /// round-2 part 2, item 2) can append the SAME option string to its own start, rather than restate the
+    /// "-c" names a second time. Empty when either path is missing.
+    /// </summary>
+    internal static string BuildSslServerOptions(string? sslCertFile, string? sslKeyFile)
+    {
+        if (string.IsNullOrWhiteSpace(sslCertFile) || string.IsNullOrWhiteSpace(sslKeyFile))
         {
-            builder.Append(" -c ssl=on");
-            builder.Append(" -c ssl_cert_file=").Append(ToForwardSlashes(sslCertFile));
-            builder.Append(" -c ssl_key_file=").Append(ToForwardSlashes(sslKeyFile));
+            return string.Empty;
         }
 
+        var builder = new StringBuilder();
+        builder.Append(" -c ssl=on");
+        builder.Append(" -c ssl_cert_file=").Append(ToForwardSlashes(sslCertFile));
+        builder.Append(" -c ssl_key_file=").Append(ToForwardSlashes(sslKeyFile));
         return builder.ToString();
     }
 

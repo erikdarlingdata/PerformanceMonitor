@@ -1284,7 +1284,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.True(method >= 0, "EnsureRunningAsync's signature moved, so this pin can no longer find it.");
 
         var heal = source.IndexOf("HealLegacyMaintenanceWorkMem(_dataDirectory);", method, StringComparison.Ordinal);
-        var upgrade = source.IndexOf("await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);", method, StringComparison.Ordinal);
+        var upgrade = source.IndexOf("await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);", method, StringComparison.Ordinal);
         Assert.True(heal > method, "EnsureRunningAsync no longer heals maintenance_work_mem before anything starts a PostgreSQL 17 cluster (#3909).");
         Assert.True(upgrade > heal,
             "The heal must run before EnsureDataDirectoryMajorAsync: the store upgrade's first step starts the old cluster on the data directory's own conf.");

@@ -2222,7 +2222,11 @@ public sealed class DarlingStoreUpgradeTests
         var ensureRunning = At("public async Task<string> EnsureRunningAsync(", 0);
         var conf = At("EnsureConfAppended(_dataDirectory);", ensureRunning);
         var update = At("UpdateTimescaleQuiescedAsync(", ensureRunning);
-        var plan = At("BuildNetworkPlan();", ensureRunning);
+        /* networkPlan is declared as a Lazy<NetworkPlan> before this method's upgrade branch (#4280 round-2
+           part 2, item 2 — so the auto.conf carry trial's SSL delegate can force it), but RESOLVED (.Value)
+           here, in the same relative spot the eager BuildNetworkPlan() call used to sit — this is still the
+           ordering that matters: nothing forces cert generation before the quiesced update has run. */
+        var plan = At("networkPlan.Value.DegradeReason", ensureRunning);
         var start = At("StartServerAsync(binDirectory, networkPlan", ensureRunning);
         Assert.True(conf < update && update < plan && plan < start,
             "the quiesced TimescaleDB update must run after the conf append and before the network plan and the start");
