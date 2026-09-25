@@ -11,12 +11,15 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -606,5 +609,215 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
+    }
+
+    private const int ParityServerId = -949558;
+    private const string ParityServerName = "query-heatmap-parity";
+    private const string ParityDb = "AppDb";
+
+    /// <summary>
+    /// #4233 ruling item 4's live pin: the pre-#4233 SQL (fetched via <c>git show origin/dev:...</c> before
+    /// this PR's rewrite landed, pinned below as <see cref="PreQ4233HeatmapSql"/> so it cannot silently rot)
+    /// and #4233's new <see cref="DarlingQueryHeatmapReader.BuildQueryHeatmapSql"/> must return IDENTICAL
+    /// cells, counts, top hash and preview text over the same seeded window - proving the rewrite (read
+    /// query_stats directly, resolve the preview only for the rn = 1 row) is a performance change with no
+    /// behavior change, by measurement rather than by argument. One window carries all three shapes the
+    /// ruling asked for, each in its own 5-minute bin so they cannot interact:
+    /// <list type="bullet">
+    /// <item>(a) a winner whose text lives only in query_text_dim - digest set, inline query_text NULL</item>
+    /// <item>(b) a pre-#1767 winner - inline query_text set, digest NULL</item>
+    /// <item>(c) a tie inside one cell - two rows with equal delta_execution_count, so ROW_NUMBER's
+    /// tiebreak is unspecified by either query. This does not assert WHICH row wins; both queries scan the
+    /// same base rows in the same order, so the pin is that the OLD SQL and the NEW builder agree with each
+    /// other, which is what "no behavior change" actually means for an unordered tie.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public async Task OldSqlFromDev_AndTheNewBuilder_AgreeOnCellsCountsHashAndPreview()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live heatmap parity test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var dimDigest = SHA256.HashData(Encoding.UTF8.GetBytes($"#4233 parity dim winner {ParityServerId}"));
+        await DeleteParityRowsAsync(connection, dimDigest, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ParityServerId, ParityServerName, ct);
+            var t0 = FloorToHour(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddHours(-6));
+
+            /* (a) dimension-resolved winner. */
+            await InsertDimTextAsync(connection, ct, dimDigest, "SELECT dim_winner_text FROM t");
+            await SeedParityRowAsync(connection, ct, t0, "0xDIMWIN", deltaExec: 9, deltaElapsed: 450_000, queryText: null, digest: dimDigest);
+
+            /* (b) pre-#1767 winner: inline text, no digest. */
+            await SeedParityRowAsync(connection, ct, t0.AddMinutes(5), "0xINLINEWIN", deltaExec: 7, deltaElapsed: 350_000, queryText: "SELECT inline_winner_text", digest: null);
+
+            /* (c) a tie: equal delta_execution_count, same cell. */
+            await SeedParityRowAsync(connection, ct, t0.AddMinutes(10), "0xTIEA", deltaExec: 3, deltaElapsed: 150_000, queryText: "SELECT tie_a", digest: null);
+            await SeedParityRowAsync(connection, ct, t0.AddMinutes(10), "0xTIEB", deltaExec: 3, deltaElapsed: 150_000, queryText: "SELECT tie_b", digest: null);
+
+            var start = t0.AddMinutes(-1);
+            var end = t0.AddMinutes(20);
+
+            var oldRows = await RunHeatmapSqlAsync(connection, PreQ4233HeatmapSql, ParityServerId, start, end, ct);
+            var newRows = await RunHeatmapSqlAsync(connection, DarlingQueryHeatmapReader.BuildQueryHeatmapSql(HeatmapMetric.Duration), ParityServerId, start, end, ct);
+
+            Assert.Equal(3, oldRows.Count);
+            Assert.Equal(oldRows.Count, newRows.Count);
+
+            for (var i = 0; i < oldRows.Count; i++)
+            {
+                Assert.Equal(oldRows[i].TimeBin, newRows[i].TimeBin);
+                Assert.Equal(oldRows[i].BucketIndex, newRows[i].BucketIndex);
+                Assert.Equal(oldRows[i].Count, newRows[i].Count);
+                Assert.Equal(oldRows[i].Hash, newRows[i].Hash);
+                Assert.Equal(oldRows[i].Text, newRows[i].Text);
+            }
+
+            /* Confirm the agreement above is not two queries independently returning the WRONG (but
+               matching) answer - check the new builder's rows against what was actually seeded. */
+            var dimCell = newRows.Single(r => r.TimeBin == t0);
+            Assert.Equal("0xDIMWIN", dimCell.Hash);
+            Assert.Equal("SELECT dim_winner_text FROM t", dimCell.Text);
+
+            var inlineCell = newRows.Single(r => r.TimeBin == t0.AddMinutes(5));
+            Assert.Equal("0xINLINEWIN", inlineCell.Hash);
+            Assert.Equal("SELECT inline_winner_text", inlineCell.Text);
+
+            var tieCell = newRows.Single(r => r.TimeBin == t0.AddMinutes(10));
+            Assert.Equal(2, tieCell.Count);
+            Assert.Contains(tieCell.Hash, new[] { "0xTIEA", "0xTIEB" });
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteParityRowsAsync(cleanup, dimDigest, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// The pre-#4233 shape of <see cref="DarlingQueryHeatmapReader.BuildQueryHeatmapSql"/>, copied from
+    /// `git show origin/dev:Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingQueryHeatmapReader.cs`
+    /// before this PR's rewrite landed there, with the metric expression resolved to Duration inline so the
+    /// comparison needs no template parameter. Reads v_query_stats (#1767's payload-resolving view) and
+    /// truncates query_text to a preview INSIDE base, for every row in the window - the shape #4233 replaced.
+    /// </summary>
+    private const string PreQ4233HeatmapSql = """
+        WITH base AS (
+            SELECT
+                date_bin(($5::integer * INTERVAL '1 minute'), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
+                (delta_elapsed_time / 1000.0) / NULLIF(delta_execution_count, 0) AS metric_value,
+                query_hash,
+                LEFT(query_text, $7) AS query_preview,
+                delta_execution_count
+            FROM v_query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   delta_execution_count > 0
+            AND   (delta_elapsed_time / 1000.0) / NULLIF(delta_execution_count, 0) IS NOT NULL
+        ),
+        binned AS (
+            SELECT
+                time_bin,
+                CASE
+                    WHEN metric_value < 1 THEN 0
+                    WHEN metric_value < 10 THEN 1
+                    WHEN metric_value < 100 THEN 2
+                    WHEN metric_value < 1000 THEN 3
+                    WHEN metric_value < 10000 THEN 4
+                    WHEN metric_value < 100000 THEN 5
+                    ELSE 6
+                END AS bucket_index,
+                query_hash,
+                query_preview,
+                delta_execution_count
+            FROM base
+        ),
+        ranked AS (
+            SELECT
+                time_bin,
+                bucket_index,
+                query_hash,
+                query_preview,
+                COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
+                ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
+            FROM binned
+        )
+        SELECT
+            time_bin,
+            bucket_index,
+            query_count,
+            query_hash AS top_query_hash,
+            query_preview AS top_query_text
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY time_bin DESC, bucket_index
+        LIMIT $6
+        """;
+
+    private static async Task SeedParityRowAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime collectionTime, string queryHash,
+        long deltaExec, long deltaElapsed, string? queryText, byte[]? digest) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash,
+     sample_interval_seconds, delta_execution_count, delta_worker_time, delta_elapsed_time,
+     delta_logical_reads, delta_logical_writes, query_text, query_text_digest)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTime), ParityServerId, ParityServerName,
+            ParityDb, queryHash, 60, deltaExec, 0L, deltaElapsed, 0L, 0L, queryText, digest);
+
+    private static async Task InsertDimTextAsync(NpgsqlConnection connection, CancellationToken ct, byte[] digest, string text) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct,
+            "INSERT INTO query_text_dim (digest, query_text, last_seen) VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING",
+            digest, text, DarlingMcpTestData.Naive(DateTime.UtcNow));
+
+    /// <summary>Runs either heatmap SQL text with the same seven bound parameters ($4 database filter NULL,
+    /// $5 bucket_minutes 5, $6 limit 500, $7 preview length 120) and returns the cells sorted by
+    /// (time_bin, bucket_index) - sorted explicitly rather than trusting each query's own ORDER BY, so the
+    /// comparison is over the same SET of cells rather than incidentally over matching physical order.</summary>
+    private static async Task<List<(DateTime TimeBin, int BucketIndex, long Count, string Hash, string Text)>> RunHeatmapSqlAsync(
+        NpgsqlConnection connection, string sql, int serverId, DateTime start, DateTime end, CancellationToken ct)
+    {
+        var rows = new List<(DateTime TimeBin, int BucketIndex, long Count, string Hash, string Text)>();
+        await using var command = new NpgsqlCommand(sql, connection);
+        DarlingMcpReadParameters.AddWindow(command, serverId, start, end);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 5 });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 500 });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 120 });
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4)));
+        }
+
+        return rows.OrderBy(r => r.TimeBin).ThenBy(r => r.BucketIndex).ToList();
+    }
+
+    private static async Task DeleteParityRowsAsync(NpgsqlConnection connection, byte[] dimDigest, CancellationToken ct)
+    {
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_stats WHERE server_id = $1", ParityServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ParityServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ParityServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM query_text_dim WHERE digest = $1", dimDigest);
     }
 }
