@@ -100,7 +100,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             await SeedCpuHourAsync(connection, serverId, serverName, T, 3, seededHigh: true, ct);
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_CPU_SPIKE");
 
             var tileLocalHour = fact.Metadata["tile_local_hour"];
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
@@ -194,7 +194,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_CPU_SPIKE");
 
             // The robust (modified-z) frame runs here too (see scenario 1's note), so the Sidak raise is over
             // ModifiedZThreshold (3.5), not the classical DefaultDeviationThreshold (2.0).
@@ -319,7 +319,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_CPU_SPIKE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_CPU_SPIKE");
 
             Assert.False(fact.Metadata.ContainsKey("tile_local_hour"), "the never-blind fallback must not carry tile keys");
             Assert.False(fact.Metadata.ContainsKey("tile_day_of_week"));
@@ -415,7 +415,7 @@ public sealed class SqlServerStoreTileBehaviourTests
             }
 
             var facts = await detector.DetectAnomaliesAsync(context);
-            var fact = Assert.Single(facts.Where(f => f.Key == "ANOMALY_WAIT_PROFILE"));
+            var fact = Assert.Single(facts, f => f.Key == "ANOMALY_WAIT_PROFILE");
 
             var tileLocalHour = fact.Metadata["tile_local_hour"];
             Assert.True(tileLocalHour == 12 || tileLocalHour == 13, $"expected tile_local_hour 12 or 13, got {tileLocalHour}");
@@ -426,6 +426,107 @@ public sealed class SqlServerStoreTileBehaviourTests
             // so the stamp is the heavy-tail modified-z cutoff, exactly like every sibling tiled family.
             Assert.True(fact.Metadata.ContainsKey("fire_threshold"), "ANOMALY_WAIT_PROFILE should now stamp fire_threshold");
             Assert.Equal(AnomalyThresholds.HeavyTailModifiedZThreshold, fact.Metadata["fire_threshold"], 0.001);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await CleanupWaitsAsync(cleanup, serverId, cleanupCt);
+                await DropBaselineFallbackViewsAsync(cleanup, cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>#3653 A8 hygiene: <see cref="PgAnomalyDetector"/>'s wait-profile family
+    /// (<c>ANOMALY_WAIT_PROFILE</c>, <c>DetectWaitAnomalies</c>) used to run <c>WaitRateTileWindowSql</c>
+    /// TWICE per analysis pass — once to build the tiles, once more, word-for-word, just to sum
+    /// <c>total_wait_ms</c> — where Lite's twin (<c>Lite.Analysis.AnomalyDetector.DetectWaitAnomalies</c>)
+    /// has always read it in ONE loop. The doubled read has no observable effect on the fired fact (both
+    /// reads return identical rows), so only the store round-trip COUNT can tell the fixed shape from the
+    /// regressed one — this pins that count through <c>pg_stat_statements</c> (reset before, summed after
+    /// one analysis pass, matched on a column-alias fragment unique to this statement).
+    ///
+    /// <para>Needs <c>pg_stat_statements</c> in <c>shared_preload_libraries</c>, which this repo's CI rig
+    /// does not currently set (only <c>timescaledb</c>) — skips, rather than fails, when the extension
+    /// will not load, exactly as every test in this file already skips when <c>DARLING_TEST_PG</c> is
+    /// unset.</para></summary>
+    [Fact]
+    public async Task Waits_DetectAnomaliesAsync_ReadsWaitRateTileWindowSqlOnce_NotTwice()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the live tile-behaviour test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int serverId = -3653_08;
+        const string serverName = "sqlstore-tile-waits-readcount";
+        const string waitType = "TILE_TEST_WAIT";
+        const string insertWait =
+            "INSERT INTO wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)";
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await CleanupWaitsAsync(connection, serverId, ct);
+
+        using (var extCmd = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", connection))
+        {
+            try
+            {
+                await extCmd.ExecuteNonQueryAsync(ct);
+            }
+            catch (PostgresException ex)
+            {
+                Assert.Skip($"pg_stat_statements did not load ({ex.Message}) - this rig's postgresql.conf must carry it in shared_preload_libraries to run this pin.");
+            }
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            // One hour is enough: the doubled read fires unconditionally once whole.Samples > 0 (before the
+            // baseline is even fetched), so the 21-day history the sibling scenario seeds is not needed here.
+            var id = 991_000L;
+            for (var i = 0; i < 12; i++)
+            {
+                var totalMs = (i % 3) switch { 0 => 30000L, 1 => 60000L, _ => 90000L };
+                await InsertAsync(connection, insertWait, id++, TruncateToSeconds(T.AddMinutes(5 * i)), serverId, serverName, waitType, 10L, totalMs);
+            }
+
+            await TimescaleSupport.EnsureBaselineFallbackViewsAsync(connection, null, ct);
+
+            using (var resetCmd = new NpgsqlCommand("SELECT pg_stat_statements_reset()", connection))
+            {
+                await resetCmd.ExecuteNonQueryAsync(ct);
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+            var detector = new PgAnomalyDetector(postgres, provider);
+            var context = new AnalysisContext
+            {
+                ServerId = serverId,
+                ServerName = serverName,
+                TimeRangeStart = T,
+                TimeRangeEnd = T.AddHours(1),
+                ServerUtcOffset = TimeSpan.Zero
+            };
+
+            await detector.DetectAnomaliesAsync(context);
+
+            // Matched on a fragment unique to WaitRateTileWindowSql (no other statement in the codebase
+            // aliases a column peak_ms_per_sec) so this counts exactly that statement's executions,
+            // regardless of what else the same analysis pass reads.
+            long calls;
+            using (var countCmd = new NpgsqlCommand(
+                "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE query LIKE '%peak_ms_per_sec%' AND query LIKE '%v_wait_stats%'",
+                connection))
+            {
+                calls = (long)(await countCmd.ExecuteScalarAsync(ct))!;
+            }
+
+            Assert.Equal(1, calls);
 
             bodySucceeded = true;
         }
