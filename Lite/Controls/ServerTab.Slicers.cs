@@ -173,6 +173,7 @@ public partial class ServerTab : UserControl
             var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
             _queryStatsFilterMgr!.UpdateData(queryStats);
             await RefreshQueryStatsComparisonAsync(fromServer, toServer);
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, fromServer, toServer);
         }
         catch (Exception ex)
         {
@@ -224,6 +225,7 @@ public partial class ServerTab : UserControl
             var qsData = await Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, fromServer, toServer, SelectedDatabaseFilter));
             _queryStoreFilterMgr!.UpdateData(qsData);
             await RefreshQueryStoreComparisonAsync(fromServer, toServer);
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, fromServer, toServer);
         }
         catch (Exception ex)
         {
@@ -275,6 +277,7 @@ public partial class ServerTab : UserControl
             var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
             _procStatsFilterMgr!.UpdateData(procStats);
             await RefreshProcStatsComparisonAsync(fromServer, toServer);
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, fromServer, toServer);
         }
         catch (Exception ex)
         {

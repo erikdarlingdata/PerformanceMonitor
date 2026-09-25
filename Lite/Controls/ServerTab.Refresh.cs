@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
 using PerformanceMonitorLite.Helpers;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
@@ -262,6 +263,7 @@ public partial class ServerTab : UserControl
                             var cEnd = toDate ?? DateTime.UtcNow;
                             var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                             await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, cStart, cEnd);
                         }
                         break;
                     case 3: // Top Procedures by Duration
@@ -273,6 +275,7 @@ public partial class ServerTab : UserControl
                             var cEnd = toDate ?? DateTime.UtcNow;
                             var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                             await RefreshProcStatsComparisonAsync(cStart, cEnd);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, cStart, cEnd);
                         }
                         break;
                     case 4: // Query Store by Duration
@@ -284,6 +287,7 @@ public partial class ServerTab : UserControl
                             var cEnd = toDate ?? DateTime.UtcNow;
                             var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                             await RefreshQueryStoreComparisonAsync(cStart, cEnd);
+                            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, cStart, cEnd);
                         }
                         break;
                     case 5: // Plan Corrections
@@ -336,6 +340,7 @@ public partial class ServerTab : UserControl
                 var cEnd = toDate ?? DateTime.UtcNow;
                 var cStart = fromDate ?? cEnd.AddHours(-hoursBack);
                 await RefreshQueryStatsComparisonAsync(cStart, cEnd);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, cStart, cEnd);
             }
             _procStatsFilterMgr!.UpdateData(procStatsTask.Result);
             SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
@@ -344,6 +349,7 @@ public partial class ServerTab : UserControl
                 var cEnd2 = toDate ?? DateTime.UtcNow;
                 var cStart2 = fromDate ?? cEnd2.AddHours(-hoursBack);
                 await RefreshProcStatsComparisonAsync(cStart2, cEnd2);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, cStart2, cEnd2);
             }
             _queryStoreFilterMgr!.UpdateData(queryStoreTask.Result);
             SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
@@ -352,6 +358,7 @@ public partial class ServerTab : UserControl
                 var cEnd3 = toDate ?? DateTime.UtcNow;
                 var cStart3 = fromDate ?? cEnd3.AddHours(-hoursBack);
                 await RefreshQueryStoreComparisonAsync(cStart3, cEnd3);
+                await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, cStart3, cEnd3);
             }
             _planCorrectionFilterMgr!.UpdateData(planCorrectionTask.Result);
             SetDefaultSortIfNone(PlanCorrectionGrid, "Score", ListSortDirection.Descending);
@@ -366,6 +373,38 @@ public partial class ServerTab : UserControl
         {
             AppLogger.Info("ServerTab", $"[{_server.DisplayName}] RefreshQueriesAsync failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// #4231: probes the shared window-floor helper (<see cref="LocalDataService.GetQueryWindowFloorAsync"/>)
+    /// for one of the three raw-only relations and updates that tab's "Showing since &lt;time&gt;" banner —
+    /// the SAME probe and the same truncation verdict (<see cref="McpQueryTools.IsWindowTruncated"/>) the
+    /// matching MCP tool uses, so the grid and the tool never disagree about whether a window was cut short.
+    /// Called from the sub-tab switch and full-refresh paths below AND from the three OnXSlicerChanged
+    /// handlers in ServerTab.Slicers.cs — a slicer drag re-reads the same grid over a narrower window, which
+    /// can itself start after the raw table's floor, so it needs the same disclosure. No try/catch here: every
+    /// caller already runs inside its own (ServerTabCapabilityPinTests pins that every OnXSlicerChanged keeps
+    /// its own try/catch; RefreshQueriesAsync has one around the whole sub-tab switch).
+    /// </summary>
+    private async System.Threading.Tasks.Task RefreshWindowTruncatedBannerAsync(QueryWindowRelation relation, TextBlock banner, DateTime start, DateTime end)
+    {
+        var floor = await Task.Run(() => _dataService.GetQueryWindowFloorAsync(relation, _serverId, start, end));
+        var truncated = McpQueryTools.IsWindowTruncated(floor, start);
+        SetWindowTruncatedBanner(banner, truncated, floor ?? start);
+    }
+
+    /// <summary>
+    /// #4231 Ruled comment: "the WPF ... grids show 'Showing since &lt;time&gt;' in the header when the window
+    /// is cut short" — same words Darling's twin uses. Formats with ServerTimeHelper.FormatServerTime, the way
+    /// QueryStatsComparisonBanner / ProcStatsComparisonBanner / QueryStoreComparisonBanner already format their
+    /// baseline range on these same tabs. internal (not private) so QueryWindowTruncationTests can pin the
+    /// truncated/not-truncated text without instantiating the UserControl (WPF objects still need an STA
+    /// thread to construct, which the test provides; the text itself is plain string formatting).
+    /// </summary>
+    internal static void SetWindowTruncatedBanner(TextBlock banner, bool truncated, DateTime effectiveStart)
+    {
+        banner.Visibility = truncated ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+        banner.Text = truncated ? $"Showing since {ServerTimeHelper.FormatServerTime(effectiveStart)}" : string.Empty;
     }
 
     /// <summary>Tab 0 — Overview (Correlated Timeline Lanes)</summary>
