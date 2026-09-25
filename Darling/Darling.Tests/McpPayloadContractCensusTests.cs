@@ -1531,6 +1531,10 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
         ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
             "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
+        ("blocked_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_blocking/get_blocked_process_reports' blocked_sql_text previewed to SqlTextPreviewLength (150 chars) — the default row LIMIT also halved (30 -> 15), because the row's other ~37 fields, not this column alone, were most of the default page's weight; full_text or a dedup_key call (Darling only) gets the whole text"),
+        ("blocking_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_blocking/get_blocked_process_reports' blocking_sql_text, previewed the same way as blocked_sql_text_truncated"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =

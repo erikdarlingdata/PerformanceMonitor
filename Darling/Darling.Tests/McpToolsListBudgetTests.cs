@@ -99,7 +99,12 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
-    private const int TotalCeilingBytes = 172_220;
+    /* #4198 (lane TI): +391 bytes for get_blocking's default-preview note in its served description and its
+       new full_text opt-in parameter (blocked_sql_text/blocking_sql_text are now a 150-char preview by
+       default). The default row limit also dropped 30 -> 15 -- 30 rows of even sub-2000-char (never
+       truncated under the OLD cap) text measured 89,096 bytes, 2.7x the budget, because the row's other ~37
+       fields were most of the weight -- but that is not a served description, so it does not count here. */
+    private const int TotalCeilingBytes = 172_611;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

@@ -91,7 +91,13 @@ public sealed class McpToolsListBudgetTests
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
        covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
-    private const int TotalCeilingBytes = 90_271;
+    /* #4198 (lane TI): +271 bytes for get_blocked_process_reports' default-preview note in its served
+       description and its new full_text opt-in parameter (blocked_sql_text/blocking_sql_text are now a
+       150-char preview by default; the default row limit also dropped 30 -> 15, since the row's other ~37
+       fields, not the two text columns, were most of the default page's weight). Darling's twin grew by a
+       different amount (+391): Darling's description also covers the dedup_key exemption, which Lite's
+       get_blocked_process_reports has no dedup_key parameter to need. */
+    private const int TotalCeilingBytes = 90_542;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
