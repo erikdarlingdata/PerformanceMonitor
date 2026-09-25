@@ -107,10 +107,10 @@ public sealed class CommandPlaneCommandTimeoutTests
         ("StoreConfigProvider.cs", "ReadConfigVersionAsync", nameof(ServiceCommandDeadlines.ConfigReloadBeaconSeconds)),
     };
 
-    /// <summary>This group's command sites, counted so a member that stops creating commands fails loudly.</summary>
-    /// <summary>#4197 bumped this from 9 to 10: <c>GetStoredFloorAsync</c> now builds TWO commands (an
-    /// EXISTS pre-check and a MIN fallback) under the one <c>QueryStoreBackfillReadSeconds</c> regime,
-    /// where every other member in <see cref="s_sites"/> still builds exactly one.</summary>
+    /// <summary>This group's command sites, counted so a member that stops creating commands fails loudly.
+    /// #4197 bumped this from 9 to 10: <c>GetStoredFloorAsync</c> now builds TWO commands (an EXISTS pre-check
+    /// and a MIN fallback) under the one <c>QueryStoreBackfillReadSeconds</c> regime, where every other member
+    /// in <see cref="s_sites"/> still builds exactly one.</summary>
     private const int ExpectedSiteCount = 10;
 
     /// <summary>
