@@ -363,6 +363,10 @@ public sealed class McpFilterSemanticsLivePostgresTests
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                 CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(ghostDay.AddHours(6)), ServerId, ServerName,
                 DarlingMcpTestData.Naive(ghostDay.AddHours(6)), "process1", "DELETE FROM Posts", "<deadlock/>");
+            /* #4232: ghostDay is 45 days closed, well outside the cache's two-hour grace, so without this the
+               range read below would serve the block the FIRST read (above) warmed and never see this insert
+               -- a real backfill lands within the cache's one-hour contract, not this test's next statement. */
+            DarlingHealthReader.ResetRangeCacheForTests();
             var survived = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummaryRange(postgres, ServerName, 60)).RootElement;
             Assert.Equal(1, survived.GetProperty("days_before_horizon").GetInt32());
             Assert.Equal(0, survived.GetProperty("purged_day_count").GetInt32());
@@ -381,6 +385,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
                collector to 10 days moves it, and the 20-day-old run becomes a ghost too. */
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "INSERT INTO config_collector_schedules (server_id, collector_name, retention_days, enabled) VALUES (NULL, 'deadlocks', 10, TRUE)");
+            /* #4232: the DELETE above mutated ghostDay's rows again (the same closed day the reset before
+               `survived` already covered once) -- reset again so this read reflects it rather than the block
+               `survived` warmed. */
+            DarlingHealthReader.ResetRangeCacheForTests();
             var shortened = JsonDocument.Parse(await DarlingMcpHealthTools.GetDailySummaryRange(postgres, ServerName, 60)).RootElement;
             Assert.Equal(DailySummaryRetention.HorizonFor(DateTime.UtcNow, 10).ToString("yyyy-MM-dd"), shortened.GetProperty("retention_horizon").GetString());
             Assert.Equal(2, shortened.GetProperty("days_before_horizon").GetInt32());

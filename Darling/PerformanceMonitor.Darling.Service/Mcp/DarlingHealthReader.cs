@@ -397,6 +397,14 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
     internal static readonly DailySummaryRangeCache<DailySummaryReadRow> RangeCache = new();
 
+    /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design one hour stale for
+    /// a closed day -- a row that lands late for a closed day (an outage catch-up, a backfill) shows within the
+    /// hour, not immediately (the #4232 ruling). A live test that mutates a closed day's rows and reads the same
+    /// server/range again through the same store object is testing THAT contract, not a product bug, unless it
+    /// calls this between the mutation and the re-read to force the re-read to hit the store. Never call this
+    /// from product code -- only <c>Darling.Tests</c> can even see it (Service's own <c>InternalsVisibleTo</c>).</summary>
+    internal static void ResetRangeCacheForTests() => RangeCache.Clear();
+
     public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
         DateTime? referenceUtc = null, bool asOfNow = true, CancellationToken cancellationToken = default)

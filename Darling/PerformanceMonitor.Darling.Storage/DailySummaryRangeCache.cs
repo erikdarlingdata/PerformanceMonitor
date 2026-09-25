@@ -151,4 +151,11 @@ public sealed class DailySummaryRangeCache<TRow>
         _blocks[key] = new CachedBlock(closedRows, closedEndUtc, nowUtc);
         return full;
     }
+
+    /// <summary>#4232: drops every cached block, for a test that needs its next read to hit the store rather than
+    /// serve a block a prior call in the same process warmed. Public rather than <c>internal</c> -- this type's
+    /// assembly (<c>PerformanceMonitor.Darling.Storage</c>) does not grant <c>InternalsVisibleTo</c> to the
+    /// service, only to <c>Darling.Tests</c>, so a caller reaching this through the service's own reset seam
+    /// (<c>DarlingHealthReader.ResetRangeCacheForTests</c>) needs a public member to call.</summary>
+    public void Clear() => _blocks.Clear();
 }
