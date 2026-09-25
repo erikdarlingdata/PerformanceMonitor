@@ -1531,6 +1531,8 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
         ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs"],
             "#4198: query_text is previewed at read time by two tools: get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
+            "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
@@ -1544,6 +1546,7 @@ public sealed class McpPayloadContractCensusTests
         ("shown", ["DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs"],
             "the page's count beside an honest WHOLE total (total_entries / total_events / total_facts, or a <noun>_count over the whole in-memory set) — the cut is exact and disclosed by the pair; the #3594 spelling is *_returned + truncated, and the rename is fenced tonight because four PgTarget* test files read shown off get_analysis_facts"),
     ];
+
 
     public static readonly (string Key, string[] Files, string WhatItActuallyIs)[] CutHomonyms =
     [

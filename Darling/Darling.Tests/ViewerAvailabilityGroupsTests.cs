@@ -15,46 +15,19 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The viewer's Availability Groups tab (#991): the read SQL's dialect and latest-snapshot shape, the banding
-/// rules, and the pure card projection. Ungated — the projection half is separated from the Postgres half exactly
-/// so the rules test without a store, mirroring FleetViewTests.
-///
-/// <para>These deliberately duplicate <c>DarlingAgReaderTests</c>' expectations rather than sharing them: the
-/// viewer reader is a COPY of the service reader (no ProjectReference exists), so the pins are what keep the two
-/// from drifting into disagreeing about whether an AG is healthy.</para>
+/// The viewer's Availability Groups tab (#991): the banding rules and the pure card projection. Ungated — this
+/// half is separated from the Postgres half exactly so the rules test without a store, mirroring FleetViewTests.
+/// The read SQL's dialect and latest-snapshot shape are pinned once, in <c>DarlingAgStatesReaderTests</c>
+/// (#4228) — this file and <c>DarlingAgReaderTests</c> both call the SAME <c>DarlingAgStatesReader</c> now, so
+/// there is one statement to disagree about instead of two.
 /// </summary>
 public sealed class AgTopologyCardsTests
 {
-    /* ─────────────────────────── SQL pins ─────────────────────────── */
-
-    [Fact]
-    public void AgSql_IsPostgresDialect_AndReadsTheBareCollectTables()
-    {
-        foreach (var sql in new[] { ViewerDataService.AgReplicaStatesSql, ViewerDataService.AgDatabaseReplicaStatesSql })
-        {
-            /* The viewer's store connection resolves `collect` through search_path, so these must NOT be
-               schema-qualified the way the service reader's copies are. */
-            Assert.DoesNotContain("collect.", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
-        }
-
-        Assert.Contains("FROM ag_replica_states", ViewerDataService.AgReplicaStatesSql, StringComparison.Ordinal);
-        Assert.Contains("FROM ag_database_replica_states", ViewerDataService.AgDatabaseReplicaStatesSql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void AgSql_KeepsEveryRowAtEachServersNewestCollection()
-    {
-        /* DISTINCT ON would keep ONE row per server, which is exactly wrong: a snapshot is many rows (one per
-           replica / per database). The join against MAX(collection_time) keeps them all. */
-        foreach (var sql in new[] { ViewerDataService.AgReplicaStatesSql, ViewerDataService.AgDatabaseReplicaStatesSql })
-        {
-            Assert.Contains("MAX(collection_time)", sql, StringComparison.Ordinal);
-            Assert.Contains("GROUP BY server_id", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("DISTINCT ON", sql, StringComparison.Ordinal);
-        }
-    }
+    /* The SQL pins used to live here, against this file's own copy of the statement text (the viewer had no
+       route to the service assembly that carried the other copy). Both copies moved to DarlingAgStatesReader
+       in PerformanceMonitor.Darling.Storage (#4228), which this project already references, and the dialect /
+       shape pins moved with it to DarlingAgStatesReaderTests — one set of pins for the one implementation,
+       instead of two that could drift apart. */
 
     [Theory]
     [InlineData(true, "local")]
@@ -75,28 +48,6 @@ public sealed class AgTopologyCardsTests
 
         var card = Assert.Single(AgTopology.BuildCards(new[] { replica }, Array.Empty<AgTopologyDatabaseRow>()));
         Assert.Equal(expected, Assert.Single(card.Replicas).LocalDisplay);
-    }
-
-    [Fact]
-    public void AgSql_SelectsIsLocalOnBothGrains()
-    {
-        /* is_local arrived on the replica grain in V37; the database grain has carried it since V34. Both reads
-           must select it, and the replica read's ordinals shifted when it was inserted — this pin plus the
-           projection tests are what stand between that and a silently mis-mapped column. */
-        Assert.Contains("r.is_local", ViewerDataService.AgReplicaStatesSql, StringComparison.Ordinal);
-        Assert.Contains("d.is_local", ViewerDataService.AgDatabaseReplicaStatesSql, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void AgSql_RestrictsToTheEnabledServerRegistry()
-    {
-        /* A server disabled in the control plane leaves the fleet surfaces at once; its AG cards go with it
-           rather than lingering until retention expires the rows. */
-        foreach (var sql in new[] { ViewerDataService.AgReplicaStatesSql, ViewerDataService.AgDatabaseReplicaStatesSql })
-        {
-            Assert.Contains("JOIN servers AS s", sql, StringComparison.Ordinal);
-            Assert.Contains("s.is_enabled", sql, StringComparison.Ordinal);
-        }
     }
 
     /* ─────────────────────────── banding ─────────────────────────── */
