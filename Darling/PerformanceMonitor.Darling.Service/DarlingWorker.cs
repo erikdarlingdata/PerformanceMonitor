@@ -2351,7 +2351,7 @@ public sealed class DarlingWorker : BackgroundService
            connection factory — because phase 1 has no write path at all; the store it writes to is
            the monitoring store, never a monitored server. */
         _planForceBot = new PlanForceBot(
-            new PgPlanForceActionStore(postgres),
+            new PgPlanForceActionStore(postgres, _loggerFactory.CreateLogger<PgPlanForceActionStore>()),
             config.ForcePlanBot.ToSettings(),
             _loggerFactory.CreateLogger<PlanForceBot>());
 

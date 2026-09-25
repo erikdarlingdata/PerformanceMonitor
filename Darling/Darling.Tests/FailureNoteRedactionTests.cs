@@ -70,22 +70,26 @@ public sealed class FailureNoteRedactionTests
         Assert.Contains("DescribeFailureForPayload(ex)", call, StringComparison.Ordinal);
     }
 
-    // ── the force-plan target-state reader ──────────────────────────────────────────────
+    // ── the force-plan target-state reader, and the bot's own copy of the same read ────
 
-    [Fact]
-    public void TheForcePlanReader_LogsOnceAndNeverPutsExMessageInItsReturnedNote()
+    [Theory]
+    [InlineData("Mcp/DarlingForcePlanTargetStateReader.cs")]
+    [InlineData("PgPlanForceActionStore.cs")]
+    public void TheForcePlanReader_LogsOnceAndNeverPutsExMessageInItsReturnedNote(string relativePath)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(Path.Combine(
-            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingForcePlanTargetStateReader.cs")));
+            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", relativePath.Replace('/', Path.DirectorySeparatorChar))));
 
-        /* No other ex.Message use exists anywhere in this file (confirmed by reading it) — comments are
-           stripped above, so this catches the code, not a remark about the fix. */
+        /* No other ex.Message use exists anywhere in either file (confirmed by reading them) — comments are
+           stripped above, so this catches the code, not a remark about the fix. PgPlanForceActionStore's own
+           TryGetTargetStatesAsync (#4316 round 1, M1) is the bot's copy of the same read and used to carry the
+           same raw ex.Message the reader was fixed to drop. */
         Assert.DoesNotContain("ex.Message", code, StringComparison.Ordinal);
         Assert.Contains("DescribeFailureForPayload(ex)", code, StringComparison.Ordinal);
 
         /* #4316: this failure logged nowhere before. It must now, at Warning, with the exception itself
            (not just its message) so the service log keeps the full text and stack. */
-        Assert.Contains("logger?.LogWarning(ex,", code, StringComparison.Ordinal);
+        Assert.Contains(".LogWarning(ex,", code, StringComparison.Ordinal);
     }
 
     // ── DarlingWorker.cs' six collection-blocking startup publishes ────────────────────

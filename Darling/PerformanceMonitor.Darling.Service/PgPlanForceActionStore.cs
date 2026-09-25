@@ -11,8 +11,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -137,10 +139,12 @@ public sealed class PgPlanForceActionStore : IPlanForceActionStore
     public const string OutcomeWithheld = "withheld";
 
     private readonly NpgsqlDataSource _postgres;
+    private readonly ILogger? _logger;
 
-    public PgPlanForceActionStore(NpgsqlDataSource postgres)
+    public PgPlanForceActionStore(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _logger = logger;
     }
 
     /// <summary>Appends one row and returns its <c>action_id</c> so a follow-up row can reference it.</summary>
@@ -311,7 +315,11 @@ SELECT
         }
         catch (Exception ex)
         {
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message})");
+            /* #4316 round 1 (M1): the same redaction as DarlingForcePlanTargetStateReader.TryReadAsync. This
+               reason lands in collect.plan_force_actions.detail, which get_plan_force_actions will serve, so it
+               carries only the type and SQLSTATE; the full exception goes to the service log once. */
+            _logger?.LogWarning(ex, "The plan-force bot's forcing and automatic-plan-correction state read failed for server {ServerId}.", serverId);
+            return (null, $"the forcing and automatic-plan-correction state read failed ({PgFactCollector.DescribeFailureForPayload(ex)})");
         }
     }
 
