@@ -451,6 +451,34 @@ public static class ServiceCommandDeadlines
     public const int StartupHostProfileSeconds = CliStoreReadSeconds + 5;
 
     /// <summary>
+    /// The <c>get_store_host</c> MCP read's own regime (#4214 part 2): a linked CTS wrapped around
+    /// <c>DarlingStoreHostProfile.GatherAsync</c> — the SAME orchestration <c>--check-settings</c> calls,
+    /// store facts included, unlike <see cref="StartupHostProfileSeconds"/>'s startup profile which never
+    /// reaches <c>GatherStoreFactsAsync</c> at all (ruling 9).
+    ///
+    /// <para><b>Why the MCP surface needs its own outer bound where the CLI verb needs none.</b>
+    /// <c>CliStoreReadSeconds</c> IS the bound for <c>--check-settings</c> because nothing waits behind an
+    /// operator's own console command. An MCP tool call is different: <c>McpCommandDeadlines</c>'s own
+    /// header states that none of the <c>[McpServerTool]</c> methods take a <c>CancellationToken</c>, so a
+    /// caller that gives up leaves the read running with nothing to cancel it — exactly the gap that sweep
+    /// closed for the other 124 shipped reads. This read cannot simply take their constant
+    /// (<c>McpCommandDeadlines.ReadSeconds</c>, 20s): unlike every read that constant covers, this one's
+    /// component queries scale with the STORE (#3199) rather than the row, so this needed a regime of its
+    /// own rather than joining one sized for the opposite kind of read.</para>
+    ///
+    /// <para><b>ABOVE the sum of what it wraps, not tied to any one query in it.</b>
+    /// <c>GatherAsync</c> runs, sequentially, the version/buffer/size/uncompressed-chunk reads
+    /// (<c>GatherStoreFactsAsync</c>, each individually bounded at <see cref="CliStoreReadSeconds"/>) and
+    /// then the <c>pg_settings</c> read (<c>GatherSettingProfilesAsync</c>, same per-statement bound) plus
+    /// eight local conf-file reads (sub-millisecond). Only two of those five statements are store-scaling
+    /// (<c>StoreSizeSql</c>, <c>UncompressedChunkSizeSql</c> — <c>SerialLoopStoreSizeSourceTests</c>'
+    /// regex), so the backstop clears TWO store-scaling statements at their own ceiling plus the same 5s
+    /// margin <see cref="StartupHostProfileSeconds"/> carries for everything outside the one query it
+    /// backstops.</para>
+    /// </summary>
+    public const int McpStoreHostProfileSeconds = (CliStoreReadSeconds * 2) + 5;
+
+    /// <summary>
     /// The store&lt;-&gt;service COMMAND plane's own bookkeeping — the stale-command reaper, the atomic
     /// claim, the desired-state store write a claimed command dispatches, the terminal result report,
     /// and the <c>pg_statement_text</c> lookup <c>test_hypothetical_index</c> resolves its statement
