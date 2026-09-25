@@ -83,6 +83,8 @@ public sealed class McpToolsListBudgetTests
     /* #4199 (M2b): +162 bytes for get_collection_log's fleet-form server_name/limit descriptions, after
        trimming both to the D2 200-char parameter cap and moving the rest to the tool's tail (get_tool_guide),
        which is not served in tools/list and so is not counted here. Matches Darling's twin change exactly. */
+    /* #4198 (get_query_heatmap): +147 bytes for the new full_text opt-in parameter, matching Darling's twin
+       change exactly. */
 /* #4198 (get_plan_corrections): +137 bytes, matching Darling's twin change exactly — the new full_text
        opt-in parameter only (the head is unchanged; the preview explanation lives in the tail get_tool_guide
        serves). Default row limit dropped 50 -> 25 and the preview 2,000 chars -> 150; neither is a served
@@ -94,7 +96,7 @@ public sealed class McpToolsListBudgetTests
     /* #4198: get_collection_log's per-server form gained full_text (76 bytes), matching Darling's twin;
        limit's own description banked 1 byte. +116 net (Lite's server_name description is shorter than
        Darling's, since it has no fleet-maintenance sentinel to warn about). */
-    private const int TotalCeilingBytes = 90_387;
+    private const int TotalCeilingBytes = 90_534;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

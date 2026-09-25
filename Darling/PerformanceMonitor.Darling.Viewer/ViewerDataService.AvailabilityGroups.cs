@@ -8,11 +8,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
-using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -20,79 +19,17 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// The Availability Group topology read for the viewer's fleet-level AG tab (#991) — the STORE half only. Every
 /// banding rule and the card projection live in <see cref="AgTopology"/> (PerformanceMonitor.Common), shared
 /// with the web dashboard and Lite's AG tab, so the three surfaces cannot reach different verdicts about the
-/// same AG. This file reads Postgres and maps rows; it decides nothing.
+/// same AG. This file maps <see cref="DarlingAgStatesReader"/>'s rows (#4228) into
+/// <see cref="AgTopologyReplicaRow"/> / <see cref="AgTopologyDatabaseRow"/>; it decides nothing.
+///
+/// <para>The statement text and the two-step, floor-bounded read used to be a separate copy here — the Viewer
+/// had no route to the Service assembly that carried the other copy. Both now call
+/// <see cref="DarlingAgStatesReader"/> in <c>PerformanceMonitor.Darling.Storage</c>, which both projects already
+/// reference, so there is one implementation instead of two that could disagree about what "the newest
+/// snapshot" means.</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>Every replica row from each server's NEWEST AG collection. The inner aggregate picks the latest
-    /// instant per server and the join keeps ALL rows at that instant (not <c>DISTINCT ON</c>, which would keep
-    /// only one replica). Joined to the ENABLED registry so a disabled server's AGs leave the surface with it.
-    /// Bare table names — the store's search_path resolves <c>collect</c>. $ none.</summary>
-    public const string AgReplicaStatesSql = @"
-SELECT
-    r.server_id,
-    r.server_name,
-    r.collection_time,
-    r.ag_name,
-    r.replica_server_name,
-    r.role_desc,
-    r.is_local,
-    r.operational_state_desc,
-    r.connected_state_desc,
-    r.recovery_health_desc,
-    r.synchronization_health_desc,
-    r.availability_mode_desc,
-    r.failover_mode_desc,
-    r.endpoint_url
-FROM ag_replica_states AS r
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM ag_replica_states
-    GROUP BY server_id
-) AS latest
-    ON r.server_id = latest.server_id
-    AND r.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = r.server_id
-    AND s.is_enabled
-ORDER BY r.server_name, r.ag_name, r.replica_server_name";
-
-    /// <summary>Every database-grain row from each server's NEWEST AG collection, same latest-snapshot shape as
-    /// <see cref="AgReplicaStatesSql"/>. Windowed independently: the two collectors sweep separately, so their
-    /// newest instants need not coincide. $ none.</summary>
-    public const string AgDatabaseReplicaStatesSql = @"
-SELECT
-    d.server_id,
-    d.server_name,
-    d.collection_time,
-    d.ag_name,
-    d.database_name,
-    d.replica_server_name,
-    d.is_local,
-    d.synchronization_state_desc,
-    d.log_send_queue_size,
-    d.redo_queue_size,
-    d.log_send_rate,
-    d.redo_rate,
-    d.is_suspended,
-    d.suspend_reason_desc,
-    d.availability_mode_desc,
-    d.secondary_lag_seconds
-FROM ag_database_replica_states AS d
-JOIN
-(
-    SELECT server_id, MAX(collection_time) AS max_collection_time
-    FROM ag_database_replica_states
-    GROUP BY server_id
-) AS latest
-    ON d.server_id = latest.server_id
-    AND d.collection_time = latest.max_collection_time
-JOIN servers AS s
-    ON s.server_id = d.server_id
-    AND s.is_enabled
-ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
-
     /// <summary>
     /// Reads the fleet's AG topology into per-(reporting server, AG) cards. An AG-less fleet — the common case —
     /// costs exactly one indexed read that returns nothing, because the database-grain read is skipped entirely
@@ -100,83 +37,77 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
     /// </summary>
     public async Task<List<AgTopologyCard>> GetAvailabilityGroupsAsync(CancellationToken cancellationToken = default)
     {
-        var replicas = await ReadAgReplicasAsync(cancellationToken);
+        var nowUtc = DateTime.UtcNow;
+        var replicas = await ReadAgReplicasAsync(nowUtc, cancellationToken);
         if (replicas.Count == 0)
         {
             return new List<AgTopologyCard>();
         }
 
-        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(cancellationToken));
+        return AgTopology.BuildCards(replicas, await ReadAgDatabasesAsync(nowUtc, cancellationToken));
     }
 
-    private async Task<List<AgTopologyReplicaRow>> ReadAgReplicasAsync(CancellationToken cancellationToken)
+    /// <summary>Maps <see cref="DarlingAgStatesReader"/>'s raw rows into <see cref="AgTopologyReplicaRow"/>,
+    /// field for field, so <see cref="AgTopology.BuildCards"/> needed no change when the read moved (#4228).
+    /// No server filter — the viewer always reads the whole fleet.</summary>
+    private async Task<List<AgTopologyReplicaRow>> ReadAgReplicasAsync(DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new List<AgTopologyReplicaRow>();
-        await using var command = _dataSource.CreateCommand(AgReplicaStatesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var raw = await DarlingAgStatesReader.GetReplicaStatesAsync(_dataSource, null, nowUtc, cancellationToken);
+        var rows = new List<AgTopologyReplicaRow>(raw.Count);
+        foreach (var row in raw)
         {
             rows.Add(new AgTopologyReplicaRow
             {
-                ServerId = reader.GetInt32(0),
-                ServerName = reader.GetString(1),
-                CollectionTime = reader.GetDateTime(2),
-                AgName = AgText(reader, 3),
-                ReplicaServerName = AgText(reader, 4),
-                RoleDesc = AgText(reader, 5),
-                IsLocal = AgFlag(reader, 6),
-                OperationalStateDesc = AgText(reader, 7),
-                ConnectedStateDesc = AgText(reader, 8),
-                RecoveryHealthDesc = AgText(reader, 9),
-                SynchronizationHealthDesc = AgText(reader, 10),
-                AvailabilityModeDesc = AgText(reader, 11),
-                FailoverModeDesc = AgText(reader, 12),
-                EndpointUrl = AgText(reader, 13),
+                ServerId = row.ServerId,
+                ServerName = row.ServerName,
+                CollectionTime = row.CollectionTime,
+                AgName = row.AgName,
+                ReplicaServerName = row.ReplicaServerName,
+                RoleDesc = row.RoleDesc,
+                IsLocal = row.IsLocal,
+                OperationalStateDesc = row.OperationalStateDesc,
+                ConnectedStateDesc = row.ConnectedStateDesc,
+                RecoveryHealthDesc = row.RecoveryHealthDesc,
+                SynchronizationHealthDesc = row.SynchronizationHealthDesc,
+                AvailabilityModeDesc = row.AvailabilityModeDesc,
+                FailoverModeDesc = row.FailoverModeDesc,
+                EndpointUrl = row.EndpointUrl,
             });
         }
 
         return rows;
     }
 
-    private async Task<List<AgTopologyDatabaseRow>> ReadAgDatabasesAsync(CancellationToken cancellationToken)
+    /// <summary>Same mapping as <see cref="ReadAgReplicasAsync"/>, for the database grain. The shared reader's
+    /// row also carries <c>LastHardenedLsn</c> / <c>LastCommitLsn</c> (the Service's columns); the viewer's card
+    /// does not surface them today, so they are simply not read here, same as before the move.</summary>
+    private async Task<List<AgTopologyDatabaseRow>> ReadAgDatabasesAsync(DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new List<AgTopologyDatabaseRow>();
-        await using var command = _dataSource.CreateCommand(AgDatabaseReplicaStatesSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        var raw = await DarlingAgStatesReader.GetDatabaseReplicaStatesAsync(_dataSource, null, nowUtc, cancellationToken);
+        var rows = new List<AgTopologyDatabaseRow>(raw.Count);
+        foreach (var row in raw)
         {
             rows.Add(new AgTopologyDatabaseRow
             {
-                ServerId = reader.GetInt32(0),
-                ServerName = reader.GetString(1),
-                CollectionTime = reader.GetDateTime(2),
-                AgName = AgText(reader, 3),
-                DatabaseName = AgText(reader, 4),
-                ReplicaServerName = AgText(reader, 5),
-                IsLocal = AgFlag(reader, 6),
-                SynchronizationStateDesc = AgText(reader, 7),
-                LogSendQueueKb = AgCount(reader, 8),
-                RedoQueueKb = AgCount(reader, 9),
-                LogSendRateKbPerSec = AgCount(reader, 10),
-                RedoRateKbPerSec = AgCount(reader, 11),
-                IsSuspended = AgFlag(reader, 12),
-                SuspendReasonDesc = AgText(reader, 13),
-                AvailabilityModeDesc = AgText(reader, 14),
-                SecondaryLagSeconds = AgCount(reader, 15),
+                ServerId = row.ServerId,
+                ServerName = row.ServerName,
+                CollectionTime = row.CollectionTime,
+                AgName = row.AgName,
+                DatabaseName = row.DatabaseName,
+                ReplicaServerName = row.ReplicaServerName,
+                IsLocal = row.IsLocal,
+                SynchronizationStateDesc = row.SynchronizationStateDesc,
+                LogSendQueueKb = row.LogSendQueueSize,
+                RedoQueueKb = row.RedoQueueSize,
+                LogSendRateKbPerSec = row.LogSendRate,
+                RedoRateKbPerSec = row.RedoRate,
+                IsSuspended = row.IsSuspended,
+                SuspendReasonDesc = row.SuspendReasonDesc,
+                AvailabilityModeDesc = row.AvailabilityModeDesc,
+                SecondaryLagSeconds = row.SecondaryLagSeconds,
             });
         }
 
         return rows;
     }
-
-    private static string? AgText(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
-
-    private static bool? AgFlag(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetBoolean(ordinal);
-
-    private static long? AgCount(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : Convert.ToInt64(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
 }
