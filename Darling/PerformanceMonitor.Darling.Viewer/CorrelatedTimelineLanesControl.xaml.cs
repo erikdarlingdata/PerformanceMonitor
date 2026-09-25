@@ -173,7 +173,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                Declared here, before the first task, so every one of the ten inherits it. */
             using var readFanOut = ViewerReadFanOut.Of(10);
 
-            var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, startUtc);
+            var cpuTask = _dataService.GetCpuUtilizationAsync(_serverId, startUtc, endUtc);
             var waitTask = _dataService.GetTotalWaitTrendAsync(_serverId, startUtc, endUtc);
             var blockingTask = _dataService.GetBlockingTrendAsync(_serverId, startUtc, endUtc);
             var deadlockTask = _dataService.GetDeadlockTrendAsync(_serverId, startUtc, endUtc);

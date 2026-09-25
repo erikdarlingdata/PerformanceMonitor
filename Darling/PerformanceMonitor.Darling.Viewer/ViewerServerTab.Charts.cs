@@ -99,7 +99,7 @@ public partial class ViewerServerTab : IDisposable
     private async Task LoadCpuAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc);
+        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc);
         /* The read is start-only server-side; bound the end for a custom range so a window that ends in
            the past doesn't trail to the newest sample. sample_time is de-skewed to naive UTC (matching endUtc). */
         if (IsCustomRange)
