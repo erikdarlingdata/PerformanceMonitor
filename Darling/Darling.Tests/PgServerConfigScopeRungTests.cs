@@ -386,7 +386,15 @@ public sealed class PgServerConfigScopeRungTests
                 var excludes = statement.Contains("database_name IS NULL", StringComparison.Ordinal)
                             && statement.Contains("role_name IS NULL", StringComparison.Ordinal);
                 var selects = statement.Contains("database_name IS NOT NULL OR", StringComparison.Ordinal);
-                if (!excludes && !selects)
+
+                /* #4348 S1b: the one-time secret scrub is the census's third answer, not a missed choice.
+                   A secret can land in a per-database or per-role override exactly as easily as in the
+                   server-wide setting (the ruling's own test shape seeds both), so the scrub's candidate
+                   read must carry NEITHER arm — it wants every row, whichever scope it is, and decides
+                   row-by-row in C# via PgSettingRedactor rather than in this SQL. */
+                var scrubsEveryScopeDeliberately = Path.GetFileName(file) == "PgSettingScrub.cs";
+
+                if (!excludes && !selects && !scrubsEveryScopeDeliberately)
                 {
                     undecided.Add($"{Path.GetFileName(file)} @ {match.Index}");
                 }
@@ -394,8 +402,9 @@ public sealed class PgServerConfigScopeRungTests
         }
 
         /* 10 -> 12 (#3937): ScopedConfigChangesSql's `snapshots` subquery and `overrides` CTE, both aliased
-           `FROM pg_server_config AS c`, both classified "selects" above. */
-        Assert.Equal(12, reads);
+           `FROM pg_server_config AS c`, both classified "selects" above. 12 -> 13 (#4348 S1b): the scrub's
+           one candidate read, classified above as the deliberate third answer. */
+        Assert.Equal(13, reads);
         Assert.True(undecided.Count == 0,
             "a pg_server_config read carries neither arm of the V138 scope split, so it will see per-database "
           + "and per-role override rows as if they were the server's settings: ["
