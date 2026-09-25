@@ -216,8 +216,10 @@ public sealed class DarlingMcpHealthTools
 
             /* The anchor is also the clock the still-forming day's window clamps against (#3525 review):
                a backdated as_of must clamp its own "today" against ITSELF, not the process clock. */
+            /* #4232 ruling item 5: only a read "as of now" (no as_of given) uses the closed-day cache — a
+               caller who pinned an explicit end time gets an unmemoized read of exactly that moment every time. */
             var range = await DarlingHealthReader.GetDailySummaryRangeAsync(
-                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd);
+                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null);
             var rows = range.Rows;
 
             if (rows.Count == 0)

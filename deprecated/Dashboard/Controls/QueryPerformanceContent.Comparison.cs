@@ -28,8 +28,13 @@ namespace PerformanceMonitorDashboard.Controls
 
             try
             {
-                var currentEnd = _queryStatsToDate ?? DateTime.UtcNow;
-                var currentStart = _queryStatsFromDate ?? currentEnd.AddHours(-_queryStatsHoursBack);
+                // #4313: server-local window (GetCurrentWindowServerLocal, shared with #4305's Server
+                // Trends ghost line) instead of a raw UTC now -- GetQueryStatsComparisonAsync,
+                // GetProcedureStatsComparisonAsync and GetQueryStoreComparisonAsync all filter on
+                // collection_time, which is server-local (collect.* defaults it to SYSDATETIME()).
+                var (currentStart, currentEnd) = CorrelatedTimelineLanesControl.GetCurrentWindowServerLocal(
+                    _queryStatsHoursBack, _queryStatsFromDate, _queryStatsToDate,
+                    DateTime.UtcNow, Helpers.ServerTimeHelper.UtcOffsetMinutes);
 
                 await RefreshQueryStatsComparisonAsync(currentStart, currentEnd);
                 await RefreshProcStatsComparisonAsync(currentStart, currentEnd);
