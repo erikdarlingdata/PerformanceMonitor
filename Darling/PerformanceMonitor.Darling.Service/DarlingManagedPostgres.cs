@@ -3979,10 +3979,9 @@ public sealed class DarlingManagedPostgres
            Open would never have helped. Each attempt gets a fresh connection because the old one's
            connector is dead. */
         var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
-        var pinned = DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString);
         for (var attempt = 1; ; attempt++)
         {
-            var connection = new NpgsqlConnection(pinned);
+            var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             try
             {
                 await connection.OpenAsync(cancellationToken);
