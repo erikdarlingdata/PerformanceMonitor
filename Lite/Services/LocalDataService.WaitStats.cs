@@ -334,9 +334,12 @@ ORDER BY wait_type, 2";
                 reader.GetString(0),
                 reader.GetDateTime(1),
                 reader.GetDateTime(5),
-                reader.GetDouble(2),
-                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+                /* ToDouble, not GetDouble: a SUM over an INTEGER-typed column (e.g. rated_tasks, inside the
+                   avg_ms_per_wait division) can come back as a boxed BigInteger DuckDB HUGEINT, which GetDouble
+                   does not accept — see GetWaitBucketsAsync's own FILTER-summed columns for the same guard. */
+                ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4))));
         }
 
         foreach (var row in rows)

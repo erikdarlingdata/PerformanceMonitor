@@ -237,11 +237,14 @@ ORDER BY counter_name, 2";
                 reader.GetString(0),
                 reader.GetDateTime(1),
                 reader.GetDateTime(6),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                /* ToInt64, not GetInt64/Convert.ToInt64: DuckDB's SUM over an INTEGER column (sample_interval_seconds)
+                   promotes to HUGEINT, which the driver hands back as a boxed BigInteger that Convert.ToInt64 cannot
+                   cast — the same reason GetPerfmonBucketsAsync's own FILTER-summed columns route through this helper. */
+                reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
                 /* NULL stays NULL: a gauge's instance rows store no delta (v62), so the SUM is NULL, not 0. */
-                reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4)),
-                reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5))));
+                reader.IsDBNull(3) ? null : ToInt64(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : ToInt64(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : (int)ToInt64(reader.GetValue(5))));
         }
 
         foreach (var row in rows)
