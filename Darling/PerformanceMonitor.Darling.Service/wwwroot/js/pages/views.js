@@ -26,7 +26,7 @@
  */
 
 import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
-import { renderPanel, VIZ } from "../panels.js";
+import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
@@ -397,6 +397,7 @@ function rememberScope(id, state) {
 }
 
 export async function renderView(main, id) {
+  const ourHash = location.hash;
   mount(main, loadingStrip("Loading view…"));
 
   const [session, catalog, res, fleetRes] = await Promise.all([
@@ -405,6 +406,11 @@ export async function renderView(main, id) {
     api.getView(id),
     apiGetFleet(),
   ]);
+
+  /* If the user navigated away while we were loading, ignore this response — a late /api/fleet or view
+     read should not replace the new page's content or start panels under the wrong route (#4204). */
+  if (location.hash !== ourHash) return;
+
   if (res.kind === "error") {
     mount(main, [el("div", { class: "page-head" }, [backToViews(), el("h2", { text: "View" })]), errorStrip(res.message)]);
     return;
@@ -470,6 +476,11 @@ export async function renderView(main, id) {
 
   mount(main, [head, status, controls, gridBox]);
   renderGrid();
+  /* Clear any stale AbortSignal left by the previous page (e.g. server.js's per-render panelAbort) so it
+     cannot bleed into SUBSEQUENT view renders — the onChange scope re-render and any poll-triggered
+     renderView call. View panels carry no per-render abort controller, so undefined (unabortable) is the
+     correct state after this grid is built (#4204). */
+  setPanelSignal();
 }
 
 /* ─────────────────────────── notebook renderer (#1563 D7) ─────────────────────────── */

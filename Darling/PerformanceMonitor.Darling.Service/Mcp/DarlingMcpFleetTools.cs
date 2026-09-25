@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -74,13 +76,42 @@ public sealed class DarlingMcpFleetTools
         "host — 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
         "did. Everything else on the payload was read for this call. Racing several calls with different " +
         "hours_back values buys nothing on that half and costs the window-bound reads N times over: call once " +
-        "with the widest window and derive, or sequence the calls.")]
+        "with the widest window and derive, or sequence the calls. " +
+        "detail defaults to \"summary\" (#4198): the rollup, band counts and worst_servers, WITHOUT the " +
+        "per-server cards array — #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
+        "that Claude Code refused it inline outright. Pass detail=\"cards\" for the full per-server detail " +
+        "this tool returned before #4198, once you already know which server needs it; cards_included says " +
+        "which shape you got, and a summary response's cards_note repeats the lever. worst_only and band " +
+        "narrow a detail=\"cards\" call back toward a manageable size instead of shipping every card: " +
+        "worst_only keeps only the cards already named in worst_servers, and band keeps only cards at one " +
+        "FleetHealthBand (healthy, warning, critical, offline). Both are ignored under detail=\"summary\", " +
+        "which never includes cards to filter.")]
     public static async Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
-        [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1)
+        [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1,
+        [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds every server's full card, this tool's shape before #4198. See tool guide.")] string detail = "summary",
+        [Description("Cards-only: keep only cards already in worst_servers (the needs-attention list). No effect under detail=\"summary\". Default false.")] bool worst_only = false,
+        [Description("Cards-only filter: keep only cards at this FleetHealthBand — \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null)
     {
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
+
+        var wantsCards = string.Equals(detail, "cards", StringComparison.OrdinalIgnoreCase);
+        if (!wantsCards && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Refusal("detail", $"detail must be \"summary\" or \"cards\" (got \"{detail}\").");
+        }
+
+        FleetHealthBand? bandFilter = null;
+        if (!string.IsNullOrWhiteSpace(band))
+        {
+            if (!Enum.TryParse<FleetHealthBand>(band, ignoreCase: true, out var parsed))
+            {
+                return McpHelpers.Refusal(
+                    "band", $"band must be one of healthy, warning, critical, offline (got \"{band}\").");
+            }
+            bandFilter = parsed;
+        }
 
         try
         {
@@ -94,7 +125,51 @@ public sealed class DarlingMcpFleetTools
                     "No servers are registered yet. The service registers each monitored server on its first successful connection.");
             }
 
-            return JsonSerializer.Serialize(result, DarlingFleetReader.JsonOptions);
+            /* Both branches serialize the SAME result (so a rollup field added later reaches both shapes
+               with no second edit site) and then add cards_included explicitly — true/false, never left
+               for a client to infer from whether "cards" is present or empty, which is indistinguishable
+               from "no servers have cards". */
+            var node = JsonSerializer.SerializeToNode(result, DarlingFleetReader.JsonOptions)!.AsObject();
+
+            if (wantsCards)
+            {
+                if (worst_only || bandFilter != null)
+                {
+                    /* Filtered at the TYPED level (result.Cards / result.WorstServers), not by inspecting
+                       the JsonObject's own "band"/"server_id" string keys — the typed properties cannot
+                       drift from what was just serialized, and a card's Band is already the same enum
+                       bandFilter was parsed into, so the comparison needs no second string parse. */
+                    var worstIds = worst_only ? new HashSet<int>() : null;
+                    if (worstIds != null)
+                    {
+                        foreach (var w in result.WorstServers) worstIds.Add(w.ServerId);
+                    }
+
+                    var filteredCards = new JsonArray();
+                    foreach (var card in result.Cards)
+                    {
+                        if (worstIds != null && !worstIds.Contains(card.ServerId)) continue;
+                        if (bandFilter != null && card.Band != bandFilter.Value) continue;
+                        filteredCards.Add(JsonSerializer.SerializeToNode(card, DarlingFleetReader.JsonOptions));
+                    }
+                    node["cards"] = filteredCards;
+                }
+
+                node["cards_included"] = true;
+                return node.ToJsonString(DarlingFleetReader.JsonOptions);
+            }
+
+            /* #4198 summary mode: strip the heavy cards array — measured at 67-81 KB on a fleet this size,
+               large enough that Claude Code refused it inline outright. worst_only/band are cards-only
+               filters (see the Description) so they are silently no-ops here rather than refused: a caller
+               that always passes band="critical" alongside its own detail choice should not have to drop
+               it again to get the cheap summary shape. */
+            node.Remove("cards");
+            node["cards_included"] = false;
+            node["cards_note"] =
+                "Per-server cards were left out of this summary to keep the response small. Call again with "
+                + "detail=\"cards\" for the full per-server detail.";
+            return node.ToJsonString(DarlingFleetReader.JsonOptions);
         }
         catch (Exception ex)
         {

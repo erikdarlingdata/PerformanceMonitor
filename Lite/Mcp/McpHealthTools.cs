@@ -666,13 +666,13 @@ public sealed class McpHealthTools
         }
     }
 
-    [McpServerTool(Name = "get_collection_log"), Description("Raw per-run collector log: duration split into monitored-server and store-write time, rows, status, error. NEWEST FIRST by default; min_duration_ms flips it to SLOWEST FIRST, ranked by cost. hours_back is the ask; oldest/newest_returned_collection_time bound what you actually got — under a min_duration_ms floor that is the cost-ranked sample's age, not reach. Filters apply before the cap; truncated/run_count reflect matches. status is the failure filter: an unknown value is refused, never silently empty. get_collection_health is the rollup; this is the underlying runs. <<GUIDE>> Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and the row cap can make those wildly different — enough collectors writing often enough will satisfy a 24-hour request out of the last few seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. All THREE filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. status IS THE FAILURE-HUNTING FILTER and the reason to reach for this tool during an incident: 'show me the failures' is the most common question asked of this log, and without it a caller pages the newest-first tail eyeballing status — which the page-span contract above explains cannot work, because the cap covers a fraction of the window and raising limit does not reach a failure that is not recent. Pass one of SUCCESS, SKIPPED, YIELDED, ABANDONED, ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING, WARNING (case-insensitive); an unknown value is REFUSED and the refusal names the whole set, rather than being applied as an equality filter that returns an empty page a caller would read as 'no failures'. get_collection_health is not this question's answer either: it carries one last_error per collector over a rollup, not the runs, their timestamps or their sequence — which is what says whether every collector failed at once or one collector failed all night. A status filter changes the page from a contiguous tail to a filtered one, so read the two page-span timestamps the same way you would under a duration floor. The filter you sent is echoed back as status_filter (not status, which on an empty result is the miss word instead), in the stored UPPERCASE spelling whatever case you sent. Two of those statuses are Darling-only in practice — EXTENSION_MISSING and WARNING are written by PostgreSQL collectors and the fleet-maintenance passes, neither of which exists on this SKU — and they are accepted rather than refused here so the vocabulary is ONE set on both products: a filter that matches nothing on this SKU is an honest empty answer, where a refusal would teach a caller the value does not exist. One precision on sql_duration_ms, which Darling's twin of this tool states at length: on the collectors that enumerate databases it is the driver's per-item stopwatch, which also wraps the per-database watermark refresh - a read against the LOCAL store, so a small part of it is not the monitored server. What does NOT apply here is the large part: this SKU never enables the deferred plan-XML or statement-text fetches, so none of the store probe or write-back that dominates Darling's figure for query_store is in this one, and there is nothing here to attribute. Three parameters carry more guidance than their 200-character cap allows; the rest of each below. collector_name: A name this server has never run returns the no-matches status rather than a quiet-window one. min_duration_ms: Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order. status: THE FAILURE FILTER — 'show me the failures' is what this log exists to answer, and paging the newest-first tail cannot reach a failure that is not recent. An unknown value is REFUSED, naming the accepted set, rather than applied as a filter that matches nothing. Omit for every status.")]
+    [McpServerTool(Name = "get_collection_log"), Description("Raw per-run collector log: duration split into monitored-server and store-write time, rows, status, error. NEWEST FIRST by default; min_duration_ms flips it to SLOWEST FIRST, ranked by cost. hours_back is the ask; oldest/newest_returned_collection_time bound what you actually got — under a min_duration_ms floor that is the cost-ranked sample's age, not reach. Filters apply before the cap; truncated/run_count reflect matches. status is the failure filter: an unknown value is refused, never silently empty. get_collection_health is the rollup; this is the underlying runs. <<GUIDE>> Gets the RAW per-run collection log for a server, NEWEST FIRST by default and SLOWEST FIRST whenever min_duration_ms is supplied: one row per collector run with its total duration, the part spent querying the monitored server, the part spent writing to the local store, rows collected, status and any error. get_collection_health rolls these into a per-collector verdict; this is the underlying runs, which is what you need when the rollup says healthy and collection still looks wrong, or when you want to see what a collector was doing during a specific incident window. READ THE PAGE-SPAN FIELDS BEFORE CONCLUDING ANYTHING FROM THE ROWS. hours_back is the span you ASKED for; oldest_returned_collection_time and newest_returned_collection_time bound the page you GOT, and the row cap can make those wildly different — enough collectors writing often enough will satisfy a 24-hour request out of the last few seconds of activity. truncated says the cap bit; the two timestamps say what the page holds. THE TWO FIELDS MEAN DIFFERENT THINGS UNDER THE TWO ORDERINGS and the difference matters: under the default newest-first ordering the page is a contiguous slice of the window's tail, so oldest_returned_collection_time IS how far back this read reached; under a min_duration_ms floor the page is a cost-RANKED sample drawn from the whole window, so it tells you how old the slowest matching runs are and NOTHING about reach. Read order to know which you have. Neither field is a window floor: nothing here probes for the oldest row the window could have held. A read whose newest and oldest are seconds apart has told you nothing about the window you named, and raising limit does NOT fix it under the default ordering because the slow runs are not the recent ones — min_duration_ms is the knob for that, because supplying it ranks by duration instead of by time. All THREE filters are applied in SQL, BEFORE the cap, so truncated and run_count describe the MATCHING rows rather than the unfiltered window. order names which ordering you got, so a caller never has to infer it from the filters it sent. status IS THE FAILURE-HUNTING FILTER and the reason to reach for this tool during an incident: 'show me the failures' is the most common question asked of this log, and without it a caller pages the newest-first tail eyeballing status — which the page-span contract above explains cannot work, because the cap covers a fraction of the window and raising limit does not reach a failure that is not recent. Pass one of SUCCESS, SKIPPED, YIELDED, ABANDONED, ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING, WARNING (case-insensitive); an unknown value is REFUSED and the refusal names the whole set, rather than being applied as an equality filter that returns an empty page a caller would read as 'no failures'. get_collection_health is not this question's answer either: it carries one last_error per collector over a rollup, not the runs, their timestamps or their sequence — which is what says whether every collector failed at once or one collector failed all night. A status filter changes the page from a contiguous tail to a filtered one, so read the two page-span timestamps the same way you would under a duration floor. The filter you sent is echoed back as status_filter (not status, which on an empty result is the miss word instead), in the stored UPPERCASE spelling whatever case you sent. Two of those statuses are Darling-only in practice — EXTENSION_MISSING and WARNING are written by PostgreSQL collectors and the fleet-maintenance passes, neither of which exists on this SKU — and they are accepted rather than refused here so the vocabulary is ONE set on both products: a filter that matches nothing on this SKU is an honest empty answer, where a refusal would teach a caller the value does not exist. One precision on sql_duration_ms, which Darling's twin of this tool states at length: on the collectors that enumerate databases it is the driver's per-item stopwatch, which also wraps the per-database watermark refresh - a read against the LOCAL store, so a small part of it is not the monitored server. What does NOT apply here is the large part: this SKU never enables the deferred plan-XML or statement-text fetches, so none of the store probe or write-back that dominates Darling's figure for query_store is in this one, and there is nothing here to attribute. Five parameters carry more guidance than their 200-character cap allows; the rest of each below. collector_name: A name this server has never run returns the no-matches status rather than a quiet-window one. min_duration_ms: Applied in SQL before the cap. 0 is a real value: it admits every run and is how you ask for the whole window ranked by cost. A negative is refused. Omit for no floor and newest-first order. status: THE FAILURE FILTER — 'show me the failures' is what this log exists to answer, and paging the newest-first tail cannot reach a failure that is not recent. An unknown value is REFUSED, naming the accepted set, rather than applied as a filter that matches nothing. Omit for every status. server_name: Omitted, blank, or \"*\" reads the WHOLE FLEET (#4199) — every enabled server's runs, merged and ranked together, each row carrying server_name — matching Darling's twin exactly (Lite has no (fleet) maintenance sentinel to protect). limit: Default 200 for one server. The fleet-wide form (server_name omitted or \"*\") defaults instead to McpResponseBudget.CollectionLogFleetDefaultLimit, sized from measured bytes/row so a default fleet call stays under the shared response-size target; pass limit explicitly for more rows either way.")]
     public static async Task<string> GetCollectionLog(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Server name or display name. Omit or pass \"*\" for the WHOLE FLEET (every enabled server's runs, merged; see tool guide).")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
-        [Description("Maximum rows to return. Default 200. Applied AFTER the two filters, so it caps the matching rows rather than the window.")] int limit = 200,
+        [Description("Maximum rows to return, applied after the filters. Default 200 for one server; the fleet-wide form (server_name omitted or \"*\") defaults lower — see tool guide.")] int? limit = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         /*
             APPENDED after as_of rather than grouped beside `limit`, matching Darling's twin and for the same
@@ -690,11 +690,26 @@ public sealed class McpHealthTools
         */
         [Description("Limit to runs with this status, matched case-insensitively against the log's own vocabulary: SUCCESS, SKIPPED, YIELDED, ABANDONED, ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING, WARNING.")] string? status = null)
     {
+        /* #4199, matching Darling's twin exactly: server_name omitted, blank or "*" means every enabled
+           server merged and ranked together, each row carrying server_name, instead of "auto-select the
+           lone server" or "which server did you mean". Lite has no (fleet) maintenance sentinel to protect
+           here (that population is Darling-only), so this check is unconditional. */
+        if (string.IsNullOrWhiteSpace(server_name) || server_name.Trim() == "*")
+        {
+            return await GetCollectionLogFleetAsync(
+                dataService, serverManager, hours_back, limit ?? McpResponseBudget.CollectionLogFleetDefaultLimit,
+                as_of, collector_name, min_duration_ms, status);
+        }
+
+        /* limit is nullable so the fleet branch above and this per-server branch can default it
+           differently, matching Darling's twin exactly — see its comment for why. */
+        var effectiveLimit = limit ?? 200;
+
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
         /* Same shared row-cap contract as Darling's twin: reject out of range, do not silently clamp. */
-        var invalidLimit = McpHelpers.ValidateTop(limit);
+        var invalidLimit = McpHelpers.ValidateTop(effectiveLimit);
         if (invalidLimit != null) return invalidLimit;
 
         /* And the same contract for the floor, one step further on: supplying it also switches the ORDERING,
@@ -739,10 +754,10 @@ public sealed class McpHealthTools
                `truncated` keeps meaning "more rows match than you were given" rather than "more rows were in
                the window", which is a different sentence under the same field name. */
             var rows = await dataService.GetRecentCollectionLogAsync(
-                resolved.ServerId, hours, maxRows: limit + 1, asOfUtc: windowEnd,
+                resolved.ServerId, hours, maxRows: effectiveLimit + 1, asOfUtc: windowEnd,
                 collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
-            var truncated = rows.Count > limit;
-            if (truncated) rows = rows.Take(limit).ToList();
+            var truncated = rows.Count > effectiveLimit;
+            if (truncated) rows = rows.Take(effectiveLimit).ToList();
 
             var filtered = !string.IsNullOrWhiteSpace(collector_name) || min_duration_ms is not null;
 
@@ -854,6 +869,110 @@ public sealed class McpHealthTools
                    this tool's miss word on the other branch (McpHelpers.Status: empty / unavailable) -- one
                    key meaning two unrelated things by branch is the collision the name avoids. Each ROW
                    keeps its own `status`, where nothing collides. */
+                status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
+                runs = result,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_collection_log", ex);
+        }
+    }
+
+    /// <summary>
+    /// The FLEET-WIDE form of <see cref="GetCollectionLog"/> (#4199), Darling's twin exactly: same
+    /// validations, same filters, same truncated/ordering contract, merged across every ENABLED server
+    /// instead of scoped to one, each row carrying which server it came from.
+    /// </summary>
+    private static async Task<string> GetCollectionLogFleetAsync(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        int hours_back,
+        int limit,
+        string? as_of,
+        string? collector_name,
+        double? min_duration_ms,
+        string? status)
+    {
+        var invalidLimit = McpHelpers.ValidateTop(limit);
+        if (invalidLimit != null) return invalidLimit;
+
+        var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
+        if (invalidFloor != null) return invalidFloor;
+
+        var invalidStatus = McpHelpers.ValidateChoice(
+            status, EnumeratedCollectorDriver.CollectionLogStatuses, "status");
+        if (invalidStatus != null) return invalidStatus;
+
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
+        try
+        {
+            var hours = hours_back;
+            var serverIds = serverManager.GetEnabledServers()
+                .Select(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)))
+                .ToList();
+
+            var rows = await dataService.GetRecentCollectionLogFleetAsync(
+                serverIds, hours, asOfUtc: windowEnd, maxRows: limit + 1,
+                collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
+            var truncated = rows.Count > limit;
+            if (truncated) rows = rows.Take(limit).ToList();
+
+            var filtered = !string.IsNullOrWhiteSpace(collector_name)
+                || min_duration_ms is not null
+                || !string.IsNullOrWhiteSpace(status);
+
+            if (rows.Count == 0)
+            {
+                var everCollected = serverIds.Count > 0 && await dataService.HasAnyCollectionLogFleetAsync(serverIds);
+
+                if (!everCollected)
+                {
+                    return McpHelpers.Status(
+                        "unavailable",
+                        "No collector runs have EVER been recorded for any enabled server. This is not an empty window — either no server is enabled yet, or collection has not run at all. Check that at least one server is enabled and that collection is running.");
+                }
+
+                if (filtered)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No collector runs fleet-wide in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
+                }
+
+                return McpHelpers.Status(
+                    "empty",
+                    $"No collector runs recorded fleet-wide in the last {hours} hour(s). At least one enabled server has collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
+            }
+
+            var result = rows.Select(r => new
+            {
+                server_name = r.ServerName,
+                collector = r.CollectorName,
+                collection_time = r.CollectionTime.ToString("o"),
+                duration_ms = r.DurationMs,
+                sql_duration_ms = r.SqlDurationMs,
+                store_duration_ms = r.DuckDbDurationMs,
+                rows_collected = r.RowsCollected,
+                status = r.Status,
+                error_message = r.ErrorMessage,
+            });
+
+            return JsonSerializer.Serialize(new
+            {
+                scope = "fleet",
+                hours_back = hours,
+                run_count = rows.Count,
+                truncated,
+                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                order = min_duration_ms is null
+                    ? McpHelpers.CollectionLogOrderNewestFirst
+                    : McpHelpers.CollectionLogOrderSlowestFirst,
+                collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
+                min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs = result,
             }, McpHelpers.JsonOptions);
