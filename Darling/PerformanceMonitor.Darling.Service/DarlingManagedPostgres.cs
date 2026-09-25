@@ -605,6 +605,10 @@ public sealed class DarlingManagedPostgres
     private static readonly TimeSpan s_versionProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan s_pgCtlTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan s_statusTimeout = TimeSpan.FromSeconds(30);
+
+    /* #4215: `postgres -C <key> -D <data>` parses every configuration file and exits — the same shape of
+       probe as s_versionProbeTimeout, so it gets the same short budget. */
+    private static readonly TimeSpan s_confValidateTimeout = TimeSpan.FromSeconds(15);
     private const int PgCtlWaitSeconds = 60;
 
     private readonly PostgresConfig _config;
@@ -2602,8 +2606,15 @@ public sealed class DarlingManagedPostgres
         }
         else
         {
+            /* #4215: the one service-owned settings file, rendered and validated right before the start it
+               takes effect on — never for the adopted-listener branch above, which does not start anything
+               this file could take effect on until the next service-owned start anyway. */
+            await EnsureManagedConfReadyAsync(binDirectory, _dataDirectory, cancellationToken);
+
             await StartServerAsync(binDirectory, networkPlan, cancellationToken);
             _startedByThisProcess = true;
+
+            SaveLastGoodManagedConf(_dataDirectory);
         }
 
         var connectionString = BuildConnectionString(_config.Port, password);
@@ -3207,6 +3218,220 @@ public sealed class DarlingManagedPostgres
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);
+    }
+
+    /* ===================== darling-managed.conf (#4215): the one service-owned settings file =====================
+       EnsureConfAppended above and its v1-v15 blocks are UNTOUCHED: this file is rendered and included AFTER
+       them, so on the postgresql.conf side it is simply the last word (last-occurrence-wins), and on the code
+       side nothing here changes when or whether a v1-v15 block runs. A2 (#4215) retires the blocks once this
+       file has proven itself; until then both write, and darling-managed.conf wins. */
+
+    /// <summary>
+    /// Gathers this host's current values for <see cref="ManagedConfFile.RenderInputs"/> — the SAME readers
+    /// v3/v5/v7/v8/v12/v13 already use above (<see cref="GetTotalPhysicalMemoryBytes"/>,
+    /// <see cref="TryGetAuthoritativePhysicalMemoryBytes"/>, <see cref="TryReadDataVolumeSpace"/>,
+    /// <see cref="TimescaleSupport.HypertableCount"/>, <see cref="ReadConfAssignments"/> for the preload list in
+    /// force), so a fresh render never disagrees with what those readers would have told the old blocks.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
+    {
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var ramBytes = GetTotalPhysicalMemoryBytes();
+        var ramAuthoritative = TryGetAuthoritativePhysicalMemoryBytes(out _);
+        var diskAuthoritative = TryReadDataVolumeSpace(dataDirectory, out var freeBytes, out var totalBytes);
+        var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
+        var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
+
+        return new ManagedConfFile.RenderInputs(
+            ManagedConfFile.CurrentFormulaVersion,
+            "Windows",
+            ramBytes,
+            ramAuthoritative,
+            Environment.ProcessorCount,
+            TimescaleSupport.HypertableCount,
+            postgresMajor,
+            freeBytes,
+            totalBytes,
+            diskAuthoritative,
+            _config.Port,
+            effectivePreload);
+    }
+
+    /// <summary>
+    /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or the
+    /// render is already byte-identical to it, replaces <c>darling-managed.conf</c> (design step 1). Always
+    /// ensures the <c>include</c> line is present in <c>postgresql.conf</c> (review L5 — there is no opt-out)
+    /// whichever branch it takes. Never throws: an I/O failure is reported in the result and the file already
+    /// in force stays in force, exactly like a failed <see cref="EnsureConfAppended"/> append would today.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfWriteResult WriteManagedConfFile(string dataDirectory, int postgresMajor)
+    {
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
+        var rendered = ManagedConfFile.Render(inputs);
+
+        string? existingText = null;
+        try
+        {
+            if (File.Exists(managedPath))
+            {
+                existingText = File.ReadAllText(managedPath);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Could not read {Path} ({Message}); writing a fresh one.", managedPath, ex.Message);
+        }
+
+        if (existingText is not null && ManagedConfFile.IsHandEdited(existingText))
+        {
+            var existingBody = ManagedConfFile.ParseExisting(existingText).Body;
+            var renderedBody = ManagedConfFile.ParseExisting(rendered).Body;
+            var diffs = ManagedConfFile.DiffBodyKeys(existingBody, renderedBody);
+            foreach (var diff in diffs)
+            {
+                _logger.LogWarning(
+                    "{Path} was hand-edited: {Key} = {FileValue} stays in force (a fresh render would write {RenderedValue}).",
+                    managedPath, diff.Key, diff.FileValue ?? "(absent)", diff.RenderedValue ?? "(absent)");
+            }
+
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: true, WriteFailed: false, rendered, diffs);
+        }
+
+        if (string.Equals(existingText, rendered, StringComparison.Ordinal))
+        {
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: false, rendered, []);
+        }
+
+        if (!ManagedConfFile.TryReplaceAtomic(
+                managedPath, rendered, ManagedConfFile.DefaultMaxReplaceAttempts, ManagedConfFile.DefaultReplaceRetryDelay, out var writeError))
+        {
+            _logger.LogError(
+                writeError,
+                "Could not update {Path}; the file already in force stays in force.",
+                managedPath);
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: true, rendered, []);
+        }
+
+        _logger.LogInformation(
+            existingText is null ? "Wrote {Path}" : "Updated {Path}",
+            managedPath);
+        EnsureManagedIncludeLine(dataDirectory);
+        return new ManagedConfWriteResult(Written: true, HandEdited: false, WriteFailed: false, rendered, []);
+    }
+
+    /// <summary>
+    /// Appends <see cref="ManagedConfFile.IncludeLine"/> to <c>postgresql.conf</c> when it is missing (review
+    /// L5): there is no opt-out, so an operator who removes it gets it back, with a warning, on the next start.
+    /// A present include in any form PostgreSQL itself would parse the same way
+    /// (<see cref="ManagedConfFile.HasManagedInclude"/>) is left exactly where it is — never moved, never
+    /// duplicated.
+    /// </summary>
+    internal void EnsureManagedIncludeLine(string dataDirectory)
+    {
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var conf = File.ReadAllText(confPath);
+        if (ManagedConfFile.HasManagedInclude(conf))
+        {
+            return;
+        }
+
+        File.AppendAllText(confPath, "\n" + ManagedConfFile.IncludeLine + "\n");
+        _logger.LogWarning(
+            "{ConfPath} had no include of {ManagedFile} — appended it back. There is no way to opt out of the managed settings file.",
+            confPath, ManagedConfFile.FileName);
+    }
+
+    /// <summary>
+    /// The <c>postgres -C</c> validation (design step 2, review H1 items 1 and 5, L1): parses every
+    /// configuration file this data directory's postgresql.conf reaches, <c>darling-managed.conf</c> included,
+    /// and exits without starting a postmaster. <c>-C</c> FIRST is load-bearing: PostgreSQL only skips its
+    /// "refuses to run as an administrator" check when <c>-C</c> is the very first argument, and this service
+    /// can run under LocalSystem or an admin domain account.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static async Task<(bool Valid, string Output)> ValidateManagedConfAsync(
+        string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var postgresExe = Path.Combine(binDirectory, "postgres.exe");
+        var (exitCode, output) = await RunToolAsync(
+            postgresExe, $"-C shared_buffers -D \"{dataDirectory}\"", s_confValidateTimeout, cancellationToken);
+        return (exitCode == 0, output);
+    }
+
+    /// <summary>
+    /// The recovery message for a rejected <c>darling-managed.conf</c> (design step 2, review H1 item 5): names
+    /// the two ways an operator can fix a value the product's own formula got wrong for this host — a line
+    /// after the include in <c>postgresql.conf</c>, or <c>ALTER SYSTEM</c> once a store is running on it.
+    /// </summary>
+    internal static string BuildManagedConfValidationFailureMessage(string dataDirectory, string postgresOutput)
+        => $"{ManagedConfFile.FileName} in {dataDirectory} was rejected by postgres -C: {postgresOutput}\n" +
+           "Fix the rejected setting with a line after 'include ''darling-managed.conf''' in " +
+           $"{Path.Combine(dataDirectory, "postgresql.conf")}, or with ALTER SYSTEM once the store is running.";
+
+    /// <summary>
+    /// Everything <see cref="EnsureRunningAsync"/> needs before it can start a server on this data directory
+    /// (#4215): render/write the managed file, validate it, and fall back to the last file that started
+    /// cleanly (design step 2, review H1 items 1, 2 and 5) rather than repeat a start failure forever. Runs
+    /// only on the service-owned start path — see the caller; the adopted-listener path never calls this.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal async Task EnsureManagedConfReadyAsync(string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
+        WriteManagedConfFile(dataDirectory, postgresMajor);
+
+        var (valid, output) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
+        if (valid)
+        {
+            return;
+        }
+
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+        if (File.Exists(lastGoodPath))
+        {
+            File.Copy(lastGoodPath, managedPath, overwrite: true);
+            var (validAfterRestore, outputAfterRestore) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
+            if (validAfterRestore)
+            {
+                _logger.LogError(
+                    "{Message} Restored {LastGood}, which still starts.",
+                    BuildManagedConfValidationFailureMessage(dataDirectory, output), lastGoodPath);
+                return;
+            }
+
+            throw new InvalidOperationException(BuildManagedConfValidationFailureMessage(dataDirectory, outputAfterRestore));
+        }
+
+        throw new InvalidOperationException(BuildManagedConfValidationFailureMessage(dataDirectory, output));
+    }
+
+    /// <summary>
+    /// Copies the file this start just proved PostgreSQL accepts to <see cref="ManagedConfFile.LastGoodFileName"/>
+    /// (design step 2), so the NEXT start has something to fall back to if a formula or a constant later
+    /// produces a value this runtime refuses. Never throws: a failed copy leaves the previous last-good file
+    /// (if any) exactly as it was, which is strictly better than crashing a start that just succeeded.
+    /// </summary>
+    internal void SaveLastGoodManagedConf(string dataDirectory)
+    {
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+        try
+        {
+            File.Copy(managedPath, lastGoodPath, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not update {LastGood} after a successful start ({Message}). A future rejected render would have nothing to fall back to.",
+                lastGoodPath, ex.Message);
+        }
     }
 
     /// <summary>
