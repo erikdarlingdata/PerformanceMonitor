@@ -21,6 +21,15 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// bounds, because a sliding preset's start/end both move every tick while the length stays constant, and
 /// keying on the moving bounds would never hit.
 ///
+/// <para><b>The key is (server, length) alone, but a hit ALSO needs the cached window's END to still be
+/// recent.</b> Keying on length alone let a stale entry answer for a window it never fetched: a user viewing
+/// this week's 7-day range, then switching to a custom 7-day range from last month, got THIS WEEK's list
+/// under last month's window, because both windows share one length-keyed slot. A hit now requires the
+/// cached <see cref="Entry.WindowEndUtc"/> to sit within <see cref="Ttl"/> of the requested end — the same
+/// freshness distance the fetch timestamp already checks, applied to the window itself rather than the wall
+/// clock, and checked BOTH directions (<c>Duration()</c>) since a custom range can move the end either way,
+/// not just forward like a sliding preset's auto-refresh does.</para>
+///
 /// <para><paramref name="nowUtc"/>-style clock parameters throughout are the seam
 /// <see cref="PerformanceMonitor.Darling.Storage.QueryStoreProbeCache"/> already uses: the caller's wall clock
 /// by default, an injected time in a test, so a live test can fast-forward past the TTL without a real
@@ -33,15 +42,19 @@ internal sealed class ViewerNameListCache
     public static readonly TimeSpan Ttl = TimeSpan.FromMinutes(15);
 
     private readonly record struct Key(int ServerId, int WindowLengthMinutes);
-    private readonly record struct Entry(List<string> Names, DateTime FetchedAtUtc);
+    private readonly record struct Entry(List<string> Names, DateTime WindowEndUtc, DateTime FetchedAtUtc);
 
     private readonly ConcurrentDictionary<Key, Entry> _entries = new();
 
     /// <summary>True (with <paramref name="names"/> populated) when a list for this server and window length was
-    /// fetched within <see cref="Ttl"/> of <paramref name="nowUtc"/>.</summary>
-    public bool TryGet(int serverId, TimeSpan windowLength, DateTime nowUtc, out List<string> names)
+    /// fetched within <see cref="Ttl"/> of <paramref name="nowUtc"/> AND that fetch's window end sits within
+    /// <see cref="Ttl"/> of <paramref name="endUtc"/> — two independent freshness checks, because a same-length
+    /// window from a different point in time is a different window, not a refresh of this one.</summary>
+    public bool TryGet(int serverId, TimeSpan windowLength, DateTime endUtc, DateTime nowUtc, out List<string> names)
     {
-        if (_entries.TryGetValue(KeyFor(serverId, windowLength), out var entry) && nowUtc - entry.FetchedAtUtc < Ttl)
+        if (_entries.TryGetValue(KeyFor(serverId, windowLength), out var entry)
+            && nowUtc - entry.FetchedAtUtc < Ttl
+            && (endUtc - entry.WindowEndUtc).Duration() < Ttl)
         {
             names = entry.Names;
             return true;
@@ -51,9 +64,10 @@ internal sealed class ViewerNameListCache
         return false;
     }
 
-    /// <summary>Records a freshly fetched list, stamped <paramref name="nowUtc"/>.</summary>
-    public void Set(int serverId, TimeSpan windowLength, List<string> names, DateTime nowUtc) =>
-        _entries[KeyFor(serverId, windowLength)] = new Entry(names, nowUtc);
+    /// <summary>Records a freshly fetched list for the window ending <paramref name="endUtc"/>, stamped
+    /// <paramref name="nowUtc"/>.</summary>
+    public void Set(int serverId, TimeSpan windowLength, DateTime endUtc, List<string> names, DateTime nowUtc) =>
+        _entries[KeyFor(serverId, windowLength)] = new Entry(names, endUtc, nowUtc);
 
     /// <summary>Rounded to the whole minute: a preset window's length is already a whole number of hours and a
     /// custom range is quarter-hour granular, so rounding only absorbs floating-point noise in the subtraction,

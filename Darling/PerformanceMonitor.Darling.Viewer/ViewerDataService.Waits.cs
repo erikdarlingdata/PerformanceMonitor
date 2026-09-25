@@ -87,6 +87,12 @@ public sealed partial class ViewerDataService
     /// answer for that case. The width is appended as its OWN trailing parameter, after the dynamic
     /// <c>wait_type IN (...)</c> list, so that list's existing <c>$4..</c> numbering does not shift. Neither
     /// wait-stats chart series plots a peak, so unlike the MCP twin there is no peak column.
+    /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c>, every row in
+    /// <c>rated</c> — rated or not, mirroring <c>DurationTrendRouting.BuildBucketedRawTrendSql</c>'s own
+    /// column of the same name) and <c>collection_count</c> (<c>COUNT(*)</c> over that same population) ride
+    /// along so the caller can tell a true singleton bucket — one physical collection, rated or not, landed
+    /// in it — from one the bucketing actually merged. <c>GetWaitStatsTrendsByTypesAsync</c> uses
+    /// <c>collection_count</c> to decide.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. wait types, last $ the bucket width in minutes.
     /// </summary>
     public static string WaitTrendsSql(int waitTypeCount)
@@ -132,7 +138,9 @@ public sealed partial class ViewerDataService
                 GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
                 CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_seconds) AS wait_time_ms_per_second,
                 CAST(SUM(rated_signal_ms) AS DOUBLE PRECISION) / SUM(rated_seconds) AS signal_wait_time_ms_per_second,
-                CASE WHEN SUM(rated_tasks) > 0 THEN CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_tasks) ELSE 0 END AS avg_ms_per_wait
+                CASE WHEN SUM(rated_tasks) > 0 THEN CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_tasks) ELSE 0 END AS avg_ms_per_wait,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
             FROM rated
             GROUP BY wait_type, 2
             HAVING COUNT(rated_seconds) > 0
@@ -154,7 +162,7 @@ public sealed partial class ViewerDataService
     {
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var windowLength = endUtc - startUtc;
-        if (_distinctWaitTypesCache.TryGet(serverId, windowLength, effectiveNow, out var cached))
+        if (_distinctWaitTypesCache.TryGet(serverId, windowLength, endUtc, effectiveNow, out var cached))
         {
             return cached;
         }
@@ -178,7 +186,7 @@ public sealed partial class ViewerDataService
             items.Add(reader.GetString(0));
         }
 
-        _distinctWaitTypesCache.Set(serverId, windowLength, items, effectiveNow);
+        _distinctWaitTypesCache.Set(serverId, windowLength, endUtc, items, effectiveNow);
         return items;
     }
 
@@ -188,10 +196,19 @@ public sealed partial class ViewerDataService
     /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES — the ruling's own
     /// wording, not the MCP convention of dividing one shared budget across every line a call draws — so the
     /// pin is rows ≤ budget × series count; <c>seriesCount</c> is therefore always 1 into
-    /// <see cref="TrendBuckets.AutoMinutes"/>. At a window small enough that width resolves to one minute,
-    /// every collection becomes its own bucket and the values match the pre-#4234 per-collection read
-    /// exactly — only the timestamp changes, from the raw collection time to its bucket's <c>date_bin</c>
-    /// start.</para>
+    /// <see cref="TrendBuckets.AutoMinutes"/>.</para>
+    /// <para>#4234 review (item 3): "when the budget covers every collection in the window, the chart gets
+    /// the raw points unchanged" — including the TIMESTAMP, not only the value. A bucket's SUM/AVG over its
+    /// one collection already equals that collection's own value at any width, but <c>bucket_start</c> is a
+    /// <c>date_bin</c> grid line, not a collection the store held, so stamping every point there (as the
+    /// always-bucketed MCP twins do at every width) would still change a raw point's timestamp even when
+    /// nothing was merged. This buffers every row's <c>collection_count</c> from <see cref="WaitTrendsSql"/>
+    /// and, only when EVERY bucket the whole call returned holds exactly one physical collection — the
+    /// literal reading of "every collection in the window" — stamps each point at its bucket's
+    /// <c>first_collection_time</c> instead of <c>bucket_start</c>, which for a singleton bucket is that one
+    /// collection's own raw time. A single merged bucket anywhere in the call (any wait type, any bucket)
+    /// keeps <c>bucket_start</c> throughout, matching what the MCP twins always serve, rather than a chart
+    /// with some points on the grid and others off it.</para>
     /// </summary>
     public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(
         int serverId, List<string> waitTypes, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -222,6 +239,9 @@ public sealed partial class ViewerDataService
         }
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
+        var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate, double Signal, double Avg)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -231,18 +251,33 @@ public sealed partial class ViewerDataService
                 continue;
             }
 
-            var waitType = reader.GetString(0);
-            if (!result.TryGetValue(waitType, out var list))
+            if (reader.GetInt64(6) != 1)
             {
-                list = new List<WaitStatsTrendPoint>();
-                result[waitType] = list;
+                everyBucketSingleton = false;
             }
 
-            list.Add(new WaitStatsTrendPoint(
+            rows.Add((
+                reader.GetString(0),
                 reader.GetDateTime(1),
+                reader.GetDateTime(5),
                 reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+        }
+
+        foreach (var row in rows)
+        {
+            if (!result.TryGetValue(row.WaitType, out var list))
+            {
+                list = new List<WaitStatsTrendPoint>();
+                result[row.WaitType] = list;
+            }
+
+            list.Add(new WaitStatsTrendPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.Rate,
+                row.Signal,
+                row.Avg));
         }
 
         return result;

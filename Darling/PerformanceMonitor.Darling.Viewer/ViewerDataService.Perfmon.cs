@@ -98,6 +98,11 @@ public sealed partial class ViewerDataService
     /// same way the MCP twin re-aggregates its own per-collection subquery. Neither perfmon chart plots a peak
     /// value, so unlike the MCP twin there is no peak column. The width is its own trailing parameter, after the
     /// dynamic <c>counter_name IN (...)</c> list, so that list's existing numbering does not shift.
+    /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c> over the
+    /// per-collection subquery, mirroring <c>DurationTrendRouting.BuildBucketedRawTrendSql</c>'s column of the
+    /// same name) and <c>collection_count</c> (<c>COUNT(*)</c> over that same subquery) ride along so the
+    /// caller can tell a true singleton bucket from one the bucketing merged.
+    /// <c>GetPerfmonTrendsByCountersAsync</c> uses <c>collection_count</c> to decide.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
@@ -111,7 +116,9 @@ public sealed partial class ViewerDataService
                 CAST(ROUND(AVG(cntr_value)) AS bigint) AS cntr_value,
                 SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds > 0) AS delta_cntr_value,
                 SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS sample_interval_seconds,
-                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
             FROM (
                 SELECT
                     counter_name,
@@ -146,7 +153,7 @@ public sealed partial class ViewerDataService
     {
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var windowLength = endUtc - startUtc;
-        if (_distinctPerfmonCountersCache.TryGet(serverId, windowLength, effectiveNow, out var cached))
+        if (_distinctPerfmonCountersCache.TryGet(serverId, windowLength, endUtc, effectiveNow, out var cached))
         {
             return cached;
         }
@@ -170,7 +177,7 @@ public sealed partial class ViewerDataService
             items.Add(reader.GetString(0));
         }
 
-        _distinctPerfmonCountersCache.Set(serverId, windowLength, items, effectiveNow);
+        _distinctPerfmonCountersCache.Set(serverId, windowLength, endUtc, items, effectiveNow);
         return items;
     }
 
@@ -180,10 +187,12 @@ public sealed partial class ViewerDataService
     /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES — the ruling's own
     /// wording, not the MCP convention of dividing one shared budget across every line a call draws — so the
     /// pin is rows ≤ budget × series count; <c>seriesCount</c> is therefore always 1 into
-    /// <see cref="TrendBuckets.AutoMinutes"/>. At a window small enough that width resolves to one minute,
-    /// every collection becomes its own bucket and the values match the pre-#4234 per-collection read
-    /// exactly — only the timestamp changes, from the raw collection time to its bucket's <c>date_bin</c>
-    /// start.</para>
+    /// <see cref="TrendBuckets.AutoMinutes"/>.</para>
+    /// <para>#4234 review (item 3): the same singleton-bucket rule as
+    /// <see cref="GetWaitStatsTrendsByTypesAsync"/> — see its remarks. Only when EVERY bucket the whole call
+    /// returned holds exactly one physical collection does the call stamp points at
+    /// <c>first_collection_time</c> instead of <c>bucket_start</c>; a single merged bucket anywhere (any
+    /// counter) keeps <c>bucket_start</c> throughout.</para>
     /// </summary>
     public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(
         int serverId, List<string> counterNames, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -214,24 +223,43 @@ public sealed partial class ViewerDataService
         }
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
+        var rows = new List<(string CounterName, DateTime BucketStart, DateTime FirstCollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var counterName = reader.GetString(0);
-            if (!result.TryGetValue(counterName, out var list))
+            if (reader.GetInt64(7) != 1)
             {
-                list = new List<PerfmonTrendPoint>();
-                result[counterName] = list;
+                everyBucketSingleton = false;
             }
 
-            list.Add(new PerfmonTrendPoint(
+            rows.Add((
+                reader.GetString(0),
                 reader.GetDateTime(1),
+                reader.GetDateTime(6),
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 /* NULL stays NULL: a gauge's instance rows store no delta (V132), so the SUM is NULL, not 0. */
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 /* NULL stays NULL (#3540's third state); 0 is the marker and must not be manufactured from it. */
                 reader.IsDBNull(4) ? null : reader.GetInt64(4),
                 reader.IsDBNull(5) ? null : reader.GetInt32(5)));
+        }
+
+        foreach (var row in rows)
+        {
+            if (!result.TryGetValue(row.CounterName, out var list))
+            {
+                list = new List<PerfmonTrendPoint>();
+                result[row.CounterName] = list;
+            }
+
+            list.Add(new PerfmonTrendPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.Value,
+                row.DeltaValue,
+                row.SampleIntervalSeconds,
+                row.CntrType));
         }
 
         return result;
