@@ -66,7 +66,7 @@ public sealed class PgTargetClockTests
         var baseCode = CSharpSourceWalker.StripCommentsAndStrings(baseSource);
         Assert.Single(Regex.Matches(baseCode, @"await ReadServerClockAsync\("));
         Assert.Contains("await ReadServerClockAsync(connection, serverId, AsNaive(windowEnd), cancellationToken)", baseCode, StringComparison.Ordinal);
-        Assert.Contains("var windowEnd = RoundedHour(analysisTime);", baseCode, StringComparison.Ordinal);
+        Assert.Contains("var windowEnd = RoundedKeyTime(metricName, analysisTime);", baseCode, StringComparison.Ordinal);
         Assert.DoesNotContain("DateTime.UtcNow", CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.Clock.cs")), StringComparison.Ordinal);
     }
