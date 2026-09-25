@@ -390,4 +390,58 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
         initializer.Dispose();
     }
+
+    /// <summary>
+    /// #4262 round 1 finding 1, measured rather than only unit-asserted: seeds a synthetic table large
+    /// enough to genuinely inflate DuckDB's buffer pool, reads it wide-open (the shape of the hazard —
+    /// "one full-width read" in the review), records process memory, forces one trim cycle, and records it
+    /// again. Not the review's 1,049 MB repro store (out of budget to build one here) — scaled down, real
+    /// data, real measurement. The number goes in the PR body, not asserted tightly (process memory is
+    /// noisy), but the direction is: <c>Assert.True(afterBytes &lt; beforeBytes)</c>.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_AfterWideRead_ReducesProcessMemory()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        using (var seed = initializer.CreateConnection())
+        {
+            await seed.OpenAsync();
+            await ExecAsync(seed, "CREATE TABLE trim_probe AS SELECT i AS id, repeat('x', 200) AS payload FROM range(2000000) t(i)");
+        }
+
+        using (var connection = initializer.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT count(*) FROM trim_probe WHERE payload LIKE 'x%'";
+            await cmd.ExecuteScalarAsync();
+        }
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var beforeBytes = Process.GetCurrentProcess().WorkingSet64;
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 1;
+        try
+        {
+            initializer.RunMemoryTrimCycle();
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+        }
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        var afterBytes = Process.GetCurrentProcess().WorkingSet64;
+
+        initializer.Dispose();
+
+        Console.WriteLine($"#4262 round 1 trim measurement: before={beforeBytes / (1024.0 * 1024.0):F1} MB, after={afterBytes / (1024.0 * 1024.0):F1} MB");
+        Assert.True(afterBytes < beforeBytes,
+            $"Expected trim to reduce working set: before={beforeBytes}, after={afterBytes}");
+    }
 }
