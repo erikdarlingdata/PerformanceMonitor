@@ -3668,9 +3668,9 @@ WITH NO DATA";
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
     /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
-    /// against a 1080-second slot the margin is 184 seconds — the clearance the population above carries, a
-    /// property of that closed record rather than of current load (it was 364 s against #3174's 1,260 s slot;
-    /// #3653's three appended hourly successors re-derived the window to 18 minutes); the heaviest
+    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load (it was 184 s against #3653's 1,080 s slot;
+    /// the A6 freeze re-derived the window back to 21 minutes); the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
@@ -3679,10 +3679,10 @@ WITH NO DATA";
     /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
     /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
-    /// <b>896.1 s</b>. That leaves <b>183.9 s</b> of the slot, <b>17.0%</b> of it, and sits <b>3.9 s</b>
+    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by four seconds, at #3653's re-derived 1,080 s window
-    /// (363.9 s, 28.8% and 153.9 s against #3174's 1,260 s). #3119 had to state these figures apart from the
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 153.9 s, at the A6 freeze's re-derived 1,260 s window
+    /// (183.9 s, 17.0% and 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
     /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
     /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
@@ -3803,9 +3803,9 @@ WITH NO DATA";
     /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
     /// restate, because the old reason stopped being true — and which #3653 re-took once more, because it
     /// came back.</b> The alternative that tempts here is the slot less one
-    /// <see cref="CompressionPhaseGuardMinutes"/> band, 840 s, and it sits BELOW
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's 18-minute window, as it did under
-    /// the uniform grid (480 s) and did NOT at #3174's 21-minute window (1,020 s). Below the ceiling was the
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's A6 freeze's 21-minute window, as it
+    /// did NOT under #3653's 18-minute window (840 s) and did at #3174's 21-minute window (1,020 s). Above the ceiling was
     /// whole of its original rejection, since a line under the recorded ceiling warns on the very run the
     /// compression grid is sized against; #3174's re-derivation took that argument away by shrinking the
     /// guard band from half a uniform slot to the light refreshes' own ceiling, leaving both lines clear of
@@ -3825,8 +3825,8 @@ WITH NO DATA";
     /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
     /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
     /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
-    /// spare, this line is 900 s and the ceiling is 4 s below it (#3174's 21-minute window had it at 1,050 s
-    /// and 154 s; #3653's 18-minute window is the floor the ceiling essay's own arithmetic names), so a
+    /// spare, this line is 1,050 s and the ceiling is 154 s below it (#3653's 18-minute window had it at 900 s
+    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window), so a
     /// reading in this band is again past the whole of the record the compression grid is sized against: a
     /// different signal calling for a different response, rather than a restatement of the grid's own
     /// sizing. <b>The relationship is what is pinned, not the two numbers</b> — a ceiling that rose past
@@ -3836,11 +3836,10 @@ WITH NO DATA";
     /// that changes anything — and at four seconds of margin the next re-derivation has no geometry left to
     /// give and has to take a member OFF the grid or a minute off the compression band.</para>
     ///
-    /// <para><b>The alternative's ordering is BACK below the ceiling at #3653's window</b>: 1,080 - 240 = 840 s
-    /// sits 56 s under the 896 s constant, so the rejection the paragraph above re-took as coupling is again
-    /// also an ordering — the alternative would warn on the grid's own sizing figure. Both reasons stand;
-    /// TimescaleSupportTests pins both, and says which one is left if a wider window ever restores #3174's
-    /// state.</para>
+    /// <para><b>The alternative's ordering is ABOVE the ceiling at #3653's A6 freeze</b>: 1,260 - 240 = 1,020 s
+    /// sits 124 s above the 896 s constant, so coupling stands as the sole reason for the rejection — the
+    /// ordering argument is gone again, as it was at #3174's 21-minute window. TimescaleSupportTests pins both
+    /// reasons and says which one remains if a narrower window re-takes the ordering.</para>
     /// </summary>
     public static int RefreshSlotWarningSeconds =>
         RefreshPhaseSlotSeconds * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
@@ -4260,16 +4259,7 @@ WITH NO DATA";
     /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
     /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
     /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
-    /// status-selected part of it. <b>TWELVE OF FIFTEEN, since #3653 (Q12).</b> The read predates the three
-    /// interval-honest hourly successors, so it covers 12 of the 15 light views the constant now bounds; the 3
-    /// registered after the read are unmeasured, and are held under this bound by SHAPE rather than by a
-    /// reading: <see cref="QueryStatsIntervalHourlyView"/> reads the same raw rows under the same group key
-    /// as <see cref="QueryStatsHourlyView"/> less the interval-0 rows (that view's own maximum in this
-    /// population is 23.3 s), and the other two are their legacies' shape less the same rows (sub-3 s). A
-    /// member that reads a SUBSET of a measured sibling's rows into the same group key cannot cost more
-    /// than the sibling, so the bound is argued, not measured — and <see cref="LogRefreshCeilingStaleness"/>
-    /// reports the first run of any of the three that falsifies it, exactly as it would for the twelve. The
-    /// next census over the fifteen-view layout replaces this sentence with a count. <b>ONE STORE'S, on the same precondition
+    /// status-selected part of it. <b>ONE STORE'S, on the same precondition
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
     /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
     /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
@@ -4636,12 +4626,12 @@ WITH NO DATA";
     /// this band cannot drift apart.</para>
     ///
     /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1080 seconds in its window and the
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
     /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 3 minutes of the window are past the refresh and are left on the table deliberately (6 of #3174's
-    /// 1,260 s window; #3653's three hourly successors took three of them): recovering them
+    /// 6 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
+    /// 1,080 s window; the A6 freeze re-added three): recovering them
     /// means sizing a band for one window against a bound whose population is 57 readings and still moving
     /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
     /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
