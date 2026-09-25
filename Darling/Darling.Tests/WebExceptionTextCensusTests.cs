@@ -552,6 +552,29 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
     }
 
+    /// <summary>#4315 round 1, Low 3: the <c>/api/read</c> body on a <c>get_sweep_reports</c> store fault,
+    /// built exactly as the tool's own catch builds it (<see cref="McpHelpers.FormatError"/> from a
+    /// <see cref="PostgresException"/> with SqlState 42P01, the undefined_table code a dropped relation
+    /// raises) and fed through the same <see cref="DarlingWebEndpoints.ToHttpResult"/> the dispatcher
+    /// uses. No database: the envelope is hand-built, so this pins the wire shape without a live store.</summary>
+    [Fact]
+    public void ToHttpResult_ToolCaughtUndefinedTable_MapsTo500_NoRelationOrSqlStateText_OneError()
+    {
+        var logger = new CapturingTestLogger();
+        var ex = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
+        var envelope = McpHelpers.FormatError("get_sweep_reports", ex);
+
+        var result = DarlingWebEndpoints.ToHttpResult(envelope, "/api/read/get_sweep_reports", logger, 9);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        var body = json.RootElement.GetProperty("error").GetString();
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, body);
+        Assert.DoesNotContain("42P01", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("relation", body, StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+    }
+
     [Fact]
     public void ToHttpResult_Refusal_IsUnchanged_StillTheEnvelopeAt400()
     {

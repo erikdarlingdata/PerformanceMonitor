@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -211,13 +212,13 @@ public static class RawChunkIntervalPlanner
             {
                 decisions[table.TableName] = new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"held at {table.CurrentIntervalHours} h: outside the {string.Join("/", RungHours)} h ladder, no safe step known");
+                    string.Create(CultureInfo.InvariantCulture, $"held at {table.CurrentIntervalHours} h: outside the {string.Join("/", RungHours)} h ladder, no safe step known"));
             }
             else if (!EligibleToday(table))
             {
                 decisions[table.TableName] = new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"held at {table.CurrentIntervalHours} h: moved within the last {MinimumDaysBetweenMoves} day(s)");
+                    string.Create(CultureInfo.InvariantCulture, $"held at {table.CurrentIntervalHours} h: moved within the last {MinimumDaysBetweenMoves} day(s)"));
             }
         }
 
@@ -248,7 +249,7 @@ public static class RawChunkIntervalPlanner
             {
                 decisions[table.TableName] = new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"held at {table.CurrentIntervalHours} h: store chunk count {currentTotalChunkCount:N0} is at or past the {ChunkCountCapThreshold:N0} cap");
+                    string.Create(CultureInfo.InvariantCulture, $"held at {table.CurrentIntervalHours} h: store chunk count {currentTotalChunkCount:N0} is at or past the {ChunkCountCapThreshold:N0} cap"));
                 continue;
             }
 
@@ -256,7 +257,7 @@ public static class RawChunkIntervalPlanner
             current[table.TableName] = narrower;
             decisions[table.TableName] = new Decision(
                 table.TableName, table.CurrentIntervalHours, narrower,
-                $"moved to {narrower} h: store-wide open-chunk bytes exceeded the {budgetBytes:N0} B budget (rate-ordered, {table.IngestBytesPerHour:N0} B/h)");
+                string.Create(CultureInfo.InvariantCulture, $"moved to {narrower} h: store-wide open-chunk bytes exceeded the {budgetBytes:N0} B budget (rate-ordered, {table.IngestBytesPerHour:N0} B/h)"));
         }
 
         /* Pass 2 — widen, hysteresis-guarded (#4211 ruling, issuecomment-5836734285): a table moves back up one
@@ -287,14 +288,14 @@ public static class RawChunkIntervalPlanner
             {
                 decisions[table.TableName] = new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"held at {table.CurrentIntervalHours} h: at {wider} h the store would hold {widenedTotal:N0} B, over half the {budgetBytes:N0} B budget");
+                    string.Create(CultureInfo.InvariantCulture, $"held at {table.CurrentIntervalHours} h: at {wider} h the store would hold {widenedTotal:N0} B, over half the {budgetBytes:N0} B budget"));
                 continue;
             }
 
             current[table.TableName] = wider;
             decisions[table.TableName] = new Decision(
                 table.TableName, table.CurrentIntervalHours, wider,
-                $"moved up to {wider} h: the store holds {widenedTotal:N0} B, under half the {budgetBytes:N0} B budget");
+                string.Create(CultureInfo.InvariantCulture, $"moved up to {wider} h: the store holds {widenedTotal:N0} B, under half the {budgetBytes:N0} B budget"));
         }
 
         var results = new List<Decision>(tables.Count);
@@ -304,7 +305,7 @@ public static class RawChunkIntervalPlanner
                 ? decision
                 : new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"unchanged at {table.CurrentIntervalHours} h: fits within budget"));
+                    string.Create(CultureInfo.InvariantCulture, $"unchanged at {table.CurrentIntervalHours} h: fits within budget")));
         }
 
         return results;

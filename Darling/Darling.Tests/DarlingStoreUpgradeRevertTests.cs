@@ -868,7 +868,8 @@ public sealed class DarlingStoreUpgradeRevertTests
             OldMajor: OldMajor,
             NewMajor: 18,
             BundledTimescaleVersion: "2.28.1",
-            AppendManagedConf: static _ => { });
+            AppendManagedConf: static _ => { },
+            SslServerOptions: static () => string.Empty);
 
         /// <summary>Which runtime is live at pg-runtime\pgsql, read from its marker.</summary>
         public string RuntimeInPlace() => File.ReadAllText(Path.Combine(CurrentPgsql, "bin", "runtime.txt"));
