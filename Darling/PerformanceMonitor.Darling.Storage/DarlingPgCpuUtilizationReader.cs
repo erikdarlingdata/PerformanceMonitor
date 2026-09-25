@@ -264,7 +264,7 @@ public static class DarlingPgCpuUtilizationReader
 
     /// <summary>One bucketed point (#4193 - the TrendBuckets contract #3897 gave the rest of the trend family).
     /// CPU and ACU are averaged with each bucket's peak kept beside it, so a saturation minute survives a wide
-    /// bucket; the capacity trio stays averaged, on <see cref="Rounded"/>'s terms; the memory pressure pair
+    /// bucket; the capacity trio stays averaged, on <c>Rounded</c>'s terms; the memory pressure pair
     /// (<see cref="Memory"/>'s <c>FreeBytes</c>/<c>ActiveBytes</c>) is the bucket's WORST sample - minimum free,
     /// maximum active - rather than an average, so a brief pressure spike is not smoothed away; the other four
     /// memory columns stay averaged.</summary>

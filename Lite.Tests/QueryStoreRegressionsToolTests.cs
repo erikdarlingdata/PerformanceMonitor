@@ -120,8 +120,10 @@ public sealed class QueryStoreRegressionsToolTests : IClassFixture<SharedDuckDbF
         Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
         Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
 
-        /* Widening makes the window bigger and the baseline SHORTER - the wrong direction. */
-        Assert.Contains("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
+        /* The baseline is a FIXED 7-day lookback now, not "everything before the window" - so the message
+           names the lookback rather than telling the caller to shorten hours_back, which no longer helps
+           once the whole lookback itself has nothing in it. */
+        Assert.Contains("baseline lookback yet", noBaselineText, StringComparison.Ordinal);
         Assert.DoesNotContain("Widen", noBaselineText, StringComparison.Ordinal);
 
         /* Four sentences, not one sentence four times. */

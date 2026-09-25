@@ -78,9 +78,14 @@ public sealed class McpToolsListBudgetTests
     /// head is not left to guess which of the four empty-window rungs applies. Raised deliberately.</item>
     /// <item>#3898 close-out: every content PR and both feature PRs have merged. Lowered once, to the measured
     /// total, banking the accumulated saving; a future PR only raises it again.</item>
+    /// <item>#4193: <c>get_pg_cpu_utilization</c> gained its first <c>bucket_minutes</c> parameter (the
+    /// #3897 TrendBuckets contract), a genuinely new schema property this tool never served before - not
+    /// text to trim. The two head descriptions this PR also touched (#4193, #4195) were trimmed back down
+    /// to bank under their own per-tool ceilings first; only the new parameter's own bytes are raised
+    /// here.</item>
     /// </list>
     /// </summary>
-    private const int TotalCeilingBytes = 170_798;
+    private const int TotalCeilingBytes = 170_880;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
