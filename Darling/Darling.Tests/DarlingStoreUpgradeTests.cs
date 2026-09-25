@@ -115,7 +115,7 @@ public sealed class DarlingStoreUpgradeTests
            ('' -> '), an embedded backslash doubled (\\ -> \). */
         const string content = "log_line_prefix = 'it''s a test \\\\backslash % value'\n";
 
-        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf(content));
+        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf(content, out _));
 
         Assert.Equal("log_line_prefix", setting.Name);
         Assert.Equal("it's a test \\backslash % value", setting.DisplayValue);
@@ -130,7 +130,7 @@ public sealed class DarlingStoreUpgradeTests
             work_mem = '128MB'
             """;
 
-        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf(content));
+        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf(content, out _));
 
         Assert.Equal("work_mem", setting.Name);
         Assert.Equal("128MB", setting.DisplayValue);
@@ -139,7 +139,7 @@ public sealed class DarlingStoreUpgradeTests
     [Fact]
     public void ParseAutoConf_IgnoresBlankLines()
     {
-        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf("\n   \nwork_mem = '128MB'\n\n"));
+        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf("\n   \nwork_mem = '128MB'\n\n", out _));
 
         Assert.Equal("work_mem", setting.Name);
     }
@@ -153,7 +153,7 @@ public sealed class DarlingStoreUpgradeTests
             work_mem = '256MB'
             """;
 
-        var settings = DarlingStoreUpgrade.ParseAutoConf(content);
+        var settings = DarlingStoreUpgrade.ParseAutoConf(content, out _);
 
         Assert.Equal(2, settings.Count);
         var workMem = Assert.Single(settings, s => s.Name == "work_mem");
@@ -164,7 +164,7 @@ public sealed class DarlingStoreUpgradeTests
     [Fact]
     public void ParseAutoConf_AcceptsAnUnquotedBareToken()
     {
-        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf("max_connections = 250\n"));
+        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf("max_connections = 250\n", out _));
 
         Assert.Equal("max_connections", setting.Name);
         Assert.Equal("250", setting.DisplayValue);
@@ -175,9 +175,30 @@ public sealed class DarlingStoreUpgradeTests
     {
         /* An unterminated quote on its own line is malformed and dropped; the next line still parses —
            one bad line must not cost every other setting in the file. */
-        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf("broken = 'unterminated\nwork_mem = '128MB'\n"));
+        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf("broken = 'unterminated\nwork_mem = '128MB'\n", out _));
 
         Assert.Equal("work_mem", setting.Name);
+    }
+
+    [Fact]
+    public void ParseAutoConf_SkipsALineWhoseNameIsNotAValidGucName()
+    {
+        /* A quote or a space in the name portion is not something ALTER SYSTEM ever writes — only a
+           hand-edited file could put one there — and that name goes into one double-quoted "-C {name}"
+           argument in CarryAutoConfAsync, so a bad one could split that argument. An extension-qualified
+           name like timescaledb.max_background_workers is still valid and must still be kept. */
+        const string content = """
+            bad"name = '1'
+            a b = '1'
+            timescaledb.max_background_workers = 8
+            """;
+
+        var settings = DarlingStoreUpgrade.ParseAutoConf(content, out var skippedNames);
+
+        var setting = Assert.Single(settings);
+        Assert.Equal("timescaledb.max_background_workers", setting.Name);
+        Assert.Equal("8", setting.DisplayValue);
+        Assert.Equal(new[] { "bad\"name", "a b" }, skippedNames);
     }
 
     [Fact]
@@ -596,6 +617,114 @@ public sealed class DarlingStoreUpgradeTests
 
             TryDeleteTree(root.FullName);
         }
+    }
+
+    /// <summary>
+    /// The failure #4253's own fix exists for: a per-setting probe THROWS (here, <see cref="TimeoutException"/>
+    /// on the 2nd of 3 settings) instead of returning a bad exit code. Before the fix the loop below exited
+    /// with postgresql.auto.conf holding whatever its LAST write left there — one candidate line nothing had
+    /// verified — and step 8's post-commit handler finishes the upgrade regardless, so that unverified line is
+    /// what the next start would read. Uses the probe seam so no real postgres.exe or 30 s wait is needed;
+    /// <see cref="CarryAutoConfAsync_CarriesAGoodSetting_LeavesOutOneTheNewBinariesReject_AndTheStoreStarts"/>
+    /// above already covers the real-binaries path.
+    /// </summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_ProbeThrowsTimeout_ResetsToHeaderAndRethrows()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-throw-");
+        try
+        {
+            var (oldDataDirectory, newDataDirectory, newAutoConfPath) = SetUpAutoConfCarryDirectories(root.FullName);
+
+            var probeCalls = 0;
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+            {
+                probeCalls++;
+                if (probeCalls == 2)
+                {
+                    throw new TimeoutException("forced timeout on the 2nd probe, for the test");
+                }
+
+                return Task.FromResult((0, string.Empty));
+            }
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            await Assert.ThrowsAsync<TimeoutException>(() => upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None));
+
+            Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(newAutoConfPath));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// Same defect as <see cref="CarryAutoConfAsync_ProbeThrowsTimeout_ResetsToHeaderAndRethrows"/>, but the
+    /// throw is the other shape <see cref="DarlingManagedPostgres.RunToolAsync"/> produces: the caller's own
+    /// token is cancelled (a service stop mid-upgrade) and the probe rethrows
+    /// <see cref="OperationCanceledException"/>. CancellationToken.None matters here specifically: the
+    /// safety write that resets the file must not itself be blocked by the very token whose cancellation
+    /// caused the reset to be needed.
+    /// </summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_ProbeThrowsAfterCancellation_ResetsToHeaderAndRethrows()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-cancel-");
+        try
+        {
+            var (oldDataDirectory, newDataDirectory, newAutoConfPath) = SetUpAutoConfCarryDirectories(root.FullName);
+
+            using var cts = new CancellationTokenSource();
+            var probeCalls = 0;
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+            {
+                probeCalls++;
+                if (probeCalls == 2)
+                {
+                    cts.Cancel();
+                    token.ThrowIfCancellationRequested();
+                }
+
+                return Task.FromResult((0, string.Empty));
+            }
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            await Assert.ThrowsAsync<OperationCanceledException>(() => upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, cts.Token));
+
+            Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(newAutoConfPath, CancellationToken.None));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Matches the private <c>header</c> constant in <see cref="DarlingStoreUpgrade.CarryAutoConfAsync"/>
+    /// exactly, for the two tests above to assert the reset-on-exception file state against.</summary>
+    private const string AutoConfHeaderOnly =
+        "# Do not edit this file manually!\n# It will be overwritten by the ALTER SYSTEM command.\n";
+
+    /// <summary>
+    /// An old data directory with three valid, ALTER-SYSTEM-shaped settings, and an empty new data directory
+    /// — enough for <see cref="DarlingStoreUpgrade.CarryAutoConfAsync"/> to run its probe loop against without
+    /// a real postgres.exe. Three settings so a throw on the 2nd leaves one already carried, one never
+    /// reached, and (before the fix) one half-written candidate line on disk.
+    /// </summary>
+    private static (string OldDataDirectory, string NewDataDirectory, string NewAutoConfPath) SetUpAutoConfCarryDirectories(string root)
+    {
+        var oldDataDirectory = Path.Combine(root, "old");
+        var newDataDirectory = Path.Combine(root, "new");
+        Directory.CreateDirectory(oldDataDirectory);
+        Directory.CreateDirectory(newDataDirectory);
+
+        File.WriteAllText(
+            Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+            "work_mem = '64MB'\nshared_buffers = '256MB'\nmax_connections = '250'\n");
+
+        return (oldDataDirectory, newDataDirectory, Path.Combine(newDataDirectory, "postgresql.auto.conf"));
     }
 
     private static async Task<string> StartDirectAsync(string binDirectory, string dataDirectory, int port, bool quiesced, CancellationToken cancellationToken)
