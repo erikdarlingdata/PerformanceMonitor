@@ -435,7 +435,17 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var comparison = GetComparisonRange();
+            /* #4296: deliberately NOT GetComparisonRange() (ServerTab.Comparison.cs) -- that one's
+               preset-range fallback is a raw DateTime.UtcNow, correct for the Queries-tab's three
+               comparison reads it also serves (UTC collection_time, no offset conversion of their own) but
+               wrong for the correlated lanes' reads, which take a supplied fromDate/toDate as SERVER-LOCAL.
+               CorrelatedTimelineLanesControl.GetOverviewComparisonRange derives the current window on that
+               basis instead (server-local now under a preset range, same as the already-server-local
+               fromDate/toDate under a custom one). */
+            (DateTime From, DateTime To, DateTime CurrentFrom)? comparison = CompareToCombo == null
+                ? null
+                : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
+                    CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.UtcOffsetMinutes);
             await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, comparison);
         }
         catch (Exception ex)
