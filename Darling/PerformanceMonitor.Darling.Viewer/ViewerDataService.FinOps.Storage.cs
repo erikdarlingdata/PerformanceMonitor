@@ -495,27 +495,36 @@ ORDER BY growth_30d_mb DESC";
         return items;
     }
 
-    /// <summary>Ranked top-N object growth summary for the object drill (#1138 §3A). $1 server_id, $2 database, $3 window start, $4 topN.</summary>
+    /// <summary>
+    /// The latest/earliest collection_time in the window, for a server+database — computed ONCE (#4227) and
+    /// passed as exact instants to both <see cref="ObjectGrowthSummarySql"/> and <see cref="ObjectGrowthSeriesSql"/>,
+    /// which used to each recompute this same MAX/MIN(collection_time) as their own <c>bounds</c> CTE (89ms and
+    /// 21.3k buffers apiece on a seeded store, with no index leading (server_id, collection_time)). $1 server_id,
+    /// $2 database, $3 window start. NULL/NULL when nothing in v_index_object_stats matches (collection hasn't
+    /// started, or stopped before the window) — the caller short-circuits to empty rather than passing NULL
+    /// instants down.
+    /// </summary>
+    public const string ObjectGrowthBoundsSql = @"
+SELECT MAX(collection_time) AS latest_time, MIN(collection_time) AS earliest_time
+FROM v_index_object_stats
+WHERE server_id = $1 AND database_name = $2 AND collection_time >= $3";
+
+    /// <summary>Ranked top-N object growth summary for the object drill (#1138 §3A). $1 server_id, $2 database, $3 latest instant, $4 earliest instant, $5 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/>.</summary>
     public const string ObjectGrowthSummarySql = @"
-WITH bounds AS (
-    SELECT MAX(collection_time) AS latest_time, MIN(collection_time) AS earliest_time
-    FROM v_index_object_stats
-    WHERE server_id = $1 AND database_name = $2 AND collection_time >= $3
-),
-latest AS (
+WITH latest AS (
     SELECT schema_name, table_name,
         SUM(reserved_mb) AS cur_reserved_mb,
         SUM(used_mb) AS cur_used_mb,
         MAX(total_rows) AS cur_rows,
         COUNT(*) AS index_count
     FROM v_index_object_stats
-    WHERE server_id = $1 AND database_name = $2 AND collection_time = (SELECT latest_time FROM bounds)
+    WHERE server_id = $1 AND database_name = $2 AND collection_time = $3
     GROUP BY schema_name, table_name
 ),
 earliest AS (
     SELECT schema_name, table_name, SUM(reserved_mb) AS e_reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND database_name = $2 AND collection_time = (SELECT earliest_time FROM bounds)
+    WHERE server_id = $1 AND database_name = $2 AND collection_time = $4
     GROUP BY schema_name, table_name
 )
 SELECT
@@ -529,25 +538,20 @@ SELECT
 FROM latest l
 LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
 ORDER BY growth_mb DESC, l.schema_name, l.table_name
-LIMIT $4";
+LIMIT $5";
 
-    /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 topN.</summary>
+    /// <summary>Daily reserved-MB series for the ranked top-N objects (heatmap). $1 server_id, $2 database, $3 window start, $4 latest instant, $5 earliest instant, $6 topN — the two instants come from <see cref="ObjectGrowthBoundsSql"/>.</summary>
     public const string ObjectGrowthSeriesSql = @"
-WITH bounds AS (
-    SELECT MAX(collection_time) AS latest_time, MIN(collection_time) AS earliest_time
-    FROM v_index_object_stats
-    WHERE server_id = $1 AND database_name = $2 AND collection_time >= $3
-),
-latest AS (
+WITH latest AS (
     SELECT schema_name, table_name, SUM(reserved_mb) AS cur_reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND database_name = $2 AND collection_time = (SELECT latest_time FROM bounds)
+    WHERE server_id = $1 AND database_name = $2 AND collection_time = $4
     GROUP BY schema_name, table_name
 ),
 earliest AS (
     SELECT schema_name, table_name, SUM(reserved_mb) AS e_reserved_mb
     FROM v_index_object_stats
-    WHERE server_id = $1 AND database_name = $2 AND collection_time = (SELECT earliest_time FROM bounds)
+    WHERE server_id = $1 AND database_name = $2 AND collection_time = $5
     GROUP BY schema_name, table_name
 ),
 ranked AS (
@@ -556,7 +560,7 @@ ranked AS (
     FROM latest l
     LEFT JOIN earliest e ON e.schema_name = l.schema_name AND e.table_name = l.table_name
     ORDER BY growth_mb DESC, l.schema_name, l.table_name
-    LIMIT $4
+    LIMIT $6
 )
 SELECT
     ios.schema_name,
@@ -582,12 +586,39 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
         var objects = new List<ObjectSizeGrowthRow>();
         var samples = new List<FinOpsObjectDaySample>();
 
+        /* #4227: bounds computed once, then handed to both statements below as exact instants instead of
+           each re-deriving them via its own `bounds` CTE. */
+        DateTime? latestTime;
+        DateTime? earliestTime;
+
+        await using (var boundsCommand = _dataSource.CreateCommand(ObjectGrowthBoundsSql))
+        {
+            boundsCommand.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            boundsCommand.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            boundsCommand.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
+            boundsCommand.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+
+            await using var reader = await boundsCommand.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken); /* MAX/MIN with no GROUP BY always returns one row. */
+            latestTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+            earliestTime = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+        }
+
+        /* No v_index_object_stats row in the window (collection hasn't started, or stopped before the window
+           started) — both old statements' `collection_time = (SELECT ... FROM bounds)` matched nothing in
+           that case, so this is the same empty result without issuing either statement. */
+        if (latestTime is not DateTime latest || earliestTime is not DateTime earliest)
+        {
+            return (objects, samples);
+        }
+
         await using (var command = _dataSource.CreateCommand(ObjectGrowthSummarySql))
         {
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = latest });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = earliest });
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -618,6 +649,8 @@ ORDER BY ios.schema_name, ios.table_name, the_day";
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = latest });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = earliest });
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);

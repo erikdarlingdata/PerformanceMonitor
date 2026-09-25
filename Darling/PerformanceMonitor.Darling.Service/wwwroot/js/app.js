@@ -220,7 +220,8 @@ async function refreshAgNav() {
   const link = document.querySelector('.nav a[data-route="ag"]');
   if (!link) return;
 
-  const res = await apiGet("/api/ag");
+  // #4189: a count-only read, not the full topology /api/ag builds — this probe only ever checks the one field.
+  const res = await apiGet("/api/ag/count");
   if (res.kind !== "data" || !res.data || !res.data.availability_group_count) return;
 
   agNavRevealed = true;

@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -43,7 +44,10 @@ public sealed partial class ViewerDataService
     /// GetInt64, narrowed to int); SUM of a bigint column is <c>numeric</c>, CAST back to <c>bigint</c> for
     /// the typed GetInt64 reader (the same adaptation the waiting-task read makes); AVG is <c>numeric</c>,
     /// CAST to <c>double precision</c> for GetDouble. $1 server_id, $2 window start, $3 window end (naive
-    /// UTC).
+    /// UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both tables are hypertables partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a
+    /// chunk on (#4229); the floor lets it skip every chunk older than the window, without being able to
+    /// drop a row (an event is collected after it happens).
     /// </summary>
     public const string BlockingDurationStatsSql = """
         WITH bpr AS (
@@ -55,6 +59,7 @@ public sealed partial class ViewerDataService
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -66,6 +71,7 @@ public sealed partial class ViewerDataService
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
@@ -95,6 +101,7 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

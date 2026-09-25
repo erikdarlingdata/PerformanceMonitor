@@ -17,6 +17,16 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>Re-probe at most this often per server (#4226 lane V1b): measured 46-58 ms on a seeded
+    /// 20-collector/7-day/1-minute-cadence DuckDB (Lite's realistic scale for one server), against a 30 s
+    /// floor on the auto-refresh timer (<c>ServerTab.AutoRefreshSecondsForIndex</c>) — over the ~50 ms bar
+    /// worth memoizing, even though Lite has no fleet fan-out to amortize across. The same "benignly racy"
+    /// TTL shape Darling's <c>GetFleetCollectionHealthByServerAsync</c> uses, not a lock: a refresh racing a
+    /// cold per-server entry may run the scan twice, which is still far cheaper than never caching.</summary>
+    private static readonly TimeSpan PermissionDeniedCountMemoLifetime = TimeSpan.FromSeconds(20);
+
+    private readonly Dictionary<int, (int Count, DateTime AtUtc)> _permissionDeniedCountByServer = new();
+
     /// <summary>
     /// #1591: how many DISTINCT collectors were permission-denied in the last 7 days — the badge count for the
     /// Collection Health tab header.
@@ -29,6 +39,12 @@ public partial class LocalDataService
     /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId)
     {
+        if (_permissionDeniedCountByServer.TryGetValue(serverId, out var cached) &&
+            DateTime.UtcNow - cached.AtUtc < PermissionDeniedCountMemoLifetime)
+        {
+            return cached.Count;
+        }
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -42,7 +58,9 @@ AND   status = 'PERMISSIONS'";
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
         var scalar = await command.ExecuteScalarAsync();
-        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        var count = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        _permissionDeniedCountByServer[serverId] = (count, DateTime.UtcNow);
+        return count;
     }
 
     /// <summary>

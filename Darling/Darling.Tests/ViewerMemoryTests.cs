@@ -143,11 +143,14 @@ public sealed class ViewerMemorySqlTests
 
         Assert.Contains("FROM v_memory_pressure_events", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        /* Windowed on sample_time (the payload's own clock + its dedicated index), NOT collection_time. */
+        /* Windowed on sample_time (the payload's own clock + its dedicated index), not collection_time for
+           the answer itself — #4229 adds a collection_time >= $4 FLOOR beside it (EventWindowFloor), so the
+           table is a hypertable partitioned on collection_time and this sample_time window alone gave the
+           planner nothing to exclude a chunk on. The floor is a second predicate, not a replacement. */
         Assert.Contains("sample_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("sample_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY sample_time", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
 
         foreach (var col in new[]
         {
