@@ -10,9 +10,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -111,12 +113,12 @@ public sealed class FleetSweepStoreLivePostgresTests
         Assert.Equal(sweepOne, latest);
         Assert.Equal(DateTimeKind.Utc, latest!.SweptAtUtc.Kind);
 
-        var verdicts = await FleetSweepStore.GetServerVerdictsAsync(postgres, 1001, null, ct);
+        var verdicts = await FleetSweepStore.GetServerVerdictsAsync(postgres, 1001, ct);
         Assert.Equal(2, verdicts.Count);
         Assert.Equal("server-a", verdicts[0].ServerName);
         Assert.Equal("cpu pinned across the span", verdicts.Single(v => v.ServerId == 2).BandReason);
 
-        var ledger = await FleetSweepStore.GetWouldHavePagedAsync(postgres, 1001, null, ct);
+        var ledger = await FleetSweepStore.GetWouldHavePagedAsync(postgres, 1001, ct);
         Assert.Equal("high_cpu", Assert.Single(ledger).AlertFamily);
 
         /* Sweep 2: the watch item is sighted again (second consecutive hit — it OPENS), and the diff
@@ -162,11 +164,11 @@ public sealed class FleetSweepStoreLivePostgresTests
 
         /* The span read honors BOTH bounds: a span ending before sweep 2 returns only sweep 1. */
         var spanned = await FleetSweepStore.GetSweepsBySpanAsync(
-            postgres, sweepOneAt.AddMinutes(-1), sweepOneAt.AddMinutes(1), null, ct);
+            postgres, sweepOneAt.AddMinutes(-1), sweepOneAt.AddMinutes(1), ct);
         Assert.Equal(1001, Assert.Single(spanned).SweepId);
 
         var open = Assert.Single(await FleetSweepStore.GetWatchItemsByStateAsync(
-            postgres, FleetSweepWatchStateMachine.Open, null, ct));
+            postgres, FleetSweepWatchStateMachine.Open, ct));
         Assert.Equal(1001, open.FirstSeenSweepId);
         Assert.Equal(1002, open.OpenedSweepId);
         Assert.Equal("""{"cpu":97}""", open.EvidenceJson);
@@ -373,5 +375,154 @@ public sealed class FleetSweepStoreLivePostgresTests
         }
 
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, sentinels)!);
+    }
+
+    /// <summary>
+    /// #4315: the five presentation reads (the web feed's <c>/api/sweeps*</c> routes and
+    /// <c>get_sweep_reports</c> share every one of them) used to log-and-degrade a store fault into an
+    /// empty list, which both surfaces rendered as a genuinely quiet span or worklist — a page reading
+    /// "No sweeps in this span" and a tool answering an empty timeline, indistinguishable from the
+    /// store actually holding nothing. Proven against a real fault, not a mock: each read's own table
+    /// is dropped out from under it, and the call must throw — never answer the happy empty shape a
+    /// caller cannot tell apart from "nothing here". This is the fix's shared root: both surfaces call
+    /// these exact methods, so a throw proven here is a throw either surface's own catch (the web
+    /// pipeline's #4276 backstop, or get_sweep_reports' try/catch) now receives.
+    /// </summary>
+    [Fact]
+    public async Task EachPresentationRead_ThrowsOnAStoreFault_NeverDegradesToEmpty()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live fleet-sweep fault test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, null, ct);
+
+            /* Each read's own table, gone — the realistic shape of the fault this pins against (an
+               unreadable relation), not a hand-built exception. */
+            await using var drop = new NpgsqlCommand(
+                "DROP TABLE collect.fleet_sweep_runs, collect.fleet_sweep_server_verdicts, " +
+                "collect.fleet_sweep_would_have_paged, collect.fleet_sweep_watch_items;",
+                migrate);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var span = new DateTime(2026, 9, 15, 10, 0, 0, DateTimeKind.Utc);
+
+        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetSweepsBySpanAsync(
+            postgres, span.AddHours(-1), span, ct));
+        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetServerVerdictsAsync(postgres, 1, ct));
+        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetWouldHavePagedAsync(postgres, 1, ct));
+        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetWatchItemsByStateAsync(
+            postgres, FleetSweepWatchStateMachine.Open, ct));
+        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, ct));
+    }
+
+    /// <summary>
+    /// #4315, the MCP half: <c>get_sweep_reports</c> used to answer a verdicts-read fault with a
+    /// document whose <c>latest</c> section silently degraded to empty verdicts, rather than failing
+    /// the call — the exact "quiet is not clean" misreading the sweep's own instrument-liveness block
+    /// warns readers about. Isolated to the verdicts table alone (the run and watch-item tables stay
+    /// up), so <c>GetLatestSweepAsync</c> and the span/watch-item reads succeed and the failure this
+    /// test proves is the one under <c>BuildDetailAsync</c>, not a knock-on from an unrelated table.
+    /// </summary>
+    [Fact]
+    public async Task GetSweepReports_AnswersError_OnAVerdictsFault_NeverADegradedDocument()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_sweep_reports fault test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, null, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var sweptAt = new DateTime(2026, 9, 15, 10, 0, 0, DateTimeKind.Utc);
+        var run = new FleetSweepRun(
+            9001, sweptAt, sweptAt.AddHours(-1), sweptAt, null, true, 1, 1, true, "{}", "{}");
+
+        await FleetSweepStore.RecordSweepAsync(
+            postgres, run,
+            new[] { new FleetSweepServerVerdict(1, "server-a", "Healthy", null, null, null) },
+            Array.Empty<FleetSweepWouldHavePagedEntry>(),
+            Array.Empty<FleetSweepWatchItem>(),
+            ct);
+
+        await using (var drop = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await drop.OpenAsync(ct);
+            await using var command = new NpgsqlCommand("DROP TABLE collect.fleet_sweep_server_verdicts;", drop);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        var raw = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, null);
+        using var doc = JsonDocument.Parse(raw);
+
+        Assert.Equal("error", doc.RootElement.GetProperty("status").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("sweeps", out _), "an error answer must not also carry a timeline");
+    }
+
+    /// <summary>
+    /// #4315, the watch-item half: the default worklist view (<see cref="FleetSweepStore.GetOpenAndCarriedWatchItemsAsync"/>)
+    /// used to degrade a fault to an empty worklist, reading as "nothing open" — the misreading the
+    /// worklist's default-view status must never carry. Isolated to the watch-item table alone.
+    /// </summary>
+    [Fact]
+    public async Task GetSweepReports_AnswersError_OnAWatchItemFault_NeverAnEmptyWorklist()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_sweep_reports fault test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, null, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var sweptAt = new DateTime(2026, 9, 15, 10, 0, 0, DateTimeKind.Utc);
+        var run = new FleetSweepRun(
+            9101, sweptAt, sweptAt.AddHours(-1), sweptAt, null, true, 1, 1, true, "{}", "{}");
+
+        await FleetSweepStore.RecordSweepAsync(
+            postgres, run,
+            new[] { new FleetSweepServerVerdict(1, "server-a", "Healthy", null, null, null) },
+            Array.Empty<FleetSweepWouldHavePagedEntry>(),
+            Array.Empty<FleetSweepWatchItem>(),
+            ct);
+
+        await using (var drop = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await drop.OpenAsync(ct);
+            await using var command = new NpgsqlCommand("DROP TABLE collect.fleet_sweep_watch_items;", drop);
+            await command.ExecuteNonQueryAsync(ct);
+        }
+
+        var raw = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, null);
+        using var doc = JsonDocument.Parse(raw);
+
+        Assert.Equal("error", doc.RootElement.GetProperty("status").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("watch_items", out _), "an error answer must not also carry a worklist");
     }
 }
