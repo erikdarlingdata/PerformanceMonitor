@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -595,9 +596,10 @@ public sealed class DarlingMcpTools
     public static async Task<string> AuditConfig(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
@@ -629,7 +631,7 @@ public sealed class DarlingMcpTools
                Engine resolved off the registry (never a column's presence, #2530) through the same read the
                refusal used; a registry that cannot answer falls through to the SQL Server audit exactly as
                before. */
-            var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId);
+            var (_, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken);
             if (MonitoredEngineKind.IsPostgres(engineKind))
             {
                 /* Coverage discarded for the reason the SQL Server arm states below (#3538 A2): these are
@@ -640,7 +642,7 @@ public sealed class DarlingMcpTools
                    CollectConfigAuditFactsAsync (#4206): the status projection below reads fact.Severity,
                    so facts must arrive scored. */
                 var pgFacts = await analysisService.CollectConfigAuditFactsAsync(
-                    resolved.ServerId, resolved.ServerName);
+                    resolved.ServerId, resolved.ServerName, cancellationToken: cancellationToken);
 
                 var pgFactsByKey = pgFacts.ToFactLookup();
 
@@ -756,7 +758,7 @@ public sealed class DarlingMcpTools
                still inside that.) #4192: the narrow read, not the full collect + detect + score pass — this
                tool projects 8 point-in-time facts, never wait stats, blocking, query stats or plan regression. */
             var facts = await analysisService.CollectConfigAuditFactsAsync(
-                resolved.ServerId, resolved.ServerName);
+                resolved.ServerId, resolved.ServerName, cancellationToken: cancellationToken);
 
             var factsByKey = facts.ToFactLookup();
 
@@ -957,7 +959,7 @@ public sealed class DarlingMcpTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("audit_config", ex);
         }
