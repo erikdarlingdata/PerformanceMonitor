@@ -69,6 +69,14 @@ public class DuckDbInitializer : IDisposable
     internal const string TrimTargetMemoryLimit = "64MB";
 
     /// <summary>
+    /// Count of trim cycles whose SET-based reset actually ran to completion (#4262 round 3). Instance
+    /// state, not static — each test constructs its own <see cref="DuckDbInitializer"/>, so there is
+    /// nothing to restore afterward, unlike <see cref="TrimThresholdBytes"/>. Internal so a test can read
+    /// it directly instead of inferring "did the cycle run" from a side effect that holds either way.
+    /// </summary>
+    internal int CompletedTrimCycleCount;
+
+    /// <summary>
     /// How often the trim timer checks the sentinel's memory usage (#4262 round 1 finding 1). Not const —
     /// read fresh by the constructor, so a test can lower it before constructing a
     /// <see cref="DuckDbInitializer"/>; most tests instead call <see cref="RunMemoryTrimCycle"/> directly
@@ -387,6 +395,16 @@ public class DuckDbInitializer : IDisposable
         if (sentinel is null)
             return;
 
+        /* #4262 round 3 finding 3: take the read lock around the memory read, unlike round 1's unlocked
+           read. Unlocked, this call could run on the sentinel at the exact moment a reset or Dispose
+           (both under the write lock) closes it out from under it — a native call on a disposed DuckDB
+           connection can take the whole process down, not just throw a catchable exception. Never wait
+           (same "a trim cycle must never block a real caller" rule as the write lock below): if the read
+           lock is busy, skip this cycle and try again in TrimInterval. Released before the write-lock
+           attempt below so the trim never holds both locks at once. */
+        if (!s_dbLock.TryEnterReadLock(0))
+            return;
+
         double? beforeBytes;
         try
         {
@@ -396,6 +414,10 @@ public class DuckDbInitializer : IDisposable
         {
             _logger?.LogDebug(ex, "Trim cycle: could not read sentinel memory usage");
             return;
+        }
+        finally
+        {
+            s_dbLock.ExitReadLock();
         }
 
         if (beforeBytes is null || beforeBytes < TrimThresholdBytes)
@@ -432,6 +454,14 @@ public class DuckDbInitializer : IDisposable
                 cmd.CommandText = $"SET memory_limit='{configuredMemoryLimit}'";
                 cmd.ExecuteNonQuery();
             }
+
+            /* #4262 round 3: only incremented once both SET statements above actually ran, so a test can
+               assert the cycle really executed instead of asserting side effects that hold whether or not
+               it did (memory_limit round-trips either way if nothing touched it; process working set
+               drifts down from GC noise alone around a bare GC.Collect()). Plain increment, not
+               Interlocked: only reachable while this thread holds s_dbLock's write lock, which already
+               serializes every writer against this field. */
+            CompletedTrimCycleCount++;
 
             stopwatch.Stop();
             var afterBytes = ReadSentinelMemoryUsageBytes(lockedSentinel);
@@ -548,10 +578,25 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     public void Dispose()
     {
-        /* Stop the trim timer (#4262 round 1) unconditionally, before the lock attempt below — even if
-           that attempt times out, nothing should still be checking memory on a sentinel this call is
-           trying to close. Timer.Dispose is safe to call more than once. */
-        _trimTimer?.Dispose();
+        /* Stop the trim timer (#4262 round 1) and wait briefly for an in-flight tick to finish, before
+           the lock attempt below (#4262 round 3 finding 3). Timer.Dispose() alone only stops FUTURE
+           callbacks — a callback already running on a thread pool thread keeps running after this call
+           returns, so without waiting here an in-flight tick could still be reading through, or writing
+           through, the sentinel while ReleaseSentinel(WithoutLock) below closes it out from under it. A
+           tick's own read- or write-lock-held section is a handful of quick queries — milliseconds — so
+           1s is generous, not a real wait in the common case; never unbounded, same "Dispose must never
+           hang" reasoning as DisposeWriteLockTimeout below. Its own try/catch: this must never throw
+           either, same reason as the rest of Dispose. */
+        try
+        {
+            using var trimTimerStopped = new ManualResetEvent(false);
+            _trimTimer.Dispose(trimTimerStopped);
+            trimTimerStopped.WaitOne(TimeSpan.FromSeconds(1));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Dispose failed while stopping the trim timer");
+        }
 
         try
         {

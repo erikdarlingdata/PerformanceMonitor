@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -314,6 +315,99 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
             releaseReader.Set();
             await readerTask;
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// #4262 round 3, my ruling. The tests above assert side effects that hold whether or not the cycle's
+    /// SET statements ever ran (<c>memory_limit</c> round-trips either way if nothing touched it) — this
+    /// asserts the run itself, through <see cref="DuckDbInitializer.CompletedTrimCycleCount"/>, which only
+    /// increments once both SET statements below it actually complete.
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_OverThreshold_IncrementsCompletedCycleCount()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 1;
+        try
+        {
+            Assert.Equal(0, initializer.CompletedTrimCycleCount);
+
+            initializer.RunMemoryTrimCycle();
+
+            Assert.Equal(1, initializer.CompletedTrimCycleCount);
+        }
+        finally
+        {
+            DuckDbInitializer.TrimThresholdBytes = originalThreshold;
+            initializer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// #4262 round 3 finding 3. Before this fix, the trim's memory read ran unlocked, so it could touch
+    /// the sentinel at the exact moment a concurrent <see cref="DuckDbInitializer.ResetDatabaseAsync"/>
+    /// (which runs its whole body under the write lock, and disposes the sentinel in the first few
+    /// instructions after acquiring it) disposed it and swapped in a new one — a native call on a
+    /// disposed DuckDB connection can take the whole process down, not a catchable exception. Fires trim
+    /// cycles in a tight loop from another thread for the whole duration of a real reset.
+    ///
+    /// <para><b>Tried reverting just the read-lock guard to confirm this fails on the old shape, the
+    /// usual bar for a regression test (round 1-2's tests in this class all clear it) — it did not
+    /// reproduce, even hammered with 8 racer threads across 30 resets (~21s). The window between
+    /// <c>ResetDatabaseAsync</c> taking the write lock and disposing the sentinel is a handful of CPU
+    /// instructions wide, not a span this kind of loop can reliably land in.</b> This still pins the
+    /// documented contract (a racing tick must never throw and the reset must still complete cleanly) and
+    /// exercises the exact interleaving the finding describes on every run, which is worth keeping even
+    /// unproven-by-revert; treat it as a stress/regression test, not a confirmed repro.</para>
+    /// </summary>
+    [Fact]
+    public async Task RunMemoryTrimCycle_RacingReset_NeverThrowsAndResetStillCompletes()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        await SeedCollectionLogRowAsync(initializer, "TestCollector");
+
+        var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
+        DuckDbInitializer.TrimThresholdBytes = 0;
+        var stop = new CancellationTokenSource();
+        var racerExceptions = new List<Exception>();
+        try
+        {
+            var racer = Task.Run(() =>
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    try
+                    {
+                        initializer.RunMemoryTrimCycle();
+                    }
+                    catch (Exception ex)
+                    {
+                        racerExceptions.Add(ex);
+                    }
+                }
+            });
+
+            var resetEx = await Record.ExceptionAsync(() => initializer.ResetDatabaseAsync());
+
+            stop.Cancel();
+            await racer;
+
+            Assert.Null(resetEx);
+            Assert.Empty(racerExceptions);
+
+            using var afterReset = initializer.CreateConnection();
+            await afterReset.OpenAsync();
+            Assert.Equal(0L, Convert.ToInt64(await ScalarAsync(afterReset, "SELECT COUNT(*) FROM collection_log")));
         }
         finally
         {
