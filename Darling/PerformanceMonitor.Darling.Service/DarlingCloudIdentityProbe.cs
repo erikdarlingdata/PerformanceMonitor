@@ -45,9 +45,12 @@ internal readonly record struct CloudIdentity(string? Provider, string? Instance
 /// <see cref="ProbeBudget"/> (200 ms) from a single cancellation source, not a per-request timeout, so a slow
 /// first hop cannot spend the budget twice. A response is read only up to <see cref="MaxResponseBytes"/> (256)
 /// bytes and rejected past that cap. The final value must match <see cref="ValuePattern"/> or it does not
-/// count. ANY failure — timeout, non-2xx status, a redirect, an oversized body, a pattern mismatch, a thrown
-/// exception — returns <see cref="CloudIdentity.None"/> rather than throwing (ruling 4): a caller never needs
-/// its own try/catch around this.</para>
+/// count. ANY failure the probe causes itself — timeout, non-2xx status, a redirect, an oversized body, a
+/// pattern mismatch, a thrown exception — returns <see cref="CloudIdentity.None"/> rather than throwing
+/// (ruling 4): a caller never needs its own try/catch around those. The one exception: the caller's own
+/// cancellation still throws <see cref="OperationCanceledException"/> rather than collapsing to
+/// <see cref="CloudIdentity.None"/>, so <see cref="StoreHostProfileCache"/>'s single-flight gather never
+/// caches a wrong "not found" for a caller that gave up mid-probe.</para>
 /// </summary>
 internal static class DarlingCloudIdentityProbe
 {
@@ -66,12 +69,16 @@ internal static class DarlingCloudIdentityProbe
 
     /// <summary>The TTL this probe asks for on its IMDSv2 token. The token is used once, for the very next
     /// request, and never persisted — the value only needs to outlive the round trip within
-    /// <see cref="ProbeBudget"/>, so the shortest TTL IMDSv2 accepts is enough.</summary>
+    /// <see cref="ProbeBudget"/>. IMDSv2 accepts 1 to 21,600 seconds here; 60 is comfortably enough for a round
+    /// trip bounded by a 200 ms budget, not the minimum IMDSv2 allows.</summary>
     private const string Ec2TokenTtlSeconds = "60";
 
     /// <summary>200 ms TOTAL for the whole probe (ruling 2) — the EC2 attempt (token PUT + instance-type GET)
-    /// and, when that finds nothing, the Azure GET all share this one budget.</summary>
-    private static readonly TimeSpan ProbeBudget = TimeSpan.FromMilliseconds(200);
+    /// and, when that finds nothing, the Azure GET all share this one budget. Also <see cref="CreateHandler"/>'s
+    /// <c>ConnectTimeout</c>, so a cancelled connect attempt cannot keep retrying past the handler's own
+    /// disposal. Internal, not private, so <see cref="DarlingCloudIdentityProbeTests"/> can assert the handler
+    /// was built with this exact value rather than a duplicated magic number.</summary>
+    internal static readonly TimeSpan ProbeBudget = TimeSpan.FromMilliseconds(200);
 
     /// <summary>The response cap (ruling 2): a body is read only up to this many bytes, then rejected as
     /// oversized. Every real value here — an EC2 instance type, an EC2 IMDSv2 token, an Azure VM size — is
@@ -82,8 +89,10 @@ internal static class DarlingCloudIdentityProbe
     /// of the set every real value is drawn from. Anything else — empty, oversized, or carrying a character
     /// neither cloud's naming scheme uses — counts as "not found", the same as a network failure. Deliberately
     /// NOT applied to the intermediate EC2 token (a base64-ish string that legitimately carries <c>+</c>,
-    /// <c>/</c> and <c>=</c>, none of which this pattern allows) — only the value this probe actually reports.</summary>
-    internal static readonly Regex ValuePattern = new(@"^[A-Za-z0-9._-]{1,64}$", RegexOptions.Compiled);
+    /// <c>/</c> and <c>=</c>, none of which this pattern allows) — only the value this probe actually reports.
+    /// Anchored with <c>\z</c>, not <c>$</c>: <c>$</c> also matches immediately before a trailing <c>\n</c>, so
+    /// a value smuggling one past the last accepted character would still pass.</summary>
+    internal static readonly Regex ValuePattern = new(@"^[A-Za-z0-9._-]{1,64}\z", RegexOptions.Compiled);
 
     /// <summary>The production entry point: builds this probe's own handler (ruling 2) and runs it.</summary>
     internal static async Task<CloudIdentity> ProbeAsync(CancellationToken cancellationToken)
@@ -95,12 +104,20 @@ internal static class DarlingCloudIdentityProbe
     }
 
     /// <summary>This probe's own handler (ruling 2) — never a handler shared with any other outbound call in
-    /// the process. <see cref="DarlingCloudIdentityProbeSourcePinTests"/> pins these two settings against the
-    /// source text.</summary>
+    /// the process. <see cref="DarlingCloudIdentityProbeSourcePinTests"/> pins <c>UseProxy</c> and
+    /// <c>AllowAutoRedirect</c> against the source text. <c>ConnectTimeout</c> bounds a stuck TCP handshake to
+    /// the same budget the rest of the probe shares, so a cancelled connect does not keep retrying for its own
+    /// default timeout after this handler is disposed. <c>MaxResponseDrainSize = 0</c> means disposing this
+    /// handler with a response in flight never reads and discards up to the runtime's 1 MiB default drain.
+    /// <c>ActivityHeadersPropagator = null</c> so no diagnostic listener can ever add a <c>traceparent</c> or
+    /// <c>baggage</c> header to a request that leaves the process for a link-local metadata endpoint.</summary>
     internal static HttpMessageHandler CreateHandler() => new SocketsHttpHandler
     {
         UseProxy = false,
         AllowAutoRedirect = false,
+        ConnectTimeout = ProbeBudget,
+        MaxResponseDrainSize = 0,
+        ActivityHeadersPropagator = null,
     };
 
     /// <summary>The handler-injectable core a fake <see cref="HttpMessageHandler"/> drives in tests.</summary>
@@ -109,7 +126,13 @@ internal static class DarlingCloudIdentityProbe
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(ProbeBudget);
 
-        using var client = new HttpClient(handler, disposeHandler: false) { Timeout = Timeout.InfiniteTimeSpan };
+        /* MaxResponseContentBufferSize caps even a buffered read at MaxResponseBytes + 1 — one byte past the
+           cap is enough to tell "oversized" from "exactly at the cap" without ever buffering a large body. */
+        using var client = new HttpClient(handler, disposeHandler: false)
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+            MaxResponseContentBufferSize = MaxResponseBytes + 1,
+        };
 
         try
         {
@@ -121,6 +144,14 @@ internal static class DarlingCloudIdentityProbe
 
             var azure = await TryAzureAsync(client, budget.Token).ConfigureAwait(false);
             return azure is not null ? new CloudIdentity("azure", azure) : CloudIdentity.None;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            /* The CALLER's own token was cancelled — not the probe's 200 ms budget expiring. That must
+               propagate rather than collapse to CloudIdentity.None, so StoreHostProfileCache's single-flight
+               gather (which only caches a gather that returns normally) never caches a wrong "not found" for a
+               caller that gave up mid-probe. */
+            throw;
         }
         catch
         {

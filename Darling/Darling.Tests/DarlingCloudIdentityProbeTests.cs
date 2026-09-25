@@ -198,8 +198,87 @@ public sealed class DarlingCloudIdentityProbeTests
     public void CreateHandler_ReturnsASocketsHttpHandler()
     {
         using var handler = DarlingCloudIdentityProbe.CreateHandler();
-        Assert.IsType<SocketsHttpHandler>(handler);
+        var sockets = Assert.IsType<SocketsHttpHandler>(handler);
+
+        Assert.False(sockets.UseProxy);
+        Assert.False(sockets.AllowAutoRedirect);
+        Assert.Equal(DarlingCloudIdentityProbe.ProbeBudget, sockets.ConnectTimeout);
+        Assert.Equal(0, sockets.MaxResponseDrainSize);
+        Assert.Null(sockets.ActivityHeadersPropagator);
     }
+
+    [Fact]
+    public async Task ProbeAsync_CallerTokenAlreadyCancelled_ThrowsAndCacheStoresNothing()
+    {
+        var handler = new FakeHandler(async (_, cancellationToken) =>
+        {
+            /* Never actually answers — this proves the probe's OWN 200 ms budget is not what stops it here;
+               the caller's own already-cancelled token is. */
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("unreachable");
+        });
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => DarlingCloudIdentityProbe.ProbeAsync(handler, cts.Token));
+
+        /* And through StoreHostProfileCache (get_store_host's caller): the exception must reach ITS caller
+           too, not collapse into a cached "not found". CancellationToken.None as the cache's OWN token, not
+           cts.Token, so SemaphoreSlim.WaitAsync does not short-circuit before ever calling gather — the
+           assertion below needs gather to actually run and actually throw. */
+        var cache = new StoreHostProfileCache(TimeSpan.FromMinutes(5));
+        var gatherCalls = 0;
+
+        async Task<HostProfile> CancelledGather(CancellationToken _)
+        {
+            gatherCalls++;
+            await DarlingCloudIdentityProbe.ProbeAsync(handler, cts.Token);
+            throw new InvalidOperationException("unreachable — ProbeAsync above always throws first");
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => cache.GetOrGatherAsync(CancelledGather, CancellationToken.None));
+
+        Task<HostProfile> SucceedingGather(CancellationToken _)
+        {
+            gatherCalls++;
+            return Task.FromResult(FixtureProfile());
+        }
+
+        var second = await cache.GetOrGatherAsync(SucceedingGather, CancellationToken.None);
+
+        /* 2, not 1: the second call actually re-gathered rather than reusing whatever the cancelled first
+           call might have left behind, so nothing from the cancelled gather was cached. */
+        Assert.Equal(2, gatherCalls);
+        Assert.NotNull(second.Profile);
+    }
+
+    [Fact]
+    public void ValuePattern_RejectsATrailingNewline()
+    {
+        /* $ (the pattern's shape before this fix) also matches immediately before a trailing \n, so
+           "t3.large\n" would wrongly pass. Called directly, not through ProbeAsync, since TryEc2Async/
+           TryAzureAsync both Trim() the body before matching and would hide this. */
+        Assert.DoesNotMatch(DarlingCloudIdentityProbe.ValuePattern, "t3.large\n");
+    }
+
+    /// <summary>A minimal, valid <see cref="HostProfile"/> for the cache test above — the cache never reads
+    /// into its fields, only caches/returns the reference, so the values themselves are arbitrary. Mirrors
+    /// <c>StoreHostProfileCacheTests.FixtureProfile</c>.</summary>
+    private static HostProfile FixtureProfile() => new()
+    {
+        Platform = "linux",
+        IsContainerized = false,
+        ProcessorCount = 4,
+        Memory = new HostMemoryProfile(8_589_934_592, null, 8_589_934_592, true, "GlobalMemoryStatusEx"),
+        DataVolume = new HostDataVolumeProfile(107_374_182_400, 53_687_091_200, "ext4", true),
+        IsManagedStore = false,
+        Store = new HostStoreFacts("17.4", "2.99.0", 1_000_000, 99.0, 0, 0, 0),
+        Settings = Array.Empty<HostSettingProfile>(),
+        Cloud = CloudIdentity.None,
+    };
 
     /// <summary>A fake handler recording every request it sees; the responder gets the SAME cancellation token
     /// <see cref="DarlingCloudIdentityProbe"/> passed to <c>SendAsync</c> — the timeout test awaits against it
@@ -225,14 +304,15 @@ public sealed class DarlingCloudIdentityProbeTests
 }
 
 /// <summary>
-/// #4214 part 2b, ruling 3: source pins proving <see cref="DarlingStoreHostProfile.GatherStartupProfileAsync"/>
-/// and <c>DarlingWorker</c> never reach <see cref="DarlingCloudIdentityProbe"/>, and ruling 2: pins on
-/// <see cref="DarlingCloudIdentityProbe.CreateHandler"/>'s two safety settings. Source-text pins rather than
-/// behavioral tests because the property under test IS the source: a passing behavioral suite proves the probe
-/// answers correctly when called, not that a future edit never adds a call from the startup path — the same
-/// reasoning <c>AlertReadFailureSurfaceTests</c> and <c>DocCommentHygieneTests</c> already rest on in this repo
-/// (see the lane orders' "real gates" list). Proved once, by hand, that each assertion fails when the source it
-/// pins is broken (reverted after).
+/// #4214 part 2b, ruling 3: source pins proving <see cref="DarlingCloudIdentityProbe.ProbeAsync(CancellationToken)"/>,
+/// <see cref="DarlingStoreHostProfile.GatherAsync"/> and <c>GetStoreHost</c> are each reached from only the
+/// call sites ruling 3 names, plus ruling 2: a pin on <see cref="DarlingCloudIdentityProbe.CreateHandler"/>'s
+/// handler-disposal discipline. Source-text pins rather than behavioral tests because the property under test
+/// IS the source: a passing behavioral suite proves the probe answers correctly when called, not that a future
+/// edit never adds a call from the startup path or some other new call site — the same reasoning
+/// <c>AlertReadFailureSurfaceTests</c> and <c>DocCommentHygieneTests</c> already rest on in this repo (see the
+/// lane orders' "real gates" list). Proved once, by hand, that each assertion fails when the source it pins is
+/// broken (reverted after).
 /// </summary>
 public sealed class DarlingCloudIdentityProbeSourcePinTests
 {
@@ -258,23 +338,11 @@ public sealed class DarlingCloudIdentityProbeSourcePinTests
         Assert.DoesNotContain(ProbeClassName, stripped, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void CreateHandler_SetsUseProxyFalse()
-    {
-        var stripped = CSharpSourceWalker.StripCommentsAndStrings(
-            ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCloudIdentityProbe.cs"));
-
-        Assert.Contains("UseProxy = false", stripped, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void CreateHandler_SetsAllowAutoRedirectFalse()
-    {
-        var stripped = CSharpSourceWalker.StripCommentsAndStrings(
-            ReadSource("Darling/PerformanceMonitor.Darling.Service/DarlingCloudIdentityProbe.cs"));
-
-        Assert.Contains("AllowAutoRedirect = false", stripped, StringComparison.Ordinal);
-    }
+    /* CreateHandler_SetsUseProxyFalse and CreateHandler_SetsAllowAutoRedirectFalse used to live here as
+       whole-file text pins ("the string UseProxy = false appears somewhere in this file"). Replaced by
+       DarlingCloudIdentityProbeTests.CreateHandler_ReturnsASocketsHttpHandler asserting the built handler's
+       actual property values — a text pin passes even if the setting moved to dead code or a different type;
+       a property assertion on the constructed handler cannot. */
 
     [Fact]
     public void OneArgumentProbeAsync_DisposesTheHandlerItCreates()
