@@ -311,13 +311,24 @@ public sealed class DarlingMcpBlockingTools
         }
     }
 
-    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the full deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit.")]
+    /// <summary>
+    /// #4198: deadlock_graph_xml is the wide field on this tool — a busy production store's default call
+    /// (limit 5, only 3 deadlocks carried a graph in the window) measured 120,454 bytes, almost all of it
+    /// this one field. Previewed to this length per graph at default (<c>full_graph: true</c> opts back
+    /// in), the same preview-plus-opt-in shape <c>get_store_query_stats</c> uses for <c>full_text</c>. A
+    /// <c>dedup_key</c> narrows the page to one named incident, so that call is exempt from the preview —
+    /// the caller already paid the cost of naming it and came for the graph.
+    /// </summary>
+    private const int DeadlockGraphPreviewLength = 2000;
+
+    [McpServerTool(Name = "get_deadlock_detail"), Description("Gets the deadlock graph XML for a specific time range, NEWEST FIRST. Returns the raw XML that can be analyzed for lock resources, process details, and deadlock chains. Only deadlocks that CARRY a graph are counted against limit, so the page is limit graphs rather than limit rows; deadlocks_returned, truncated and oldest_returned_deadlock_time / newest_returned_deadlock_time describe the page the same way get_deadlocks does, and truncated means the window held more graphs than limit. deadlock_graph_xml is a preview by default (deadlock_graph_xml_truncated: true) — pass full_graph for the whole graph; a dedup_key call always gets the whole graph.")]
     public static async Task<string> GetDeadlockDetail(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks WITH a graph to return, newest first. Default 5. Read truncated to know whether the window held more.")] int limit = 5,
         [Description("Optional #1140 alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects.")] string? dedup_key = null,
+        [Description("Return each graph's full XML instead of a 2000-character preview. Default false. A dedup_key call ignores this and always returns the full graph.")] bool full_graph = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
@@ -376,13 +387,18 @@ public sealed class DarlingMcpBlockingTools
             var truncated = candidates.Count > limit;
             var withXml = candidates.Take(limit).ToList();
 
+            /* #4198: filtering (a dedup_key) already narrowed the page to one named incident, so that call
+               is exempt from the preview cut — see DeadlockGraphPreviewLength's doc comment. */
+            var showFullGraph = full_graph || filtering;
+
             var result = withXml.Select((r, i) => new
             {
                 collection_time = r.CollectionTime.ToString("o"),
                 deadlock_time = r.DeadlockTime?.ToString("o"),
                 victim_process_id = r.VictimProcessId,
                 dedup_key = keys[i],
-                deadlock_graph_xml = r.DeadlockGraphXml
+                deadlock_graph_xml = showFullGraph ? r.DeadlockGraphXml : McpHelpers.Truncate(r.DeadlockGraphXml, DeadlockGraphPreviewLength),
+                deadlock_graph_xml_truncated = !showFullGraph && r.DeadlockGraphXml.Length > DeadlockGraphPreviewLength
             });
 
             return JsonSerializer.Serialize(new
