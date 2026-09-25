@@ -87,7 +87,19 @@ public sealed partial class ViewerDataService
     ///       <c>COUNT(*) OVER</c> the same partition carried alongside so one pass yields both the
     ///       count and the top row. Ties resolve arbitrarily, exactly as ARG_MAX did.
     /// The magnitude CASE, the <c>delta_execution_count &gt; 0</c> / <c>metric IS NOT NULL</c> filters,
-    /// the <c>LEFT(query_text, 120)</c> preview, and the $1/$2/$3 placeholders are Lite's verbatim.
+    /// and the $1/$2/$3 placeholders are Lite's verbatim.
+    ///
+    /// <para>#4233: the 120-character preview is resolved for the <c>rn = 1</c> row of each cell only,
+    /// not every row in the window. <c>base</c> reads <c>query_stats</c> directly rather than
+    /// <c>v_query_stats</c> (#1767's payload-resolving view), so no row pays for the
+    /// <c>query_text_dim</c> join or a truncation it will never be shown — the raw inline
+    /// <c>query_text</c> (populated only on pre-#1767 rows) and the digest ride the window sorts in
+    /// its place, which is narrower on almost every row since a post-#1767 row's inline column is
+    /// NULL. The outer <c>WHERE rn = 1</c> filters before the SELECT list runs, so
+    /// <c>LEFT(COALESCE(query_text, (SELECT … FROM query_text_dim …)), 120)</c> — the same resolution
+    /// <c>v_query_stats</c> would have performed — executes only for the one row per cell the caller
+    /// sees. Measured on a seeded 24-hour, ~180k-row window: see the PR for before/after
+    /// EXPLAIN (ANALYZE, BUFFERS).</para>
     /// </summary>
     public static string BuildQueryHeatmapSql(HeatmapMetric metric)
     {
@@ -98,9 +110,10 @@ public sealed partial class ViewerDataService
                     date_bin(INTERVAL '5 minutes', collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
                     {metricExpr} AS metric_value,
                     query_hash,
-                    LEFT(query_text, 120) AS query_preview,
+                    query_text,
+                    query_text_digest,
                     delta_execution_count
-                FROM v_query_stats
+                FROM query_stats
                 WHERE server_id = $1
                 AND   collection_time >= $2
                 AND   collection_time <= $3
@@ -121,7 +134,8 @@ public sealed partial class ViewerDataService
                         ELSE 6
                     END AS bucket_index,
                     query_hash,
-                    query_preview,
+                    query_text,
+                    query_text_digest,
                     delta_execution_count
                 FROM base
             ),
@@ -130,7 +144,8 @@ public sealed partial class ViewerDataService
                     time_bin,
                     bucket_index,
                     query_hash,
-                    query_preview,
+                    query_text,
+                    query_text_digest,
                     COUNT(*) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
                     ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
                 FROM binned
@@ -140,7 +155,7 @@ public sealed partial class ViewerDataService
                 bucket_index,
                 query_count,
                 query_hash AS top_query_hash,
-                query_preview AS top_query_text
+                LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), 120) AS top_query_text
             FROM ranked
             WHERE rn = 1
             ORDER BY time_bin, bucket_index

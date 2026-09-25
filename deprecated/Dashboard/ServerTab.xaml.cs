@@ -518,8 +518,13 @@ namespace PerformanceMonitorDashboard
 
             try
             {
-                // Feed comparison to Resource Metrics (Server Trends overlay)
-                await ResourceMetricsContent.SetComparisonRangeAsync(comparisonRange);
+                // Feed comparison to Resource Metrics (Server Trends overlay). #4305: the index, not
+                // GetComparisonRange()'s resolved (From, To) -- ResourceMetricsContent.RefreshServerTrendsAsync
+                // derives the range itself, server-local, via CorrelatedTimelineLanesControl.GetOverviewComparisonRange.
+                // GetComparisonRange()'s own preset-range fallback (DateTime.UtcNow) is untouched here: it still
+                // feeds the Query Performance grids below, unchanged (#4305's scope is the Server Trends ghost
+                // line only; the grids' likely-matching bug is tracked separately as #4313).
+                await ResourceMetricsContent.SetComparisonRangeAsync(CompareToCombo.SelectedIndex);
 
                 // Feed comparison to Query Performance grids
                 PerformanceTab.SetComparisonRange(comparisonRange);
