@@ -1,6 +1,7 @@
 # McpBlockingTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_blocked_process_reports 483
+tool get_blocked_process_reports 600
 param get_blocked_process_reports.as_of 167
+param get_blocked_process_reports.full_text 108
 param get_blocked_process_reports.hours_back 29
 param get_blocked_process_reports.limit 133
 param get_blocked_process_reports.server_name 28
