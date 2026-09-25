@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
@@ -19,7 +18,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
-using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -190,45 +188,25 @@ internal static class DarlingFleetSweepEndpoints
            renders as its empty state rather than an error. */
         app.MapGet("/api/sweeps/latest", async (HttpContext context) =>
         {
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
-                return run is null
-                    ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
-                    : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* The latest-sweep read throws on a store fault (the engine-seam posture); here the
-                   loud shape is a 500 the page renders red — never a 404 that reads as "no sweeps".
-                   #4286 review, Low 3: the dispatcher's own pattern (DarlingWebEndpoints' /api/read/*
-                   catch) instead of ex.Message on the wire with no log line -- this GET needs no
-                   editing seat, so #4283's list (write routes only) does not cover it. */
-                DarlingWebFailureLog.Report(logger, "/api/sweeps/latest", stopwatch.ElapsedMilliseconds, ex);
-                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
-            }
+            /* #4283: no local catch. A store-fault throw here used to answer 500 with ex.Message; the #4281
+               top-of-pipeline backstop (MapAll wires this route after it) now answers it — the loud shape is
+               still a 500 (503 for a caught statement_timeout) the page renders red, never a 404 that reads
+               as "no sweeps", because a store fault is never the null BuildDetailAsync sees on a genuine miss. */
+            var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
+            return run is null
+                ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
+                : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
         });
 
         /* One sweep in full, by id — the timeline click-through. 404 means genuinely absent (pruned
            by retention, or never recorded); a store fault is the 500 arm, per the store read's doc. */
         app.MapGet("/api/sweeps/{id:long}", async (HttpContext context, long id) =>
         {
-            var stopwatch = Stopwatch.StartNew();
-            try
-            {
-                var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
-                return run is null
-                    ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
-                    : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* #4286 review, Low 3: same fix as /api/sweeps/latest above -- the ruled body/status
-                   instead of ex.Message on the wire with no log line. */
-                DarlingWebFailureLog.Report(logger, "/api/sweeps/" + id, stopwatch.ElapsedMilliseconds, ex);
-                return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
-            }
+            /* #4283: no local catch — see /api/sweeps/latest's comment above. */
+            var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
+            return run is null
+                ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
+                : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
         });
 
         /* The watch-item worklist. Default = open + carried in ONE store read; ?state= narrows to a

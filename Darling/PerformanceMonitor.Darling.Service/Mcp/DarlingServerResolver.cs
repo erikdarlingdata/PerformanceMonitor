@@ -46,6 +46,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingServerResolver
 {
+    /// <summary>The registry-read fault sentence's fixed prefix (#4283 H2) — a constant so the web surface's
+    /// <see cref="PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ClassifyToolResponse"/> and the
+    /// triage note/card can recognize this specific store fault and route it through <c>ServerErrorResult</c>
+    /// instead of leaving it a bare 400 string, without the two sides drifting on the literal text.</summary>
+    internal const string RegistryReadFaultPrefix = "Could not read the servers registry from the Postgres store: ";
+
     /// <summary>One enabled row from the servers registry — the resolver's pure-matching input.</summary>
     internal sealed record RegisteredServer(int ServerId, string ServerName, string? DisplayName);
 
@@ -98,7 +104,7 @@ ORDER BY server_name";
         }
         catch (Exception ex)
         {
-            return (new List<RegisteredServer>(), $"Could not read the servers registry from the Postgres store: {ex.Message}");
+            return (new List<RegisteredServer>(), $"{RegistryReadFaultPrefix}{ex.Message}");
         }
     }
 
