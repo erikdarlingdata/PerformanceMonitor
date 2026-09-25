@@ -310,7 +310,7 @@ public sealed class DarlingMcpCustomViewTools
         "note}. displayName is the measure's one-line purpose; kind is scalar|ratio (use the key as the panel's " +
         "'measure', or as 'ratio' when kind='ratio'); validAggregates is what the panel's 'aggregate' may be — it " +
         "is the one field that VARIES within a source (a ratio measure's list differs from its source's scalars), " +
-        "so it stays inline rather than move to the source level like allowedDimensions did. " +
+        "so it stays inline, because the compact form drops allowedDimensions and dimensions, and `source=<name>` returns them. " +
         "SOURCE DRILL-DOWN (source=\"wait_stats\", a name from the default call's sources[].source): {source, " +
         "measures (every field below, filtered to this source), dimensions (this source's filterable/groupable " +
         "columns), annotationSources, ...the same small vocabularies}. An unmatched source comes back with empty " +
