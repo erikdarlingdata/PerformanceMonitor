@@ -164,7 +164,13 @@ public sealed class DarlingMcpFleetSweepTools
                is the ONE place a sweep-report fault is traced for the MCP path — the #3473 review's
                reason this tool carries its own logger seat unlike get_fleet_overview/get_ag_health.
                McpHelpers.FormatError still answers the tool's usual error envelope; this only adds the
-               service-log line the removed internal catches used to write. */
+               service-log line the removed internal catches used to write.
+
+               Reached through /api/read/get_sweep_reports, a fault logs TWICE, on purpose: this line
+               carries the exception and its stack, and DarlingWebEndpoints' ToHttpResult ->
+               ServerErrorResult line (the same one every other /api/read/* tool's fault writes) carries
+               the route and the elapsed time. Two lines, two different pieces of the same fault — not a
+               duplicate to collapse. */
             logger?.LogError(ex, "get_sweep_reports failed: {Message}", ex.Message);
             return McpHelpers.FormatError("get_sweep_reports", ex);
         }
