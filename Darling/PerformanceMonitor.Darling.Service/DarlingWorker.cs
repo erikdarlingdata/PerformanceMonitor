@@ -6338,14 +6338,16 @@ LIMIT 1";
     /// the evaluator". <paramref name="managedConfWriteResult"/> and <paramref name="managedUsedLastGoodConf"/>
     /// are this start's own in-process facts, carried down unchanged from <c>ExecuteAsync</c>; the rejected-value
     /// list is the one genuine store read, isolated in <see cref="ReadRejectedManagedConfSettingNamesAsync"/> so
-    /// a throw there degrades to "no rejected settings this tick" rather than stopping the fleet loop.
+    /// a throw there degrades to <c>null</c> (unknown) rather than stopping the fleet loop — the coordinator's
+    /// A1d ruling: unlike <see cref="UsedLastGoodConf"/>/<see cref="HandEdited"/>, a rejected-value row is one
+    /// of the three conditions the alert fires on, so "empty" and "unknown" cannot share a representation.
     /// </summary>
     private async Task EvaluateStoreSettingsAsync(
         DarlingConfig config, ManagedConfWriteResult? managedConfWriteResult, bool managedUsedLastGoodConf,
         CancellationToken cancellationToken)
     {
         var isManagedStore = config.Postgres.Managed && OperatingSystem.IsWindows();
-        IReadOnlyList<string> rejectedSettingNames = isManagedStore
+        IReadOnlyList<string>? rejectedSettingNames = isManagedStore
             ? await ReadRejectedManagedConfSettingNamesAsync(cancellationToken)
             : [];
 
@@ -6358,12 +6360,14 @@ LIMIT 1";
     }
 
     /// <summary>Every setting name <c>collect.managed_conf_verdicts</c> (V144) currently holds as
-    /// <see cref="HostSettingVerdict.RejectedValue"/> — the store-settings self-alert's one real store read.
-    /// Best-effort: an unreachable store or an unmigrated column degrades to "no rejected settings reported
-    /// this tick" rather than losing the whole sweep, the same posture <see cref="ReadStoreSizeBytesAsync"/>
-    /// already takes for its own read.</summary>
-    private async Task<IReadOnlyList<string>> ReadRejectedManagedConfSettingNamesAsync(CancellationToken cancellationToken)
+    /// <see cref="HostSettingVerdict.RejectedValue"/> — the store-settings self-alert's one real store read,
+    /// and one of the three conditions the alert fires on. Returns <c>null</c> (unknown), not an empty list,
+    /// on a failed read: a <c>RejectedValue</c> row is judgeable evidence, not context, so this read is counted
+    /// on #3013's swallowed-read counter like the other alert reads — <see cref="ReadStoreSizeBytesAsync"/>'s
+    /// Debug/empty posture is for a read that is ONLY context and does not apply here.</summary>
+    private async Task<IReadOnlyList<string>?> ReadRejectedManagedConfSettingNamesAsync(CancellationToken cancellationToken)
     {
+        var readClock = Stopwatch.StartNew();
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
@@ -6375,11 +6379,12 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* NOT counted by #3013's swallowed-read counter: this read is CONTEXT for the alert (which
-               settings to name), not the whole condition — UsedLastGoodConf/HandEdited are judged either way,
-               so losing this costs the message some names, not the alert's ability to fire. */
-            _logger.LogDebug("Store settings self-alert: could not read stored managed-conf verdicts: {Message}", ex.Message);
-            return [];
+            _logger.LogWarning(
+                "Store settings self-alert: could not read stored managed-conf verdicts after {ElapsedMs} ms — "
+                + "the rejected-settings condition stays unresolved this tick: {Message}",
+                readClock.ElapsedMilliseconds, ex.Message);
+            _readFailures.RecordReadFailure(null, "store settings self-alert (managed-conf verdicts)", readClock.ElapsedMilliseconds);
+            return null;
         }
     }
 

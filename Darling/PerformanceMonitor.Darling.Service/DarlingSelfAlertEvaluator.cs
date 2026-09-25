@@ -4523,16 +4523,27 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <paramref name="RejectedSettingNames"/> is the one fact that IS store-backed: every
     /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V144) is
     /// currently holding, read fresh each tick since a rejected value fixed by a later start replaces that
-    /// row without this process restarting.
+    /// row without this process restarting. <c>null</c> means the read FAILED this tick — unknown, not
+    /// empty — so the evaluator neither fires nor resolves on this condition alone and instead keeps
+    /// whatever the family's rejected-settings state already was; a coordinator ruling on A1d (the read's
+    /// own worker-side catch used to collapse a failure to an empty list, which made one bad read able to
+    /// write a false "Store Settings Resolved" when rejected settings were the only condition standing).
     /// </summary>
     internal sealed record StoreSettingsReport(
         bool IsManagedStore,
         bool UsedLastGoodConf,
         bool HandEdited,
-        IReadOnlyList<string> RejectedSettingNames);
+        IReadOnlyList<string>? RejectedSettingNames);
 
     private readonly ConcurrentDictionary<string, bool> _activeStoreSettings = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastStoreSettingsAlert = new();
+
+    /// <summary>The last KNOWN rejected-setting-name list for the store-settings family — updated only on a
+    /// successful read (<see cref="StoreSettingsReport.RejectedSettingNames"/> non-null), including a
+    /// successful read that came back empty. A failed read (<c>null</c>) leaves this untouched, so the
+    /// rejected-settings condition holds its last known state across a read failure instead of collapsing to
+    /// "clear" — the A1d false-resolve fix.</summary>
+    private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _lastKnownRejectedSettingNames = new();
 
     /// <summary>The fixed key for the fleet-level store-settings edge (not a real server); non-numeric so the
     /// deliverer's #1236 int.TryParse override no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
@@ -4621,11 +4632,19 @@ internal sealed class DarlingSelfAlertEvaluator
             reasons.Add("darling-managed.conf is hand-edited, and the edit is being kept in force rather than overwritten");
         }
 
-        if (report.RejectedSettingNames.Count > 0)
+        /* #4215 A1d: null means the read FAILED this tick — unknown, not empty — so this condition keeps its
+           LAST KNOWN state (whatever the previous successful read found) rather than either firing fresh or
+           clearing. A successful read, including one that comes back empty, always overwrites the last-known
+           value; a failed one never does. */
+        var rejectedSettingNames = report.RejectedSettingNames is not null
+            ? _lastKnownRejectedSettingNames[StoreSettingsKey] = report.RejectedSettingNames
+            : _lastKnownRejectedSettingNames.GetValueOrDefault(StoreSettingsKey, []);
+
+        if (rejectedSettingNames.Count > 0)
         {
-            var rejectedList = string.Join(", ", report.RejectedSettingNames);
+            var rejectedList = string.Join(", ", rejectedSettingNames);
             reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"PostgreSQL rejected the managed value for {report.RejectedSettingNames.Count} owned setting(s): {rejectedList}"));
+                $"PostgreSQL rejected the managed value for {rejectedSettingNames.Count} owned setting(s): {rejectedList}"));
         }
 
         if (reasons.Count == 0)
