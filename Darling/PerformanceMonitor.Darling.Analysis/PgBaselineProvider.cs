@@ -370,7 +370,7 @@ public class PgBaselineProvider
             ComputedAt = roundedHour,
             RealTime = realTime,
             Buckets = buckets,
-            FreshUntilUtc = buckets is not null && IsDailyCacheMetric(metricName) ? realTime.AddDays(1) : null,
+            FreshUntilUtc = buckets is not null && IsDailyCacheArm(metricName) ? realTime.AddDays(1) : null,
             Clock = clock,
             UtcOffsetMinutes = utcOffsetMinutes,
             TimeZoneId = timeZoneId
@@ -444,7 +444,7 @@ public class PgBaselineProvider
                     ComputedAt = roundedHour,
                     RealTime = computedAt,
                     Buckets = memberBuckets,
-                    FreshUntilUtc = memberBuckets is not null && IsDailyCacheMetric(metricName) ? computedAt.AddDays(1) : null,
+                    FreshUntilUtc = memberBuckets is not null && IsDailyCacheArm(metricName) ? computedAt.AddDays(1) : null,
                     Clock = clock,
                     UtcOffsetMinutes = utcOffsetMinutes,
                     TimeZoneId = timeZoneId,
@@ -466,33 +466,44 @@ public class PgBaselineProvider
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
 
     /// <summary>Midnight UTC of <paramref name="analysisTime"/>'s day (#4248) — the key time and window end for an
-    /// arm that reads a RAW hypertable at full grain over the 30-day window (<see cref="IsDailyCacheMetric"/>),
+    /// arm that reads a RAW hypertable at full grain over the 30-day window (<see cref="IsDailyCacheArm"/>),
     /// playing <see cref="RoundedHour"/>'s role at day grain instead of hour grain. The underlying rows move by
     /// about 1/720 an hour, so an hourly key bought nothing but 24x the recomputes.</summary>
     internal static DateTime RoundedDay(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
 
-    /// <summary>#4248: the two arms whose <c>clean</c> CTE reads a RAW hypertable (<c>cpu_utilization_stats</c>,
-    /// <c>file_io_stats</c> — the #1743 follow-up pair, see <see cref="GetBaselineQuery"/>'s remarks) rather than a
-    /// pre-aggregated <c>CREATE MATERIALIZED VIEW ... _baseline</c> supply. Both tables carry their own 30-day
-    /// service-side retention floor (<c>DarlingRetentionHorizons.BaselineServingRawCollectors</c>), so the 30-day
-    /// WINDOW does not change here — only the cache KEY's grain does, because a full-grain 30-day read is what made
-    /// an hourly recompute expensive (measured: ~50 MB of temp per <see cref="MetricNames.IoLatency"/> call). The
-    /// other seven <see cref="RobustTierScaffold"/> arms and the two event arms read an already-aggregated view —
-    /// far fewer rows for the same 30 days — and keep the hourly key. <c>PgTargetBaselineProvider</c>'s arms all
-    /// read raw PostgreSQL-target hypertables too (its own remarks say so), but they are NOT in this set: nobody
-    /// has ruled on a keyed-arm day-long lifetime against <see cref="KeyedBaselineCacheWarnCount"/>'s hourly-turnover
-    /// calibration, so that file is unchanged here.</summary>
+    /// <summary>#4248: the two arms of THIS class whose <c>clean</c> CTE reads a RAW hypertable
+    /// (<c>cpu_utilization_stats</c>, <c>file_io_stats</c> — the #1743 follow-up pair, see
+    /// <see cref="GetBaselineQuery"/>'s remarks) rather than a pre-aggregated <c>CREATE MATERIALIZED VIEW ...
+    /// _baseline</c> supply. Both tables carry their own 30-day service-side retention floor
+    /// (<c>DarlingRetentionHorizons.BaselineServingRawCollectors</c>), so the 30-day WINDOW does not change here —
+    /// only the cache KEY's grain does, because a full-grain 30-day read is what made an hourly recompute expensive
+    /// (measured: ~50 MB of temp per <see cref="MetricNames.IoLatency"/> call). The other seven
+    /// <see cref="RobustTierScaffold"/> arms and the two event arms read an already-aggregated view — far fewer rows
+    /// for the same 30 days — and keep the hourly key. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/>
+    /// is the seam a derived provider reads instead, and need not agree with it.</summary>
     internal static bool IsDailyCacheMetric(string metricName)
         => metricName is MetricNames.Cpu or MetricNames.IoLatency;
 
-    /// <summary>The cache key's time AND the compute's window end (#3941's invariant, restated for #4248): whichever
-    /// grain <paramref name="metricName"/> uses (<see cref="IsDailyCacheMetric"/>) — the day for a raw-hypertable
-    /// arm, the hour for every other one. Both call sites (the key and the window) read this ONE seam so they can
-    /// never diverge — a key that named a different instant than the window it was computed over would be sharing
-    /// an answer that is not the answer a fresh compute at that key would give.</summary>
-    internal static DateTime RoundedKeyTime(string metricName, DateTime analysisTime)
-        => IsDailyCacheMetric(metricName) ? RoundedDay(analysisTime) : RoundedHour(analysisTime);
+    /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
+    /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
+    /// name="metricName"/>'s arm belong in the daily cache tier — the day-grain key <see cref="RoundedKeyTime"/>
+    /// hands both the compute and the entry's freshness clock (<see cref="CachedBaseline.FreshUntilUtc"/>)? The
+    /// base answers from <see cref="IsDailyCacheMetric"/> — Cpu and IoLatency are its only two raw-hypertable arms.
+    /// <see cref="PgTargetBaselineProvider"/> overrides this to return true unconditionally: EVERY one of its arms
+    /// reads a raw PostgreSQL-target hypertable at full grain over the 30-day window, measured up to 2.45 s and
+    /// 262 MB of temp per hourly recompute (<c>pg_statement_mean_ms</c> keyed, the worst of the 15), so there is no
+    /// PostgreSQL-target arm this cache should ever recompute more than once a UTC day.</summary>
+    protected virtual bool IsDailyCacheArm(string metricName) => IsDailyCacheMetric(metricName);
+
+    /// <summary>The cache key's time AND the compute's window end (#3941's invariant, restated for #4248 and
+    /// #4298): whichever grain <paramref name="metricName"/> uses for THIS provider (<see cref="IsDailyCacheArm"/>)
+    /// — the day for a daily-cache arm, the hour for every other one. Both call sites (the key and the window)
+    /// read this ONE seam so they can never diverge — a key that named a different instant than the window it was
+    /// computed over would be sharing an answer that is not the answer a fresh compute at that key would give.
+    /// Instance rather than static since #4298, so the decision dispatches through <see cref="IsDailyCacheArm"/>.</summary>
+    internal DateTime RoundedKeyTime(string metricName, DateTime analysisTime)
+        => IsDailyCacheArm(metricName) ? RoundedDay(analysisTime) : RoundedHour(analysisTime);
 
     /// <summary>This provider's engine in the shared tier's key (#3941): a SQL Server series and a PostgreSQL-target
     /// series of one server id are never each other's.</summary>
@@ -673,9 +684,10 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// The first of the three seams a derived provider overrides (#3542; it was "the one seam" until #3691 added
+    /// The first of the four seams a derived provider overrides (#3542; it was "the one seam" until #3691 added
     /// <see cref="ReadServerClockAsync"/> for the local clock and <see cref="ResolveKeyedBaselineQuery"/> for one
-    /// member of a population — <c>PgTargetClockTests</c> counts the three): which SQL computes
+    /// member of a population, and #4298 added <see cref="IsDailyCacheArm"/> for the cache grain —
+    /// <c>PgTargetClockTests</c> counts the four): which SQL computes
     /// <paramref name="metricName"/>'s buckets. The base answers from <see cref="GetBaselineQuery"/> — the SQL Server store tables and CAGGs.
     /// <see cref="PgTargetBaselineProvider"/> answers from its own <c>clean</c> CTEs over the PostgreSQL raw
     /// hypertables and inherits everything else here unchanged: the hour×dow cache, the parameter binding,
