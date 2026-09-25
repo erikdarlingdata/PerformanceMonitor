@@ -1319,32 +1319,43 @@ internal static class DarlingDataReader
     ///
     /// <para>Bounded on both sides, so it prunes chunks and answers from an ordered scan that stops at the first
     /// row rather than reading the window. $1 server_id, $2/$3 window (naive UTC).</para>
+    ///
+    /// <para>#4231 generalized this single-table probe into <see cref="RawWindowFloor"/>, which
+    /// <c>query_stats</c> and <c>procedure_stats</c> now share rather than each carrying its own copy; this
+    /// constant is <see cref="RawWindowFloor.FloorSql"/> for <see cref="RawWindowFloor.Table.QueryStoreStats"/>,
+    /// kept under its original name because <c>DarlingMcpQueryStoreClutterTools</c> and the #2364 tests still
+    /// reach it by this one.</para>
     /// </summary>
-    public const string QueryStoreWindowFloorSql = """
-        SELECT MIN(collection_time)
-        FROM query_store_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        """;
+    public static readonly string QueryStoreWindowFloorSql = RawWindowFloor.FloorSql(RawWindowFloor.Table.QueryStoreStats);
 
     /// <summary>
-    /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
-    /// reports as "nothing was read" rather than as an absence of activity. Deliberately unfiltered: the floor is
-    /// a property of the tier, so a database or module filter on the top read does not narrow it.
+    /// Reads <see cref="QueryStoreWindowFloorSql"/> through the shared <see cref="RawWindowFloor.GetAsync"/>, at
+    /// this surface's own MCP read deadline. Null when the window holds nothing at all, which the caller reports
+    /// as "nothing was read" rather than as an absence of activity. Deliberately unfiltered: the floor is a
+    /// property of the tier, so a database or module filter on the top read does not narrow it.
     /// </summary>
-    public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
+    public static Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
-    {
-        await using var command = postgres.CreateCommand(QueryStoreWindowFloorSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
-        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
-        var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is DateTime dt ? dt : null;
-    }
+        CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// #4231's <c>query_stats</c> arm of the same probe: <c>get_top_queries_by_cpu</c> reads the raw table only,
+    /// which on a store with the rollups armed is dropped at 4 days, and its top-N-by-CPU rows say nothing about
+    /// how far back the window reached (the same reasoning as <see cref="GetQueryStoreWindowFloorAsync"/>).
+    /// </summary>
+    public static Task<DateTime?> GetQueryStatsWindowFloorAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
+
+    /// <summary>
+    /// #4231's <c>procedure_stats</c> arm of the same probe, for <c>get_top_procedures_by_cpu</c>.
+    /// </summary>
+    public static Task<DateTime?> GetProcedureStatsWindowFloorAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
+        CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.ProcedureStats, serverId, startUtc, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
 
     /// <summary>
     /// Top Query Store groups over the window — a focused projection of the viewer's

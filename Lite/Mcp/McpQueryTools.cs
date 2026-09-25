@@ -271,7 +271,13 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. #4231 WIRE CHANGE: that head sentence is shared, byte-identical, cross-SKU text (Darling.Tests' McpToolGuideTests lockstep pin) and is stale for Lite as of this change -- Lite NOW has the same raw-tier window floor Darling does, via LocalDataService.GetQueryWindowFloorAsync; trust window_truncated / effective_start / effective_hours_back on the payload (and McpHelpers.WindowTruncatedDescription below), not the head's 'no such floor' line, until a coordinated PR updates both SKUs' heads together. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints." + McpHelpers.WindowTruncatedDescription)]
+    /// <summary>
+    /// #4198: the default page's <c>query_text</c> preview length. Mirrors
+    /// <c>DarlingMcpDataTools.QueryTextPreviewLength</c> -- see that constant's remarks for why 400.
+    /// </summary>
+    private const int QueryTextPreviewLength = 400;
+
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because stored history can be shorter than asked; effective_start / effective_hours_back give the reach actually served. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints. query_text is a 400-character preview by default (query_text_truncated marks a cut row); full_text=true returns each row's whole statement." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -281,7 +287,8 @@ public sealed class McpQueryTools
         [Description("Filter to a specific database.")] string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
-        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null)
+        [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -373,7 +380,8 @@ public sealed class McpQueryTools
                 avg_physical_reads = r.AvgPhysicalReads,
                 avg_rowcount = r.AvgRowcount,
                 last_execution_time = r.LastExecutionTime?.ToString("o"),
-                query_text = McpHelpers.Truncate(r.QueryText, 2000)
+                query_text = full_text ? r.QueryText : McpHelpers.Truncate(r.QueryText, QueryTextPreviewLength),
+                query_text_truncated = !full_text && r.QueryText != null && r.QueryText.Length > QueryTextPreviewLength
             });
 
             return JsonSerializer.Serialize(new
@@ -402,9 +410,11 @@ public sealed class McpQueryTools
     /// unbounded Query Store text each measured 211 KB at default arguments on a busy production store (the
     /// Darling twin's own measurement; the read and its payload shape are identical). Previewed to this
     /// length per row at default (<c>full_text: true</c> opts back in), the same preview-plus-opt-in shape
-    /// <c>get_store_query_stats</c> uses for its own <c>full_text</c>.
+    /// <c>get_store_query_stats</c> uses for its own <c>full_text</c>. Named apart from get_query_store_top's
+    /// preview constant in this class; the Darling twin is
+    /// <c>DarlingMcpQueryStoreRegressionTools.QueryTextPreviewLength</c>.
     /// </summary>
-    private const int QueryTextPreviewLength = 240;
+    private const int RegressionsQueryTextPreviewLength = 240;
 
     [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
     public static async Task<string> GetQueryStoreRegressions(
@@ -485,8 +495,8 @@ public sealed class McpQueryTools
                     baseline_plan_count = r.BaselinePlanCount,
                     recent_plan_count = r.RecentPlanCount,
                     last_execution_time = r.LastExecutionTime?.ToString("o"),
-                    query_text = full_text ? r.QueryTextSample : McpHelpers.Truncate(r.QueryTextSample, QueryTextPreviewLength),
-                    query_text_truncated = !full_text && r.QueryTextSample.Length > QueryTextPreviewLength,
+                    query_text = full_text ? r.QueryTextSample : McpHelpers.Truncate(r.QueryTextSample, RegressionsQueryTextPreviewLength),
+                    query_text_truncated = !full_text && r.QueryTextSample.Length > RegressionsQueryTextPreviewLength,
                 }),
             }, McpHelpers.JsonOptions);
         }
