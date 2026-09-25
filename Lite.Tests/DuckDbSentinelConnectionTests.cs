@@ -217,54 +217,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     }
 
     /// <summary>
-    /// #4262 round 2, found measuring at scale: <c>sum(memory_usage_bytes) FROM duckdb_memory()</c> is a
-    /// DuckDB <c>SUM</c> over a <c>BIGINT</c> column, which DuckDB always promotes to <c>HUGEINT</c> —
-    /// regardless of the summed magnitude — and DuckDB.NET maps <c>HUGEINT</c> to
-    /// <see cref="System.Numerics.BigInteger"/>, which plain <c>Convert.ToDouble(object)</c> cannot handle
-    /// (it requires <see cref="IConvertible"/>, which <c>BigInteger</c> does not implement) and throws on
-    /// every call, not just large ones. Neither existing trim test caught this: both assert on behavior
-    /// that holds whether or not the cycle actually ran (<c>RestoresConfiguredMemoryLimit</c> checks
-    /// <c>memory_limit</c> round-trips, true either way; <c>ReducesProcessMemory</c> compares working set
-    /// around two <c>GC.Collect()</c> calls, which drifts downward from GC noise alone). This tests the
-    /// converter directly instead.
+    /// #4262 round 3, my ruling: casts the sum to <c>BIGINT</c> in SQL instead of converting a
+    /// <c>HUGEINT</c>/<c>BigInteger</c> in C# — see <see cref="DuckDbInitializer.ReadSentinelMemoryUsageBytes"/>'s
+    /// remarks for why the old unconditional <c>Convert.ToDouble(result)</c> never returned a value. Drives
+    /// the method against a real connection instead of unit-testing a conversion helper in isolation: the
+    /// isolated version (this test's round-2 predecessor) passed while the real read still always failed,
+    /// which is exactly how the original bug went unnoticed.
     /// </summary>
     [Fact]
-    public void ConvertBytesToDouble_HandlesBigIntegerFromDuckDbSum()
+    public async Task ReadSentinelMemoryUsageBytes_RealConnection_ReturnsPositiveNumber()
     {
-        Assert.Equal(3407872.0, DuckDbInitializer.ConvertBytesToDouble(new System.Numerics.BigInteger(3407872)));
-        // Still handles the plain numeric types DuckDB.NET can also hand back, unchanged from before.
-        Assert.Equal(1024.0, DuckDbInitializer.ConvertBytesToDouble(1024L));
-        Assert.Equal(512.0, DuckDbInitializer.ConvertBytesToDouble(512));
-    }
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
 
-    /// <summary>
-    /// #4262 round 2, found alongside the <c>HUGEINT</c> bug above: the fallback this trim read falls
-    /// through to when <c>duckdb_memory()</c> is unavailable, <c>pragma_database_size()</c>'s
-    /// <c>memory_usage</c> column, is not a byte count — it is DuckDB's own human-formatted string
-    /// ("3.2 MiB", confirmed empirically against a live sentinel) — so the same plain
-    /// <c>Convert.ToDouble</c> threw <see cref="FormatException"/> on every call there too. Both branches
-    /// of the real read always failed, silently, so the trim's memory check always returned null and the
-    /// cycle always skipped before ever taking the write lock, on every store size, until this fix.
-    /// </summary>
-    [Theory]
-    [InlineData("3.2 MiB", 3.2 * 1024 * 1024)]
-    [InlineData("512.0 KiB", 512.0 * 1024)]
-    [InlineData("1.05 GiB", 1.05 * 1024 * 1024 * 1024)]
-    [InlineData("998 bytes", 998.0)]
-    [InlineData("2.0 MB", 2_000_000.0)]
-    [InlineData("0 bytes", 0.0)]
-    public void ParseHumanReadableByteCount_ParsesKnownDuckDbFormats(string text, double expectedBytes)
-    {
-        var result = DuckDbInitializer.ParseHumanReadableByteCount(text);
+        using var connection = initializer.CreateConnection();
+        await connection.OpenAsync();
+
+        var result = initializer.ReadSentinelMemoryUsageBytes(connection);
+
         Assert.NotNull(result);
-        Assert.Equal(expectedBytes, result!.Value, precision: 3);
-    }
-
-    [Fact]
-    public void ParseHumanReadableByteCount_UnrecognizedText_ReturnsNull()
-    {
-        Assert.Null(DuckDbInitializer.ParseHumanReadableByteCount("not a size"));
-        Assert.Null(DuckDbInitializer.ParseHumanReadableByteCount(""));
+        Assert.True(result > 0, $"Expected a positive byte count, got {result}");
     }
 
     /// <summary>

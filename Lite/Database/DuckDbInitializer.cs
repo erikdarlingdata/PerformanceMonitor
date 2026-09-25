@@ -450,51 +450,35 @@ public class DuckDbInitializer : IDisposable
     }
 
     /// <summary>
-    /// Reads the sentinel's current memory usage in bytes (#4262 round 1 finding 1). Prefers
-    /// <c>duckdb_memory()</c>, which reports raw bytes; falls back to <c>pragma_database_size()</c>'s
-    /// <c>memory_usage</c> column if the first fails (an older bundled DuckDB without the table function).
-    /// Returns null if neither can be read — a busy or torn connection is a "skip this cycle", not an error.
+    /// Reads the sentinel's current memory usage in bytes (#4262 round 1 finding 1). Returns null if the
+    /// read fails — a busy or torn connection is a "skip this cycle", not an error.
     ///
-    /// <para><b>Found measuring at scale for #4262 round 2, and load-bearing: neither branch's plain
-    /// <c>Convert.ToDouble(result)</c> ever actually returned a value before this fix.</b>
+    /// <para><b>Casts the sum to BIGINT in SQL rather than converting in C# (#4262 round 3, my ruling).</b>
     /// <c>sum(memory_usage_bytes)</c> is a DuckDB <c>SUM</c> over a <c>BIGINT</c> column, which DuckDB
     /// always promotes to <c>HUGEINT</c> — regardless of the summed magnitude, not just on overflow — and
     /// DuckDB.NET maps <c>HUGEINT</c> to <see cref="System.Numerics.BigInteger"/>, which does not implement
-    /// <see cref="IConvertible"/>. <c>Convert.ToDouble(object)</c> requires that interface and throws
-    /// <see cref="InvalidCastException"/> on every call, confirmed empirically (a 3.2MB sentinel: "Unable to
-    /// cast object of type 'System.Numerics.BigInteger' to type 'System.IConvertible'"). That exception was
-    /// always caught by the try/catch right below it and logged at Debug — invisible in normal operation —
-    /// so execution always fell through to the <c>pragma_database_size()</c> fallback. That branch has the
-    /// same bug from a different cause: <c>memory_usage</c> is not a byte count, it is DuckDB's own
-    /// human-formatted string ("3.2 MiB", confirmed empirically), and <c>Convert.ToDouble("3.2 MiB")</c>
-    /// throws <see cref="FormatException"/>, caught the same way. The net effect: <see cref="RunMemoryTrimCycle"/>
-    /// always saw <c>beforeBytes is null</c> and returned before ever taking the write lock — the trim this
-    /// class exists to run had never actually fired, on any store size, until this fix.</para>
+    /// <see cref="IConvertible"/>. <c>Convert.ToDouble(object)</c> requires that interface and threw
+    /// <see cref="InvalidCastException"/> on every call before this fix, confirmed empirically (a 3.2MB
+    /// sentinel: "Unable to cast object of type 'System.Numerics.BigInteger' to type
+    /// 'System.IConvertible'") — always caught by the try/catch below and logged at Debug, so
+    /// <see cref="RunMemoryTrimCycle"/> always saw <c>beforeBytes is null</c> and returned before ever
+    /// taking the write lock. The <c>CAST(... AS BIGINT)</c> here keeps the result a plain <c>long</c>,
+    /// which <see cref="Convert.ToDouble(object)"/> handles directly. <c>duckdb_memory()</c> exists on the
+    /// DuckDB version Lite ships, so there is no fallback to an older, table-function-less build.</para>
+    ///
+    /// <para>Internal so a test can drive it against a real connection instead of unit-testing a
+    /// conversion helper in isolation — the isolated version passed while the real read always failed,
+    /// which is exactly how the original bug went unnoticed.</para>
     /// </summary>
-    private double? ReadSentinelMemoryUsageBytes(DuckDBConnection connection)
+    internal double? ReadSentinelMemoryUsageBytes(DuckDBConnection connection)
     {
         try
         {
             using var cmd = connection.CreateCommand();
-            cmd.CommandText = "SELECT sum(memory_usage_bytes) FROM duckdb_memory()";
+            cmd.CommandText = "SELECT CAST(sum(memory_usage_bytes) AS BIGINT) FROM duckdb_memory()";
             var result = cmd.ExecuteScalar();
             if (result != null && result != DBNull.Value)
-                return ConvertBytesToDouble(result);
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogDebug(ex, "Trim cycle: duckdb_memory() unavailable, falling back to pragma_database_size()");
-        }
-
-        try
-        {
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = "SELECT memory_usage FROM pragma_database_size()";
-            var result = cmd.ExecuteScalar();
-            if (result is string formatted)
-                return ParseHumanReadableByteCount(formatted);
-            if (result != null && result != DBNull.Value)
-                return ConvertBytesToDouble(result);
+                return Convert.ToDouble(result);
         }
         catch (Exception ex)
         {
@@ -502,49 +486,6 @@ public class DuckDbInitializer : IDisposable
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// <see cref="Convert.ToDouble(object)"/>, except it also handles a boxed <see cref="System.Numerics.BigInteger"/>
-    /// (DuckDB's <c>HUGEINT</c>, which <c>sum(memory_usage_bytes)</c> always returns — see
-    /// <see cref="ReadSentinelMemoryUsageBytes"/>'s remarks) — <c>BigInteger</c> does not implement
-    /// <see cref="IConvertible"/>, so the plain conversion throws for every value, not just large ones.
-    /// </summary>
-    internal static double ConvertBytesToDouble(object value) =>
-        value is System.Numerics.BigInteger big ? (double)big : Convert.ToDouble(value);
-
-    /// <summary>
-    /// Parses DuckDB's own human-readable size formatting ("3.2 MiB", "512.0 KiB", "998 bytes") from
-    /// <c>pragma_database_size()</c>'s <c>memory_usage</c> column back into a byte count — see
-    /// <see cref="ReadSentinelMemoryUsageBytes"/>'s remarks for why the column is never a raw number.
-    /// Binary (KiB/MiB/GiB/TiB, 1024-based) and decimal (KB/MB/GB/TB, 1000-based) suffixes are both
-    /// accepted since this is the fallback for an unknown-vintage bundled DuckDB. Returns null on anything
-    /// that doesn't parse — same "skip this cycle" contract as the rest of this method.
-    /// </summary>
-    internal static double? ParseHumanReadableByteCount(string text)
-    {
-        var match = System.Text.RegularExpressions.Regex.Match(
-            text.Trim(), @"^([\d.]+)\s*([A-Za-z]*)$");
-        if (!match.Success)
-            return null;
-        if (!double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float,
-            System.Globalization.CultureInfo.InvariantCulture, out var quantity))
-            return null;
-
-        var multiplier = match.Groups[2].Value.ToLowerInvariant() switch
-        {
-            "" or "b" or "byte" or "bytes" => 1.0,
-            "kib" => 1024.0,
-            "mib" => 1024.0 * 1024,
-            "gib" => 1024.0 * 1024 * 1024,
-            "tib" => 1024.0 * 1024 * 1024 * 1024,
-            "kb" => 1_000.0,
-            "mb" => 1_000_000.0,
-            "gb" => 1_000_000_000.0,
-            "tb" => 1_000_000_000_000.0,
-            _ => -1.0,
-        };
-        return multiplier < 0 ? null : quantity * multiplier;
     }
 
     /// <summary>
