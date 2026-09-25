@@ -523,9 +523,10 @@ public sealed class DarlingMcpDataTools
         [Description("If true, only return queries whose cached plan has EVER run at DOP > 1 (a LIFETIME max_dop; can read stale after a MAXDOP change). See the tool's reading guide.")] bool parallel_only = false,
         [Description("Minimum DOP to filter on. Implies parallel filtering. Filters the same lifetime-max value as parallel_only, not current parallelism.")] int min_dop = 0,
         [Description("Grouping. 'query_hash' (default): one row per (database, query_hash, host_object). 'host_object': rolls a proc's statements into ONE row. See the tool's reading guide.")] string group_by = "query_hash",
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* #2235: an unrecognised value must not silently fall back to the default grouping — a caller who
@@ -560,13 +561,13 @@ public sealed class DarlingMcpDataTools
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
             var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
-                postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop);
+                postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, cancellationToken: cancellationToken);
 
             /* #4231: what the raw tier actually held, beside what was asked for. Rows above are top-N by CPU,
                not by time, so their timestamps say nothing about how far back the window reached — raw
                query_stats is dropped at 4 days on a store with the rollups armed, and a 7-day ask silently
                got ~4. Same probe and the same #2364 disclosure get_query_store_top already makes. */
-            var floor = await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var floor = await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
             var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
             var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
 
@@ -583,7 +584,7 @@ public sealed class DarlingMcpDataTools
                         new { filter_applied = filterApplied });
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
@@ -591,8 +592,8 @@ public sealed class DarlingMcpDataTools
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
                ratio is omitted rather than invented when a denominator piece is missing. The two reads
                are independent, so they run concurrently (review catch). */
-            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now);
-            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
@@ -684,7 +685,7 @@ public sealed class DarlingMcpDataTools
                 queries = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_top_queries_by_cpu", ex);
         }
@@ -697,9 +698,10 @@ public sealed class DarlingMcpDataTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description("Number of top procedures. Default 20.")] int top = 20,
         [Description("Filter to a specific database.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -711,23 +713,23 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name);
+            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
                get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats. */
-            var floor = await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var floor = await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
             var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
             var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
-            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now);
-            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId);
+            var cpuAggregateTask = DarlingDataReader.GetCpuWindowAggregateAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var propertiesTask = DarlingDataReader.GetLatestServerPropertiesAsync(postgres, resolved.ServerId, cancellationToken);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
@@ -786,7 +788,7 @@ public sealed class DarlingMcpDataTools
                 procedures = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_top_procedures_by_cpu", ex);
         }
