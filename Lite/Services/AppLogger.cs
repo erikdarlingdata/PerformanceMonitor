@@ -300,7 +300,8 @@ public static class AppLogger
                 if (sb.Length > 0)
                 {
                     var logFile = Path.Combine(s_logDirectory, $"lite_{DateTime.Now:yyyyMMdd}.log");
-                    File.AppendAllText(logFile, sb.ToString());
+                    /* #4281 review: AppendAllText's strict UTF-8 encoder throws on a lone surrogate, dropping the whole batch. */
+                    File.AppendAllText(logFile, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
             }
             catch
