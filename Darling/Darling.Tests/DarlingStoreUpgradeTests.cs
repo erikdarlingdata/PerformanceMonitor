@@ -841,6 +841,74 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>
+    /// Item 0b, live: a cancellation raised while the trial's REAL cluster start is in flight must propagate
+    /// as <see cref="OperationCanceledException"/>. Before the fix, the trial's own catch swallowed it into
+    /// <c>started = false</c> like any other failed start, driving the header-only retry — which fails the
+    /// same way under the same already-cancelled token — and then threw the fixed "would not start even with
+    /// an empty postgresql.auto.conf" message, wrong for a service stop unrelated to the carried settings. The
+    /// probe is faked (always exits 0) so the trial is reached without a real "postgres -C" call; the trial's
+    /// own start is real and live, so cancellation lands while <c>pg_ctl -w</c> is actually waiting, the same
+    /// as a real service stop would (#4280 round-2 part 2, item 0b).
+    /// </summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_CancelledDuringTheTrialStart_PropagatesCancellation_NotTheFixedMessage()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        var bin = Path.Combine(runtimeRoot!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-trialcancel-");
+        var oldDataDirectory = Path.Combine(root.FullName, "old");
+        var newDataDirectory = Path.Combine(root.FullName, "new");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+
+        try
+        {
+            Directory.CreateDirectory(oldDataDirectory);
+            File.WriteAllText(Path.Combine(oldDataDirectory, "postgresql.auto.conf"), "work_mem = '64MB'\n");
+
+            var (newInitExit, newInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{newDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
+
+            /* Never touches postgres.exe — only the trial's own real cluster start does. */
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan probeTimeout, CancellationToken token)
+                => Task.FromResult((0, string.Empty));
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            var carryTask = upgrade.CarryAutoConfAsync(oldDataDirectory, newDataDirectory, bin, Probe, cts.Token);
+
+            /* The trial writes its marker synchronously, before it starts the real cluster (#3908) — as soon
+               as it appears, the awaited StartClusterAsync call is in flight, so cancelling now lands there. */
+            var marker = Path.Combine(newDataDirectory, DarlingStoreUpgrade.QuiescedUpdateMarkerFileName);
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (!File.Exists(marker) && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(10, timeout.Token);
+            }
+
+            Assert.True(File.Exists(marker), "The trial never wrote its marker within 30s.");
+            cts.Cancel();
+
+            await Assert.ThrowsAsync<OperationCanceledException>(() => carryTask);
+            Assert.Equal(
+                AutoConfHeaderOnly,
+                await File.ReadAllTextAsync(Path.Combine(newDataDirectory, "postgresql.auto.conf"), CancellationToken.None));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /// <summary>Matches the private <c>header</c> constant in <see cref="DarlingStoreUpgrade.CarryAutoConfAsync"/>
     /// exactly, for the two tests above to assert the reset-on-exception file state against.</summary>
     private const string AutoConfHeaderOnly =

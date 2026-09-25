@@ -3057,8 +3057,13 @@ internal sealed class DarlingStoreUpgrade
                         newBinDirectory, newDataDirectory, trialPort, cancellationToken, QuiescedUpdateServerOptions, QuiescedStartWaitSeconds);
                     started = true;
                 }
-                catch (Exception)
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
                 {
+                    /* A cancellation (service stop mid-trial) is not a failed start — swallowing it here
+                       would fall through to the header-only retry and then the fixed "would not start even
+                       with an empty postgresql.auto.conf" message, both wrong for a stop that has nothing to
+                       do with the carried settings (#4280 round-2 part 2, item 0b). Letting it propagate
+                       still runs this finally, which stops the trial server the same as any other exit. */
                     started = false;
                 }
                 finally
