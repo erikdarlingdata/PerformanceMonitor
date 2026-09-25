@@ -9335,11 +9335,19 @@ LIMIT 1";
     /// The sentence is built first, because it reads the verdict that the second step can drop. Nothing here
     /// allocates on the way to null for a fault that is not a <see cref="PostgresException"/>, because the general
     /// handler is also the OutOfMemoryException landing pad.
+    ///
+    /// <para>#4251 round-1 review, M1: also drops a stale pg_file_settings verdict through
+    /// <see cref="DarlingCollectorRunner.ForgetStaleFileSettingsVerdict"/> — a no-op here in practice, since a
+    /// pg_server_config 42501 classifies PERMISSIONS and is caught before reaching this general handler (see
+    /// the other call at the PERMISSIONS arm below), but called anyway so this stays the one place every
+    /// stale-verdict check for a fault this handler sees is reached from, the same way the read-binary-file
+    /// one already is.</para>
     /// </summary>
     internal static string? LogTailGeneralFault(Exception ex, string collectorName, ServerRuntime runtime)
     {
         var explanation = LogTailUndecodableByteExplanation(ex, collectorName, runtime);
         DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+        DarlingCollectorRunner.ForgetStaleFileSettingsVerdict(collectorName, ex, runtime);
         return explanation;
     }
 
@@ -10258,6 +10266,13 @@ LIMIT 1";
             /* #4051 review L1: a 42501 while the binary route is in use means that grant is gone, so the
                cached verdict must not outlive it by up to an hour. */
             DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+
+            /* #4251 round-1 review, M1: the real landing spot for a pg_server_config 42501 — PostgresFaultOutcome
+               classifies SqlState 42501 PERMISSIONS for every collector (PostgresTargetProvider.Classify), so
+               this fault never reaches the general catch below, and a call only in LogTailGeneralFault would
+               never fire for it. Dropping the stale verdict here is what lets the next cycle re-probe instead
+               of losing the whole pg_settings snapshot until the hour runs out. */
+            DarlingCollectorRunner.ForgetStaleFileSettingsVerdict(collectorName, ex, runtime);
 
             if (status == "YIELDED")
             {
