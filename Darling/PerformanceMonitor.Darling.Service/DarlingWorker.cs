@@ -1737,9 +1737,12 @@ public sealed class DarlingWorker : BackgroundService
            best-effort ALTER DATABASE ... SET search_path. Without this a FRESH bring-your-own
            store silently collects nothing until the service is restarted; see
            EnsureStoreSearchPath for the pool-timing root cause. Managed mode already sets it, so
-           this is a no-op there. */
-        storeConnectionString = EnsureStoreSearchPath(storeConnectionString);
-        await using var postgres = NpgsqlDataSource.Create(storeConnectionString);
+           this is a no-op there. The pin has to sit OUTSIDE EnsureStoreSearchPath (wrapping its
+           result rather than the two being one call), so the census below only has to look for the
+           pin on the Create line itself — no reassignment in between for a future edit to slip
+           an unpinned read behind. */
+        await using var postgres = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(EnsureStoreSearchPath(storeConnectionString)));
         _postgres = postgres;
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
            a moment — restarting, failing over, still coming up alongside this service — and a sibling
@@ -2222,7 +2225,9 @@ public sealed class DarlingWorker : BackgroundService
         }
 
         await using var customAlertViewerSource =
-            customAlertViewerConnString is not null ? NpgsqlDataSource.Create(customAlertViewerConnString) : null;
+            customAlertViewerConnString is not null
+                ? NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(customAlertViewerConnString))
+                : null;
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
@@ -4387,15 +4392,19 @@ public sealed class DarlingWorker : BackgroundService
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
         if (string.IsNullOrWhiteSpace(builder.SearchPath))
         {
-            /* DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
+            /* Append, don't rewrite through the builder: round-1 review on #4285's PR found the builder's
+               writer erases a caller keyword set to an explicit empty value (Password='', ...), because it
+               emits that as a bare Key=, which its own reader treats as "not set". Appending keeps every
+               other keyword byte for byte. The constant below holds no ';', '=' or quote character, so it
+               never needs quoting — a plain "Search Path=<value>" is unambiguous.
+               DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
                bundled-cluster surface, but SearchPath is a platform-neutral compile-time constant
                with no runtime dependency, and BYO mode runs on any OS — so the CA1416 cross-platform
                reachability flag is spurious for this const reference. Suppressed narrowly rather than
                forking the constant, keeping managed and BYO byte-identical (a test pins them equal). */
 #pragma warning disable CA1416
-            builder.SearchPath = DarlingManagedPostgres.SearchPath;
+            return connectionString + ";Search Path=" + DarlingManagedPostgres.SearchPath;
 #pragma warning restore CA1416
-            return builder.ConnectionString;
         }
 
         return connectionString;

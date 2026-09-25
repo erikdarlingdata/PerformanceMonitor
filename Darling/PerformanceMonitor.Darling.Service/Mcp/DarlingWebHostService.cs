@@ -30,6 +30,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -695,7 +696,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
 
             /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. */
-            var postgres = NpgsqlDataSource.Create(storeConnectionString);
+            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
             _appDataSource = postgres;
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
