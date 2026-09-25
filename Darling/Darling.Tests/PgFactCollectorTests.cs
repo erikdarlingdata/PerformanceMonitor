@@ -110,8 +110,11 @@ public sealed class PgFactCollectorTests
     public void AllSql_CoversEveryQuery_OnePerCollectMethodPlusTheDmvFallback()
     {
         /* 32 collect methods (31 fact readers plus the #3538 coverage witness), one query each, plus
-           the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery. */
-        Assert.Equal(LiteCollectMethodSurface.Length + 1, PgFactCollector.AllSql.Count);
+           the DMV-snapshot fallback the blocking-chain method appends through PgBlockingPairRowQuery, plus
+           PLAN_REGRESSION's #3953 table twin: the plan-regression method runs one of two reads per server,
+           and Lite has no store for the second (its DuckDB keeps no latest-snapshot interval table). */
+        Assert.Equal(LiteCollectMethodSurface.Length + 2, PgFactCollector.AllSql.Count);
+        Assert.Contains(PgFactCollector.PlanRegressionTableSql, PgFactCollector.AllSql);
         Assert.Contains(PgBlockingPairRowQuery.DmvSnapshotSql, PgFactCollector.AllSql);
         Assert.Contains(PgFactCollector.CoverageSql, PgFactCollector.AllSql);
     }
@@ -243,11 +246,15 @@ public sealed class PgFactCollectorTests
         /* any_value() is standard SQL:2023, in Postgres since 16 (product minimum PG is 17).
            It is deliberate in the plan-regression aggregation and nowhere else. */
         Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionSql, StringComparison.Ordinal);
+        Assert.Contains("any_value(query_plan_hash)", PgFactCollector.PlanRegressionTableSql, StringComparison.Ordinal);
         foreach (var sql in PgFactCollector.AllSql)
         {
             if (sql.Contains("any_value", StringComparison.OrdinalIgnoreCase))
             {
-                Assert.Equal(PgFactCollector.PlanRegressionSql, sql);
+                /* The two PLAN_REGRESSION reads (#3953: raw, and its interval-table twin), and nothing else. */
+                Assert.True(
+                    sql == PgFactCollector.PlanRegressionSql || sql == PgFactCollector.PlanRegressionTableSql,
+                    "any_value() outside the PLAN_REGRESSION reads:\n" + sql);
             }
         }
     }
@@ -289,8 +296,13 @@ public sealed class PgFactCollectorTests
             foreach (Match m in Regex.Matches(scanSql, @"\b(?:FROM|JOIN)\s+(\w+)", RegexOptions.IgnoreCase))
             {
                 var target = m.Groups[1].Value;
+
+                /* #3953: the latest-snapshot interval table is the one non-collector relation a fact reads,
+                   sourced from its Storage class rather than restated, as #2150 did for query_store_text in
+                   the drill-down guard. */
                 Assert.True(
-                    views.Contains(target) || tables.Contains(target) || ctes.Contains(target),
+                    views.Contains(target) || tables.Contains(target) || ctes.Contains(target)
+                        || target == QueryStoreIntervalLatest.TableName,
                     $"FROM/JOIN target '{target}' resolves to no V4 view, collector table, or CTE in:\n{sql}");
             }
         }

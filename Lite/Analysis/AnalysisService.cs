@@ -568,6 +568,36 @@ public class AnalysisService
     }
 
     /// <summary>
+    /// audit_config's own read (#4192, Darling parity): the collector's narrow family read, never the full
+    /// collect + detect + score pass <see cref="CollectAndScoreFactsAsync"/> runs. No coverage witness, no
+    /// anomaly detector, no scorer — audit_config projects 8 point-in-time facts and discards WindowCoverage
+    /// already, so the full pass was paying for, and this skips, every other family plus the detector's
+    /// baseline reads.
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null)
+    {
+        var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
+        var context = new AnalysisContext
+        {
+            ServerId = serverId,
+            ServerName = serverName,
+            TimeRangeStart = timeRangeEnd.AddHours(-1),
+            TimeRangeEnd = timeRangeEnd,
+            AsOfUtc = asOfUtc
+        };
+
+        try
+        {
+            return await _collector.CollectConfigAuditFactsAsync(context);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("AnalysisService", $"Config-audit fact collection failed for {serverName}: {ex.Message}");
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Compares analysis of two time periods, returning facts from both for comparison, each with its
     /// window's observed coverage (#3538 A2) so the caller can say when one side was only partly
     /// collected — the case the empty-window caveats never reached, where a half-collected window

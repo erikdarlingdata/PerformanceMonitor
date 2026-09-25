@@ -252,6 +252,31 @@ public sealed partial class PgFactCollector : IFactCollector
     }
 
     /// <summary>
+    /// audit_config's own collection (#4192): exactly the config, hardware, memory and database-size
+    /// families — CONFIG_CTFP/MAXDOP/MAX_MEMORY_MB/MAX_WORKER_THREADS, SERVER_EDITION, SERVER_HARDWARE,
+    /// MEMORY_TOTAL_PHYSICAL_MB, DATABASE_TOTAL_SIZE_MB — none of the other ~28 families
+    /// <see cref="CollectFactsAsync"/> runs (wait stats, blocking, query stats, plan regression, …), and no
+    /// anomaly detector or scorer after it. Those are exactly the 8 point-in-time facts audit_config projects;
+    /// the full pass answered them at the cost of every other family too — on one busy store the plan-regression
+    /// read alone measured 4.8 s mean / 6.5 s max per call. No coverage witness runs here either: every fact
+    /// below is a latest-snapshot read, which is why audit_config already discards WindowCoverage.
+    /// <see cref="PgLatestValueBounds.EnsureAsync"/> still runs, so the two latest-value reads
+    /// (<see cref="CollectMemoryFactsAsync"/>, <see cref="CollectDatabaseSizeFactAsync"/>) bind the same
+    /// per-collector cadence bound the full pass gives them, not the flat 24-hour fallback.
+    /// </summary>
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(AnalysisContext context)
+    {
+        var facts = new List<Fact>();
+        await PgLatestValueBounds.EnsureAsync(_postgres, context, _logger);
+        await CollectServerConfigFactsAsync(context, facts);
+        await CollectServerMetadataFactsAsync(context, facts);
+        await CollectServerPropertiesFactsAsync(context, facts);
+        await CollectMemoryFactsAsync(context, facts);
+        await CollectDatabaseSizeFactAsync(context, facts);
+        return facts;
+    }
+
+    /// <summary>
     /// Every query this collector executes, for the ungated dialect/hygiene pins in
     /// Darling.Tests (no QUALIFY, no bare NOW()/CURRENT_TIMESTAMP, no read_parquet, $N
     /// positional parameters only, and every FROM/JOIN target resolves to a V4 passthrough
@@ -277,6 +302,7 @@ public sealed partial class PgFactCollector : IFactCollector
         QueryStatsSql,
         ParameterSensitivitySql,
         PlanRegressionSql,
+        PlanRegressionTableSql,
         BadActorSql,
         PerfmonSql,
         MemoryClerkSql,

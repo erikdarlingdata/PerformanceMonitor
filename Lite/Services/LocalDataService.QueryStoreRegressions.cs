@@ -49,15 +49,14 @@ public sealed class QueryStoreRegressionRow
 /*
  * The Query Store regressions read (#2484) — Lite's port of Darling's, which is itself the viewer's port
  * of the Dashboard's report.query_store_regressions inline TVF. Two windowed passes over the SAME
- * v_query_store_stats view: BASELINE is every capture BEFORE the window start, RECENT is the window.
+ * v_query_store_stats view: BASELINE is a fixed lookback before the window start, RECENT is the window.
  *
  * Both arms are DEDUPED first, and that is correctness rather than performance. Query Store rows are
  * CUMULATIVE per-interval snapshots and the collector re-fetches an open interval every cycle, so the same
  * interval is stored repeatedly with a growing execution_count. This read is the most exposed of any to
- * that: the baseline arm is UNBOUNDED (potentially months) while the recent arm is a short window, so the
- * two arms have systematically different re-collection density per interval — which alone moves the
- * averages the regression percent is computed from and the 25% CPU gate, manufacturing and hiding
- * regressions for reasons that have nothing to do with the query.
+ * that: the baseline arm and the recent arm can have systematically different re-collection density per
+ * interval — which alone moves the averages the regression percent is computed from and the 25% CPU gate,
+ * manufacturing and hiding regressions for reasons that have nothing to do with the query.
  *
  * One deliberate difference from Darling's: the query-text sample comes only from MAX(query_text) on the
  * fact rows. Darling resolves it from collect.query_store_text (#2150) and falls back to the fact rows;
@@ -67,8 +66,19 @@ public sealed class QueryStoreRegressionRow
 public partial class LocalDataService
 {
     /// <summary>
+    /// The baseline's own lookback (Lite's twin of Darling's #4195 fix): a fixed 7 days ending at the recent
+    /// window's start, so the comparison period stops moving with retention. Before this the baseline was
+    /// every retained row before the window with NO lower bound, so its cost tracked how much history the
+    /// store still held rather than the window asked for. A regression against a baseline OLDER than 7 days
+    /// is no longer caught; a server retaining less than 7 days of Query Store history is unaffected — the
+    /// bound never reaches further back than the unbounded read already stopped.
+    /// </summary>
+    public const int BaselineLookbackDays = 7;
+
+    /// <summary>
     /// The queries whose Query Store performance got WORSE over [now - <paramref name="hoursBack"/>, now]
-    /// compared with everything collected before it, ranked by execution-count-weighted extra duration.
+    /// compared with a fixed <see cref="BaselineLookbackDays"/>-day baseline ending at the window's start,
+    /// ranked by execution-count-weighted extra duration.
     /// </summary>
     public async Task<List<QueryStoreRegressionRow>> GetQueryStoreRegressionsAsync(
         int serverId, int hoursBack = 24, int maxRows = 50, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
@@ -77,8 +87,10 @@ public partial class LocalDataService
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
-        var limitIndex = 4 + dbValues.Count;
+        var baselineParamIndex = 4 + dbValues.Count;
+        var limitIndex = baselineParamIndex + 1;
 
         command.CommandText = @"
 WITH deduped_baseline AS (
@@ -99,6 +111,7 @@ WITH deduped_baseline AS (
         ) AS rn
     FROM v_query_store_stats
     WHERE server_id = $1
+    AND   collection_time >= $" + baselineParamIndex + @"
     AND   collection_time < $2" + dbClause + @"
 ),
 deduped_recent AS (
@@ -188,6 +201,7 @@ LIMIT $" + limitIndex;
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
 
         var rows = new List<QueryStoreRegressionRow>();
@@ -222,7 +236,8 @@ LIMIT $" + limitIndex;
     }
 
     /// <summary>
-    /// Whether this server has Query Store rows BEFORE the window, and whether it has any INSIDE it.
+    /// Whether this server has Query Store rows in the baseline lookback before the window, and whether it
+    /// has any INSIDE it.
     /// <para>One round trip for the two facts that decide what an empty regression result means, run only
     /// on the empty path. Zero regressions is four states here, not two, and only one of them is good news.
     /// The dangerous one is a server whose entire collected history sits INSIDE the requested window: it
@@ -237,6 +252,7 @@ LIMIT $" + limitIndex;
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var baselineStartTime = startTime.AddDays(-BaselineLookbackDays);
 
         command.CommandText = @"
 SELECT
@@ -244,6 +260,7 @@ SELECT
         SELECT 1
         FROM v_query_store_stats
         WHERE server_id = $1
+        AND   collection_time >= $4
         AND   collection_time < $2
     ) AS has_baseline,
     EXISTS (
@@ -257,6 +274,7 @@ SELECT
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = baselineStartTime });
 
         using var reader = await command.ExecuteReaderAsync();
         if (!await reader.ReadAsync())

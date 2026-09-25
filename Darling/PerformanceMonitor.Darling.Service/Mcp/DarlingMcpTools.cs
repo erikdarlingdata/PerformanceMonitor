@@ -634,9 +634,13 @@ public sealed class DarlingMcpTools
             {
                 /* Coverage discarded for the reason the SQL Server arm states below (#3538 A2): these are
                    point-in-time settings — the latest row regardless of window — and an hour the collector
-                   missed changes nothing about what the server is configured to. */
-                var (pgFacts, _, _) = await analysisService.CollectAndScoreFactsAsync(
-                    resolved.ServerId, resolved.ServerName, 1);
+                   missed changes nothing about what the server is configured to. #4192: the narrow read, not
+                   the full collect + detect pass — this tool never touches wait stats, blocking, plan
+                   regression or any of the other families the full pass runs. The scorer IS run inside
+                   CollectConfigAuditFactsAsync (#4206): the status projection below reads fact.Severity,
+                   so facts must arrive scored. */
+                var pgFacts = await analysisService.CollectConfigAuditFactsAsync(
+                    resolved.ServerId, resolved.ServerName);
 
                 var pgFactsByKey = pgFacts.ToFactLookup();
 
@@ -749,9 +753,10 @@ public sealed class DarlingMcpTools
                configuration facts, which are the latest row regardless of window, and a one-hour window
                the collector missed changes nothing about what the server is configured to. (Physical memory
                and database size are the newest sample within a day of now, #3896 — an hour missed is
-               still inside that.) */
-            var (facts, _, _) = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, 1);
+               still inside that.) #4192: the narrow read, not the full collect + detect + score pass — this
+               tool projects 8 point-in-time facts, never wait stats, blocking, query stats or plan regression. */
+            var facts = await analysisService.CollectConfigAuditFactsAsync(
+                resolved.ServerId, resolved.ServerName);
 
             var factsByKey = facts.ToFactLookup();
 

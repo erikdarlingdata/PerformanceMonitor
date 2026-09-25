@@ -577,9 +577,9 @@ public sealed class McpAnalysisTools
                configuration facts, which are the latest row regardless of window, and a one-hour window
                the collector missed changes nothing about what the server is configured to. (Physical memory
                and database size are the newest sample within a day of now, #3896 — an hour missed is
-               still inside that.) */
-            var (facts, _, _) = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, 1);
+               still inside that.) #4192: the narrow read, not the full collect + detect + score pass. */
+            var facts = await analysisService.CollectConfigAuditFactsAsync(
+                resolved.ServerId, resolved.ServerName);
 
             var factsByKey = facts.ToFactLookup();
 

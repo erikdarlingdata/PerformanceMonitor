@@ -272,7 +272,14 @@ LIMIT 20";
     /* PG port: any_value() below is standard SQL:2023, in Postgres since 16 — the product's
        minimum supported PG is 17, so it stays verbatim (DuckDB and PG agree on its semantics:
        an arbitrary non-null value from the group). */
-    public const string PlanRegressionSql = @"
+    public const string PlanRegressionSql = PlanRegressionRawPrefix + PlanRegressionSuffix;
+
+    /// <summary>
+    /// The raw read's head (#3953 split it off, byte-identical): the interval dedup over the server's raw Query Store
+    /// slice, then <c>plan_agg</c> over it. <see cref="PlanRegressionSuffix"/> is shared with
+    /// <see cref="PlanRegressionTableSql"/>, so the two reads cannot drift above <c>plan_agg</c>.
+    /// </summary>
+    private const string PlanRegressionRawPrefix = @"
 WITH deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
@@ -364,7 +371,54 @@ plan_agg AS
     FROM deduped
     GROUP BY database_name, query_id, plan_id, replica_role
 ),
-plan_dedup AS
+";
+
+    /// <summary>
+    /// PLAN_REGRESSION over the latest-snapshot interval table (#3953): <see cref="PlanRegressionSql"/> with its
+    /// <c>deduped</c> CTE deleted and <c>plan_agg</c> reading <c>query_store_interval_latest</c>. Everything from
+    /// <c>plan_dedup</c> down is the shared <see cref="PlanRegressionSuffix"/>. Over the same snapshots it returns the
+    /// raw read's result exactly; where the table holds intervals raw has purged, it reaches the full 14-day window
+    /// the fact always described. Chosen per server and pass by <see cref="QueryStoreIntervalLatest.ReadsTableAsync"/>.
+    /// </summary>
+    public const string PlanRegressionTableSql = PlanRegressionTablePrefix + PlanRegressionSuffix;
+
+    private const string PlanRegressionTablePrefix = @"
+WITH plan_agg AS
+(
+    -- #3953: the table twin. query_store_interval_latest already holds each interval's latest snapshot -- the
+    -- raw twin's deduped CTE, maintained as raw is written -- so this aggregates it directly. $2/$3 are the raw
+    -- read's own bounds, kept so both reads are the same function of the same snapshots: per interval the raw read
+    -- keeps the snapshot maximal in (collection_time, execution_count) among those passing them, snapshots are
+    -- cumulative, so if any passes the maximal one does, and the maximal one is the table's row. $4 bounds the
+    -- table's partitioning column (first_execution_time) for chunk exclusion, bare for #2387's reason; it is
+    -- implied by last_execution_time >= $2, because one Query Store interval spans at most a day.
+    -- Execution-weighted per-exec cost per plan_id, per replica. Keeping replica_role in the grain all
+    -- the way down is what makes the wider dedup key an improvement rather than a blend: were it dropped
+    -- here, both replicas' rows would survive the dedup and then be summed into one number, and primary
+    -- and secondary workload would be indistinguishable in the output.
+    SELECT
+        database_name,
+        query_id,
+        plan_id,
+        replica_role,
+        any_value(query_plan_hash) AS query_plan_hash,
+        SUM(execution_count) AS execs,
+        SUM(avg_cpu_time_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS cpu_per_exec,
+        SUM(avg_duration_us * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0) AS dur_per_exec,
+        MAX(last_execution_time) AS last_exec,
+        bool_or(is_forced_plan) AS is_forced_plan,
+        MAX(force_failure_count) AS force_failure_count
+    FROM query_store_interval_latest
+    WHERE server_id = $1
+    AND   last_execution_time >= $2
+    AND   collection_time >= $3
+    AND   first_execution_time >= $4
+    GROUP BY database_name, query_id, plan_id, replica_role
+),
+";
+
+    /// <summary>Everything from <c>plan_dedup</c> down, shared by both PLAN_REGRESSION reads.</summary>
+    private const string PlanRegressionSuffix = @"plan_dedup AS
 (
     -- Collapse plan_ids that share a query_plan_hash (a recompile can produce an
     -- identical plan under a new plan_id); keep only plans with enough executions.
@@ -424,7 +478,10 @@ compared AS
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
-        l.database_name
+        l.database_name,
+        -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
+        -- on both SKUs, so a best plan can be two weeks old.
+        b.last_exec AS best_last_exec
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -445,7 +502,9 @@ SELECT
     regression_factor,
     -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
     -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
-    database_name
+    database_name,
+    -- #3953: appended for the same reason.
+    best_last_exec
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
@@ -469,20 +528,33 @@ LIMIT 20";
         /* #3902: cleared first, so a read that fails below leaves "not known" for the drill-down rather
            than a list some earlier pass stamped on a reused context. */
         context.PlanRegressionOffenders = null;
+        context.PlanRegressionReadsIntervalTable = null;
 
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(PlanRegressionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
-
             /* #2387: the chunk-exclusion bound, one CLOCK-SKEW MARGIN below the comparison window. Bound as
                its own parameter rather than written as "$2 - INTERVAL '1 day'" so the planner compares
                against a bare parameter, which is the form runtime chunk exclusion handles most reliably. */
-            cmd.Parameters.AddWithValue(AsNaive(
-                context.TimeRangeStart.AddDays(-(PlanRegressionWindowDays + PlanRegressionSkewMarginDays))));
+            var collectionBound = AsNaive(
+                context.TimeRangeStart.AddDays(-(PlanRegressionWindowDays + PlanRegressionSkewMarginDays)));
+
+            /* #3953: the latest-snapshot interval table where its coverage holds everything this read would read,
+               raw otherwise. Decided once here and recorded, so the drill-down reads the same source. */
+            var readsTable = await QueryStoreIntervalLatest.ReadsTableAsync(
+                connection, context.ServerId, collectionBound, FactCommandTimeoutSeconds, _logger, context.CancellationToken);
+            context.PlanRegressionReadsIntervalTable = readsTable;
+
+            using var cmd = new NpgsqlCommand(readsTable ? PlanRegressionTableSql : PlanRegressionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart.AddDays(-PlanRegressionWindowDays)));
+            cmd.Parameters.AddWithValue(collectionBound);
+            if (readsTable)
+            {
+                /* $4, the table's partitioning column: the same value, bare, for the same reason. */
+                cmd.Parameters.AddWithValue(collectionBound);
+            }
 
             var offenderCount = 0;
             var worstFactor = 0.0;
@@ -492,6 +564,7 @@ LIMIT 20";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            DateTime? worstBestLastExec = null;
             var offenders = new List<PlanRegressionOffender>();
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -509,6 +582,7 @@ LIMIT 20";
 
                     worstLatestCpu = latestCpu;
                     worstBestCpu = bestCpu;
+                    worstBestLastExec = reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9));
                     // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
@@ -528,7 +602,7 @@ LIMIT 20";
 
             if (offenderCount == 0) return;
 
-            facts.Add(new Fact
+            var fact = new Fact
             {
                 Source = "queries",
                 Key = "PLAN_REGRESSION",
@@ -543,9 +617,20 @@ LIMIT 20";
                     ["best_cpu_per_exec_us"] = worstBestCpu,
                     ["regressed_dimension"] = worstDimension,
                     ["latest_is_forced"] = worstLatestForced,
-                    ["force_failure_count"] = worstForceFailures
+                    ["force_failure_count"] = worstForceFailures,
+                    /* #3953: 1 when this pass read the latest-snapshot interval table, 0 for the raw slice. */
+                    ["plan_regression_source"] = readsTable ? 1 : 0,
                 }
-            });
+            };
+
+            /* #3953: the worst offender's best plan's age at the window's end, in days. Absent only if the read
+               returned no timestamp, which a plan with executions in the window cannot do. */
+            if (worstBestLastExec is DateTime bestLastExec)
+            {
+                fact.Metadata["best_plan_age_days"] = Math.Max(0.0, (context.TimeRangeEnd - bestLastExec).TotalDays);
+            }
+
+            facts.Add(fact);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
