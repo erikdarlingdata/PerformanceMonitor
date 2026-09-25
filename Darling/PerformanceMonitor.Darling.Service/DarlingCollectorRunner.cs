@@ -3499,6 +3499,28 @@ public sealed class DarlingCollectorRunner
             : $"SELECT MAX({utcColumnName}), MAX({columnName}) FROM {tableName} WHERE server_id = $1";
 
     /// <summary>
+    /// The per-database watermark SQL (#1535/#2344), exposed for the same reason as its server-scoped
+    /// siblings: a pin asserts the SHIPPED string. <paramref name="bounded"/> adds the same
+    /// <c>collection_time</c> partitioning-column predicate, parameterized last ($3) after server and
+    /// database.
+    /// </summary>
+    internal static string BuildServerWatermarkForDatabaseSql(string tableName, string columnName, string databaseColumnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
+
+    /// <summary>
+    /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
+    /// (job_history's <c>instance_id</c>), exposed for the same reason as the timestamp builders above. Bounds
+    /// on <c>collection_time</c> — job_history's partitioning column — never on <paramref name="columnName"/>
+    /// itself, which does not partition the table and so cannot prune a chunk (#4197).
+    /// </summary>
+    internal static string BuildServerWatermarkInstanceIdSql(string tableName, string columnName, bool bounded) =>
+        bounded
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+
+    /// <summary>
     /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so
     /// <see cref="GetLastCollectedTimeAsync"/>'s answer would be read by nothing and the round trip can be
     /// skipped (#2797).
@@ -3569,23 +3591,48 @@ public sealed class DarlingCollectorRunner
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var sql = BuildServerWatermarkSql(tableName, columnName, collectedSince is not null);
+
+            /* #4197: an explicit collectedSince (query_store's clamped floor, per WatermarkPolicy.ReadFloor)
+               stays exactly what #2344/#2795 shipped — one bounded read, and a null result falls through to
+               the caller's own clamp rather than a second round trip. Every OTHER caller passes null, which
+               used to mean "read every chunk in retention, every cycle" — the ring-buffer cost #4197
+               measures. It now means WatermarkPolicy.RecentWatermarkWindow's probe-then-confirm: bound on
+               the SAME partitioning column first (chunk exclusion prunes everything older), and only on a
+               miss fall back to the true unbounded MAX below. The value is identical either way — see
+               RecentWatermarkWindow's remarks for why a hit can never differ from the unbounded answer. */
+            var autoWindow = collectedSince is null;
+            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+            var sql = BuildServerWatermarkSql(tableName, columnName, bounded: true);
             using var command = new NpgsqlCommand(sql, connection);
             /* Explicit rather than Npgsql's 30 s default: that default was never a decision anyone made
                here, and it silently governed a read whose measured cost exceeded it. */
             command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
-            if (collectedSince is DateTime floor)
-            {
-                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
-                   timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
-            }
+            /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+               timestamptz and Postgres would convert it into the session zone on the way in. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
 
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime dt)
             {
                 return dt;
+            }
+
+            if (autoWindow)
+            {
+                /* The probe found no row in the window — a gap wider than RecentWatermarkWindow, or a
+                   genuinely empty table. Either way only the true unbounded MAX answers correctly; a null
+                   here would read as first-run, which is not scoped to the window the way it is for
+                   query_store's clamped callers. */
+                using var fallback = new NpgsqlCommand(BuildServerWatermarkSql(tableName, columnName, bounded: false), connection);
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+                if (fallbackResult is DateTime fallbackDt)
+                {
+                    return fallbackDt;
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3638,28 +3685,59 @@ public sealed class DarlingCollectorRunner
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var sql = BuildServerWatermarkPairSql(tableName, columnName, utcColumnName, collectedSince is not null);
-            using var command = new NpgsqlCommand(sql, connection);
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            if (collectedSince is DateTime floor)
+
+            /* #4197: same probe-then-confirm as the sibling above — see its remarks. collectedSince
+               non-null (query_store's clamped floor) is unchanged; null now means "bound to
+               RecentWatermarkWindow, fall back to the true unbounded pair only on a miss" instead of
+               "always unbounded". */
+            var autoWindow = collectedSince is null;
+            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+            var sql = BuildServerWatermarkPairSql(tableName, columnName, utcColumnName, bounded: true);
+            using (var command = new NpgsqlCommand(sql, connection))
             {
+                command.CommandTimeout = CommandTimeoutSeconds;
+                command.Parameters.AddWithValue(serverId);
                 /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
                    timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+                using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        return (reader.GetDateTime(0), true);
+                    }
+
+                    if (!reader.IsDBNull(1))
+                    {
+                        return (reader.GetDateTime(1), false);
+                    }
+                }
             }
 
-            using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            if (await reader.ReadAsync(cancellationToken))
+            if (autoWindow)
             {
-                if (!reader.IsDBNull(0))
+                /* Neither column had a row in the window — fall back to the true unbounded pair, the
+                   sibling's exact reasoning: this is not query_store's clamped path, so a miss here is not
+                   necessarily a first run. */
+                using var fallback = new NpgsqlCommand(
+                    BuildServerWatermarkPairSql(tableName, columnName, utcColumnName, bounded: false), connection);
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                using var fallbackReader = await fallback.ExecuteReaderAsync(cancellationToken);
+                if (await fallbackReader.ReadAsync(cancellationToken))
                 {
-                    return (reader.GetDateTime(0), true);
-                }
+                    if (!fallbackReader.IsDBNull(0))
+                    {
+                        return (fallbackReader.GetDateTime(0), true);
+                    }
 
-                if (!reader.IsDBNull(1))
-                {
-                    return (reader.GetDateTime(1), false);
+                    if (!fallbackReader.IsDBNull(1))
+                    {
+                        return (fallbackReader.GetDateTime(1), false);
+                    }
                 }
             }
         }
@@ -5128,25 +5206,43 @@ RETURNING s.state_key";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            var sql = collectedSince is null
-                ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2"
-                : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
-            using var command = new NpgsqlCommand(sql, connection);
-            /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(databaseName);
-            if (collectedSince is DateTime floor)
+
+            /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
+               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first and
+               falls back to the true unbounded read only on a miss, instead of skipping straight to it. */
+            var autoWindow = collectedSince is null;
+            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+            var sql = BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: true);
+            using (var command = new NpgsqlCommand(sql, connection))
             {
+                /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
+                command.CommandTimeout = CommandTimeoutSeconds;
+                command.Parameters.AddWithValue(serverId);
+                command.Parameters.AddWithValue(databaseName);
                 /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
                    timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+                var result = await command.ExecuteScalarAsync(cancellationToken);
+                if (result is DateTime dt)
+                {
+                    return dt;
+                }
             }
 
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
+            if (autoWindow)
             {
-                return dt;
+                using var fallback = new NpgsqlCommand(
+                    BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                fallback.Parameters.AddWithValue(databaseName);
+                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+                if (fallbackResult is DateTime fallbackDt)
+                {
+                    return fallbackDt;
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -5169,6 +5265,13 @@ RETURNING s.state_key";
     /// collection — the numeric twin of <see cref="GetLastCollectedTimeAsync"/> (job_history dedups on
     /// <c>instance_id</c>, sysjobhistory's IDENTITY bigint). Returns null on first run or if the query
     /// fails (caller uses its documented first-run/fallback path).
+    ///
+    /// <para>#4197: this was the one of the three server-scoped watermark reads with no bound at all —
+    /// job_history is its only caller, and every cycle scanned every chunk in retention to find one bigint.
+    /// Same probe-then-confirm as the timestamp twins now: bound on <c>collection_time</c> (the
+    /// partitioning column — <c>instance_id</c> does not partition the table, so it cannot prune a chunk)
+    /// to <see cref="WatermarkPolicy.RecentWatermarkWindow"/> first, and fall back to the true unbounded
+    /// <c>MAX</c> only when the probe finds no row.</para>
     /// </summary>
     public async Task<long?> GetLastCollectedInstanceIdAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
@@ -5176,15 +5279,32 @@ RETURNING s.state_key";
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1", connection);
-            /* Parity with both timestamp twins (#2795): explicit, not Npgsql's inherited 30 s. */
-            command.CommandTimeout = CommandTimeoutSeconds;
-            command.Parameters.AddWithValue(serverId);
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is not null && result != DBNull.Value)
+            var bound = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+            using (var command = new NpgsqlCommand(
+                BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: true), connection))
             {
-                return Convert.ToInt64(result);
+                /* Parity with both timestamp twins (#2795): explicit, not Npgsql's inherited 30 s. */
+                command.CommandTimeout = CommandTimeoutSeconds;
+                command.Parameters.AddWithValue(serverId);
+                /* Naive like every other timestamp bound in this store (#1969). */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+                var result = await command.ExecuteScalarAsync(cancellationToken);
+                if (result is not null && result != DBNull.Value)
+                {
+                    return Convert.ToInt64(result);
+                }
+            }
+
+            using (var fallback = new NpgsqlCommand(
+                BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: false), connection))
+            {
+                fallback.CommandTimeout = CommandTimeoutSeconds;
+                fallback.Parameters.AddWithValue(serverId);
+                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+                if (fallbackResult is not null && fallbackResult != DBNull.Value)
+                {
+                    return Convert.ToInt64(fallbackResult);
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
