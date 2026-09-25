@@ -269,10 +269,9 @@ public sealed class RetentionTierRouterTests
     public void FinOpsReaders_RouteWithoutTrippingTheirDriftGuards(RetentionTier tier)
     {
         var usage = ViewerDataService.DatabaseResourceUsageSqlFor(tier);
-        var byTotal = ViewerDataService.TopResourceConsumersByTotalSqlFor(tier);
-        var byAvg = ViewerDataService.TopResourceConsumersByAvgSqlFor(tier);
+        var topConsumers = ViewerDataService.TopResourceConsumersSqlFor(tier);
 
-        foreach (var sql in new[] { usage, byTotal, byAvg })
+        foreach (var sql in new[] { usage, topConsumers })
         {
             /* Routed off the raw passthrough, onto a rollup, with the rollup's time column. */
             Assert.DoesNotContain("FROM v_query_stats", sql, StringComparison.Ordinal);
@@ -294,8 +293,7 @@ public sealed class RetentionTierRouterTests
         Assert.Contains($"FROM collect.{dbGrain}", usage, StringComparison.Ordinal);
         Assert.Contains("SUM(logical_reads_sum)", usage, StringComparison.Ordinal);
 
-        Assert.Contains($"FROM collect.{queryGrain}", byTotal, StringComparison.Ordinal);
-        Assert.Contains($"FROM collect.{queryGrain}", byAvg, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{queryGrain}", topConsumers, StringComparison.Ordinal);
     }
 
     /// <summary>Raw must return each constant untouched — the recent-window path is unchanged.</summary>
@@ -303,7 +301,6 @@ public sealed class RetentionTierRouterTests
     public void FinOpsReaders_RawTier_ReturnTheConstantsUnchanged()
     {
         Assert.Equal(ViewerDataService.DatabaseResourceUsageSql, ViewerDataService.DatabaseResourceUsageSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
-        Assert.Equal(ViewerDataService.TopResourceConsumersByTotalSql, ViewerDataService.TopResourceConsumersByTotalSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
-        Assert.Equal(ViewerDataService.TopResourceConsumersByAvgSql, ViewerDataService.TopResourceConsumersByAvgSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
+        Assert.Equal(ViewerDataService.TopResourceConsumersSql, ViewerDataService.TopResourceConsumersSqlFor(RetentionTier.Raw), StringComparer.Ordinal);
     }
 }

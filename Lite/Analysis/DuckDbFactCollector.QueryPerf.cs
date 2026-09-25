@@ -399,7 +399,10 @@ compared AS
         -- The resource-expenditure half of the importance gate (#2138): total CPU the LATEST plan burned
         -- over the window. The exec-count floor above only counts; this weighs.
         l.execs * l.cpu_per_exec AS latest_total_cpu_us,
-        l.database_name
+        l.database_name,
+        -- #3953: when the best plan last ran, so the advice can state its age. The window reaches a full 14 days
+        -- on both SKUs, so a best plan can be two weeks old.
+        b.last_exec AS best_last_exec
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -420,7 +423,9 @@ SELECT
     regression_factor,
     -- #3902: appended, so the ordinals above are untouched. With query_id it names each offender for the
     -- regressed-queries drill-down (AnalysisContext.PlanRegressionOffenders).
-    database_name
+    database_name,
+    -- #3953: appended for the same reason.
+    best_last_exec
 FROM compared
 WHERE regression_factor >= 2
 -- 10 CPU-seconds across the window: a NOISE floor, not an importance ranking — it exists to exclude
@@ -441,6 +446,7 @@ LIMIT 20";
             var worstDimension = 1;
             var worstLatestForced = 0;
             var worstForceFailures = 0L;
+            DateTime? worstBestLastExec = null;
             var offenders = new List<PlanRegressionOffender>();
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -458,6 +464,7 @@ LIMIT 20";
 
                     worstLatestCpu = latestCpu;
                     worstBestCpu = bestCpu;
+                    worstBestLastExec = reader.IsDBNull(9) ? null : Convert.ToDateTime(reader.GetValue(9));
                     // Which CASE branch fired, not which raw ratio is larger (review catch on #2138):
                     // CPU has PRECEDENCE in the scoring, so a row with cpu 2.5x and duration 10x is a
                     // CPU-detected regression at 2.5 — comparing magnitudes would mislabel it duration.
@@ -477,7 +484,7 @@ LIMIT 20";
 
             if (offenderCount == 0) return;
 
-            facts.Add(new Fact
+            var fact = new Fact
             {
                 Source = "queries",
                 Key = "PLAN_REGRESSION",
@@ -492,9 +499,20 @@ LIMIT 20";
                     ["best_cpu_per_exec_us"] = worstBestCpu,
                     ["regressed_dimension"] = worstDimension,
                     ["latest_is_forced"] = worstLatestForced,
-                    ["force_failure_count"] = worstForceFailures
+                    ["force_failure_count"] = worstForceFailures,
+                    /* #3953 parity: Lite reads its raw slice (0); Darling's 1 is the interval table. */
+                    ["plan_regression_source"] = 0,
                 }
-            });
+            };
+
+            /* #3953: the worst offender's best plan's age at the window's end, in days. Absent only if the read
+               returned no timestamp, which a plan with executions in the window cannot do. */
+            if (worstBestLastExec is DateTime bestLastExec)
+            {
+                fact.Metadata["best_plan_age_days"] = Math.Max(0.0, (context.TimeRangeEnd - bestLastExec).TotalDays);
+            }
+
+            facts.Add(fact);
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {

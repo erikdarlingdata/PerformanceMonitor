@@ -106,6 +106,10 @@ internal static class TrendBuckets
     /// <summary><c>get_pg_query_duration_trend</c>: about 170 bytes a point.</summary>
     public const int PgQueryDurationMaxPoints = 1500;
 
+    /// <summary><c>get_pg_cpu_utilization</c> (#4193): about 500 bytes a point, the widest of the family — the
+    /// CPU/ACU pair (each with its own peak), the capacity trio and the six V136 host-memory columns.</summary>
+    public const int PgCpuMaxPoints = 500;
+
     /// <summary>
     /// The fixed origin every bucketing read aligns to, as a SQL literal both dialects accept (PostgreSQL
     /// <c>date_bin</c>, DuckDB <c>time_bucket</c>). A midnight, so every ladder width lands on round clock times.

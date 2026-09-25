@@ -773,6 +773,15 @@ public sealed class CollectorContext
     /// and without this the row is indistinguishable from a write that never faulted at all.</para>
     /// </summary>
     public int StoreWriteReattempts { get; set; }
+
+    /// <summary>
+    /// How many of this cycle's Query Store batches stored their raw rows but missed Darling's latest-snapshot
+    /// interval table and were queued for replay (#3953). Set by the Darling host only; Lite has no such table and
+    /// leaves it at zero. Read once per cycle, after the writes, to compose the collection_log note, for
+    /// <see cref="StoreWriteReattempts"/>'s reason: the cycle writes a SUCCESS row, and without the count the miss
+    /// would be invisible there.
+    /// </summary>
+    public int QueryStoreIntervalMisses { get; set; }
 }
 
 /// <summary>
