@@ -772,7 +772,8 @@ public static class FactRemediation
                 BestCpuPerExecUs: GetDouble(row, "best_cpu_per_exec_us"),
                 RegressionFactor: GetDouble(row, "regression_factor"),
                 ReplicaRole: string.IsNullOrEmpty(replicaRole) ? null : replicaRole,
-                ParameterSensitivityCoFired: GetBool(row, "parameter_sensitivity_cofired"));
+                ParameterSensitivityCoFired: GetBool(row, "parameter_sensitivity_cofired"),
+                BestPlanLastSeenUtc: GetDateTime(row, "best_plan_last_seen"));
         }
 
         foreach (var key in order)
@@ -1987,6 +1988,19 @@ public static class FactRemediation
             JsonValueKind.Number => (int)v.GetDouble(),
             _ => null
         };
+    }
+
+    /// <summary>
+    /// A drill-down timestamp (#3953's <c>best_plan_last_seen</c>): a JSON string in the round-trip form the
+    /// serializer writes, read back as the same naive value. Null when absent, null or unparseable.
+    /// </summary>
+    private static DateTime? GetDateTime(JsonElement row, string property)
+    {
+        if (!row.TryGetProperty(property, out var v) || v.ValueKind != JsonValueKind.String) return null;
+        return DateTime.TryParse(v.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var parsed)
+            ? DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified)
+            : null;
     }
 
     private static bool GetBool(JsonElement row, string property)

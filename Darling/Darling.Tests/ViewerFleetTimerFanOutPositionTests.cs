@@ -72,6 +72,26 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class ViewerFleetTimerFanOutPositionTests
 {
+    /// <summary>
+    /// #4227: the FinOps aggregate tab must sit in <see cref="RefreshTick"/>'s tab early-return, the same way
+    /// Recommendations and Overview already do — every FinOps sub-tab loads on activation and its own Refresh
+    /// button, so polling the whole tab every <c>NocRefreshIntervalSeconds</c> re-ran its costliest reads
+    /// (the top-consumer grids' raw query_stats scan, the object-growth bounds scan) for figures that move
+    /// hourly at the fastest. A source pin rather than a behavioural test for the same reason
+    /// <see cref="ViewerFleetTimerGuardTests"/>'s class remarks give: no seam to instantiate
+    /// <c>MainWindow</c>/<c>DispatcherTimer</c> against. Proven red against the pre-#4227 source once, by
+    /// reverting the exemption locally and confirming this fails.
+    /// </summary>
+    [Fact]
+    public void FinOpsTab_IsInTheRefreshTicksTabEarlyReturn()
+    {
+        var body = StrippedTickBody(RefreshTick);
+        var earlyReturn = EarlyReturnOffset(body);
+        var guard = body[..earlyReturn];
+
+        Assert.Contains("FinOpsTab", guard, StringComparison.Ordinal);
+    }
+
     /// <summary>The tick whose fan-out position is the subject; the Overview tick has no early-return to
     /// split on and is <see cref="ViewerFleetTimerGuardTests"/>'s side of the pair.</summary>
     private const string RefreshTick = "OnRefreshTimerTick";

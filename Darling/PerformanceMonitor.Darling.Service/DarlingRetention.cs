@@ -171,6 +171,15 @@ public static class DarlingRetention
     internal const int OversizedPlanBacklogRetentionDays = DataRetentionBaseDays;
 
     /// <summary>
+    /// #3953: the latest-snapshot interval table's horizon, on <c>first_execution_time</c>: the ruled 15 days, the
+    /// detector's 14-day window plus a day. A named constant, not a knob, and in no collector schedule: the table's
+    /// horizon is the detector's, not the store's, so a held purge (#1759) does not hold it. It is deliberately NOT a
+    /// raw-tier coverage consumer and NOT in <c>RetentionPolicies</c>: it has no <c>bucket</c> column for the arming
+    /// gate to measure, and joining the gate would hold raw's purge until the table covered raw's oldest row.
+    /// </summary>
+    internal const int QueryStoreIntervalLatestRetentionDays = 15;
+
+    /// <summary>
     /// #3466 (lane 2): the fleet-sweep tables' horizon — the base data horizon, deliberately, because a
     /// sweep document is a summary OF the base data and a sweep outliving the rows it summarized explains
     /// nothing: its drill-downs dangle and its diffs cite evidence no reader can re-check. Runs and their
@@ -624,6 +633,33 @@ public static class DarlingRetention
                 {
                     tablesPurged++;
                     totalRowsDeleted += logDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
+            }
+
+            /* #3953: the latest-snapshot interval table, at its own 15-day horizon on first_execution_time (the
+               monitored clock the table partitions on). The batched DELETE, which is compressed-chunk safe; the
+               table is a plain heap until its hypertable conversion lands, and drop_chunks joins this block then,
+               in collection_log's shape above. Its pending-replay rows go at the same horizon: a batch still
+               pending after 15 days can no longer reach a window the table serves, and a removed server's rows
+               would otherwise stay forever. Failure-isolated like every sibling. */
+            var intervalLatestDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalLatest.TableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.TableName, "first_execution_time"),
+                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken);
+            var intervalPendingDeleted = await PurgeOneAsync(
+                postgres, QueryStoreIntervalLatest.PendingTableName,
+                TimeSlicedDeleteSql("collect." + QueryStoreIntervalLatest.PendingTableName, "recorded_at"),
+                utcNow.AddDays(-QueryStoreIntervalLatestRetentionDays), logger, cancellationToken);
+            foreach (var deleted in new[] { intervalLatestDeleted, intervalPendingDeleted })
+            {
+                if (deleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += deleted.Value;
                 }
                 else
                 {

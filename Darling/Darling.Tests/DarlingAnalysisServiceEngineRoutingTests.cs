@@ -95,7 +95,7 @@ public sealed class DarlingAnalysisServiceEngineRoutingTests
     }
 
     [Fact]
-    public void TheThreeEntryPoints_EachResolveTheEngine_BeforeTheirFirstCollectorRead()
+    public void TheFourEntryPoints_EachResolveTheEngine_BeforeTheirFirstCollectorRead()
     {
         var service = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "DarlingAnalysisService.cs");
 
@@ -104,6 +104,11 @@ public sealed class DarlingAnalysisServiceEngineRoutingTests
             "public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)",
             "CollectAndScoreFactsAsync(",
             "ComparePeriodsAsync(",
+            /* #4192: audit_config's own narrow read - a fourth entry point that resolves the engine off the
+               registry before its collector dispatch, exactly like the other three, even though its
+               dispatch is a switch over the resolved collector's narrow method rather than the shared
+               CollectFactsAsync every other entry point calls unconditionally. */
+            "CollectConfigAuditFactsAsync(",
         })
         {
             var at = service.IndexOf(entryPoint, StringComparison.Ordinal);
@@ -113,9 +118,9 @@ public sealed class DarlingAnalysisServiceEngineRoutingTests
             Assert.True(resolve > at && collect > resolve, $"{entryPoint} must resolve the engine before it collects");
         }
 
-        /* Exactly three, one per entry point; the pass resolves ahead of its span gate, because the gate is
+        /* Exactly four, one per entry point; the pass resolves ahead of its span gate, because the gate is
            engine-specific. */
-        Assert.Equal(3, Regex.Matches(service, @"await ResolveEngineAsync\(").Count);
+        Assert.Equal(4, Regex.Matches(service, @"await ResolveEngineAsync\(").Count);
         var pass = service.IndexOf("public async Task<List<AnalysisFinding>> AnalyzeAsync(AnalysisContext context)", StringComparison.Ordinal);
         var resolveInPass = service.IndexOf("await ResolveEngineAsync(", pass, StringComparison.Ordinal);
         var gate = service.IndexOf("await GetTotalDataSpanHoursAsync(engine,", pass, StringComparison.Ordinal);

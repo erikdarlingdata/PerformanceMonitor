@@ -173,8 +173,10 @@ public sealed class DarlingAnalysisPipelineTests
         /* 17 collect methods, one query each, except CollectQueriesAtSpike (peak lookup +
            queries-at-peak = 2). The reconstructed-chain method's DMV-snapshot fallback runs
            through the shared PgBlockingPairRowQuery.DmvSnapshotSql, already pinned in the
-           fact-collector suite. */
-        Assert.Equal(LiteDrillDownMethodSurface.Length + 1, PgDrillDownCollector.AllSql.Count);
+           fact-collector suite. Plus the regressed-queries read's #3953 table twin, which Lite has no
+           store for: its DuckDB keeps no latest-snapshot interval table. */
+        Assert.Equal(LiteDrillDownMethodSurface.Length + 2, PgDrillDownCollector.AllSql.Count);
+        Assert.Contains(PgDrillDownCollector.RegressedQueriesTableSql, PgDrillDownCollector.AllSql);
     }
 
     [Fact]
@@ -211,11 +213,15 @@ public sealed class DarlingAnalysisPipelineTests
            It is deliberate in the plan-regression re-detection and nowhere else — the same
            confinement the fact collector pins for its PlanRegressionSql. */
         Assert.Contains("any_value(query_text)", PgDrillDownCollector.RegressedQueriesSql, StringComparison.Ordinal);
+        Assert.Contains("any_value(query_text)", PgDrillDownCollector.RegressedQueriesTableSql, StringComparison.Ordinal);
         foreach (var sql in PgDrillDownCollector.AllSql)
         {
             if (sql.Contains("any_value", StringComparison.OrdinalIgnoreCase))
             {
-                Assert.Equal(PgDrillDownCollector.RegressedQueriesSql, sql);
+                /* The two regressed-queries reads (#3953: raw, and its interval-table twin), and nothing else. */
+                Assert.True(
+                    sql == PgDrillDownCollector.RegressedQueriesSql || sql == PgDrillDownCollector.RegressedQueriesTableSql,
+                    "any_value() outside the regressed-queries reads:\n" + sql);
             }
         }
     }
@@ -240,7 +246,7 @@ public sealed class DarlingAnalysisPipelineTests
            against a table that no longer exists. query_text_dim is the second (#3902): the
            parameter-sensitivity drill-down resolves text for its five output rows by digest rather than
            reading v_query_stats, whose join resolves it for every row in the window. */
-        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable }
+        var sideTables = new[] { QueryStoreTextStore.TableName, PayloadDimensions.QueryTextDimTable, QueryStoreIntervalLatest.TableName }
             .Select(t => t.Contains('.', StringComparison.Ordinal) ? t.Split('.')[^1] : t)
             .ToHashSet(StringComparer.Ordinal);
 

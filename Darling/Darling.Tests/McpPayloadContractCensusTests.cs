@@ -1475,13 +1475,12 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
-    /// <item><b>A wide field's own preview cut</b> — <see cref="FieldPreviewCutKeys"/>: #4198's shape for a wide
-    /// TEXT field (query text, a plan fragment, a deadlock graph) that is previewed at default to keep the
-    /// PAYLOAD under the shared response-size budget, spelled <c>&lt;field&gt;_truncated</c> per row and paired
-    /// with a <c>full_text</c> (or tool-specific) opt-in. Unlike a source-side cut the full value IS in the
-    /// store and the flag is actionable — pass the opt-in and get it back — so it keeps its own class rather
-    /// than joining <see cref="SourceSideCutKeys"/>, and unlike the page dialect it describes one FIELD on one
-    /// row, not how many rows came back.</item>
+        /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
+    /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
+    /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
+    /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
+    /// <c>full_graph</c>, the same shape <c>get_store_query_stats</c>' <c>full_text</c> already used) or by
+    /// narrowing the page to one named thing (a <c>dedup_key</c> call always gets the whole field).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1528,6 +1527,8 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
     [
+        ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
         ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
             "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
     ];

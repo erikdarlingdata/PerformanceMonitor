@@ -26,15 +26,17 @@ namespace Darling.Tests;
 /// <c>server_id</c> Filter — every OTHER server's rows in the newest chunk read and rejected before the two
 /// this server's read wanted turned up.
 ///
-/// <para>This file takes over the "I am the top rung" claims that moved off
-/// <see cref="CollectionCaveatsRungTests"/> (V141) when this rung landed.</para>
+/// <para>This file took over the "I am the top rung" claims that moved off
+/// <see cref="CollectionCaveatsRungTests"/> (V141) when this rung landed. When
+/// <see cref="QueryStoreIntervalLatestRungTests"/> (V143, #3953) landed, those claims moved on again.
+/// What stays is everything true of this rung wherever it sits.</para>
 /// </summary>
 public sealed class IndexObjectStatsServerTimeIndexRungTests
 {
     private const int RungVersion = 142;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the last argument, because V142 is
-    /// (for now) the newest rung.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe — V143 (#3953) is now above it, so it
+    /// is no longer the last argument.</summary>
     private const int ProbeOrdinal = 117;
 
     private const string IndexName = "idx_index_object_stats_server_time";
@@ -51,8 +53,7 @@ public sealed class IndexObjectStatsServerTimeIndexRungTests
         Assert.Equal("index-object-stats-server-time", V142.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
-        Assert.Same(V142, PgMigrations.Scripts[^1]);
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -103,8 +104,8 @@ public sealed class IndexObjectStatsServerTimeIndexRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        /* This rung IS the newest sentinel for now, so its ordinal is the last parameter. */
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* V143 (#3953) is now above this rung, so ProbeOrdinal is no longer the last parameter. */
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasIndexObjectStatsServerTimeIndex", method.GetParameters()[ProbeOrdinal].Name);
 
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
@@ -114,12 +115,14 @@ public sealed class IndexObjectStatsServerTimeIndexRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(141, (int)method.Invoke(null, behind)!);
 
-        /* In the source, this rung's arm sits ABOVE V141's and returns this build's version. */
+        /* In the source, this rung's arm sits between V143's (above) and V141's (below). */
         var thisArm = viewer.IndexOf("if (hasIndexObjectStatsServerTimeIndex)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
+        var nextArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V142 sentinel arm — a fully-migrated store would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
         Assert.True(thisArm < previousArm, "the V142 arm sits below V141's, so a current store maps one rung low");
+        Assert.True(nextArm < thisArm, "the V143 arm should sit above V142's arm");
         Assert.Contains(
             "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
