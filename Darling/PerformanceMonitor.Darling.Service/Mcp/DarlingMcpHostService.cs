@@ -485,8 +485,12 @@ public sealed class DarlingMcpHostService : BackgroundService
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
             /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
                point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
-               reads dataDirectory/Managed off it, never writes. */
-            builder.Services.AddSingleton(config.Postgres);
+               reads dataDirectory/Managed off it, never writes.
+               Trimmed copy, not config.Postgres itself (round-1 review, Low 3): the full PostgresConfig
+               also carries the owner connection string. Nothing serializes this DI registration today,
+               but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
+               takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
+            builder.Services.AddSingleton(new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory });
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache));
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
