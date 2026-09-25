@@ -51,7 +51,7 @@ public sealed class DarlingWebHostGateLiveTests
     /// the transport (TestServer instead of Kestrel sockets) and the store pool (a data source that is never
     /// opened, because none of these gates touch Postgres).
     /// </summary>
-    private static async Task<TestServer> BuildServer(bool networkMode)
+    private static async Task<TestServer> BuildServer(bool networkMode, string? publicBaseUrlHost = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -77,7 +77,8 @@ public sealed class DarlingWebHostGateLiveTests
             networkListenIp: networkMode ? IPAddress.Parse(ListenIp) : null,
             allowedCidr: IPNetwork.Parse(AllowedCidr),
             accessToken: Token,
-            oidcClient: null);
+            oidcClient: null,
+            publicBaseUrlHost: publicBaseUrlHost);
 
         await app.StartAsync();
         return app.GetTestServer();
@@ -140,6 +141,29 @@ public sealed class DarlingWebHostGateLiveTests
     public async Task NetworkMode_ForeignHost_IsRefused()
     {
         using var server = await BuildServer(networkMode: true);
+        var ctx = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>#4220: web.publicBaseUrl's host is admitted as one extra allowed Host value — a DNS name
+    /// darling.sample.json suggests but that, before this, the guard refused unconditionally (it only ever
+    /// compared against networkListenIp or the loopback names).</summary>
+    [Fact]
+    public async Task NetworkMode_PublicBaseUrlHost_IsAdmitted()
+    {
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: "monitor.example.com");
+        var ctx = await Send(server, "/", "monitor.example.com", InCidrRemote, token: Token);
+
+        Assert.NotEqual(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
+    }
+
+    /// <summary>The admission names exactly ONE host — every other hostname, including one that merely looks
+    /// similar, still gets 400.</summary>
+    [Fact]
+    public async Task NetworkMode_AnyOtherHost_StillRefused_EvenWithAPublicBaseUrlHostConfigured()
+    {
+        using var server = await BuildServer(networkMode: true, publicBaseUrlHost: "monitor.example.com");
         var ctx = await Send(server, "/", "evil.com", InCidrRemote, token: Token);
 
         Assert.Equal(StatusCodes.Status400BadRequest, ctx.Response.StatusCode);
