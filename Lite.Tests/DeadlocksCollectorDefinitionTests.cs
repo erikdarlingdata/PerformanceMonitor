@@ -99,14 +99,15 @@ public sealed class DeadlocksCollectorDefinitionTests
     {
         var watermark = new DateTime(2026, 7, 2, 11, 55, 0, DateTimeKind.Utc);
         var withWatermark = DeadlocksCollector.Instance.BuildQuery(MakeContext(watermark: watermark));
-        var parameter = Assert.Single(withWatermark.Parameters);
-        Assert.Equal("@cutoff_time", parameter.Name);
+        /* #4200 added @last_execution_count alongside @cutoff_time. */
+        Assert.Equal(2, withWatermark.Parameters.Count);
+        var parameter = Assert.Single(withWatermark.Parameters, p => p.Name == "@cutoff_time");
         Assert.Equal(watermark, parameter.Value);
         Assert.Equal(CollectorParameterType.DateTime2, parameter.Type);
 
         var collectionTime = new DateTime(2026, 7, 2, 12, 0, 0, DateTimeKind.Utc);
         var fallback = DeadlocksCollector.Instance.BuildQuery(MakeContext(collectionTime: collectionTime));
-        Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters).Value);
+        Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters, p => p.Name == "@cutoff_time").Value);
     }
 
     [Fact]
