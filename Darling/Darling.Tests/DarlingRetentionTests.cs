@@ -85,7 +85,9 @@ public sealed class DarlingRetentionTests
             "DELETE FROM collection_log WHERE collection_time < $1 AND collection_time >= (SELECT min(collection_time) FROM collection_log WHERE collection_time < $1) AND collection_time < (SELECT min(collection_time) FROM collection_log WHERE collection_time < $1) + INTERVAL '1 days'",
             DarlingRetention.TimeSlicedDeleteSql("collection_log", "collection_time"));
 
-        /* The slice width IS the hypertable chunk width — the fallback's unit of work stays one chunk. */
+        /* The slice width matches ChunkIntervalDays, the ladder's CEILING since #4211 (RawChunkIntervalPlanner
+           can narrow a raw table's actual chunk_time_interval below a day) — the fallback's unit of work stays
+           bounded to at most one day's worth even where it is no longer exactly one chunk. */
         Assert.Equal(1, TimescaleSupport.ChunkIntervalDays);
     }
 
