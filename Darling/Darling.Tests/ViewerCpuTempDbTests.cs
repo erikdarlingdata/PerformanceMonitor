@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -20,17 +21,19 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the CPU-tab and tempdb-tab reads (W1a viewer copy-parity) against the Darling store contract,
-/// no live Postgres. The CPU tab (and, since W1d, the Overview's CPU lane) plots RAW per-sample rows
-/// (windowed on the naive-UTC collection_time, ordered by the server-local sample_time) — deliberately
-/// not an average-per-collection roll-up. The tempdb reads mirror Lite's view-based queries
-/// (v_tempdb_stats / v_file_io_stats): the numeric(18,2) MB columns are CAST to double precision for
-/// the typed reader, total_sessions_using_tempdb stays bigint (GetInt64), and the file-I/O read filters
-/// to tempdb and averages stall/op per file.
+/// no live Postgres. The CPU tab (and, since W1d, the Overview's CPU lane) plots the de-skewed
+/// per-sample series bucketed to <see cref="TrendBudget.Chart"/>'s width (#4234): a bucket wider than
+/// one sample averages the two gauge columns, and a bucket holding exactly one physical sample is
+/// stamped at that sample's own raw time by the C# reader rather than the bucket grid (ruling item 3).
+/// The tempdb reads mirror Lite's view-based queries (v_tempdb_stats / v_file_io_stats), unaffected by
+/// #4234: the numeric(18,2) MB columns are CAST to double precision for the typed reader,
+/// total_sessions_using_tempdb stays bigint (GetInt64), and the file-I/O read filters to tempdb and
+/// averages stall/op per file.
 /// </summary>
 public sealed class ViewerCpuTempDbSqlTests
 {
     [Fact]
-    public void CpuUtilizationSql_SelectsRawSamples_WindowedOnCollectionTime_OrderedBySampleTime()
+    public void CpuUtilizationSql_SelectsFromRawCte_WindowedOnCollectionTime_OrderedByBucketStart()
     {
         Assert.Contains("FROM cpu_utilization_stats", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("sample_time", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
@@ -38,17 +41,35 @@ public sealed class ViewerCpuTempDbSqlTests
         Assert.Contains("other_process_cpu_utilization", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sample_time", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* The outer bucketed query groups/orders by the bucket_start ordinal, not the raw column name
+           (#4234 — the pre-bucketing read ordered by the bare sample_time column). */
+        Assert.Contains("GROUP BY 1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void CpuUtilizationSql_IsRawNotAveraged_NoAvgOrGroupBy()
+    public void CpuUtilizationSql_IsBucketedWithGaugeAveragesAndNullAsZero()
     {
-        /* The CPU tab (and the Overview's CPU lane) plots every ring-buffer sample; it must NOT
-           average per collection. The de-skew uses a window MAX (one value per row, no roll-up) and a
-           PARTITION BY, never AVG or GROUP BY. */
-        Assert.DoesNotContain("AVG(", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("GROUP BY", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* #4234: both CPU columns are gauges (ruling item 2), averaged per bucket. A NULL
+           other_process_cpu_utilization (SQL on Linux, #1048) is COALESCEd to 0 BEFORE the AVG, matching
+           the pre-bucketing reader's per-row "NULL reads as 0" rule exactly rather than letting
+           Postgres's NULL-skipping AVG silently change a mixed-OS bucket's value. */
+        Assert.Contains("AVG(COALESCE(sqlserver_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        Assert.Contains("AVG(COALESCE(other_process_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234: the source check ruling item 6 asks for — every bucketed WPF trend statement carries
+    /// a width parameter and buckets via the shared origin, so the width the C# picks (<c>TrendBuckets.AutoMinutes</c>)
+    /// is the width the SQL actually bins on.</summary>
+    [Fact]
+    public void CpuUtilizationSql_CarriesABucketWidth_AndTheSingletonColumnsForRawPassthrough()
+    {
+        var sql = ViewerDataService.CpuUtilizationSql;
+        Assert.Contains("date_bin(CAST($3 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, sql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(sample_time) AS first_sample_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS sample_count", sql, StringComparison.Ordinal);
     }
 
     [Fact]
