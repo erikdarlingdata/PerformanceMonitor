@@ -1069,18 +1069,37 @@ public sealed class DarlingWebHostService : BackgroundService
                         return;
 
                     default: /* ShowLogin */
-                        /* A 200 rather than a 401, so this is not a "rejected request" by status - and
-                           it is exactly the state an operator asks about when a ?token= they pasted did
-                           not work. Logged ONLY when a token was actually presented and did not match:
-                           a first visit with no token is the normal path to the login page and logging
-                           it would make every bookmark a warning. */
+                        /* A page route gets 200 rather than 401, so it is not a "rejected request" by status -
+                           and it is exactly the state an operator asks about when a ?token= they pasted did not
+                           work. An /api/* call gets 401 instead (#4187): the SAME unauthenticated state, but a
+                           fetch caller branches on status rather than parsing a body, and the SPA must never
+                           mistake the login form for empty data. This arm is reached with no valid cookie AND
+                           no valid token regardless of which of the three modes (shared token, cookie session,
+                           OIDC) the caller was trying, so the split below covers all three by construction.
+                           Logged ONLY when a token was actually presented and did not match: a first visit (or
+                           an open tab polling with no cookie after a restart - #4187's own trigger) is the
+                           normal path here and logging THAT would make every bookmark, and every stale tab,
+                           a warning. */
+                        var isApiCall = IsApiPath(context.Request.Path.Value ?? "/");
+                        var shownStatus = isApiCall ? StatusCodes.Status401Unauthorized : StatusCodes.Status200OK;
+
                         if (!string.IsNullOrEmpty(presentedToken))
                         {
                             refusals.Report(
-                                _logger, "Web dashboard", DarlingRefusalGate.Token, StatusCodes.Status200OK,
+                                _logger, "Web dashboard", DarlingRefusalGate.Token, shownStatus,
                                 remote,
-                                "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
+                                isApiCall
+                                    ? "the presented ?token= does not match web.network.encryptedToken, so the API call was refused"
+                                    : "the presented ?token= does not match web.network.encryptedToken, so the login page was served instead",
                                 DateTime.UtcNow);
+                        }
+
+                        if (isApiCall)
+                        {
+                            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                            context.Response.ContentType = "application/json; charset=utf-8";
+                            await context.Response.WriteAsync("{\"error\":\"session expired\",\"login\":\"/\"}");
+                            return;
                         }
 
                         await WriteLoginPageAsync(context, oidcClient is not null);
@@ -1119,6 +1138,19 @@ public sealed class DarlingWebHostService : BackgroundService
             && (string.Equals(path, OidcLoginPath, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(path, OidcCallbackPath, StringComparison.OrdinalIgnoreCase));
     }
+
+    /// <summary>
+    /// PURE: is this an <c>/api/*</c> call rather than a page navigation? #4187 — the unauthenticated arm of
+    /// the auth gate (below) used to answer BOTH the same way: a 200 <c>text/html</c> login form. That is the
+    /// right answer for a browser loading a page, but the SPA's own fetch layer parsed the form as a failed
+    /// JSON.parse, got <c>body: null</c>, and rendered an expired/rotated session as an empty "nothing here"
+    /// card rather than "sign in again" (<c>classifyResponse</c>'s own comment says a failure must never do
+    /// that). Every route this host serves under <c>/api/</c> always answers JSON, so the split is a path
+    /// prefix, not a content-negotiation guess — a hand-curled request with no <c>Accept</c> header gets the
+    /// same answer as the SPA's.
+    /// </summary>
+    internal static bool IsApiPath(string path)
+        => path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// PURE per-request decision, composing the sign-in flow around <see cref="DecideWebAuth"/>: the CIDR
