@@ -25,10 +25,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>ServerTab.CopyExport.cs</c> / <c>ServerTab.Plans.cs</c>. Copy/Export delegate to the shared
 /// PerformanceMonitor.Ui <see cref="DataGridExport"/>; the XML-save buttons write the row's stored graph /
 /// report XML to a file. <see cref="CopyReproScript_Click"/> builds a paste-ready T-SQL repro from the query
-/// grids' STORED row fields (no live connection — Active Queries carries its plan in-row; Top Queries / Query
-/// Store best-effort read the collector's STORED plan from Postgres to enrich parameters). Only Lite's
-/// "Get Actual Plan" (a LIVE re-execution) stays omitted; the stored-plan "View Plan" host lives in
-/// ViewerServerTab.Plans.cs.
+/// grids' STORED row fields (no live connection — Active Queries best-effort fetches its stored plan from
+/// Postgres by the row's natural key (#4239), like Top Queries / Query Store, EXCEPT when the row already
+/// carries the plan in-row (the live "Current Active Queries" grid); Top Queries / Query Store best-effort
+/// read the collector's STORED plan from Postgres to enrich parameters). Only Lite's "Get Actual Plan" (a
+/// LIVE re-execution) stays omitted; the stored-plan "View Plan" host lives in ViewerServerTab.Plans.cs.
 /// </summary>
 public partial class ViewerServerTab
 {
@@ -47,10 +48,12 @@ public partial class ViewerServerTab
     /// <summary>
     /// "Copy Repro Script" for the query grids — builds a paste-ready T-SQL reproduction from the row's STORED
     /// fields and copies it to the clipboard. NO live SQL connection: Active Queries carries its query text /
-    /// plan / isolation in-row; Top Queries / Query Store best-effort read their STORED plan from Postgres (a
-    /// read via <see cref="ViewerDataService"/>, not a live re-exec) to enrich the extracted parameters, then
-    /// fall back to a plan-less repro. (Lite fetches these plans live from the monitored server — the viewer
-    /// reads the collector's stored copy, its only seam-difference; Lite's "Get Actual Plan" has no equivalent.)
+    /// isolation in-row and best-effort reads its STORED plan from Postgres by the row's natural key (#4239),
+    /// EXCEPT when the row already carries the plan in-row (the live "Current Active Queries" grid); Top
+    /// Queries / Query Store best-effort read their STORED plan from Postgres (a read via
+    /// <see cref="ViewerDataService"/>, not a live re-exec) to enrich the extracted parameters, then fall back
+    /// to a plan-less repro. (Lite fetches these plans live from the monitored server — the viewer reads the
+    /// collector's stored copy, its only seam-difference; Lite's "Get Actual Plan" has no equivalent.)
     /// </summary>
     private async void CopyReproScript_Click(object sender, RoutedEventArgs e)
     {
@@ -58,9 +61,10 @@ public partial class ViewerServerTab
         var grid = FindParentDataGrid(menuItem);
         if (grid?.CurrentItem is not { } row) return;
 
-        /* Best-effort STORED-plan enrichment for the aggregate grids (a Postgres read, never a live SQL
-           connection). Active Queries needs none — its plan rides in-row. Failures fall through to a
-           plan-less repro. */
+        /* Best-effort STORED-plan enrichment for the query grids (a Postgres read, never a live SQL
+           connection). Active Queries prefers its in-row plan (the live grid) and only fetches by natural key
+           when HasQueryPlan is true but the row itself carries none (a stored-row read, #4239). Failures fall
+           through to a plan-less repro. */
         string? enrichedPlanXml = null;
         try
         {
@@ -71,6 +75,11 @@ public partial class ViewerServerTab
                     break;
                 case ViewerQueryStoreRow qs:
                     enrichedPlanXml = await _dataService.GetQueryStorePlanTextAsync(_server.ServerId, qs.DatabaseName, qs.QueryId, qs.PlanId);
+                    break;
+                case ViewerQuerySnapshotRow snapshot when snapshot.HasQueryPlan:
+                    enrichedPlanXml = !string.IsNullOrEmpty(snapshot.QueryPlan)
+                        ? snapshot.QueryPlan
+                        : await _dataService.GetQuerySnapshotPlanXmlAsync(_server.ServerId, snapshot.CollectionTime, snapshot.SessionId, snapshot.RequestId, live: false);
                     break;
             }
         }
@@ -88,11 +97,13 @@ public partial class ViewerServerTab
 
     /// <summary>
     /// Maps a query-grid row to a repro script built from its STORED fields (pure, unit-tested). Active Queries
-    /// uses its in-row plan + isolation (<paramref name="enrichedPlanXml"/> ignored); Top Queries / Query Store
-    /// use the caller's best-effort stored <paramref name="enrichedPlanXml"/> (null → a plan-less repro, which
-    /// ReproScriptBuilder still produces with a "plan not available" note). Returns null for a row with no query
-    /// text (comparison aggregates / procedures) or an unsupported row type — the caller then no-ops, exactly
-    /// like Lite's default branch. NO row type here reads a live connection.
+    /// uses its isolation in-row and the caller's <paramref name="enrichedPlanXml"/> for the plan (#4239 — the
+    /// caller resolves it in-row-first from the live grid, else a best-effort store fetch by natural key,
+    /// matching Top Queries / Query Store); Top Queries / Query Store likewise use the caller's best-effort
+    /// stored <paramref name="enrichedPlanXml"/>. Null → a plan-less repro, which ReproScriptBuilder still
+    /// produces with a "plan not available" note. Returns null for a row with no query text (comparison
+    /// aggregates / procedures) or an unsupported row type — the caller then no-ops, exactly like Lite's
+    /// default branch. NO row type here reads a live connection.
     /// </summary>
     internal static string? BuildReproScriptForRow(object row, string? enrichedPlanXml, string productName)
     {
@@ -101,7 +112,7 @@ public partial class ViewerServerTab
             case ViewerQuerySnapshotRow snapshot:
                 if (string.IsNullOrEmpty(snapshot.QueryText)) return null;
                 return ReproScriptBuilder.BuildReproScript(
-                    snapshot.QueryText, snapshot.DatabaseName, snapshot.QueryPlan, snapshot.TransactionIsolationLevel,
+                    snapshot.QueryText, snapshot.DatabaseName, enrichedPlanXml, snapshot.TransactionIsolationLevel,
                     "Active Queries", productName: productName);
 
             case ViewerQueryStatsRow stats:

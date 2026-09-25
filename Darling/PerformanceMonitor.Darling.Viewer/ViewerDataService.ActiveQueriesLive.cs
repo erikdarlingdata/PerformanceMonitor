@@ -162,6 +162,11 @@ public sealed partial class ViewerDataService
                 ParallelWorkerCount = r.ParallelWorkerCount,
                 QueryPlan = r.QueryPlan,
                 LiveQueryPlan = r.LiveQueryPlan,
+                /* #4239: HasQueryPlan/HasLiveQueryPlan are now independent flags (no longer computed from
+                   QueryPlan/LiveQueryPlan), so the live path — the only place a snapshot row carries plan XML
+                   in-row — must set them explicitly here from that same in-row plan. */
+                HasQueryPlan = !string.IsNullOrEmpty(r.QueryPlan),
+                HasLiveQueryPlan = !string.IsNullOrEmpty(r.LiveQueryPlan),
                 CollectionTime = fetchedAt,
                 LoginName = r.LoginName ?? "",
                 HostName = r.HostName ?? "",
