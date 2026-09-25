@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -47,6 +48,34 @@ public sealed partial class ViewerDataService
     /// <summary>The stitch-aware routed form (#3653 A6, lane LA-3b2). See
     /// <see cref="DailySummarySql.RangeSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
     public static string DailySummaryRangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) => DailySummarySql.RangeSqlFor(tier, coverage, windowStartUtc);
+
+    /// <summary>#4232: this viewer instance's own closed-day cache for the calendar's range read (ruling item 6
+    /// — the WPF viewer keeps its own instance, distinct from the service's shared one). Benignly racy like
+    /// <see cref="GetRollupAvailabilityAsync"/>'s cache: concurrent tab loads may miss together and compute the
+    /// range twice, which is correct, just not maximally cache-efficient.</summary>
+    private readonly DailySummaryRangeCache<RawDailySummaryDay> _dailySummaryRangeCache = new();
+
+    /// <summary>#4232: one day's worth of <see cref="DailySummarySql"/>'s raw output columns, from BEFORE any
+    /// banding or retention judgment — the unit <see cref="_dailySummaryRangeCache"/> actually caches. A record
+    /// with init-only properties (immutable), matching every row instance being shared across callers within
+    /// the cache's lifetime.</summary>
+    private sealed record RawDailySummaryDay
+    {
+        public DateTime Day { get; init; }
+        public decimal TotalWaitTimeSec { get; init; }
+        public string TopWaitType { get; init; } = "";
+        public long? UniqueQueries { get; init; }
+        public long DeadlockCount { get; init; }
+        public long BlockingEvents { get; init; }
+        public long HighCpuEvents { get; init; }
+        public long CollectionErrors { get; init; }
+        public long MemoryPressureEvents { get; init; }
+        public long MemoryCriticalEvents { get; init; }
+        public long AlertCount { get; init; }
+        public long MaxBlockDurationMs { get; init; }
+        public long CollectionRuns { get; init; }
+        public int SignalSourcesPresent { get; init; }
+    }
 
     /// <summary>
     /// Returns one <see cref="DailySummaryRow"/> per collected day in the half-open [fromDate, toDate)
@@ -99,19 +128,48 @@ public sealed partial class ViewerDataService
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window, so the calendar
-           and get_daily_health (DarlingHealthReader, same call) count the same queries for the same day. */
-        await using var command = _dataSource.CreateCommand(DailySummaryRangeSqlFor(tier, coverage, fromDate));
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(fromDate.Date, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(toDate.Date, DateTimeKind.Unspecified) });
+           and get_daily_health (DarlingHealthReader, same call) count the same queries for the same day.
+           #4232: resolved ONCE for the range as a whole and reused for every sub-range RunRangeAsync below is
+           asked to read (see DailySummaryRangeCache's own doc) — a sub-range resolved on its own could route to
+           a different tier than the range it is part of, which would silently change what a day's
+           unique_queries means between two rows of the same read. */
+        var routedSql = DailySummaryRangeSqlFor(tier, coverage, fromDate);
 
-        var results = new List<DailySummaryRow>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        async Task<List<RawDailySummaryDay>> RunRangeAsync(DateTime start, DateTime end, CancellationToken ct)
         {
-            results.Add(ReadDailySummaryRow(reader, banding, horizon));
+            var raws = new List<RawDailySummaryDay>();
+            await using var command = _dataSource.CreateCommand(routedSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(start.Date, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(end.Date, DateTimeKind.Unspecified) });
+
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                raws.Add(ReadRawDailySummaryDay(reader));
+            }
+
+            return raws;
         }
+
+        /* #4232: the closed-day cache. The viewer's calendar reads are always live ("as of now"), so every
+           call is cache-eligible. ToDailySummaryRow re-reads the live banding/horizon on every row, cached or
+           fresh, every call — never from whatever a cached block happened to compute them as up to an hour ago
+           (ruling item 7: no column the statement itself returns spans more than one day, but this post-read
+           judgment does move between refreshes). */
+        var rawResults = await _dailySummaryRangeCache.GetRangeAsync(
+            storeKey: string.Empty,
+            serverId: serverId,
+            fromDate: fromDate,
+            toDate: toDate,
+            routedSql: routedSql,
+            asOfNow: true,
+            day: raw => raw.Day,
+            runRange: RunRangeAsync,
+            cancellationToken: cancellationToken);
+
+        var results = rawResults.Select(raw => ToDailySummaryRow(raw, banding, horizon)).ToList();
 
         return (results, horizon);
     }
@@ -158,31 +216,56 @@ public sealed partial class ViewerDataService
         return DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
     }
 
-    private static DailySummaryRow ReadDailySummaryRow(DbDataReader reader, DailyHealthThresholds banding, DateTime retentionHorizon)
+    /// <summary>#4232: the parse half of the old ReadDailySummaryRow, split out so the closed-day cache
+    /// (<see cref="_dailySummaryRangeCache"/>) can hold rows from BEFORE any banding/retention judgment is
+    /// stamped onto them — see <see cref="ToDailySummaryRow"/>, which does the stamping, fresh, on every call.</summary>
+    private static RawDailySummaryDay ReadRawDailySummaryDay(DbDataReader reader) => new()
+    {
+        Day = reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
+        TotalWaitTimeSec = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
+        TopWaitType = reader.IsDBNull(2) ? "" : reader.GetString(2),
+        /* #3653 A6: a NULL unique_queries is the routed statement's "not carried at this tier" (the rollup
+           never materialized this server's day while its source still holds the rows) and is KEPT as null
+           — the 0L this used to substitute drew a measured-zero on the day-detail panel for a day the tier
+           skipped. The MCP reader (DarlingHealthReader) makes the same read at the same ordinal. */
+        UniqueQueries = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
+        DeadlockCount = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+        BlockingEvents = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+        HighCpuEvents = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),
+        CollectionErrors = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
+        MemoryPressureEvents = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
+        MemoryCriticalEvents = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
+        AlertCount = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
+        MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
+        /* #3539 A2: the trailing collection_runs column — the collection-error share's denominator. */
+        CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
+        /* #3541 A9 / #3653: the aggregate's LAST column, how many of the seven signal sources hold a row for
+           the day — the fact that tells a purged shell from a day the purge has not reached. */
+        SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+    };
+
+    /// <summary>#4232: the banding half of the old ReadDailySummaryRow — stamps a raw parsed day with the
+    /// per-range banding inputs. Called fresh for every row (cached or freshly read) on every range read, never
+    /// itself cached, so a settings save or a purge horizon crossing mid-cache-lifetime still repaints
+    /// correctly.</summary>
+    private static DailySummaryRow ToDailySummaryRow(RawDailySummaryDay raw, DailyHealthThresholds banding, DateTime retentionHorizon)
     {
         var row = new DailySummaryRow
         {
-            SummaryDate = reader.IsDBNull(0) ? DateTime.MinValue : Convert.ToDateTime(reader.GetValue(0)),
-            TotalWaitTimeSec = reader.IsDBNull(1) ? 0m : Convert.ToDecimal(reader.GetValue(1)),
-            TopWaitType = reader.IsDBNull(2) ? "" : reader.GetString(2),
-            /* #3653 A6: a NULL unique_queries is the routed statement's "not carried at this tier" (the rollup
-               never materialized this server's day while its source still holds the rows) and is KEPT as null
-               — the 0L this used to substitute drew a measured-zero on the day-detail panel for a day the tier
-               skipped. The MCP reader (DarlingHealthReader) makes the same read at the same ordinal. */
-            UniqueQueries = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3)),
-            DeadlockCount = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
-            BlockingEvents = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-            HighCpuEvents = reader.IsDBNull(6) ? 0L : Convert.ToInt64(reader.GetValue(6)),
-            CollectionErrors = reader.IsDBNull(7) ? 0L : Convert.ToInt64(reader.GetValue(7)),
-            MemoryPressureEvents = reader.IsDBNull(8) ? 0L : Convert.ToInt64(reader.GetValue(8)),
-            MemoryCriticalEvents = reader.IsDBNull(9) ? 0L : Convert.ToInt64(reader.GetValue(9)),
-            AlertCount = reader.IsDBNull(10) ? 0L : Convert.ToInt64(reader.GetValue(10)),
-            MaxBlockDurationMs = reader.IsDBNull(11) ? 0L : Convert.ToInt64(reader.GetValue(11)),
-            /* #3539 A2: the trailing collection_runs column — the collection-error share's denominator. */
-            CollectionRuns = reader.IsDBNull(12) ? 0L : Convert.ToInt64(reader.GetValue(12)),
-            /* #3541 A9 / #3653: the aggregate's LAST column, how many of the seven signal sources hold a row for
-               the day — the fact that tells a purged shell from a day the purge has not reached. */
-            SignalSourcesPresent = reader.IsDBNull(13) ? 0 : Convert.ToInt32(reader.GetValue(13)),
+            SummaryDate = raw.Day,
+            TotalWaitTimeSec = raw.TotalWaitTimeSec,
+            TopWaitType = raw.TopWaitType,
+            UniqueQueries = raw.UniqueQueries,
+            DeadlockCount = raw.DeadlockCount,
+            BlockingEvents = raw.BlockingEvents,
+            HighCpuEvents = raw.HighCpuEvents,
+            CollectionErrors = raw.CollectionErrors,
+            MemoryPressureEvents = raw.MemoryPressureEvents,
+            MemoryCriticalEvents = raw.MemoryCriticalEvents,
+            AlertCount = raw.AlertCount,
+            MaxBlockDurationMs = raw.MaxBlockDurationMs,
+            CollectionRuns = raw.CollectionRuns,
+            SignalSourcesPresent = raw.SignalSourcesPresent,
             HasData = true,
             RetentionHorizon = retentionHorizon,
         };

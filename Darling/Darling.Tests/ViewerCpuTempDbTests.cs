@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -20,17 +21,19 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the CPU-tab and tempdb-tab reads (W1a viewer copy-parity) against the Darling store contract,
-/// no live Postgres. The CPU tab (and, since W1d, the Overview's CPU lane) plots RAW per-sample rows
-/// (windowed on the naive-UTC collection_time, ordered by the server-local sample_time) — deliberately
-/// not an average-per-collection roll-up. The tempdb reads mirror Lite's view-based queries
-/// (v_tempdb_stats / v_file_io_stats): the numeric(18,2) MB columns are CAST to double precision for
-/// the typed reader, total_sessions_using_tempdb stays bigint (GetInt64), and the file-I/O read filters
-/// to tempdb and averages stall/op per file.
+/// no live Postgres. The CPU tab (and, since W1d, the Overview's CPU lane) plots the de-skewed
+/// per-sample series bucketed to <see cref="TrendBudget.Chart"/>'s width (#4234): a bucket wider than
+/// one sample averages the two gauge columns, and a bucket holding exactly one physical sample is
+/// stamped at that sample's own raw time by the C# reader rather than the bucket grid (ruling item 3).
+/// The tempdb reads mirror Lite's view-based queries (v_tempdb_stats / v_file_io_stats), unaffected by
+/// #4234: the numeric(18,2) MB columns are CAST to double precision for the typed reader,
+/// total_sessions_using_tempdb stays bigint (GetInt64), and the file-I/O read filters to tempdb and
+/// averages stall/op per file.
 /// </summary>
 public sealed class ViewerCpuTempDbSqlTests
 {
     [Fact]
-    public void CpuUtilizationSql_SelectsRawSamples_WindowedOnCollectionTime_OrderedBySampleTime()
+    public void CpuUtilizationSql_SelectsFromRawCte_WindowedOnCollectionTime_OrderedByBucketStart()
     {
         Assert.Contains("FROM cpu_utilization_stats", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("sample_time", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
@@ -38,17 +41,35 @@ public sealed class ViewerCpuTempDbSqlTests
         Assert.Contains("other_process_cpu_utilization", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sample_time", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* The outer bucketed query groups/orders by the bucket_start ordinal, not the raw column name
+           (#4234 — the pre-bucketing read ordered by the bare sample_time column). */
+        Assert.Contains("GROUP BY 1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void CpuUtilizationSql_IsRawNotAveraged_NoAvgOrGroupBy()
+    public void CpuUtilizationSql_IsBucketedWithGaugeAveragesAndNullAsZero()
     {
-        /* The CPU tab (and the Overview's CPU lane) plots every ring-buffer sample; it must NOT
-           average per collection. The de-skew uses a window MAX (one value per row, no roll-up) and a
-           PARTITION BY, never AVG or GROUP BY. */
-        Assert.DoesNotContain("AVG(", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("GROUP BY", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* #4234: both CPU columns are gauges (ruling item 2), averaged per bucket. A NULL
+           other_process_cpu_utilization (SQL on Linux, #1048) is COALESCEd to 0 BEFORE the AVG, matching
+           the pre-bucketing reader's per-row "NULL reads as 0" rule exactly rather than letting
+           Postgres's NULL-skipping AVG silently change a mixed-OS bucket's value. */
+        Assert.Contains("AVG(COALESCE(sqlserver_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        Assert.Contains("AVG(COALESCE(other_process_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234: the source check ruling item 6 asks for — every bucketed WPF trend statement carries
+    /// a width parameter and buckets via the shared origin, so the width the C# picks (<c>TrendBuckets.AutoMinutes</c>)
+    /// is the width the SQL actually bins on.</summary>
+    [Fact]
+    public void CpuUtilizationSql_CarriesABucketWidth_AndTheSingletonColumnsForRawPassthrough()
+    {
+        var sql = ViewerDataService.CpuUtilizationSql;
+        Assert.Contains("date_bin(CAST($3 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, sql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(sample_time) AS first_sample_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS sample_count", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -200,6 +221,9 @@ public sealed class ViewerCpuTempDbLivePostgresTests
     private const int SkewServerId = -979797;
     private const string SkewServerName = "viewer-cpu-skew-e2e";
 
+    private const int BudgetServerId = -989898;
+    private const string BudgetServerName = "viewer-cpu-budget-e2e";
+
     private const int TempDbServerId = -959595;
     private const string TempDbServerName = "viewer-tempdb-tab-e2e";
 
@@ -241,9 +265,9 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             Assert.Equal(3, samples.Count);
             /* Raw (not averaged), ordered by sample_time. */
             Assert.Equal(new[] { s1.Ticks, s2.Ticks, s3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
-            Assert.Equal(new[] { 10, 20, 30 }, samples.Select(s => s.SqlServerCpu));
+            Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
             /* Middle sample's NULL other-process CPU reads as 0. */
-            Assert.Equal(new[] { 5, 0, 15 }, samples.Select(s => s.OtherProcessCpu));
+            Assert.Equal(new[] { 5.0, 0.0, 15.0 }, samples.Select(s => s.OtherProcessCpu));
 
             bodySucceeded = true;
         }
@@ -310,7 +334,10 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             await InsertCpuAsync(connection, SkewServerId, SkewServerName, collUtc, trueUtcOld + utc, sqlCpu: 41, otherCpu: 9);
             await InsertCpuAsync(connection, SkewServerId, SkewServerName, collUtc, trueUtcNew + utc, sqlCpu: 42, otherCpu: 10);
 
-            var samples = await viewer.GetCpuUtilizationAsync(SkewServerId, collPdt.AddMinutes(-10));
+            /* #4234: an explicit endUtc close to the fixture's own fixed 2026-06-01 window — the default
+               (the wall clock) would otherwise size the bucket width off a multi-month gap and merge these
+               hour-apart batches together. */
+            var samples = await viewer.GetCpuUtilizationAsync(SkewServerId, collPdt.AddMinutes(-10), collUtc.AddMinutes(10));
 
             Assert.Equal(8, samples.Count);
 
@@ -319,7 +346,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
                Paired with its (unique) CPU value so the assertion pins which row de-skewed to which
                instant. */
             Assert.Equal(
-                new[]
+                new (long, double)[]
                 {
                     (truePdtOld.Ticks, 11),
                     (truePdtNew.Ticks, 12),
@@ -357,6 +384,94 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "cpu_utilization_stats", SkewServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 6: a 7-day window (one sample per minute, the ring buffer's real cadence)
+    /// must not hand back all 10,080 raw rows — the bucketed read caps at <see cref="TrendBudget.Chart"/>'s
+    /// single-series budget.</summary>
+    [Fact]
+    public async Task Cpu_SevenDayWindow_ReturnsAtMostBudgetRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", BudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+
+            await BulkSeedCpuAsync(connection, BudgetServerId, BudgetServerName, start, end);
+
+            var samples = await viewer.GetCpuUtilizationAsync(BudgetServerId, start, end);
+
+            var budget = TrendBudget.Chart.AutoPoints;
+            Assert.True(samples.Count > 0 && samples.Count <= budget, $"{samples.Count} rows over a budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", BudgetServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3: when the window's budget covers every collection (three samples, five
+    /// minutes apart, each its own bucket), every point is stamped at its own raw sample_time — seeded off
+    /// the minute grid (:37 seconds) so a fix that floors to the date_bin grid line instead would lose the
+    /// seconds and fail this.</summary>
+    [Fact]
+    public async Task Cpu_BudgetCoversEveryCollection_ReturnsRawTimestampsAndValuesUnchanged_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU singleton-passthrough test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", BudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = new DateTime(2026, 3, 10, 9, 0, 37);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            /* collection_time == sample_time (a UTC batch): the #1262 de-skew is a no-op, so the raw
+               sample_time survives unchanged if every bucket the read returns is a true singleton. */
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t1, t1, sqlCpu: 10, otherCpu: 5);
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t2, t2, sqlCpu: 20, otherCpu: 6);
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t3, t3, sqlCpu: 30, otherCpu: 7);
+
+            /* Explicit endUtc close to the fixed fixture window — the default (the wall clock) would
+               otherwise size the bucket width off a multi-month gap and merge these 5-minute-apart
+               collections into one bucket. */
+            var samples = await viewer.GetCpuUtilizationAsync(BudgetServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+
+            Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
+            Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
+            Assert.Equal(new[] { 5.0, 6.0, 7.0 }, samples.Select(s => s.OtherProcessCpu));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", BudgetServerId, cleanupCt));
         }
     }
 
@@ -489,6 +604,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sampleTimeLocal, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(sqlCpu);
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)otherCpu ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One collection (one ring-buffer sample) per minute from <paramref name="start"/> to
+    /// <paramref name="end"/> inclusive, generated server-side — the real cadence a 7-day CPU window would
+    /// see — without a per-row round trip. A UTC batch (sample_time == collection_time), so the #1262
+    /// de-skew is a no-op throughout.</summary>
+    private static async Task BulkSeedCpuAsync(
+        NpgsqlConnection connection, int serverId, string serverName, DateTime start, DateTime end)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time,
+     sqlserver_cpu_utilization, other_process_cpu_utilization)
+SELECT 1, g, $1, $2, g, 50, 10
+FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

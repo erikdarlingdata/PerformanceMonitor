@@ -561,14 +561,22 @@ public partial class ServerTab : UserControl
 
             while (await reader.ReadAsync())
             {
+                var liveQueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
+                var liveActualPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString();
                 results.Add(new QuerySnapshotRow
                 {
                     SessionId = Convert.ToInt32(reader.GetValue(0)),
                     DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                     ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
                     QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                    QueryPlan = reader.IsDBNull(4) ? null : reader.GetString(4),
-                    LiveQueryPlan = reader.IsDBNull(5) ? null : reader.GetValue(5)?.ToString(),
+                    QueryPlan = liveQueryPlan,
+                    LiveQueryPlan = liveActualPlan,
+                    /* #4239: this row is never written to the store (CollectionTime is "now", not a
+                       capture the collector persisted), so a fetch-by-key from the grid's plan buttons
+                       would never find it. The payload rides in-row here, same as before #4239, so the
+                       flags are derived from it directly instead of from a store read. */
+                    HasQueryPlan = !string.IsNullOrEmpty(liveQueryPlan),
+                    HasLiveQueryPlan = !string.IsNullOrEmpty(liveActualPlan),
                     Status = reader.IsDBNull(6) ? "" : reader.GetString(6),
                     BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7)),
                     WaitType = reader.IsDBNull(8) ? "" : reader.GetString(8),

@@ -52,11 +52,15 @@ public sealed class ViewerPerfmonSqlTests
         Assert.Contains("CAST(SUM(delta_cntr_value) AS bigint)", sql, StringComparison.Ordinal);
         /* The interval is NOT additive across a counter's instance rows — it is one measured sweep gap
            repeated per instance, so SUM would multiply the denominator by the instance count (12-17 for
-           Transactions/sec on the fleet). Same pin as the MCP read carries, #2234. */
+           Transactions/sec on the fleet). Same pin as the MCP read carries, #2234. This is the INNER
+           per-collection subquery's rule; unchanged by #4234. */
         Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("SUM(sample_interval_seconds)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY counter_name, collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY counter_name, collection_time", sql, StringComparison.Ordinal);
+        /* #4234: the OUTER bucketing query DOES sum sample_interval_seconds — but across COLLECTIONS
+           (each already MAX'd across its own instances above), never across instances directly, and only
+           the rated ones (the ruling's "summed deltas over summed intervals" rate rule). */
+        Assert.Contains("SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS sample_interval_seconds", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY counter_name, 2", sql, StringComparison.Ordinal);
     }
 
     [Theory]
