@@ -173,6 +173,11 @@ public partial class ServerTab : UserControl
             var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
             _queryStatsFilterMgr!.UpdateData(queryStats);
             await RefreshQueryStatsComparisonAsync(fromServer, toServer);
+            /* #4279: the banner probes UTC collection_time directly (LocalDataService.GetQueryWindowFloorAsync),
+               so it takes e.StartUtc/e.EndUtc, not the server-local fromServer/toServer the grid read and the
+               comparison call above use (those convert back to UTC themselves, or -- for the comparison -- share
+               GetComparisonRange's own basis; see ServerTab.Comparison.cs). */
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {
@@ -224,6 +229,8 @@ public partial class ServerTab : UserControl
             var qsData = await Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, 0, 50, fromServer, toServer, SelectedDatabaseFilter));
             _queryStoreFilterMgr!.UpdateData(qsData);
             await RefreshQueryStoreComparisonAsync(fromServer, toServer);
+            /* #4279: UTC probe, UTC bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {
@@ -275,6 +282,8 @@ public partial class ServerTab : UserControl
             var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, 0, 50, fromServer, toServer, UtcOffsetMinutes, SelectedDatabaseFilter));
             _procStatsFilterMgr!.UpdateData(procStats);
             await RefreshProcStatsComparisonAsync(fromServer, toServer);
+            /* #4279: UTC probe, UTC bounds -- see the twin comment in OnQueryStatsSlicerChanged above. */
+            await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
         {

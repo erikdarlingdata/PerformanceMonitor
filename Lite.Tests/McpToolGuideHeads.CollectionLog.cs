@@ -32,7 +32,6 @@ public sealed class McpToolGuideHeadsCollectionLogTests
         ("get_collection_log", "an unknown value is refused, never silently empty"),
         ("get_query_store_top", "window_truncated"),
         ("get_query_store_top", "not a page cut"),
-        ("get_query_store_top", "Lite: no such floor"),
     ];
 
     [Fact]
@@ -73,11 +72,17 @@ public sealed class McpToolGuideHeadsCollectionLogTests
         Assert.Contains("this SKU never enables the deferred plan-XML or statement-text fetches", tail, StringComparison.Ordinal);
     }
 
+    /// <summary>#4231: get_query_store_top's window-floor clause is now one shared, byte-identical head across
+    /// both SKUs -- neither the old "Darling: " qualifier nor the false "Lite: no such floor" line survives.
+    /// Darling's twin is <c>Darling.Tests/McpToolGuideHeadsCollectionLogTests.
+    /// QueryStoreTop_WindowFloorClause_IsSharedAcrossBothSkusInTheHead</c>.</summary>
     [Fact]
-    public void QueryStoreTop_WindowFloorClause_IsScopedToDarlingInTheHead()
+    public void QueryStoreTop_WindowFloorClause_IsSharedAcrossBothSkusInTheHead()
     {
         var served = McpToolGuideTests.Served("get_query_store_top");
-        Assert.Contains("Darling: window_truncated", served.Served, StringComparison.Ordinal);
-        Assert.Contains("Lite: no such floor", served.Served, StringComparison.Ordinal);
+        Assert.Contains("window_truncated", served.Served, StringComparison.Ordinal);
+        Assert.Contains("not a page cut", served.Served, StringComparison.Ordinal);
+        Assert.DoesNotContain("Darling: window_truncated", served.Served, StringComparison.Ordinal);
+        Assert.DoesNotContain("Lite: no such floor", served.Served, StringComparison.Ordinal);
     }
 }
