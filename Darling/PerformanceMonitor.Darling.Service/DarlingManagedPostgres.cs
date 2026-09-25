@@ -2570,10 +2570,16 @@ public sealed class DarlingManagedPostgres
         var autoConfCarryMarker = _storeUpgrade.TryReadAutoConfCarryMarker(_dataDirectory);
         if (autoConfCarryMarker is { State: DarlingStoreUpgrade.AutoConfCarryStateCarrying })
         {
-            await _storeUpgrade.ResetAutoConfCarryAsync(
+            /* #4280 item 2: a failed reset (the header-only write itself threw) never blocks the start — the
+               unverified settings ride into the real start either way, same as before this recovery existed.
+               Only clear the marker when the reset actually ran, so a write failure leaves it for the next
+               start to retry rather than losing track of the stuck carry. */
+            if (await _storeUpgrade.ResetAutoConfCarryAsync(
                 _dataDirectory, autoConfCarryMarker.Value,
-                "a previous start's postgresql.auto.conf carry never finished");
-            autoConfCarryMarker = null;
+                "a previous start's postgresql.auto.conf carry never finished"))
+            {
+                autoConfCarryMarker = null;
+            }
         }
 
         EnsureConfAppended(_dataDirectory);
@@ -2656,10 +2662,16 @@ public sealed class DarlingManagedPostgres
                    unwrapped, same as before this fallback existed. */
                 /* autoConfCarryMarker! — ShouldFallBackToHeaderOnly above already proved this non-null (its
                    whole first clause is a null-checking pattern match on it); the compiler cannot see that
-                   through the opaque method call the way it narrows an inline `is {...}` pattern. */
-                await _storeUpgrade.ResetAutoConfCarryAsync(
+                   through the opaque method call the way it narrows an inline `is {...}` pattern. If the
+                   reset itself could not write header-only, retrying against the same unwritable file cannot
+                   help — rethrow the original start failure rather than mask it behind a doomed retry. */
+                if (!await _storeUpgrade.ResetAutoConfCarryAsync(
                     _dataDirectory, autoConfCarryMarker!.Value,
-                    "the real start failed even though these settings passed an isolated trial");
+                    "the real start failed even though these settings passed an isolated trial"))
+                {
+                    throw;
+                }
+
                 await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
             }
 

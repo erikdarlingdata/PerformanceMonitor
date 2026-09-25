@@ -2857,8 +2857,11 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>Resets postgresql.auto.conf to header-only, logs <paramref name="marker"/>'s names as dropped
     /// (never their values — only names ever reach this log), and deletes the marker. Shared by
     /// <see cref="DarlingManagedPostgres"/>'s item 2 real-start fallback and item 4 leftover-"carrying"
-    /// recovery, so neither restates the header literal or the drop-and-delete sequence a new way.</summary>
-    internal async Task ResetAutoConfCarryAsync(string dataDirectory, AutoConfCarryMarker marker, string reason)
+    /// recovery, so neither restates the header literal or the drop-and-delete sequence a new way. Returns
+    /// false only when the header-only write itself failed: then neither the "NOT carried" warning nor the
+    /// delete runs, the marker is left in place so the next start retries the reset, and the caller must not
+    /// claim the carry was dropped or retry a start against the same unwritable file. True otherwise.</summary>
+    internal async Task<bool> ResetAutoConfCarryAsync(string dataDirectory, AutoConfCarryMarker marker, string reason)
     {
         var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
         try
@@ -2867,7 +2870,10 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _logger.LogWarning("Could not reset {Path} to header-only ({Message}).", autoConfPath, ex.Message);
+            _logger.LogWarning(
+                "Could not reset {Path} to header-only ({Message}); the carry-state marker is kept so the next start tries again.",
+                autoConfPath, ex.Message);
+            return false;
         }
 
         if (marker.Names.Count > 0)
@@ -2878,6 +2884,7 @@ internal sealed class DarlingStoreUpgrade
         }
 
         TryDeleteAutoConfCarryMarker(dataDirectory);
+        return true;
     }
 
     /// <summary>

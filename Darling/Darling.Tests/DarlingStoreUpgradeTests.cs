@@ -939,7 +939,9 @@ public sealed class DarlingStoreUpgradeTests
             Assert.Equal(DarlingStoreUpgrade.AutoConfCarryStateCarrying, carrying!.Value.State);
             Assert.Equal(new[] { "work_mem", "shared_buffers" }, carrying.Value.Names);
 
-            await upgrade.ResetAutoConfCarryAsync(dataDirectory, carrying.Value, "test reason, never a setting value");
+            Assert.True(
+                await upgrade.ResetAutoConfCarryAsync(dataDirectory, carrying.Value, "test reason, never a setting value"),
+                "a good header-only write must return true (#4280 item 2).");
 
             Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(autoConfPath));
             Assert.False(File.Exists(markerPath), "ResetAutoConfCarryAsync must delete the marker.");
@@ -963,6 +965,54 @@ public sealed class DarlingStoreUpgradeTests
         }
         finally
         {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// Item 2 (#4280): when the header-only write itself fails (here, a read-only auto.conf), the reset must
+    /// return false and must not claim success — no "NOT carried ... reset to header-only" warning, no marker
+    /// deletion, no file change. Before this fix, the write's own catch only logged a warning and execution
+    /// fell through to log the drop and delete the marker anyway, so the next start ran the still-carried,
+    /// unverified settings with no marker left to retry the reset.
+    /// </summary>
+    [Fact]
+    public async Task ResetAutoConfCarryAsync_HeaderOnlyWriteFails_ReturnsFalse_KeepsMarkerAndFile()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-resetfail-");
+        var autoConfPath = Path.Combine(root.FullName, "postgresql.auto.conf");
+        var madeReadOnly = false;
+        try
+        {
+            const string carriedText = "work_mem = '256MB'\n";
+            File.WriteAllText(autoConfPath, carriedText);
+
+            var markerPath = Path.Combine(root.FullName, DarlingStoreUpgrade.AutoConfCarryStateMarkerFileName);
+            File.WriteAllText(markerPath, "trial-passed\nwork_mem\n");
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            var marker = upgrade.TryReadAutoConfCarryMarker(root.FullName)!.Value;
+
+            File.SetAttributes(autoConfPath, FileAttributes.ReadOnly);
+            madeReadOnly = true;
+
+            var reset = await upgrade.ResetAutoConfCarryAsync(root.FullName, marker, "test reason, never a setting value");
+
+            Assert.False(reset, "a failed header-only write must return false.");
+            Assert.True(File.Exists(markerPath), "a failed reset must keep the marker so the next start retries it.");
+            Assert.Equal(carriedText, await File.ReadAllTextAsync(autoConfPath));
+
+            var logged = log.ToString();
+            Assert.DoesNotContain("reset to header-only", logged, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (madeReadOnly)
+            {
+                File.SetAttributes(autoConfPath, FileAttributes.Normal);
+            }
+
             TryDeleteTree(root.FullName);
         }
     }
