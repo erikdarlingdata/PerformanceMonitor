@@ -27,7 +27,7 @@ namespace PerformanceMonitorLite.Tests;
 /// #4198, Lite twin of Darling's CollectionHealthPayloadBudgetLiveTests: get_collection_health has no row to
 /// drop (every collector is one row, and a health read must never hide a failing/stale/disabled/erroring one),
 /// so the default-size cut is per-field. Seeds every SQL Server catalog collector, mostly boring-healthy plus
-/// four rows that must never compact, and measures McpHealthTools.GetCollectionHealth's own UTF-8 bytes.
+/// six rows that must never compact, and measures McpHealthTools.GetCollectionHealth's own UTF-8 bytes.
 /// </summary>
 public sealed class CollectionHealthPayloadBudgetToolTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -68,7 +68,7 @@ public sealed class CollectionHealthPayloadBudgetToolTests : IClassFixture<Share
             .Where(d => d.TargetEngine == CollectorTargetEngine.SqlServer)
             .Select(d => d.Name)
             .ToArray();
-        var neverCompact = new[] { "wait_stats", "memory_grant_stats", "query_store_health", "database_scoped_config" };
+        var neverCompact = new[] { "wait_stats", "memory_grant_stats", "query_store_health", "database_scoped_config", "plan_cache_stats", "tempdb_stats" };
 
         foreach (var name in sqlServerCollectors)
         {
@@ -97,6 +97,25 @@ public sealed class CollectionHealthPayloadBudgetToolTests : IClassFixture<Share
                 case "deadlocks":
                     for (var i = 0; i < 8; i++)
                         await SeedLogAsync(name, now.AddHours(-i * 18), "SUCCESS", 15, 0, null);
+                    break;
+                case "plan_cache_stats":
+                    /* #4198 follow-up: HEALTHY band (a fresh, productive success) but SessionMissingCount > 0 -
+                       runs whose XE session was missing. Classify() never takes the count as a parameter, so
+                       nothing about HealthStatus hints at it; IsCollectionHealthCompactEligible checks it
+                       directly, which is why this row must fail the predicate on session_missing ALONE. */
+                    for (var i = 0; i < 2; i++)
+                        await SeedLogAsync(name, now.AddDays(-1).AddHours(-i), "SESSION_MISSING", 40, null, null);
+                    for (var i = 0; i < 6; i++)
+                        await SeedLogAsync(name, now.AddHours(-i * 24 - 1), "SUCCESS", 100 + i * 15, 50 + i * 5, null);
+                    break;
+                case "tempdb_stats":
+                    /* #4198 follow-up: HEALTHY band (1/250 = 0.4% abandon rate, under the 0.5% WARNING cutoff)
+                       but AbandonedCount > 0 - a cycle the wall-clock budget gave up on, storing nothing and
+                       advancing no watermark. IsCollectionHealthCompactEligible checks the COUNT, not the rate,
+                       so this row fails it on abandoned ALONE even though Classify() reads it HEALTHY. */
+                    await SeedLogAsync(name, now.AddHours(-3), "ABANDONED", 120000, null, null);
+                    for (var i = 0; i < 249; i++)
+                        await SeedLogAsync(name, now.AddMinutes(-i * 15 - 5), "SUCCESS", 90, 20, null);
                     break;
                 default:
                     for (var i = 0; i < 6; i++)
@@ -137,6 +156,16 @@ public sealed class CollectionHealthPayloadBudgetToolTests : IClassFixture<Share
             Assert.False(defaultRows[name].TryGetProperty("avg_duration_ms", out _),
                 $"{name} is over budget by default and should not carry full-detail-only fields like avg_duration_ms.");
         }
+
+        /* #4198 follow-up: a HEALTHY row failing the predicate on session-missing runs, abandoned cycles, or a
+           denial that a later success cleared must still say WHY in the partial shape - not just that something
+           needs a look. Each reason field is nonzero/non-null on the row whose only issue it is. */
+        Assert.True(defaultRows["plan_cache_stats"].GetProperty("session_missing").GetInt64() > 0,
+            "plan_cache_stats' only issue is session-missing runs; the partial row must say how many.");
+        Assert.True(defaultRows["tempdb_stats"].GetProperty("abandoned").GetInt64() > 0,
+            "tempdb_stats' only issue is abandoned cycles; the partial row must say how many.");
+        Assert.Equal(JsonValueKind.String, defaultRows["query_store_health"].GetProperty("last_denied_at").ValueKind);
+
         Assert.True(defaultRows["deadlocks"].TryGetProperty("compact", out var deadlocksCompact) && deadlocksCompact.GetBoolean());
 
         using var fullDoc = JsonDocument.Parse(fullJson);

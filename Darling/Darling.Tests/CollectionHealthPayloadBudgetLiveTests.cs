@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// #4198: get_collection_health has no row to drop (every collector on the server is one row, and a health
 /// read must never hide a failing/stale/disabled/erroring one by leaving it off the page), so its default-size
 /// cut is per-field instead. This seeds every SQL Server catalog collector - the realistic per-server shape -
-/// mostly HEALTHY-and-boring, plus four deliberately NOT-boring rows that must never compact even though three
-/// of the four band HEALTHY, and measures the tool method's own UTF-8 byte count. Its own file/seeding per the
+/// mostly HEALTHY-and-boring, plus six deliberately NOT-boring rows that must never compact even though five
+/// of the six band HEALTHY, and measures the tool method's own UTF-8 byte count. Its own file/seeding per the
 /// #4198 common brief: not shared with any other lane's tonight.
 /// </summary>
 [Collection("live-postgres")]
@@ -89,8 +89,8 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                 .ToArray();
             Assert.True(sqlServerCollectors.Length > 30, "expected a realistic SQL Server catalog width");
 
-            /* four collectors that must NEVER compact, three of them despite banding HEALTHY: */
-            var neverCompact = new[] { "wait_stats", "memory_grant_stats", "query_store_health", "database_scoped_config" };
+            /* six collectors that must NEVER compact, five of them despite banding HEALTHY: */
+            var neverCompact = new[] { "wait_stats", "memory_grant_stats", "query_store_health", "database_scoped_config", "plan_cache_stats", "tempdb_stats" };
             Assert.All(neverCompact, name => Assert.Contains(name, sqlServerCollectors));
 
             foreach (var name in sqlServerCollectors)
@@ -139,6 +139,28 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                             await InsertLogRowAsync(connection, name, now.AddHours(-i * 18), "SUCCESS", 15, 0, null, ct);
                         break;
 
+                    case "plan_cache_stats":
+                        /* #4198 follow-up: HEALTHY band (a fresh, productive success) but SessionMissingCount > 0
+                           - runs whose XE session was missing. Classify() never takes the count as a parameter, so
+                           nothing about HealthStatus hints at it; IsCollectionHealthCompactEligible checks it
+                           directly, which is why this row must fail the predicate on session_missing ALONE. */
+                        for (var i = 0; i < 2; i++)
+                            await InsertLogRowAsync(connection, name, now.AddDays(-1).AddHours(-i), "SESSION_MISSING", 40, null, null, ct);
+                        for (var i = 0; i < 6; i++)
+                            await InsertLogRowAsync(connection, name, now.AddHours(-i * 24 - 1), "SUCCESS", 100 + i * 15, 50 + i * 5, null, ct);
+                        break;
+
+                    case "tempdb_stats":
+                        /* #4198 follow-up: HEALTHY band (1/250 = 0.4% abandon rate, under the 0.5% WARNING
+                           cutoff) but AbandonedCount > 0 - a cycle the wall-clock budget gave up on, storing
+                           nothing and advancing no watermark. IsCollectionHealthCompactEligible checks the COUNT,
+                           not the rate, so this row fails it on abandoned ALONE even though Classify() reads it
+                           HEALTHY. */
+                        await InsertLogRowAsync(connection, name, now.AddHours(-3), "ABANDONED", 120000, null, null, ct);
+                        for (var i = 0; i < 249; i++)
+                            await InsertLogRowAsync(connection, name, now.AddMinutes(-i * 15 - 5), "SUCCESS", 90, 20, null, ct);
+                        break;
+
                     default:
                         /* The realistic majority: plainly healthy and productive. */
                         for (var i = 0; i < 6; i++)
@@ -179,6 +201,16 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                 Assert.False(defaultRows[name].TryGetProperty("avg_duration_ms", out _),
                     $"{name} is over budget by default and should not carry full-detail-only fields like avg_duration_ms.");
             }
+
+            /* #4198 follow-up: a HEALTHY row failing the predicate on session-missing runs, abandoned cycles, or
+               a denial that a later success cleared must still say WHY in the partial shape - not just that
+               something needs a look. Each reason field is nonzero/non-null on the row whose only issue it is. */
+            Assert.True(defaultRows["plan_cache_stats"].GetProperty("session_missing").GetInt64() > 0,
+                "plan_cache_stats' only issue is session-missing runs; the partial row must say how many.");
+            Assert.True(defaultRows["tempdb_stats"].GetProperty("abandoned").GetInt64() > 0,
+                "tempdb_stats' only issue is abandoned cycles; the partial row must say how many.");
+            Assert.Equal(JsonValueKind.String, defaultRows["query_store_health"].GetProperty("last_denied_at").ValueKind);
+
             Assert.True(defaultRows["deadlocks"].TryGetProperty("compact", out var deadlocksCompact) && deadlocksCompact.GetBoolean(),
                 "an event collector resting at zero rows should compact.");
             Assert.True(defaultRows.Values.Count(r => r.TryGetProperty("compact", out _)) >= sqlServerCollectors.Length - neverCompact.Length,
