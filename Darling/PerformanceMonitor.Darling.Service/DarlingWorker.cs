@@ -1284,13 +1284,17 @@ public sealed class DarlingWorker : BackgroundService
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Configuration, ex.Message, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Configuration,
+                    CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Configuration),
+                    attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex)
             {
                 _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, ex.Message);
+                _collectorState.PublishStopped(
+                    CollectorRuntimeState.StartupStep.Configuration,
+                    CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Configuration));
                 return;
             }
         }
@@ -1428,13 +1432,17 @@ public sealed class DarlingWorker : BackgroundService
                         ex.Message, attempt, StartupFailureTriage.Attempts,
                         (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                     _collectorState.PublishRetrying(
-                        CollectorRuntimeState.StartupStep.ManagedStore, ex.Message, attempt, StartupFailureTriage.Attempts);
+                        CollectorRuntimeState.StartupStep.ManagedStore,
+                        CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.ManagedStore),
+                        attempt, StartupFailureTriage.Attempts);
                     await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
-                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore, ex.Message);
+                    _collectorState.PublishStopped(
+                        CollectorRuntimeState.StartupStep.ManagedStore,
+                        CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.ManagedStore));
                     return;
                 }
             }
@@ -1803,7 +1811,9 @@ public sealed class DarlingWorker : BackgroundService
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Store, ex.Message, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Store,
+                    CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Store),
+                    attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1812,7 +1822,9 @@ public sealed class DarlingWorker : BackgroundService
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store, ex.Message);
+                _collectorState.PublishStopped(
+                    CollectorRuntimeState.StartupStep.Store,
+                    CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Store));
                 return;
             }
         }

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -97,6 +98,31 @@ public sealed class CollectorRuntimeState
         /// <summary>Opening the store connection and applying the migration ladder.</summary>
         Store,
     }
+
+    /// <summary>
+    /// The fixed <see cref="Snapshot.Detail"/> text for each step's failure (#4316). The worker used to pass
+    /// <c>ex.Message</c> straight through, but <c>Detail</c> leaves the process in <c>/api/ping</c>'s response
+    /// body — a 200 any unauthenticated caller who can reach the port gets to read — and an exception's text
+    /// was never vetted for that audience: a connection string, a file path or a driver's inner-exception
+    /// chain can all land in <c>ex.Message</c>. The LogWarning/LogCritical line beside every
+    /// <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call still logs the exception's full text to
+    /// the service log, which is where that detail belongs.
+    /// </summary>
+    private static readonly Dictionary<StartupStep, string> FailureDetailByStep =
+        new()
+        {
+            [StartupStep.Configuration] =
+                "Loading or validating the configuration failed. The service log has the full error.",
+            [StartupStep.ManagedStore] =
+                "Bootstrapping the managed PostgreSQL store failed. The service log has the full error.",
+            [StartupStep.Store] =
+                "The store connection or migration failed. The service log has the full error.",
+        };
+
+    /// <summary>The fixed, non-exception <see cref="Snapshot.Detail"/> text to publish for
+    /// <paramref name="step"/>'s failure. See <see cref="FailureDetailByStep"/> for why this replaces
+    /// <c>ex.Message</c> at every <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call site.</summary>
+    public static string FailureDetailFor(StartupStep step) => FailureDetailByStep[step];
 
     /// <summary>
     /// A coherent published snapshot; null until the worker first publishes.

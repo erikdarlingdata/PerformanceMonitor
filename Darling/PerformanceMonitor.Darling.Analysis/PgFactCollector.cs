@@ -152,7 +152,7 @@ public sealed partial class PgFactCollector : IFactCollector
         AnalysisContext context,
         [CallerMemberName] string collectMethod = "")
     {
-        context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), ex.Message);
+        context.RecordCollectionFailure(CollectionFailure.FamilyOf(collectMethod), collectMethod, ClassifyOutcome(ex), DescribeFailureForPayload(ex));
 
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {
@@ -190,6 +190,21 @@ public sealed partial class PgFactCollector : IFactCollector
         if (ex is PostgresException { SqlState: "42P01" or "42703" }) return CollectionFailureOutcome.MissingSchema;
         return ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error;
     }
+
+    /// <summary>
+    /// The fixed, non-message text for a swallowed failure that a tool payload exposes to an MCP or
+    /// <c>/api</c> caller (#4316) — <c>ex.Message</c> is never used here because it can carry a connection
+    /// string, a file path or a driver's inner-exception text that was never vetted for that audience. The
+    /// exception's type, plus a <see cref="PostgresException"/>'s <c>SqlState</c> when there is one, is
+    /// enough for a caller to tell one failure from another without any of the message text; the full text
+    /// is still wherever the site already logs it (every one of the three call sites logs the raw
+    /// exception beside this call). Shared by <see cref="PgTargetFactCollector"/> and
+    /// <c>DarlingForcePlanTargetStateReader</c> so the three sites cannot drift into three different shapes.
+    /// </summary>
+    public static string DescribeFailureForPayload(Exception ex) =>
+        ex is PostgresException { SqlState: { } sqlState }
+            ? $"{ex.GetType().Name}, SQLSTATE {sqlState}; the service log has the full error"
+            : $"{ex.GetType().Name}; the service log has the full error";
 
     /// <summary>
     /// The number of family reads this collector runs, derived from the type (#3691) — the
