@@ -52,11 +52,14 @@ namespace PerformanceMonitor.Darling.Service;
 /// with 350 settings has at most 350 candidates on its worst day), but a day is still sub-batched past that
 /// cap, so one target's answer never determines the batch size.</para>
 ///
-/// <para><b>No explicit recompress step.</b> Measured live on TimescaleDB 2.30.1: after an UPDATE scoped by
-/// the day's range predicate, the touched chunk's <c>is_compressed</c> flag stayed <c>true</c> throughout —
-/// this build's compressed-chunk DML path decompresses and recompresses the affected segment inline. Forcing
-/// a manual <c>compress_chunk</c> afterward would be redundant work, not a correctness requirement; the
-/// standing compression policy has nothing left to do.</para>
+/// <para><b>No explicit recompress step, and the touched chunk stays partly compressed until the standing
+/// compression policy next runs.</b> Measured live on TimescaleDB 2.30.1: after an UPDATE scoped by the
+/// day's range predicate, the touched chunk's <c>_timescaledb_catalog.chunk.status</c> read "compressed +
+/// partial" — the chunk's <c>is_compressed</c> flag stays <c>true</c>, but the rows this batch touched moved
+/// into that chunk's uncompressed heap and stay there, growing the store, until the compression policy's
+/// next run recompresses them. A manual <c>compress_chunk</c> right after each batch would avoid that window,
+/// but the scrub deliberately leaves it to the standing policy rather than adding its own compression step —
+/// see the release note below for the space and retention consequence.</para>
 ///
 /// <para><b>Failure is isolated and retried, never fatal.</b> Any exception — the connection, the candidate
 /// read, a batch — is caught, logged once at WARNING, and the marker is left unwritten, so the next service
@@ -147,10 +150,15 @@ WHERE
     OR setting ILIKE '%secret%' OR reset_val ILIKE '%secret%' OR boot_val ILIKE '%secret%'
     OR setting ILIKE '%token%' OR reset_val ILIKE '%token%' OR boot_val ILIKE '%token%'
     OR setting ILIKE '%://%@%' OR reset_val ILIKE '%://%@%' OR boot_val ILIKE '%://%@%'
-    OR name = 'ssl_passphrase_command'
+    OR setting ILIKE '%pass%' OR reset_val ILIKE '%pass%' OR boot_val ILIKE '%pass%'
+    OR setting ILIKE '%key%' OR reset_val ILIKE '%key%' OR boot_val ILIKE '%key%'
+    OR setting ILIKE '%credential%' OR reset_val ILIKE '%credential%' OR boot_val ILIKE '%credential%'
+    OR setting ILIKE '%pwd%' OR reset_val ILIKE '%pwd%' OR boot_val ILIKE '%pwd%'
+    OR (name = 'ssl_passphrase_command' AND (setting <> '' OR boot_val <> '' OR reset_val <> ''))
     OR (name LIKE '%.%' AND (
         name ILIKE '%password%' OR name ILIKE '%passwd%' OR name ILIKE '%passphrase%'
-        OR name ILIKE '%secret%' OR name ILIKE '%salt%' OR name ILIKE '%token%' OR name ILIKE '%key%'))";
+        OR name ILIKE '%secret%' OR name ILIKE '%salt%' OR name ILIKE '%token%' OR name ILIKE '%key%'
+        OR name ILIKE '%credential%' OR name ILIKE '%pwd%' OR name ILIKE '%pass%'))";
 
     private const string BatchUpdateSql = @"
 WITH batch AS (
@@ -165,7 +173,8 @@ AND   t.collection_time = b.collection_time
 AND   t.name = b.name
 AND   t.database_name IS NOT DISTINCT FROM b.database_name
 AND   t.role_name IS NOT DISTINCT FROM b.role_name
-AND   t.collection_time >= $9 AND t.collection_time < $10";
+AND   t.collection_time >= $9 AND t.collection_time < $10
+AND   t.server_id = $11";
 
     private sealed record CandidateRow(
         int ServerId, DateTime CollectionTime, string Name, string? DatabaseName, string? RoleName,
@@ -194,6 +203,14 @@ AND   t.collection_time >= $9 AND t.collection_time < $10";
         {
             while (await reader.ReadAsync(cancellationToken))
             {
+        if (reader.IsDBNull(2))
+                {
+                    /* V102's name column is nullable; a NULL name cannot be redacted (PgSettingRedactor keys
+                       its decision off the name) and cannot be batched (it is a join/predicate key), so skip
+                       it rather than throw and fail the whole scrub at every start (R1 L5). */
+                    continue;
+                }
+
                 candidates.Add(new CandidateRow(
                     reader.GetInt32(0),
                     reader.GetDateTime(1),
@@ -206,21 +223,28 @@ AND   t.collection_time >= $9 AND t.collection_time < $10";
             }
         }
 
-        var byDay = new SortedDictionary<DateTime, List<CandidateRow>>();
+/* Grouped by (server, day), not day alone — see the type remarks' H1 fix. A day-only batch joins many
+           servers' rows through an unnested array with no constant server_id predicate, so TimescaleDB cannot
+           exclude any other server's rows in that day's chunk and decompresses the whole chunk for every
+           server on the fleet; past about 11 targets that blows the default
+           timescaledb.max_tuples_decompressed_per_dml_transaction. A constant server_id predicate per batch,
+           alongside the day range, lets the planner exclude everything but this one server's segment. */
+        var byServerDay = new SortedDictionary<(int ServerId, DateTime Day), List<CandidateRow>>();
         foreach (var c in candidates)
         {
-            var day = c.CollectionTime.Date;
-            if (!byDay.TryGetValue(day, out var list))
+            var key = (c.ServerId, c.CollectionTime.Date);
+            if (!byServerDay.TryGetValue(key, out var list))
             {
                 list = new List<CandidateRow>();
-                byDay[day] = list;
+                byServerDay[key] = list;
             }
             list.Add(c);
         }
 
         var rowsUpdated = 0;
-        var daysTouched = 0;
-        foreach (var (day, dayCandidates) in byDay)
+        var changedRowCount = 0;
+        var daysTouched = new HashSet<DateTime>();
+        foreach (var ((serverId, day), dayCandidates) in byServerDay)
         {
             var changed = new List<CandidateRow>();
             var newSettings = new List<string?>();
@@ -249,23 +273,36 @@ AND   t.collection_time >= $9 AND t.collection_time < $10";
                 continue;
             }
 
-            daysTouched++;
+            daysTouched.Add(day);
+            changedRowCount += changed.Count;
             for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
             {
                 var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
                 rowsUpdated += await RunBatchAsync(
-                    connection, changed, newSettings, newBootVals, newResetVals, i, take, day, cancellationToken);
+                    connection, changed, newSettings, newBootVals, newResetVals, i, take, day, serverId, cancellationToken);
             }
         }
 
-        await WriteMarkerAsync(connection, currentVersion, cancellationToken);
+        if (rowsUpdated == changedRowCount)
+        {
+            await WriteMarkerAsync(connection, currentVersion, cancellationToken);
+        }
+        else
+        {
+            /* R1 L4: a systematic key mismatch would otherwise mark the store scrubbed while plaintext rows
+               remain. Skipping the marker means the next start re-reads and re-tries; a day dropped by
+               retention mid-run (benign) just means those rows are gone by then. */
+            logger?.LogWarning(
+                "pg_setting_scrub: updated {RowsUpdated} of {ChangedRowCount} changed rows; leaving the marker unwritten so the next start retries",
+                rowsUpdated, changedRowCount);
+        }
 
-        return new Summary(alreadyDone: false, candidates.Count, rowsUpdated, daysTouched);
+        return new Summary(alreadyDone: false, candidates.Count, rowsUpdated, daysTouched.Count);
     }
 
     private static async Task<int> RunBatchAsync(
         NpgsqlConnection connection, List<CandidateRow> changed, List<string?> newSettings, List<string?> newBootVals,
-        List<string?> newResetVals, int offset, int count, DateTime day, CancellationToken cancellationToken)
+        List<string?> newResetVals, int offset, int count, DateTime day, int serverId, CancellationToken cancellationToken)
     {
         var serverIds = new int[count];
         var times = new DateTime[count];
@@ -302,6 +339,9 @@ AND   t.collection_time >= $9 AND t.collection_time < $10";
            remarks. Redundant with the join equality on collection_time, and load-bearing anyway. */
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) });
+        /* The constant server_id predicate is what lets TimescaleDB exclude every other server's segment in
+           this day's chunk — see the H1 fix note above RunAsync's grouping. */
+        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
 
         return await update.ExecuteNonQueryAsync(cancellationToken);
     }
