@@ -40,7 +40,9 @@ public sealed class MaterializationHoleRepairTests
         var registered = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.DailyAggregates).Concat(TimescaleSupport.BaselineAggregates).ToArray();
 
         Assert.Equal(registered.Length, targets.Count);
-        Assert.Equal(26, targets.Count); // #3653 A6 lane LB: +3 for the interval-honest successor dailies added to DailyAggregates
+        // #3653 LC: 26 (A6 lane LB's count) minus the six the freeze took out of HourlyAggregates/DailyAggregates
+        // (they stay in TimescaleSupport.RollupViews and FrozenRollupAggregates, but nothing repairs them now).
+        Assert.Equal(20, targets.Count);
         Assert.Equal(registered.Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal), targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal));
 
         /* The rollups come first in the backfill's dependency order — every raw-sourced rollup before the
@@ -55,13 +57,29 @@ public sealed class MaterializationHoleRepairTests
             Assert.Equal(target.Source.EndsWith("_hourly", StringComparison.Ordinal) || target.Source.EndsWith("_daily", StringComparison.Ordinal) ? "bucket" : "collection_time", target.SourceTimeColumn);
         }
 
-        /* A daily is scanned after the hourly it reads, so its scan sees the rows the hourly's repair wrote. */
-        foreach (var (legacy, _, dependentDaily) in TimescaleSupport.SupersededHourlyRollups)
+        /* A daily is scanned after the hourly it reads, so its scan sees the rows the hourly's repair wrote.
+           #3653 LC: SupersededHourlyRollups' own Legacy/DependentDaily pair is frozen out of `targets` entirely
+           now (there is nothing left to order), so this re-pins the live analog — SupersededDailyRollups' own
+           SuccessorHourly/SuccessorDaily pair, derived rather than typed, the same two relations
+           RollupBackfill.Targets still orders by depth. */
+        foreach (var (_, successorDaily, successorHourly) in TimescaleSupport.SupersededDailyRollups)
         {
             Assert.True(
-                targets.ToList().FindIndex(t => t.View == legacy) < targets.ToList().FindIndex(t => t.View == dependentDaily),
-                $"{dependentDaily} must be scanned after {legacy}");
+                targets.ToList().FindIndex(t => t.View == successorHourly) < targets.ToList().FindIndex(t => t.View == successorDaily),
+                $"{successorDaily} must be scanned after {successorHourly}");
         }
+    }
+
+    /// <summary>#3653 LC: the repair walk must never see a frozen view — refreshing one is the one thing the
+    /// freeze forbids (see <see cref="TimescaleSupport.FrozenRollupAggregates"/>'s remarks). A regression that
+    /// re-adds one of the six to <see cref="RollupBackfill.Targets"/> (and so to
+    /// <see cref="TimescaleSupport.MaterializationHoleTargets"/>) fails here rather than at a live refresh.</summary>
+    [Fact]
+    public void MaterializationHoleTargets_HoldsNoFrozenRollupAggregate()
+    {
+        Assert.DoesNotContain(
+            TimescaleSupport.MaterializationHoleTargets,
+            target => TimescaleSupport.IsFrozenRollupAggregate(target.View));
     }
 
     [Fact]
@@ -119,10 +137,16 @@ public sealed class MaterializationHoleRepairTests
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0\n    OFFSET 0)", sql, StringComparison.Ordinal);
         Assert.EndsWith("ORDER BY c.bucket", sql.TrimEnd(), StringComparison.Ordinal);
 
+        /* #3653 LC froze query_stats_daily out of MaterializationHoleTargets; its unfiltered, hierarchical shape
+           lives on in its live successor daily (SuccessorDailyOf, derived rather than typed), which is
+           hierarchical from query_stats_interval_hourly with no WHERE of its own either. */
+        var successorDaily = TimescaleSupport.SuccessorDailyOf(TimescaleSupport.QueryStatsIntervalHourlyView)
+            ?? throw new InvalidOperationException(
+                $"{TimescaleSupport.QueryStatsIntervalHourlyView} must be in {nameof(TimescaleSupport.SupersededDailyRollups)}.");
         var unfiltered = TimescaleSupport.MaterializationHoleScanSql(
-            TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsDailyView), ("s", "m"))
+            TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == successorDaily), ("s", "m"))
             .Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("FROM collect.query_stats_hourly AS s", unfiltered, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats_interval_hourly AS s", unfiltered, StringComparison.Ordinal);
         Assert.Contains("s.bucket >= c.bucket", unfiltered, StringComparison.Ordinal);
         /* No filter: the source probe's fence follows straight after the width bound. */
         Assert.Contains("s.bucket < c.bucket + $3::interval\n    OFFSET 0)", unfiltered, StringComparison.Ordinal);
@@ -390,7 +414,11 @@ public sealed class MaterializationHoleRepairLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var view = TimescaleSupport.QueryStatsHourlyView;
+        /* #3653 LC: query_stats_hourly itself is now frozen — the repair walk never touches it, so it cannot
+           carry this proof any more. query_stats_interval_hourly is its live successor, raw-sourced from the
+           same collect.query_stats this test's own inserts target, so every plain (non-restart) row below is
+           admitted the same way the legacy used to admit it. */
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, view, ct);
         Assert.NotNull(materialization);
 
@@ -518,15 +546,13 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.Empty(await ScanAsync(connection, target, materialization.Value, H(0), H(10), ct));
         Assert.Equal(new[] { H(0), H(1), H(2), H(3), H(4), H(9), H(10) }, await MaterializedBucketsAsync(connection, view, ct));
 
-        /* THE CONTROL on the source filter: the interval-honest successor sees the same tail (its WHERE admits
-           the planted rows), but an hour holding ONLY a restart row is not a hole for it — the scan applies the
-           aggregate's own filter — while the legacy, which admits the row, would materialize it. Planted at
-           H(12), refreshed on the legacy so its span reaches past it, and the successor's span made to reach
-           past it too by refreshing H(9)-H(11) there. */
-        var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
-        var successorMaterialization = await TimescaleSupport.ResolveMaterializationAsync(connection, successor, ct);
-        Assert.NotNull(successorMaterialization);
-        await RefreshAsync(connection, successor, H(0), H(3), ct);
+        /* THE CONTROL on the source filter (#3653 LC): pre-freeze this planted a restart-only row and
+           contrasted the legacy (admits it) against the successor (excludes it, scan and all) — two live
+           relations reading the same collect.query_stats. The legacy no longer repairs at all, so only the
+           successor's own half still runs live (MaterializationHoleScanShapeTests/MaterializationHoleRepairTests'
+           pure pins still hold the CreateSql contrast). What remains provable here: an hour holding ONLY a
+           restart row is neither materialized NOR reported as a hole — the scan applies view's own filter, so
+           an uncovered hour the filter would reject is not a false positive. */
         await using (var restartOnly = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
@@ -540,15 +566,11 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         }
 
         await InsertHoursAsync(connection, new[] { 14 }, H, ct);
-        await RefreshAsync(connection, successor, H(14), H(15), ct);
+        await RefreshAsync(connection, view, H(14), H(15), ct);
 
-        var successorTarget = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == successor);
-        var successorHoles = await ScanAsync(connection, successorTarget, successorMaterialization.Value, H(0), H(14), ct);
-        Assert.DoesNotContain(H(12), successorHoles);
-        Assert.Equal(new[] { H(3), H(4), H(9), H(10) }, successorHoles);
-
-        await RefreshAsync(connection, view, H(12), H(13), ct);
-        Assert.Contains(H(12), await MaterializedBucketsAsync(connection, view, ct));
+        var restartHoles = await ScanAsync(connection, target, materialization.Value, H(0), H(14), ct);
+        Assert.DoesNotContain(H(12), restartHoles);
+        Assert.DoesNotContain(H(12), await MaterializedBucketsAsync(connection, view, ct));
     }
 
     /// <summary>
@@ -583,7 +605,9 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var view = TimescaleSupport.QueryStatsHourlyView;
+        /* #3653 LC: query_stats_hourly is frozen out of the repair walk; query_stats_interval_hourly is its live
+           successor and, like the legacy, admits every plain (non-restart) row this test plants. */
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var cap = TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.HourlyBucket);
         Assert.Equal(24, cap);
 

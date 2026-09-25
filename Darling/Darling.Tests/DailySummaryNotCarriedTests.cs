@@ -38,8 +38,9 @@ namespace Darling.Tests;
 /// <para><b>The witness is the hole scan's definition, reused, not a second one.</b> The scan calls a bucket a
 /// hole when the materialization holds no row for it AND the source holds an admitted row in it. The routed
 /// <c>queries</c> CTE's third member asks the same two questions per server at day grain, with the source, its
-/// time column and its filter read off <see cref="TimescaleSupport.MaterializationHoleTargets"/> — the repair's
-/// own target list. So a server that genuinely ran nothing that day (no source row) is NOT named: the
+/// time column and its filter read off <see cref="TimescaleSupport.RollupCoverageProbeTargets"/> — the repair's
+/// own target list, extended (#3653 LC) so a frozen legacy rollup still has one. So a server that genuinely
+/// ran nothing that day (no source row) is NOT named: the
 /// disclosure cannot claim a hole where the raw table was simply empty. The live test below plants exactly
 /// that control beside the hole.</para>
 ///
@@ -88,7 +89,9 @@ public sealed class DailySummaryNotCarriedTests
         foreach (var (tier, relation) in RoutedForms)
         {
             var sql = DailySummarySql.RangeSqlFor(tier, relation);
-            var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == relation);
+            /* #3653 LC froze query_stats_hourly/_daily out of MaterializationHoleTargets; RollupCoverageProbeTargets
+               still knows every relation the daily summary can route to. */
+            var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == relation);
             var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
 
             Assert.Contains("SELECT b.d, NULL::bigint AS c", sql, StringComparison.Ordinal);
@@ -138,7 +141,7 @@ public sealed class DailySummaryNotCarriedTests
 
     private static (string Source, string TimeColumn, string Filter) SourceOf(string view)
     {
-        var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == view);
+        var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == view);
         return (target.Source, target.SourceTimeColumn, TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql));
     }
 
@@ -174,7 +177,7 @@ public sealed class DailySummaryNotCarriedTests
     public void RangeSqlFor_RefusesAnUnregisteredRelation()
     {
         var ex = Assert.Throws<ArgumentException>(() => DailySummarySql.RangeSqlFor(RetentionTier.Hourly, "some_future_rollup"));
-        Assert.Contains("MaterializationHoleTargets", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("RollupCoverageProbeTargets", ex.Message, StringComparison.Ordinal);
         Assert.Throws<ArgumentException>(() => DailySummarySql.RangeSqlFor(RetentionTier.Hourly, " "));
     }
 
