@@ -1312,9 +1312,11 @@ public sealed class DarlingWorker : BackgroundService
 
             /* #2953: every problem, joined, rather than the first — Validate is all-fatal and reports the whole
                set, so a ping body carrying one of several would send an operator to fix a config that still
-               does not start. PublishConfigurationProblems does the joining and the sanitizing/length cap
-               (#4316 round 1 B1): this is the one terminal stand-down whose detail is not a fixed sentence. */
-            _collectorState.PublishConfigurationProblems(problems);
+               does not start. PublishConfigurationProblems takes the config, not this `problems` list — it
+               calls Validate itself, so there is no string/list parameter here for a future caller to hand
+               exception text instead (#4316 round 1 B1, round 2 L1-r2 a). `problems` above stays local, for
+               the per-problem critical log lines just above. */
+            _collectorState.PublishConfigurationProblems(config);
             return;
         }
 

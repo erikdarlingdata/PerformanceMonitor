@@ -107,39 +107,56 @@ public sealed class CollectorRuntimeStateTests
     /// that body is worth bounding. Truncation is marked, so a shortened message is distinguishable from a
     /// complete one.
     ///
-    /// <para>#4316 round 1 B1: <see cref="CollectorRuntimeState.PublishConfigurationProblems"/> is the only
-    /// <c>Publish*</c> method left that takes free text \u2014 validated config problems, never an exception's
-    /// message \u2014 so it is the only site left to pin this sanitizing against; every other publish's detail
-    /// is now one of the fixed sentences the reflection test below guards.</para>
+    /// <para>#4316 round 2 L1-r2 a: <see cref="CollectorRuntimeState.PublishConfigurationProblems"/> now
+    /// takes the <see cref="DarlingConfig"/> itself, not a problem list, so the CR-trim/first-line/cap
+    /// reduction and the semicolon join are pinned here through the two pure helpers that back it \u2014
+    /// <see cref="CollectorRuntimeState.FirstLineOf"/> and
+    /// <see cref="CollectorRuntimeState.ConfigurationProblemsDetail"/> \u2014 and the last case drives the
+    /// public method end to end, through a real invalid config, to pin that the two are actually wired
+    /// together.</para>
     /// </summary>
     [Fact]
     public void ConfigurationProblems_ArriveAsOneCappedLine_JoinedWithSemicolons()
     {
-        var state = new CollectorRuntimeState();
-
         /* The exact shape a failing rung produced against PostgreSQL 17.11. */
-        state.PublishConfigurationProblems(["3F000: no schema has been selected to create in\n\nPOSITION: 30"]);
-        Assert.Equal("3F000: no schema has been selected to create in", state.Read()!.Detail);
+        Assert.Equal(
+            "3F000: no schema has been selected to create in",
+            CollectorRuntimeState.FirstLineOf("3F000: no schema has been selected to create in\n\nPOSITION: 30"));
 
         /* CRLF too, not just LF - the working copies of this repo are CRLF. */
-        state.PublishConfigurationProblems(["Failed to connect\r\ndetail"]);
-        Assert.Equal("Failed to connect", state.Read()!.Detail);
+        Assert.Equal("Failed to connect", CollectorRuntimeState.FirstLineOf("Failed to connect\r\ndetail"));
 
         var long_ = new string('x', CollectorRuntimeState.MaxDetailLength + 50);
-        state.PublishConfigurationProblems([long_]);
-        var capped = state.Read()!.Detail!;
+        var capped = CollectorRuntimeState.FirstLineOf(long_);
         Assert.Equal(CollectorRuntimeState.MaxDetailLength + 1, capped.Length);
         Assert.EndsWith("\u2026", capped, StringComparison.Ordinal);
 
         /* A message already inside the cap is passed through whole - the cap must not cost the ordinary case
            its last character. */
-        state.PublishConfigurationProblems(["Failed to connect to 127.0.0.1:5953"]);
-        Assert.Equal("Failed to connect to 127.0.0.1:5953", state.Read()!.Detail);
+        Assert.Equal(
+            "Failed to connect to 127.0.0.1:5953",
+            CollectorRuntimeState.FirstLineOf("Failed to connect to 127.0.0.1:5953"));
 
         /* Every problem, not just the first - Validate is all-fatal and joining with "; " means a ping body
            carrying one of several does not send an operator to fix a config that still would not start. */
-        state.PublishConfigurationProblems(["problem one", "problem two"]);
-        Assert.Equal("problem one; problem two", state.Read()!.Detail);
+        Assert.Equal(
+            "problem one; problem two",
+            CollectorRuntimeState.ConfigurationProblemsDetail(["problem one", "problem two"]));
+
+        /* End to end, through a real invalid config: PublishConfigurationProblems calls Validate itself and
+           wires the two helpers above into the published snapshot. A server entry is included so Validate's
+           independent "servers must contain at least one entry" problem does not also fire and join in -
+           the point here is the Postgres-section gate, alone. */
+        var state = new CollectorRuntimeState();
+        state.PublishConfigurationProblems(new DarlingConfig
+        {
+            Postgres = null!,
+            Servers = [new MonitoredServer { Host = "test-host" }],
+        });
+        var snapshot = state.Read()!;
+        Assert.Equal(CollectorRuntimeState.CollectorPhase.Stopped, snapshot.Phase);
+        Assert.Equal(CollectorRuntimeState.StartupStep.Configuration, snapshot.Step);
+        Assert.Equal("postgres section is required.", snapshot.Detail);
     }
 
     // ── The mapping ───────────────────────────────────────────────────────────────────────
@@ -410,22 +427,29 @@ public sealed class CollectorRuntimeStateTests
     }
 
     /// <summary>
-    /// #4316 round 1 B1: the census above (and the one the redaction tests used to run over each publish
-    /// call site) is no longer the thing actually protecting this. A grep census only catches the literal
-    /// spellings someone thought to check for — <c>ex.Message</c>, not <c>ex.ToString()</c>, not
-    /// <c>$"{ex}"</c>, not a variable named <c>e</c>. This is the enforcement that cannot be routed around:
-    /// no public <c>Publish*</c> method on <see cref="CollectorRuntimeState"/> accepts a bare <see
-    /// cref="string"/> at all, so there is no parameter left for a caller to put exception text into.
-    /// <see cref="CollectorRuntimeState.PublishConfigurationProblems"/> keeps its
-    /// <c>IReadOnlyList&lt;string&gt;</c> — validated config problems, never an exception's message — which
-    /// this check does not flag because the parameter type is not <c>string</c> itself.
+    /// #4316 round 1 B1, widened round 2 L1-r2 a: the census above (and the one the redaction tests used to
+    /// run over each publish call site) is no longer the thing actually protecting this. A grep census only
+    /// catches the literal spellings someone thought to check for — <c>ex.Message</c>, not
+    /// <c>ex.ToString()</c>, not <c>$"{ex}"</c>, not a variable named <c>e</c>. This is the enforcement that
+    /// cannot be routed around: no <c>Publish*</c> method on <see cref="CollectorRuntimeState"/> that is not
+    /// PRIVATE — public, internal, or protected internal, instance or static — takes a parameter of any type
+    /// but <see cref="CollectorRuntimeState.StartupStep"/>, <see cref="int"/>, or <see cref="DarlingConfig"/>, so there is no seat
+    /// left, at any accessibility, for a caller to hand it a bare string or a problem list.
+    /// <see cref="CollectorRuntimeState.PublishConfigurationProblems"/> used to be the one exception (an
+    /// <c>IReadOnlyList&lt;string&gt;</c> the old reflection alone could not flag); round 2 L1-r2 a closed
+    /// that by giving it a <see cref="DarlingConfig"/> parameter instead, so it calls <c>Validate</c> itself.
+    /// <see cref="CollectorRuntimeState.PublishStoppedCore"/>, the one method that still takes a raw
+    /// <c>string</c> detail, is checked separately below and must stay private — the only sanctioned way to
+    /// reach it is through <c>FailureDetailFor</c> or <see cref="CollectorRuntimeState.ConfigurationProblemsDetail"/>.
     /// </summary>
     [Fact]
-    public void NoPublicPublishMethod_TakesAStringParameter()
+    public void NoNonPrivatePublishMethod_TakesAParameterOutsideTheApprovedTypes()
     {
+        var approvedParameterTypes = new[] { typeof(CollectorRuntimeState.StartupStep), typeof(int), typeof(DarlingConfig) };
+
         var publishMethods = typeof(CollectorRuntimeState)
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
-            .Where(m => m.Name.StartsWith("Publish", StringComparison.Ordinal))
+            .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(m => m.Name.StartsWith("Publish", StringComparison.Ordinal) && !m.IsPrivate)
             .ToList();
 
         Assert.True(publishMethods.Count >= 5, $"expected at least the five Publish* methods; found {publishMethods.Count}.");
@@ -433,11 +457,22 @@ public sealed class CollectorRuntimeStateTests
         foreach (var method in publishMethods)
         {
             Assert.True(
-                method.GetParameters().All(p => p.ParameterType != typeof(string)),
-                $"{method.Name} takes a string parameter — a free-text detail a caller could put exception "
-                + "text into, which is exactly what #4316 closes. Build the detail from FailureDetailFor(step) "
-                + "or a fixed sentence instead.");
+                method.GetParameters().All(p => approvedParameterTypes.Contains(p.ParameterType)),
+                $"{method.Name} takes a parameter of type "
+                + $"{string.Join(", ", method.GetParameters().Select(p => p.ParameterType.Name))} — a seat a "
+                + "caller could put exception text (or a problem list) into, which is exactly what #4316 "
+                + "closes. Build the detail from FailureDetailFor(step), ConfigurationProblemsDetail, or a "
+                + "fixed sentence instead.");
         }
+
+        var stoppedCore = typeof(CollectorRuntimeState).GetMethod(
+            "PublishStoppedCore", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+        Assert.NotNull(stoppedCore);
+        Assert.True(
+            stoppedCore!.IsPrivate,
+            "PublishStoppedCore must stay private — it is the one Publish* method that still takes a raw "
+            + "string detail, and every other publish must keep reaching it only through FailureDetailFor "
+            + "or ConfigurationProblemsDetail, not directly.");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────────────────
