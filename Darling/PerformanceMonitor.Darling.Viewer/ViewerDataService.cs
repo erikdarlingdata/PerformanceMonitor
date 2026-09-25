@@ -459,7 +459,7 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        _dataSource = NpgsqlDataSource.Create(effectiveConnectionString);
+        _dataSource = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(effectiveConnectionString));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
     }
 

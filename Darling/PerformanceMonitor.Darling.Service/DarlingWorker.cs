@@ -1738,7 +1738,7 @@ public sealed class DarlingWorker : BackgroundService
            store silently collects nothing until the service is restarted; see
            EnsureStoreSearchPath for the pool-timing root cause. Managed mode already sets it, so
            this is a no-op there. */
-        storeConnectionString = EnsureStoreSearchPath(storeConnectionString);
+        storeConnectionString = DarlingStoreConnection.PinSessionTimeZoneUtc(EnsureStoreSearchPath(storeConnectionString));
         await using var postgres = NpgsqlDataSource.Create(storeConnectionString);
         _postgres = postgres;
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
@@ -2222,7 +2222,9 @@ public sealed class DarlingWorker : BackgroundService
         }
 
         await using var customAlertViewerSource =
-            customAlertViewerConnString is not null ? NpgsqlDataSource.Create(customAlertViewerConnString) : null;
+            customAlertViewerConnString is not null
+                ? NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(customAlertViewerConnString))
+                : null;
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
