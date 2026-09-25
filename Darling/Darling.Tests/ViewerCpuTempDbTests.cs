@@ -221,6 +221,9 @@ public sealed class ViewerCpuTempDbLivePostgresTests
     private const int SkewServerId = -979797;
     private const string SkewServerName = "viewer-cpu-skew-e2e";
 
+    private const int BudgetServerId = -989898;
+    private const string BudgetServerName = "viewer-cpu-budget-e2e";
+
     private const int TempDbServerId = -959595;
     private const string TempDbServerName = "viewer-tempdb-tab-e2e";
 
@@ -384,6 +387,94 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         }
     }
 
+    /// <summary>#4234 ruling item 6: a 7-day window (one sample per minute, the ring buffer's real cadence)
+    /// must not hand back all 10,080 raw rows — the bucketed read caps at <see cref="TrendBudget.Chart"/>'s
+    /// single-series budget.</summary>
+    [Fact]
+    public async Task Cpu_SevenDayWindow_ReturnsAtMostBudgetRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", BudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+
+            await BulkSeedCpuAsync(connection, BudgetServerId, BudgetServerName, start, end);
+
+            var samples = await viewer.GetCpuUtilizationAsync(BudgetServerId, start, end);
+
+            var budget = TrendBudget.Chart.AutoPoints;
+            Assert.True(samples.Count > 0 && samples.Count <= budget, $"{samples.Count} rows over a budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", BudgetServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3: when the window's budget covers every collection (three samples, five
+    /// minutes apart, each its own bucket), every point is stamped at its own raw sample_time — seeded off
+    /// the minute grid (:37 seconds) so a fix that floors to the date_bin grid line instead would lose the
+    /// seconds and fail this.</summary>
+    [Fact]
+    public async Task Cpu_BudgetCoversEveryCollection_ReturnsRawTimestampsAndValuesUnchanged_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU singleton-passthrough test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", BudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = new DateTime(2026, 3, 10, 9, 0, 37);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            /* collection_time == sample_time (a UTC batch): the #1262 de-skew is a no-op, so the raw
+               sample_time survives unchanged if every bucket the read returns is a true singleton. */
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t1, t1, sqlCpu: 10, otherCpu: 5);
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t2, t2, sqlCpu: 20, otherCpu: 6);
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t3, t3, sqlCpu: 30, otherCpu: 7);
+
+            /* Explicit endUtc close to the fixed fixture window — the default (the wall clock) would
+               otherwise size the bucket width off a multi-month gap and merge these 5-minute-apart
+               collections into one bucket. */
+            var samples = await viewer.GetCpuUtilizationAsync(BudgetServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+
+            Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
+            Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
+            Assert.Equal(new[] { 5.0, 6.0, 7.0 }, samples.Select(s => s.OtherProcessCpu));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", BudgetServerId, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task TempDb_ReadsMbAsDouble_AndBigintSessionCount_AgainstDevPostgres()
     {
@@ -513,6 +604,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sampleTimeLocal, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(sqlCpu);
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)otherCpu ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One collection (one ring-buffer sample) per minute from <paramref name="start"/> to
+    /// <paramref name="end"/> inclusive, generated server-side — the real cadence a 7-day CPU window would
+    /// see — without a per-row round trip. A UTC batch (sample_time == collection_time), so the #1262
+    /// de-skew is a no-op throughout.</summary>
+    private static async Task BulkSeedCpuAsync(
+        NpgsqlConnection connection, int serverId, string serverName, DateTime start, DateTime end)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time,
+     sqlserver_cpu_utilization, other_process_cpu_utilization)
+SELECT 1, g, $1, $2, g, 50, 10
+FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

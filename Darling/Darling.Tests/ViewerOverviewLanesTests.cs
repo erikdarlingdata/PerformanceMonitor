@@ -13,6 +13,7 @@ using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -262,6 +263,177 @@ public sealed class ViewerOverviewLanesLivePostgresTests
         }
     }
 
+    /// <summary>#4234 ruling item 6: a 7-day window (one collection per minute, two wait types each — the
+    /// real wait_stats cadence) must not hand back all 10,080 raw rows — the bucketed read caps at
+    /// <see cref="TrendBudget.Chart"/>'s single-series budget.</summary>
+    [Fact]
+    public async Task TotalWaitTrend_SevenDayWindow_ReturnsAtMostBudgetRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live total-wait budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteWaitRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+
+            await BulkSeedWaitAsync(connection, TestContext.Current.CancellationToken, start, end);
+
+            var points = await viewer.GetTotalWaitTrendAsync(WaitServerId, start, end);
+
+            var budget = TrendBudget.Chart.AutoPoints;
+            Assert.True(points.Count > 0 && points.Count <= budget, $"{points.Count} rows over a budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteWaitRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3: when the window's budget covers every collection (three collections,
+    /// five minutes apart, two wait types each, each its own bucket), every point is stamped at its own raw
+    /// collection_time — seeded off the minute grid (:37 seconds) so a fix that floors to the date_bin grid
+    /// line instead would lose the seconds and fail this.</summary>
+    [Fact]
+    public async Task TotalWaitTrend_BudgetCoversEveryCollection_ReturnsRawTimestampsAndValuesUnchanged_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live total-wait singleton-passthrough test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteWaitRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = new DateTime(2026, 3, 10, 9, 0, 37);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            /* Two wait types per collection, both with an explicit 60s interval so the rate is a plain
+               SUM(delta)/60 with no LAG/#3540 fallback involved. */
+            await InsertWaitRowAsync(connection, 1, t1, "CXPACKET", 6000, sampleIntervalSeconds: 60);
+            await InsertWaitRowAsync(connection, 1, t1, "WRITELOG", 6000, sampleIntervalSeconds: 60);
+            await InsertWaitRowAsync(connection, 2, t2, "CXPACKET", 12000, sampleIntervalSeconds: 60);
+            await InsertWaitRowAsync(connection, 2, t2, "WRITELOG", 12000, sampleIntervalSeconds: 60);
+            await InsertWaitRowAsync(connection, 3, t3, "CXPACKET", 18000, sampleIntervalSeconds: 60);
+            await InsertWaitRowAsync(connection, 3, t3, "WRITELOG", 18000, sampleIntervalSeconds: 60);
+
+            var points = await viewer.GetTotalWaitTrendAsync(WaitServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+
+            Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, points.Select(p => p.CollectionTime.Ticks).ToArray());
+            Assert.Equal(200.0, points[0].WaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(400.0, points[1].WaitTimeMsPerSecond, precision: 3);
+            Assert.Equal(600.0, points[2].WaitTimeMsPerSecond, precision: 3);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteWaitRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 6: a 7-day window (one collection per minute — memory_stats' real cadence)
+    /// must not hand back all 10,080 raw rows — the bucketed read caps at <see cref="TrendBudget.Chart"/>'s
+    /// single-series budget.</summary>
+    [Fact]
+    public async Task MemoryTrend_SevenDayWindow_ReturnsAtMostBudgetRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live memory-trend budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteMemoryRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+
+            await BulkSeedMemoryAsync(connection, TestContext.Current.CancellationToken, start, end);
+
+            var points = await viewer.GetMemoryTrendAsync(MemoryServerId, start, end);
+
+            var budget = TrendBudget.Chart.AutoPoints;
+            Assert.True(points.Count > 0 && points.Count <= budget, $"{points.Count} rows over a budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteMemoryRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3: when the window's budget covers every collection (three collections,
+    /// five minutes apart, each its own bucket), every point is stamped at its own raw collection_time —
+    /// seeded off the minute grid (:37 seconds) so a fix that floors to the date_bin grid line instead would
+    /// lose the seconds and fail this.</summary>
+    [Fact]
+    public async Task MemoryTrend_BudgetCoversEveryCollection_ReturnsRawTimestampsAndValuesUnchanged_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live memory-trend singleton-passthrough test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteMemoryRowsAsync(connection, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = new DateTime(2026, 3, 10, 9, 0, 37);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            await InsertMemoryRowAsync(connection, 1, t1, total: 1000.00m, target: 2000.00m, buffer: 800.50m, planCache: 150.00m);
+            await InsertMemoryRowAsync(connection, 2, t2, total: 1100.00m, target: 2000.00m, buffer: 850.25m, planCache: 160.00m);
+            await InsertMemoryRowAsync(connection, 3, t3, total: 1200.00m, target: 2000.00m, buffer: 900.75m, planCache: 170.00m);
+
+            var points = await viewer.GetMemoryTrendAsync(MemoryServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+
+            Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, points.Select(p => p.CollectionTime.Ticks).ToArray());
+            Assert.Equal(new[] { 800.50, 850.25, 900.75 }, points.Select(p => p.BufferPoolMb));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteMemoryRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task BaselineForLane_NoHistory_ReturnsEmptyBucket_AgainstDevPostgres()
     {
@@ -322,6 +494,45 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", connection);
         command.Parameters.Add(new NpgsqlParameter { Value = buffer, NpgsqlDbType = NpgsqlDbType.Numeric });
         command.Parameters.Add(new NpgsqlParameter { Value = planCache, NpgsqlDbType = NpgsqlDbType.Numeric });
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One collection per minute from <paramref name="start"/> to <paramref name="end"/> inclusive,
+    /// two wait types each with an explicit 60s interval — the real wait_stats cadence — generated
+    /// server-side without a per-row round trip.</summary>
+    private static async Task BulkSeedWaitAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime start, DateTime end)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type,
+     waiting_tasks_count, wait_time_ms, signal_wait_time_ms,
+     delta_waiting_tasks, delta_wait_time_ms, delta_signal_wait_time_ms, sample_interval_seconds)
+SELECT 1, g, $1, $2, wt, 0, 0, 0, 10, 100, 10, 60
+FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS g
+CROSS JOIN (VALUES ('CXPACKET'), ('WRITELOG')) AS types(wt)", connection);
+        command.Parameters.AddWithValue(WaitServerId);
+        command.Parameters.AddWithValue(WaitServerName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One collection per minute from <paramref name="start"/> to <paramref name="end"/> inclusive —
+    /// the real memory_stats cadence — generated server-side without a per-row round trip.</summary>
+    private static async Task BulkSeedMemoryAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, DateTime start, DateTime end)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO memory_stats
+    (collection_id, collection_time, server_id, server_name,
+     target_server_memory_mb, total_server_memory_mb, buffer_pool_mb, plan_cache_mb)
+SELECT 1, g, $1, $2, 2000.00, 1000.00, 800.50, 150.00
+FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(MemoryServerId);
+        command.Parameters.AddWithValue(MemoryServerName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static DateTime TruncateToSeconds(DateTime value) =>
