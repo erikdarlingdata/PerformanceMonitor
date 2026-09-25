@@ -331,10 +331,13 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
             var t2 = t1.AddMinutes(5);
             var t3 = t2.AddMinutes(5);
 
+            /* t1..t3 are 5 minutes apart, so 1.0 MB/s needs bytes calibrated to a 300-second interval
+               (unlike the 60-second-spaced throughput test above). */
+            const long oneMbPerSecOverFiveMinutes = 1048576L * 300L;
             foreach (var t in new[] { t1, t2, t3 })
             {
                 await InsertFileIoAsync(connection, FileIoSingletonServerId, t, "db1", "f1",
-                    deltaReads: 10, deltaWrites: 4, deltaReadBytes: 1048576L * 60L, deltaWriteBytes: 1048576L * 60L,
+                    deltaReads: 10, deltaWrites: 4, deltaReadBytes: oneMbPerSecOverFiveMinutes, deltaWriteBytes: oneMbPerSecOverFiveMinutes,
                     deltaStallReadMs: 100, deltaStallWriteMs: 20, deltaStallQueuedReadMs: 0, deltaStallQueuedWriteMs: 0);
             }
 
