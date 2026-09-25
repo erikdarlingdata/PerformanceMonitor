@@ -41,7 +41,12 @@ namespace PerformanceMonitor.Darling.Analysis;
 /// <item><b>Time.</b> <see cref="PgBaselineProvider.CacheTtl"/> after the compute an entry is dead whatever its hour —
 /// the bound on anything that did move inside a settled window (a late row, a purge, the target's clock changing zone,
 /// which is re-keyed on the next compute exactly as before). Dead entries are swept, so the tier holds at most one
-/// TTL's worth of computes.</item>
+/// TTL's worth of computes. <b>Except (#4248):</b> a successful compute of a daily-cache metric
+/// (<see cref="PgBaselineProvider.IsDailyCacheMetric"/>) is never eroded by the TTL
+/// (<see cref="PgBaselineProvider.CachedBaseline.FreshUntilUtc"/> is a 24-hour backstop, not the real bound) — the
+/// EntryKey's analysis-day component is, exactly as the hourly case's analysis-hour component always was, so this
+/// tier keeps answering every lookup for the rest of that UTC day. See <see cref="PgBaselineProvider.IsFresh"/>,
+/// which this tier's live check and sweep both call, so they never evict a still-fresh daily entry early.</item>
 /// <item><b>Failure.</b> Only a SUCCESSFUL compute is shared. A failed one (a timeout, a role that cannot read a
 /// relation) stays in the failing provider's own tier, where it has always meant "no baseline for this pass" — one
 /// caller's timeout never blanks another caller's baselines, and a success from any caller beats a local failure.</item>
@@ -103,7 +108,7 @@ public sealed class BaselineCache
     internal void Clear() => _entries.Clear();
 
     private static bool IsLive(PgBaselineProvider.CachedBaseline entry, DateTime nowUtc)
-        => nowUtc - entry.RealTime < PgBaselineProvider.CacheTtl;
+        => PgBaselineProvider.IsFresh(entry, nowUtc);
 
     /// <summary>At most once per quarter of <see cref="PgBaselineProvider.CacheTtl"/>, drops the entries no lookup can
     /// take any more, so the tier holds little beyond one TTL of computes. Without it the tier would grow for the life of

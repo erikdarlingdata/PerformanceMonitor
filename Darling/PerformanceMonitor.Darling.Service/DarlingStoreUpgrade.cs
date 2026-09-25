@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1492,7 +1493,7 @@ internal sealed class DarlingStoreUpgrade
             SearchPath = null,
         }.ConnectionString;
 
-        var sourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
+        var sourceBuilder = new NpgsqlDataSourceBuilder(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
         sourceBuilder.ConfigureTypeLoading(typeLoading => typeLoading.EnableTypeLoading(false));
         await using var source = sourceBuilder.Build();
         await using var connection = await WithTransportRetryAsync(
@@ -1555,7 +1556,7 @@ internal sealed class DarlingStoreUpgrade
         => WithTransportRetryAsync(
             async () =>
             {
-                var connection = new NpgsqlConnection(connectionString);
+                var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
                 try
                 {
                     await connection.OpenAsync(cancellationToken);
@@ -3229,7 +3230,7 @@ internal sealed class DarlingStoreUpgrade
     internal static async Task<ClusterIdentity> ReadClusterIdentityAsync(string ownerConnectionString, CancellationToken cancellationToken)
     {
         var builder = new NpgsqlConnectionStringBuilder(ownerConnectionString) { Database = "postgres", Pooling = false };
-        await using var connection = new NpgsqlConnection(builder.ConnectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
         await connection.OpenAsync(cancellationToken);
 
         await using var command = new NpgsqlCommand(
@@ -3283,7 +3284,7 @@ internal sealed class DarlingStoreUpgrade
         var databases = new List<string>();
 
         var listBuilder = new NpgsqlConnectionStringBuilder(ownerConnection) { Database = "postgres", Pooling = false };
-        await using (var connection = new NpgsqlConnection(listBuilder.ConnectionString))
+        await using (var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(listBuilder.ConnectionString)))
         {
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(
@@ -3479,7 +3480,7 @@ internal sealed class DarlingStoreUpgrade
         try
         {
             var builder = new NpgsqlConnectionStringBuilder(ownerConnectionString) { Pooling = false };
-            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             await connection.OpenAsync(cancellationToken);
 
             await using (var version = new NpgsqlCommand("SHOW server_version_num", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds })
