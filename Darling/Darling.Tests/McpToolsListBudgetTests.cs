@@ -110,6 +110,9 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
+    /* #4198 (lane TR): +214 bytes for get_query_store_regressions gaining full_text (its own preview
+       opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
+       over the old 86). */
     /* #4198 (lane TI): +391 bytes for get_blocking's default-preview note in its served description and its
        new full_text opt-in parameter (blocked_sql_text/blocking_sql_text are now a 150-char preview by
        default). The default row limit also dropped 30 -> 15 -- 30 rows of even sub-2000-char (never
@@ -127,7 +130,9 @@ public sealed class McpToolsListBudgetTests
        combined total with collection_log (#4265) changes on top. */
     /* #4198 (blocking, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265);
        combined total with blocking (#4267) changes on top. */
-    private const int TotalCeilingBytes = 172_942;
+    /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
+       combined total with qs-regressions (#4264) changes on top. */
+    private const int TotalCeilingBytes = 173_157;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

@@ -101,6 +101,9 @@ public sealed class McpToolsListBudgetTests
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
        covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
+    /* #4198 (lane TR): +203 bytes for get_query_store_regressions gaining full_text (its own preview
+       opt-in, +84 bytes) and its limit description growing to explain the new lower default (+78 bytes
+       over the old 86). */
     /* #4198 (lane TI): +271 bytes for get_blocked_process_reports' default-preview note in its served
        description and its new full_text opt-in parameter (blocked_sql_text/blocking_sql_text are now a
        150-char preview by default; the default row limit also dropped 30 -> 15, since the row's other ~37
@@ -112,7 +115,9 @@ public sealed class McpToolsListBudgetTests
        Darling's, since it has no fleet-maintenance sentinel to warn about). */
     /* #4198 (blocking, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265);
        combined total with blocking (#4267) changes on top. */
-    private const int TotalCeilingBytes = 91_083;
+    /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
+       combined total with qs-regressions (#4264) changes on top. */
+    private const int TotalCeilingBytes = 91_298;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
