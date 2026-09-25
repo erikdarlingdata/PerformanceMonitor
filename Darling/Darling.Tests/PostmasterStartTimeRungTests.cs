@@ -200,12 +200,14 @@ public sealed class PostmasterStartTimeRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* In the source, the arm sits ABOVE the previous rung's and returns this build's version. */
+        /* In the source, the arm sits ABOVE the previous rung's and returns this rung's version. */
         var thisArm = viewer.IndexOf("if (hasPostmasterStartTime)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasPgServerConfigDatabaseRoleOverrides)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V139 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V139 sentinel arm — a store stopped here would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
-        Assert.True(thisArm < previousArm, "the V139 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm < previousArm, "the V139 arm sits below the previous rung's, so a V139 store maps one rung low");
+        /* This rung's own literal, not the build's version: the "returns StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to V140's test with the top. */
         Assert.Contains(
             "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
@@ -264,8 +266,8 @@ public sealed class PostmasterStartTimeLivePostgresTests
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS postmaster_start_time");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.pg_write_stats DROP COLUMN IF EXISTS postmaster_start_time");
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 139");
-            /* Every rung from 139 up re-applies (V140 and later are idempotent ADD COLUMN IF NOT EXISTS), so the
-               count is the distance to the top rung, not 1. */
+            /* Every rung from 139 up re-applies (V140-V143 are idempotent: ADD COLUMN IF NOT EXISTS or CREATE
+               TABLE/INDEX IF NOT EXISTS), so the count is the distance to the top rung, not 1. */
             Assert.Equal(StorageVersion.SchemaVersion - 138, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
