@@ -1298,6 +1298,46 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// #4251: sets <see cref="CollectorContext.PgFileSettingsReadable"/> for <c>pg_server_config</c> from
+    /// <see cref="PgFileSettingsCapability"/> (its own hourly cache), and leaves every other collector
+    /// untouched — pg_file_settings only matters to this one read. Its own method, the
+    /// <see cref="ResolvePgReadBinaryFileGrantAsync"/> shape, so the gate is testable without a live target.
+    /// Logs ONCE per target at Information when the view turns out to be unreadable
+    /// (<see cref="PgFileSettingsCapability.ShouldLogUnreadable"/>) rather than on every cycle the fallback
+    /// query runs — the collector itself keeps collecting <c>pg_settings</c> either way, so this is
+    /// informational, never a fault.
+    /// </summary>
+    internal static async ValueTask ResolvePgFileSettingsReadableAsync(
+        CollectorContext context,
+        string collectorName,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        if (server.Target.Engine != CollectorTargetEngine.PostgreSql || collectorName != "pg_server_config")
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+        context.PgFileSettingsReadable = await PgFileSettingsCapability.IsReadableAsync(
+            targetConnection, targetKey, cancellationToken);
+
+        if (!context.PgFileSettingsReadable && PgFileSettingsCapability.ShouldLogUnreadable(targetKey))
+        {
+            logger?.LogInformation(
+                "[{Server}] pg_file_settings is not readable by the monitoring role (#4251), so pending_restart "
+                + "is computed from pg_settings alone, which can read false from a connection opened after a "
+                + "reload — most visibly on Windows, where the collector's own reconnect means no connection "
+                + "stays open across the reload. Two grants fix it: GRANT SELECT ON pg_file_settings and "
+                + "GRANT EXECUTE ON FUNCTION pg_show_all_file_settings() to the monitoring role — the view's "
+                + "own grant does not extend to the function it calls.",
+                server.Config.DisplayName);
+        }
+    }
+
+    /// <summary>
     /// The one place <see cref="PgReadBinaryFileCapability"/>'s cache key comes from (#4051 round-2 review). The
     /// helper that fills the cache, the one that reads it for the advisory note, and the one that drops a stale
     /// verdict all take the <see cref="ServerRuntime"/> and key through here. None of them can drift to a
@@ -2695,6 +2735,11 @@ public sealed class DarlingCollectorRunner
                    CollectorTargetInfo that live for the connection's whole life. */
                 await ResolvePgReadBinaryFileGrantAsync(
                     context, definition.Name, targetConnection, server, cancellationToken);
+                /* #4251: same shape, same connection, right beside the grant check above — pg_server_config
+                   is the other server-scoped PostgreSQL collector that must decide which of two query texts
+                   to send before BuildQuery runs. */
+                await ResolvePgFileSettingsReadableAsync(
+                    context, definition.Name, targetConnection, server, _logger, cancellationToken);
 
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);

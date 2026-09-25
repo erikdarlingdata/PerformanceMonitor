@@ -486,10 +486,14 @@ public sealed class PgServerConfigScopeRungTests
            (PgServerConfigOverrideLivePostgresTests). The page is serialized as-is when there is nothing to say, and
            the two keys are added to the JSON node only when there is. */
         var code = StripComments(tools);
-        Assert.Contains("if (overrides.Count == 0)", code, StringComparison.Ordinal);
+        /* #4251 added a second, independent reason to leave the fast path: the file-settings caveat attaches
+           the same way, so the condition below now reads overrides.Count == 0 AND the caveat does not apply
+           either — still the same attach pattern, one more term. */
+        Assert.Contains("if (overrides.Count == 0 && !fileSettingsUnreadable)", code, StringComparison.Ordinal);
         Assert.Contains("return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);", code, StringComparison.Ordinal);
         Assert.Contains("node[\"database_overrides\"] = JsonSerializer.SerializeToNode(", code, StringComparison.Ordinal);
         Assert.Contains("node[\"database_overrides_note\"] =", code, StringComparison.Ordinal);
+        Assert.Contains("node[\"pending_restart_caveat\"] = PgFileSettingsCapability.UnreadableCaveat;", code, StringComparison.Ordinal);
         Assert.DoesNotContain("database_overrides = ", code, StringComparison.Ordinal);
         Assert.DoesNotContain("database_overrides_note = ", code, StringComparison.Ordinal);
         Assert.Contains("GetOverridesAsync(postgres, resolved.ServerId)", tools, StringComparison.Ordinal);

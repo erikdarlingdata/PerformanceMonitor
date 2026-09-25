@@ -669,6 +669,15 @@ public sealed class DarlingMcpPgServerStateTools
                question it answers is "is my value overridden anywhere" and a cap turns a No into a maybe. */
             var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId);
 
+            /* #4251: attached like database_overrides below, from the collector's own cached verdict (no
+               store read - PgFileSettingsCapability is process-wide and this Darling process is the same one
+               that ran the collector). TryGetCachedVerdict returns false with fileSettingsReadable unset for
+               a target never checked (collector has not run yet, or is SQL Server), which correctly shows no
+               caveat rather than a false one - "readable" is not claimed, only "known unreadable" is. */
+            var fileSettingsUnreadable =
+                PgFileSettingsCapability.TryGetCachedVerdict(resolved.ServerName, out var fileSettingsReadable)
+                && !fileSettingsReadable;
+
             var configPage = new
             {
                 server = resolved.ServerName,
@@ -730,33 +739,45 @@ public sealed class DarlingMcpPgServerStateTools
                to tell which one a session actually gets — and every count above (settings_returned,
                non_default_count, non_default_returned) is a count of the server-wide population, which is what
                those names have always promised. The overrides sit beside them, not among them. */
-            if (overrides.Count == 0)
+            if (overrides.Count == 0 && !fileSettingsUnreadable)
             {
                 return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);
             }
 
             var node = JsonSerializer.SerializeToNode(configPage, McpHelpers.JsonOptions)?.AsObject()
                 ?? throw new InvalidOperationException("the server-config page did not serialize to a JSON object");
-            node["database_overrides"] = JsonSerializer.SerializeToNode(overrides.Select(o => new
+
+            if (overrides.Count > 0)
             {
-                /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET, a role with no
-                   database is ALTER ROLE ... SET (that role in every database), and both is ALTER ROLE ... IN
-                   DATABASE ... SET. Neither-NULL cannot appear here — that is a server-wide row, and the read
-                   excludes it. */
-                database_name = o.DatabaseName,
-                role_name = o.RoleName,
-                name = o.Name,
-                setting = o.Setting,
-            }).ToList(), McpHelpers.JsonOptions);
-            node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
-                + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
-                + "database, or as that role, runs with the override rather than with the server-wide "
-                + "value listed above - so a setting that appears in both places has TWO answers and "
-                + "which one applies depends on who is connecting. The stored text is what was SET, "
-                + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
-                + "connection at connect time, and the catalog records only the instruction. No unit, "
-                + "default or context is carried on these rows because the catalog does not hold them "
-                + "- read those off the server-wide row for the same setting name.";
+                node["database_overrides"] = JsonSerializer.SerializeToNode(overrides.Select(o => new
+                {
+                    /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET, a role with no
+                       database is ALTER ROLE ... SET (that role in every database), and both is ALTER ROLE ... IN
+                       DATABASE ... SET. Neither-NULL cannot appear here — that is a server-wide row, and the read
+                       excludes it. */
+                    database_name = o.DatabaseName,
+                    role_name = o.RoleName,
+                    name = o.Name,
+                    setting = o.Setting,
+                }).ToList(), McpHelpers.JsonOptions);
+                node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
+                    + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
+                    + "database, or as that role, runs with the override rather than with the server-wide "
+                    + "value listed above - so a setting that appears in both places has TWO answers and "
+                    + "which one applies depends on who is connecting. The stored text is what was SET, "
+                    + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
+                    + "connection at connect time, and the catalog records only the instruction. No unit, "
+                    + "default or context is carried on these rows because the catalog does not hold them "
+                    + "- read those off the server-wide row for the same setting name.";
+            }
+
+            /* #4251: ATTACHED like database_overrides_note just above, and for the same reason — present only
+               when it applies, so every other snapshot's JSON is untouched. */
+            if (fileSettingsUnreadable)
+            {
+                node["pending_restart_caveat"] = PgFileSettingsCapability.UnreadableCaveat;
+            }
+
             return node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
