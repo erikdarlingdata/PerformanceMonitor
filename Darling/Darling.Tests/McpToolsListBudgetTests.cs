@@ -91,7 +91,9 @@ public sealed class McpToolsListBudgetTests
        tools/list and so is not counted here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
-    private const int TotalCeilingBytes = 171_719;
+    /* #4198: get_collection_log's per-server form gained full_text (its error_message preview opt-in,
+       76 bytes) and limit's own description banked 1 byte describing the new lower default. +127 net. */
+    private const int TotalCeilingBytes = 171_846;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

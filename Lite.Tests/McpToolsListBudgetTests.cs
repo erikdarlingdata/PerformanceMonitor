@@ -83,7 +83,10 @@ public sealed class McpToolsListBudgetTests
     /* #4199 (M2b): +162 bytes for get_collection_log's fleet-form server_name/limit descriptions, after
        trimming both to the D2 200-char parameter cap and moving the rest to the tool's tail (get_tool_guide),
        which is not served in tools/list and so is not counted here. Matches Darling's twin change exactly. */
-    private const int TotalCeilingBytes = 89_881;
+    /* #4198: get_collection_log's per-server form gained full_text (76 bytes), matching Darling's twin;
+       limit's own description banked 1 byte. +116 net (Lite's server_name description is shorter than
+       Darling's, since it has no fleet-maintenance sentinel to warn about). */
+    private const int TotalCeilingBytes = 89_997;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

@@ -1475,6 +1475,11 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
+    /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
+    /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
+    /// one wide field (query text, a plan fragment, an error message) rather than the page — unlike a
+    /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_collection_log</c>'s
+    /// <c>full_text</c>, the same shape <c>get_store_query_stats</c>' <c>full_text</c> already used).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1517,6 +1522,12 @@ public sealed class McpPayloadContractCensusTests
             "the prose beside chain_may_be_truncated — what the depth cap is and why the root shown may not be the root"),
         ("query_text_may_be_truncated", ["DarlingMcpPgBlockingTools.cs"],
             "the statement text cut at COLLECTION to the collector's per-row text cap (track_activity_query_size on the target is the other cutter) — the store never held the rest"),
+    ];
+
+    public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
+    [
+        ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
+            "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
@@ -1567,6 +1578,7 @@ public sealed class McpPayloadContractCensusTests
         SecondBoundCutKeys.Select(k => (k.Key, k.Files))
             .Concat(CutNoteKeys.Select(k => (k.Key, k.Files)))
             .Concat(SourceSideCutKeys.Select(k => (k.Key, k.Files)))
+            .Concat(FieldPreviewCutKeys.Select(k => (k.Key, k.Files)))
             .Concat(WithheldSummaryKeys.Select(k => (k.Key, k.Files)))
             .Concat(PageCountsUnderANeutralNoun.Select(k => (k.Key, k.Files)))
             .Concat(CutHomonyms.Select(k => (k.Key, k.Files)));
