@@ -427,8 +427,8 @@ public sealed class DarlingManagedPostgresTests
            assertion below vacuously true, and a reflection filter that stopped matching is exactly the
            silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
            thirteen as of #3899 (v13 statement statistics); fourteen as of #3909 (v14 PostgreSQL 17
-           maintenance_work_mem limit). */
-        Assert.Equal(14, markers.Length);
+           maintenance_work_mem limit); fifteen as of #4246 (v15 WAL compression and checkpoint interval). */
+        Assert.Equal(15, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -1919,6 +1919,79 @@ public sealed class DarlingManagedPostgresTests
         }
     }
 
+    /* ===================== v15 WAL compression and checkpoint interval (#4246) ===================== */
+
+    /// <summary>
+    /// The v15 block (#4246): both settings the measurement found worth changing, in one append. See
+    /// <see cref="DarlingManagedPostgres.ConfMarkerV15"/> for why they travel together and why the block
+    /// deliberately says nothing about <c>max_wal_size</c>.
+    /// </summary>
+    [Fact]
+    public void WalVolumeConfAppend_PinsV15Marker_AndSetsCompressionAndCheckpointTimeout()
+    {
+        var block = DarlingManagedPostgres.BuildWalVolumeConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV15, block, StringComparison.Ordinal);
+        Assert.Equal("lz4", LastSettingValue(block, "wal_compression"));
+        Assert.Equal("15min", LastSettingValue(block, "checkpoint_timeout"));
+
+        /* No fingerprint or stamp line, or the v8/v12 staleness checks would misread what they scan. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, block, StringComparison.Ordinal);
+
+        /* v12 (#3802) is still the only thing that ever sets these: this block leaves the disk-derived
+           ceiling exactly where it is. */
+        Assert.Null(LastSettingValue(block, "max_wal_size"));
+        Assert.Null(LastSettingValue(block, "min_wal_size"));
+        Assert.Null(LastSettingValue(block, "checkpoint_completion_target"));
+    }
+
+    /// <summary>The generic per-setting source scan (#4214) walks every marker in this list; a block absent
+    /// from it would be invisible to that scan even though it is live.</summary>
+    [Fact]
+    public void ConfMarkerV15_IsInAllManagedConfMarkers()
+        => Assert.Contains(DarlingManagedPostgres.ConfMarkerV15, DarlingManagedPostgres.AllManagedConfMarkers);
+
+    /// <summary>
+    /// The heal on real files (#4246): a cluster whose conf carries every earlier marker but not v15 gains
+    /// exactly one v15 block, with both settings live in the file, and a second start appends nothing more --
+    /// the same once-only shape v9-v11 and v13 prove elsewhere (<see
+    /// cref="FreshConfHeal_KeepsTimescaleInThePreloadList_AndASecondHealAppendsNoSecondV13"/>), exercised here
+    /// through the real <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string
+    /// concatenation.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_AppendsV15Once_AndNotAgainOnANextStart()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v15-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5994));
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5994, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var first = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV15));
+            Assert.Equal("lz4", LastSettingValue(first, "wal_compression"));
+            Assert.Equal("15min", LastSettingValue(first, "checkpoint_timeout"));
+
+            pg.EnsureConfAppended(dataDirectory);
+            var second = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV15));
+            Assert.Equal("lz4", LastSettingValue(second, "wal_compression"));
+            Assert.Equal("15min", LastSettingValue(second, "checkpoint_timeout"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
     /* ===================== v12 wal sizing (#3802) ===================== */
 
     private const long OneGb = 1024L * 1024 * 1024;
@@ -2522,7 +2595,8 @@ public sealed class DarlingManagedPostgresTests
                 await connection.OpenAsync(timeout.Token);
                 using var current = new NpgsqlCommand(
                     "SELECT current_database(), current_user, current_setting('max_worker_processes'), current_setting('work_mem'), current_setting('shared_buffers'), " +
-                    "pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(@confMaintenance)",
+                    "pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(@confMaintenance), " +
+                    "current_setting('wal_compression'), current_setting('checkpoint_timeout')",
                     connection);
                 current.Parameters.AddWithValue("confMaintenance", confMaintenanceWorkMem);
                 using var reader = await current.ExecuteReaderAsync(timeout.Token);
@@ -2545,6 +2619,12 @@ public sealed class DarlingManagedPostgresTests
                    the same setting and a failed string compare (seen live on a large-RAM runner). */
                 Assert.Equal(reader.GetInt64(6), reader.GetInt64(5));
                 Assert.NotEqual(64L * 1024 * 1024, reader.GetInt64(5));
+
+                /* #4246: the v15 block is LIVE, not merely written -- both settings are SIGHUP-context and
+                   this is the very start that appended them, so a fresh cluster proves them without a
+                   reload. Neither is the PostgreSQL stock default (off / 5min). */
+                Assert.Equal("lz4", reader.GetString(7));
+                Assert.Equal("15min", reader.GetString(8));
             }
 
             /* Second EnsureRunning against the live server: idempotent — no re-init (credential

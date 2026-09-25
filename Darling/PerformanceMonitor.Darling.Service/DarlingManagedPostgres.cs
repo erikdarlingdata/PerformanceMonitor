@@ -494,6 +494,51 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV14 = "# Managed by PerformanceMonitor Darling (v14 PostgreSQL 17 maintenance_work_mem limit) -- do not remove this block";
 
     /// <summary>
+    /// The v15 marker (#4246): <c>wal_compression = lz4</c> and <c>checkpoint_timeout = 15min</c>, appended
+    /// together because both attack the same measured cost. Across two production stores, <c>pg_waldump
+    /// --stats=record</c> over live WAL showed 66-90% of bytes were full-page images (FPI) — mostly
+    /// <c>FPI_FOR_HINT</c>, the image data checksums force on a page's first hint-bit change, plus random-key
+    /// btree leaf inserts — and a paired-cycle read found roughly two-thirds of one 5-minute cycle's images
+    /// were of blocks the PREVIOUS cycle had already imaged. The two settings shrink that from different
+    /// ends: <c>wal_compression</c> shrinks every image, <c>FPI_FOR_HINT</c> included, regardless of the
+    /// interval; <c>checkpoint_timeout</c> stops re-imaging the same hot page three times an hour instead of
+    /// once.
+    ///
+    /// <para><b><c>lz4</c>, not <c>zstd</c> or <c>pglz</c>.</b> <c>default_toast_compression = lz4</c> (v1)
+    /// already proves lz4 ships in the bundled runtime; it costs less CPU than zstd for a few GB/hour of
+    /// image data, the same trade the TOAST setting already made.</para>
+    ///
+    /// <para><b>#3892 declined 900s once, on different ground, and this does not reopen that question.</b>
+    /// That issue measured per-checkpoint fsync time — dirtied-file COUNT, not WAL bytes — found it flat, and
+    /// noted a longer interval makes each checkpoint's own file count larger. This issue is about WAL volume:
+    /// fewer page images and fewer rewrites of the same hot pages. #3892's own reopen bar (<i>"per-checkpoint
+    /// p50/p90 climbs for several consecutive days, or reads start failing inside checkpoint windows"</i>) is
+    /// what an install of this block should still watch, since the longer interval is the one lever both
+    /// issues share.</para>
+    ///
+    /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
+    /// by free disk, and that bound stays the size-based checkpoint trigger it was built to be. At one
+    /// measured store's rate (about 3.7 GB of WAL per 15 minutes), the 16 GB ceiling rung's size trigger —
+    /// roughly <c>max_wal_size / (1 + checkpoint_completion_target)</c>, about 8.4 GB at the 0.9 completion
+    /// target PostgreSQL defaults to on 14+ — sits above 15 minutes of WAL, so the time trigger this block
+    /// sets is the one that fires. On a store with less free disk the smaller rung's size trigger fires
+    /// first regardless of this block; that is v12's disk guard doing its job, not a gap this one should
+    /// fight.</para>
+    ///
+    /// <para><b>Field note.</b> The heaviest measured sample followed a restart: most of its images were
+    /// <c>FPI_FOR_HINT</c> from the first cycle's reads setting hint bits on pages nothing had touched since
+    /// the previous shutdown. <c>wal_compression</c> compresses those images too, so the heaviest hour a
+    /// store sees after a restart is also where it pays off most.</para>
+    ///
+    /// <para>Both settings are SIGHUP-context, and this append runs before <c>pg_ctl start</c>, so a
+    /// service-owned start applies them on the very start that writes the block — the v9-v11 story. Managed
+    /// stores only; a bring-your-own store keeps whatever <c>wal_compression</c>/<c>checkpoint_timeout</c>
+    /// its owner set. A later change to either value needs a NEW marker (the v11/v14 precedent): this block
+    /// heals by its marker's absence, so an edited value in an already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV15 = "# Managed by PerformanceMonitor Darling (v15 WAL compression and checkpoint interval) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -506,6 +551,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
+        ConfMarkerV15,
     ];
 
     /// <summary>
@@ -2094,6 +2140,24 @@ public sealed class DarlingManagedPostgres
         }
     }
 
+    /* ===================== v15 WAL compression and checkpoint interval (#4246) ===================== */
+
+    /// <summary>
+    /// The v15 block: <c>wal_compression = lz4</c> and <c>checkpoint_timeout = 15min</c>. See
+    /// <see cref="ConfMarkerV15"/> for the measurement, why lz4, why this does not reopen #3892, and why it
+    /// deliberately does not touch <c>max_wal_size</c>. Both settings are SIGHUP-context and this carries no
+    /// fingerprint or stamp line, so the v8 and v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildWalVolumeConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV15).Append('\n');
+        builder.Append("wal_compression = lz4\n");
+        builder.Append("checkpoint_timeout = 15min\n");
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
@@ -3133,6 +3197,18 @@ public sealed class DarlingManagedPostgres
         {
             File.AppendAllText(confPath, BuildLegacyMaintenanceWorkMemCapConfAppend());
             LogLegacyMaintenanceWorkMemCap(v14OverLimit);
+        }
+
+        /* v15 (#4246): keyed on its marker's absence like v9-v11 and v13, and placed last so it stays the
+           block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. Both settings are SIGHUP-context and appended before pg_ctl start,
+           so a service-owned start applies them on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV15, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildWalVolumeConfAppend());
+            _logger.LogInformation(
+                "Appended v15 WAL compression and checkpoint interval to postgresql.conf (wal_compression = lz4, checkpoint_timeout = 15min): most of this store's WAL is full-page images, and both settings cut that -- compression shrinks every image, and the longer interval stops re-imaging the same hot page several times an hour. Watch checkpoint sync p50/p90 and read failures inside checkpoint windows after this change (#3892's reopen bar). SIGHUP-context, so effective on this start when the service owns it.");
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);
