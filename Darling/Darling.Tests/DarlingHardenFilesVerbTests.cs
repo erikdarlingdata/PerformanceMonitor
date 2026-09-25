@@ -115,6 +115,10 @@ public class DarlingHardenFilesVerbTests
         /* The live config is the ONLY target the interactive operator keeps read on: the Viewer and the CLI
            verbs run as that operator and must still read it. Nothing reads a backup (#1769). */
         Assert.Contains("AllowInteractive: true", body, StringComparison.Ordinal);
+
+        /* #4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf is a target too, since
+           File.Copy does not ACL it on its own. */
+        Assert.Contains("DarlingStoreUpgrade.PreUpgradeAutoConfFileName", body, StringComparison.Ordinal);
     }
 
     /// <summary>
