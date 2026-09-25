@@ -224,15 +224,16 @@ SELECT
     transaction_isolation_level,
     dop,
     parallel_worker_count,
-    query_plan,
-    live_query_plan,
+    query_plan IS NOT NULL AS has_query_plan,
+    live_query_plan IS NOT NULL AS has_live_query_plan,
     collection_time,
     login_name,
     host_name,
     program_name,
     open_transaction_count,
     percent_complete,
-    query_hash
+    query_hash,
+    request_id
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -270,19 +271,100 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
                 TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
                 Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
+                HasQueryPlan = reader.IsDBNull(18) ? false : reader.GetBoolean(18),
+                HasLiveQueryPlan = reader.IsDBNull(19) ? false : reader.GetBoolean(19),
                 CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
                 LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
                 HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
                 ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
                 OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
                 PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25)),
-                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26)
+                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26),
+                RequestId = reader.IsDBNull(27) ? 0 : reader.GetInt32(27)
             });
         }
 
         return items;
+    }
+
+    /// <summary>Selects <c>query_plan</c> on <c>false</c>, <c>live_query_plan</c> on <c>true</c> — SQL can't
+    /// parameterize a column name, so <see cref="GetSnapshotPlanTextAsync"/> picks the text at call time.</summary>
+    private static string SnapshotPlanColumn(bool live) => live ? "live_query_plan" : "query_plan";
+
+    /// <summary>
+    /// On-demand fetch of ONE snapshot's plan XML, by its capture key (#4239). The bulk reads
+    /// (<see cref="GetLatestQuerySnapshotsAsync"/>, <see cref="GetQuerySnapshotsByWaitTypeAsync"/>,
+    /// <see cref="GetAllQuerySnapshotsInRangeAsync"/>) stopped selecting this payload for every row in the
+    /// window — on a busy server it was megabytes of plan XML for grid rows nobody clicks. The plan buttons
+    /// call this instead, scoped to the one row the user picked.
+    ///
+    /// <para>Reads <c>v_query_snapshots</c> — the SAME archive-aware view the three bulk reads use — not the
+    /// bare <c>query_snapshots</c> table. A snapshot old enough to have been archived to parquet is still
+    /// shown by those reads (and its plan is still in the parquet copy), so a fetcher scoped to the live
+    /// table alone would silently regress every archived row to "no plan available".</para>
+    ///
+    /// <para><c>(server_id, collection_time, session_id, request_id)</c> is unique by construction — the SQL
+    /// Server collector query is provably unique per (session_id, request_id) per collection tick (the only
+    /// join that could fan out is wrapped in an aggregate with no GROUP BY, so it always collapses to one
+    /// row: see QuerySnapshotsCollector.cs). It is NOT enforced by a constraint — query_snapshots is
+    /// bulk-appended with no PK, same as its Postgres counterpart — so LIMIT 1 is a defensive guard against a
+    /// freak duplicate, not a real expectation. <c>request_id</c> reads back NULL for rows collected before
+    /// schema v34 added the column (DuckDbInitializer ~1066) or archived before that migration, via parquet's
+    /// union-by-name; every reader above already defaults a null request_id to 0, so the match does too.</para>
+    ///
+    /// <para>The codebase's usual tie-break idiom for "no PK, need one deterministic row"
+    /// (<c>QueryStoreSliceRepairService</c>'s <c>ORDER BY ... , rowid DESC</c>) does not reach here:
+    /// <c>v_query_snapshots</c> is a UNION ALL of a live table and <c>read_parquet()</c> (query_snapshots
+    /// carries no entry in <c>ArchiveViewDedupKeys</c>, so there is no QUALIFY dedup either), and DuckDB does
+    /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
+    /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
+    /// either — there is nothing left to order by beyond the WHERE match itself, so <c>LIMIT 1</c> alone is
+    /// the guard: on the freak duplicate this idiom exists for, it returns A matching row, not a chosen one.</para>
+    /// </summary>
+    public async Task<string?> GetSnapshotPlanTextAsync(int serverId, DateTime collectionTime, int sessionId, int requestId, bool live)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var column = SnapshotPlanColumn(live);
+
+        command.CommandText = $@"
+SELECT {column}
+FROM v_query_snapshots
+WHERE server_id = $1
+AND   collection_time = $2
+AND   session_id = $3
+AND   COALESCE(request_id, 0) = $4
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+        command.Parameters.Add(new DuckDBParameter { Value = sessionId });
+        command.Parameters.Add(new DuckDBParameter { Value = requestId });
+
+        var result = await command.ExecuteScalarAsync();
+        return result is null or DBNull ? null : (string)result;
+    }
+
+    /// <summary>Estimated plan for a grid row: the in-row <see cref="QuerySnapshotRow.QueryPlan"/> when a
+    /// caller (the Live Snapshot handler) already populated it, else a store fetch gated on
+    /// <see cref="QuerySnapshotRow.HasQueryPlan"/> so a row that never had a plan never reaches the store.</summary>
+    public Task<string?> ResolveSnapshotEstimatedPlanAsync(int serverId, QuerySnapshotRow row)
+    {
+        if (row.QueryPlan != null)
+            return Task.FromResult<string?>(row.QueryPlan);
+        if (!row.HasQueryPlan)
+            return Task.FromResult<string?>(null);
+        return GetSnapshotPlanTextAsync(serverId, row.CollectionTime, row.SessionId, row.RequestId, live: false);
+    }
+
+    /// <summary>The actual/live-captured plan counterpart of <see cref="ResolveSnapshotEstimatedPlanAsync"/>.</summary>
+    public Task<string?> ResolveSnapshotLivePlanAsync(int serverId, QuerySnapshotRow row)
+    {
+        if (row.LiveQueryPlan != null)
+            return Task.FromResult<string?>(row.LiveQueryPlan);
+        if (!row.HasLiveQueryPlan)
+            return Task.FromResult<string?>(null);
+        return GetSnapshotPlanTextAsync(serverId, row.CollectionTime, row.SessionId, row.RequestId, live: true);
     }
 
     /// <summary>
@@ -1349,8 +1431,20 @@ public class QuerySnapshotRow
     /// page is drawn from (it may still be past the page — the tool checks that). MCP read only.</summary>
     public bool BlockerInPopulation { get; set; }
 
-    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
-    public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
+    /// <summary>
+    /// Whether a plan exists for this capture (#4239). Independent of <see cref="QueryPlan"/>: the three
+    /// snapshot reads (<see cref="LocalDataService.GetLatestQuerySnapshotsAsync"/>,
+    /// <see cref="LocalDataService.GetQuerySnapshotsByWaitTypeAsync"/>,
+    /// <see cref="LocalDataService.GetAllQuerySnapshotsInRangeAsync"/>) set this from
+    /// <c>query_plan IS NOT NULL</c> without selecting the payload, leaving <see cref="QueryPlan"/> null on
+    /// the row; the plan buttons fetch it on click via <see cref="LocalDataService.ResolveSnapshotEstimatedPlanAsync"/>.
+    /// The one path that still builds a row with the payload already in hand — <c>ServerTab.xaml.cs</c>'s
+    /// Live Snapshot handler, whose rows are never in the store — sets this explicitly alongside
+    /// <see cref="QueryPlan"/> instead of relying on a read.
+    /// </summary>
+    public bool HasQueryPlan { get; set; }
+    /// <summary>See <see cref="HasQueryPlan"/> — the same independence, for <see cref="LiveQueryPlan"/>.</summary>
+    public bool HasLiveQueryPlan { get; set; }
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
 
     // Sessions this session is blocking at the same collection_time (SQL-derived in the
