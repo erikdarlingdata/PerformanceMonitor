@@ -31,7 +31,7 @@
  * would discard an in-progress edit — while the sidebar (server list + view list) still refreshes.
  */
 
-import { el, mount, apiGet, apiGetFleet, bandClass, localTime } from "./util.js";
+import { el, mount, apiGet, apiGetFleet, bandClass, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
 import { navigateServer } from "./panels.js";
 import { renderFleet } from "./pages/fleet.js";
 import { renderAg } from "./pages/ag.js";
@@ -110,10 +110,21 @@ function serverRoute(rest) {
   };
 }
 
-function route() {
+/**
+ * @param {object} [opts] — forwarded to renderServer; `{ poll: true }` marks this call as the 60s poll's own
+ * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Not meaningful
+ * to any other page today, so every other renderX() call below ignores it.
+ */
+function route(opts) {
+  /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
+     see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
+     back button), and re-dispatching to a page here would just start a fresh round of reads that fail the
+     same way; short-circuiting is simpler than unwiring every listener that can reach route(). */
+  if (isSessionExpired()) return;
+
   const r = currentRoute();
   setActiveNav(r);
-  if (r.name === "server") renderServer(main, r.param, r.tab);
+  if (r.name === "server") renderServer(main, r.param, r.tab, opts);
   else if (r.name === "ag") renderAg(main);
   else if (r.name === "sweeps") renderSweeps(main);
   else if (r.name === "alerts") renderAlerts(main);
@@ -209,7 +220,8 @@ async function refreshAgNav() {
   const link = document.querySelector('.nav a[data-route="ag"]');
   if (!link) return;
 
-  const res = await apiGet("/api/ag");
+  // #4189: a count-only read, not the full topology /api/ag builds — this probe only ever checks the one field.
+  const res = await apiGet("/api/ag/count");
   if (res.kind !== "data" || !res.data || !res.data.availability_group_count) return;
 
   agNavRevealed = true;
@@ -286,17 +298,46 @@ function updateStatusBar(d) {
 /* ─────────────────────────── refresh loop ─────────────────────────── */
 
 function refresh() {
+  if (isSessionExpired()) return;
+
+  /* Poll-clobber guard (#1563, extended #3285): never re-render an editor (dashboard/notebook composer OR the
+     alert-rule editor) from the background poll — a rebuild would discard an in-progress edit. hashchange still
+     routes to it normally; only this periodic refresh skips it.
+     Overlap guard (#4191): also skip re-rendering the route while its OWN last render's reads are still
+     outstanding — evaluated here, before refreshSidebar/refreshViewList/refreshAgNav below start any of THIS
+     tick's reads, so it reflects only what the PREVIOUS render left running. A poll landing mid-load would
+     otherwise fire every one of the page's panel reads a second time on top of the first, which is exactly what
+     doubled audit_config on the Config tab. The sidebar/view-list/AG-nav probe keep refreshing every tick
+     regardless — only the heavier per-page render waits for the last one to settle. */
+  const routeName = currentRoute().name;
+  const skipRoute = routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
+    || hasInFlightReads();
+
   /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
      second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
   refreshSidebar();
   refreshViewList();
   refreshAgNav();
-  /* Poll-clobber guard (#1563, extended #3285): never re-render an editor (dashboard/notebook composer OR the
-     alert-rule editor) from the background poll — a rebuild would discard an in-progress edit. hashchange still
-     routes to it normally; only this periodic refresh skips it. */
-  const routeName = currentRoute().name;
-  if (routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor") return;
-  route();
+  if (skipRoute) return;
+  route({ poll: true });
+}
+
+/* The session-expired takeover (#4187): the FIRST read anywhere on the page to report the session is gone (an
+   expired/rotated session cookie, no token — see util.js's classifyResponse) replaces the whole shell with a
+   sign-in prompt, once, instead of leaving every open panel to separately render its own "signed out" guess
+   that looks like an unrelated failure. The sign-in link navigates to THIS BROWSER's own current location
+   (pathname + search + hash) — never the server's 401 body value — so a future proxy or misconfiguration
+   cannot inject an off-site or javascript: URL. Reloading the current URL rather than "/" (#4221) means an
+   alert link's #/triage route survives a stale-session sign-in the same way the login page's own return
+   value does: the hash never left the address bar, so there is nothing to lose. */
+function showSignedOutState(message, _login) {
+  mount(serverList, []);
+  mount(viewList, []);
+  mount(statusbar, el("span", { class: "sb-item muted", text: "Signed out" }));
+  mount(main, el("div", { class: "strip error", role: "alert" }, [
+    (message || "Your session is no longer valid.") + " ",
+    el("a", { href: location.pathname + location.search + location.hash, text: "Sign in again" }),
+  ]));
 }
 
 function start() {
@@ -307,6 +348,7 @@ function start() {
   setInterval(() => {
     if (!document.hidden) refresh();
   }, POLL_MS);
+  onSessionExpired(showSignedOutState);
 
   refreshSidebar();
   refreshViewList();

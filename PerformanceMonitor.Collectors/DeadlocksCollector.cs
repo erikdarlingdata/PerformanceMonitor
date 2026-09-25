@@ -70,25 +70,54 @@ public sealed class DeadlocksCollector : CollectorDefinitionBase<DeadlocksCollec
     private const string AzureQueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
+/* #4200: @execution_count is this cycle's read of the ring-buffer target's own delivered-event
+   counter; @shred_needed says whether the cast+shred below runs. Gates only this database-scoped
+   ring-buffer session -- the telemetry-blob UNION branch further down has no execution_count of
+   its own and always runs. Both ride the trailing result set at the very end so ReadAsync can
+   persist @execution_count as next cycle's @last_execution_count regardless of which branch ran. */
+DECLARE
+    @execution_count bigint,
+    @shred_needed bit;
+
 DECLARE
     @PerformanceMonitor_Deadlock TABLE
 (
     ring_buffer xml NOT NULL
 );
 
-INSERT
-    @PerformanceMonitor_Deadlock
-(
-    ring_buffer
-)
-SELECT /* PerformanceMonitorLite */
-    ring_xml = TRY_CAST(xet.target_data AS xml)
+SELECT
+    @execution_count = xet.execution_count
 FROM sys.dm_xe_database_session_targets AS xet
 JOIN sys.dm_xe_database_sessions AS xes
   ON xes.address = xet.event_session_address
 WHERE xes.name = N'{XeSessionName}'
 AND   xet.target_name = N'ring_buffer'
 OPTION(RECOMPILE);
+
+SET @shred_needed =
+    CASE
+        WHEN @execution_count IS NULL THEN 1
+        WHEN @last_execution_count IS NULL THEN 1
+        WHEN @execution_count <> @last_execution_count THEN 1
+        ELSE 0
+    END;
+
+IF @shred_needed = 1
+BEGIN
+    INSERT
+        @PerformanceMonitor_Deadlock
+    (
+        ring_buffer
+    )
+    SELECT /* PerformanceMonitorLite */
+        ring_xml = TRY_CAST(xet.target_data AS xml)
+    FROM sys.dm_xe_database_session_targets AS xet
+    JOIN sys.dm_xe_database_sessions AS xes
+      ON xes.address = xet.event_session_address
+    WHERE xes.name = N'{XeSessionName}'
+    AND   xet.target_name = N'ring_buffer'
+    OPTION(RECOMPILE);
+END;
 
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -135,12 +164,23 @@ FROM
 ) AS tel
 WHERE tel.evt IS NOT NULL
 AND   tel.evt.value('(/event/@timestamp)[1]', 'datetime2') > @cutoff_time
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* #4200: the gate's own result, read by ReadAsync (NextResultAsync) right after the payload rows
+   above -- always one row, whichever branch the IF took. */
+SELECT
+    execution_count = @execution_count,
+    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;";
 
     /* On-prem / Azure MI / AWS RDS: read from ring_buffer (server-scoped session)
        Use .query() to get XML with structure intact, then CONVERT to nvarchar(max) */
     private const string ServerScopedQueryText = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+/* #4200: see AzureQueryText's twin comment -- same gate, server-scoped session. */
+DECLARE
+    @execution_count bigint,
+    @shred_needed bit;
 
 DECLARE
     @PerformanceMonitor_Deadlock TABLE
@@ -148,19 +188,39 @@ DECLARE
     ring_buffer xml NOT NULL
 );
 
-INSERT
-    @PerformanceMonitor_Deadlock
-(
-    ring_buffer
-)
-SELECT /* PerformanceMonitorLite */
-    ring_xml = TRY_CAST(xet.target_data AS xml)
+SELECT
+    @execution_count = xet.execution_count
 FROM sys.dm_xe_session_targets AS xet
 JOIN sys.dm_xe_sessions AS xes
   ON xes.address = xet.event_session_address
 WHERE xes.name = N'{XeSessionName}'
 AND   xet.target_name = N'ring_buffer'
 OPTION(RECOMPILE);
+
+SET @shred_needed =
+    CASE
+        WHEN @execution_count IS NULL THEN 1
+        WHEN @last_execution_count IS NULL THEN 1
+        WHEN @execution_count <> @last_execution_count THEN 1
+        ELSE 0
+    END;
+
+IF @shred_needed = 1
+BEGIN
+    INSERT
+        @PerformanceMonitor_Deadlock
+    (
+        ring_buffer
+    )
+    SELECT /* PerformanceMonitorLite */
+        ring_xml = TRY_CAST(xet.target_data AS xml)
+    FROM sys.dm_xe_session_targets AS xet
+    JOIN sys.dm_xe_sessions AS xes
+      ON xes.address = xet.event_session_address
+    WHERE xes.name = N'{XeSessionName}'
+    AND   xet.target_name = N'ring_buffer'
+    OPTION(RECOMPILE);
+END;
 
 SELECT
     deadlock_time = evt.value('(@timestamp)[1]', 'datetime2'),
@@ -178,7 +238,13 @@ FROM
 ) AS rb
 CROSS APPLY rb.ring_buffer.nodes('RingBufferTarget/event[@name=""xml_deadlock_report""]') AS q(evt)/*DL_PLAN_APPLY*/
 WHERE evt.value('(@timestamp)[1]', 'datetime2') > @cutoff_time
-OPTION(RECOMPILE);";
+OPTION(RECOMPILE);
+
+/* #4200: the gate's own result, read by ReadAsync (NextResultAsync) right after the payload rows
+   above -- always one row, whichever branch the IF took. */
+SELECT
+    execution_count = @execution_count,
+    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;";
 
     /* Best-effort victim plan capture (CapturePlanXml only — Darling). Resolve the victim's deadlocked
        statement plan from the live plan cache by its executionStack frame's sql_handle + statement
@@ -271,6 +337,15 @@ OUTER APPLY
     /// </summary>
     public override string? PerDatabaseWatermarkColumn => "database_name";
 
+    /// <summary>
+    /// The dedicated session's own delivered-event counter (#4200), carried per server or, on Azure SQL
+    /// DB, per database via <see cref="XeShredGate.KeyFor"/>. See <see cref="XeShredGate"/> for why the
+    /// counter is exact and which shapes always shred. Does not gate the Azure telemetry-blob branch of
+    /// <see cref="AzureQueryText"/>: that branch reads a durable file-backed store with no execution_count
+    /// of its own, and runs unconditionally exactly as before.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey };
+
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         var text = context.Target.IsAzureSqlDb ? AzureQueryText : ServerScopedQueryText;
@@ -285,9 +360,15 @@ OUTER APPLY
            10-minute window on first run. */
         var cutoffTime = context.Watermark ?? context.CollectionTime.AddMinutes(-10);
 
+        /* #4200: the prior cycle's own read of the target's execution_count, per server or (Azure SQL
+           DB) per database -- null on a first run, a restarted host, or a store that lost the row, all
+           of which XeShredGate.ShouldShred treats as "shred". */
+        var lastExecutionCount = XeShredGate.ReadLast(context.State, context.CurrentDatabaseName);
+
         return new CollectorQuery(text, new List<CollectorParameter>
         {
             new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
+            new("@last_execution_count", lastExecutionCount, CollectorParameterType.BigInt),
         });
     }
 
@@ -304,6 +385,9 @@ OUTER APPLY
            NULL when the graph carries no currentdbname). Keys the Azure per-database watermark. */
         new CollectorColumn("database_name", CollectorColumnType.Varchar),
     };
+
+    /// <summary>1 when this cycle's gate (#4200) skipped the cast+shred, else 0.</summary>
+    public const string ShredGatedMeasurement = "shred_gated";
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
@@ -347,6 +431,20 @@ OUTER APPLY
                    a database-scoped session), server-scoped falls back to the victim's currentdbname. */
                 DatabaseName = sourceDatabaseName ?? context.CurrentDatabaseName ?? victim.DatabaseName,
             });
+        }
+
+        /* #4200: the gate's own trailing result set -- always one row, whichever branch BuildQuery's
+           IF took, so PendingState carries forward exactly what THIS cycle observed regardless of
+           whether it shredded. Read positionally, like the payload rows above. */
+        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0))
+            {
+                context.PendingState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                    XeShredGate.ToStateValue(reader.GetInt64(0));
+            }
+
+            context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
         }
 
         return rows;

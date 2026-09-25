@@ -324,10 +324,9 @@ public partial class FinOpsTab : UserControl
 
             if (data != null)
             {
-                topTotal = await Task.Run(() => _dataService.GetTopResourceConsumersByTotalAsync(serverId));
-                if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
-
-                topAvg = await Task.Run(() => _dataService.GetTopResourceConsumersByAvgAsync(serverId));
+                var (byTotal, byAvg) = await Task.Run(() => _dataService.GetTopResourceConsumersAsync(serverId));
+                topTotal = byTotal;
+                topAvg = byAvg;
                 if (_loads.Superseded(nameof(LoadUtilizationAsync), gen)) return;
 
                 dbSizeSummary = await Task.Run(() => _dataService.GetDatabaseSizeSummaryAsync(serverId));
@@ -683,6 +682,23 @@ public partial class FinOpsTab : UserControl
         {
             var servers = _serverManager.GetAllServers();
 
+            /* #4227: ONE fleet round trip for every server's DuckDB-collected metrics, not one per server
+               inside the fan-out below — that fan-out still runs per server for the LIVE query (step 1), which
+               is a real network call to each monitored server and stays that way; only the DuckDB overlay
+               (step 2) used to also run once per server against the SAME local file. An empty/uninitialized
+               store still returns an empty dictionary rather than throwing, so this keeps the old "metrics may
+               not exist yet" tolerance without a per-server try/catch around it. */
+            Dictionary<int, LocalDataService.ServerMetricsRow> fleetMetrics;
+            try
+            {
+                fleetMetrics = await Task.Run(() => _dataService!.GetServerMetricsAsync());
+            }
+            catch
+            {
+                // DuckDB metrics may not exist yet — that's OK
+                fleetMetrics = new Dictionary<int, LocalDataService.ServerMetricsRow>();
+            }
+
             var tasks = servers.Select(async server =>
             {
                 try
@@ -694,19 +710,14 @@ public partial class FinOpsTab : UserControl
                     item.ServerName = server.DisplayName;
                     item.MonthlyCost = server.MonthlyCostUsd;
 
-                    // Step 2: Get collected metrics from DuckDB
-                    try
+                    // Step 2: Overlay this server's collected metrics from the fleet-wide DuckDB read above
+                    var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+                    if (fleetMetrics.TryGetValue(serverId, out var row))
                     {
-                        var serverId = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
-                        var (avgCpu, storageGb, idleDbs, status) = await Task.Run(() => _dataService!.GetServerMetricsAsync(serverId));
-                        if (avgCpu.HasValue) item.AvgCpuPct = avgCpu;
-                        if (storageGb.HasValue) item.StorageTotalGb = storageGb;
-                        if (idleDbs.HasValue) item.IdleDbCount = idleDbs;
-                        if (status != null) item.ProvisioningStatus = status;
-                    }
-                    catch
-                    {
-                        // DuckDB metrics may not exist yet — that's OK
+                        if (row.AvgCpuPct.HasValue) item.AvgCpuPct = row.AvgCpuPct;
+                        if (row.StorageTotalGb.HasValue) item.StorageTotalGb = row.StorageTotalGb;
+                        if (row.IdleDbCount.HasValue) item.IdleDbCount = row.IdleDbCount;
+                        if (row.ProvisioningStatus != null) item.ProvisioningStatus = row.ProvisioningStatus;
                     }
 
                     return item;

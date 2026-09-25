@@ -133,10 +133,12 @@ public sealed class ViewerCollectionCaveatsGateTests
         var collectionCaveatsOrdinal = Array.FindIndex(method.GetParameters(), p => p.Name == "hasCollectionCaveats");
         Assert.True(collectionCaveatsOrdinal >= 0, "hasCollectionCaveats is gone from the signature");
 
-        /* Every sentinel BELOW hasCollectionCaveats true, it and everything from it up false: a store that
-           has not reached V141 also has not reached whatever landed above it. Found BY NAME, not
-           `arity - 1` -- V143 (#3953) appended its own parameter after this one, so the last ordinal is no
-           longer V141's, and leaving it true would let the V143 arm answer 143 regardless of V141. */
+        /* Every sentinel through V140 true, the V141 one (ordinal 116) and everything after it (V142's
+           ordinal 117, and any later one) false: the gate must not report 141 for a store that lacks the
+           table GetCollectionCaveatsAsync depends on. Pinned to ordinal 116 rather than "arity - 1" since
+           V142 (#4196) appended its own parameter after V141's — "the last parameter" stopped being V141's
+           sentinel the moment it did. */
+        const int collectionCaveatsOrdinal = 116;
         var throughV140 = Enumerable.Range(0, arity).Select(i => (object)(i < collectionCaveatsOrdinal)).ToArray();
         var result = (int)method.Invoke(null, throughV140)!;
         Assert.True(result < 141, $"expected below 141 with the V141 sentinel absent, got {result}");

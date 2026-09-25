@@ -577,13 +577,18 @@ public static class DarlingRetention
                     var dimDeleted = await PurgeOneAsync(
                         postgres,
                         dimTable,
+                        /* Illustrative at the CEILING cap when isPlanDim — PurgeOneAsync rebuilds this
+                           same statement per attempt at whatever cap #4130's adaptive sizing has chosen
+                           once adaptiveRowCapTimeColumn is set below, so this exact string is never the
+                           one executed for that table. */
                         isPlanDim
                             ? RowCappedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn, PlanDimDeleteRowCap)
                             : TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn),
                         ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff),
                         logger,
                         cancellationToken,
-                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1);
+                        batchSize: isPlanDim ? PlanDimDeleteRowCap : 1,
+                        adaptiveRowCapTimeColumn: isPlanDim ? PayloadDimensions.LastSeenColumn : null);
                     if (dimDeleted is not null)
                     {
                         tablesPurged++;
@@ -932,12 +937,20 @@ public static class DarlingRetention
     }
 
     /// <summary>
-    /// Rows per statement for the plan dimension's purge (#2386). Measured on the use2 store, whose
-    /// <c>query_plan_dim</c> is 133 GB over 12.4 M rows: deletes run at <b>~1,000 rows/sec</b>, linear
-    /// from 10 k to 50 k, worst observed 834 rows/sec. 50 k therefore costs ~50 s against
-    /// <see cref="DeleteTimeoutSeconds"/>'s 300 s — about 5x margin, which is the point: a loaded box is
-    /// slower than the idle one this was measured on, and 100 k (~97 s nominal) would sit at ~291 s under
-    /// a 3x slowdown, i.e. against the wall.
+    /// The CEILING on rows per statement for the plan dimension's purge (#2386, reframed by #4130) — not a
+    /// fixed batch size any more. <see cref="NextPlanDimBatchCap"/> adapts the actual cap toward
+    /// <see cref="PlanDimBatchTargetSeconds"/> between <see cref="PlanDimDeleteRowFloor"/> and this value,
+    /// every run starting back here.
+    ///
+    /// <para><b>Why a constant ceiling wasn't enough (#4130).</b> Originally measured on the use2 store
+    /// (133 GB / 12.4 M rows) at ~1,000 rows/sec, worst observed 834 rows/sec — 50 k costing ~50 s against
+    /// the 300 s timeout, "about 5x margin". A large field store's first-start purge instead averaged
+    /// 152.7 s per batch (max 195.8 s, ~330 rows/sec) — a ~2x margin, not 5x — and its sixth batch passed
+    /// 300 s, was cancelled by the client, and failed the whole table for the day. That store's
+    /// <c>query_plan_dim</c> is 67 GB, 63 GB of it TOAST, with autovacuum debt on the TOAST relation at the
+    /// time. A different field store, by contrast, averaged 30.7 s per 50 k batch (max 43.2 s) — comfortably
+    /// under target, needing no shrink at all. The ceiling stays sized for that fast case; the adaptive
+    /// floor below protects the slow one.</para>
     /// </summary>
     internal const int PlanDimDeleteRowCap = 50_000;
 
@@ -1183,12 +1196,20 @@ public static class DarlingRetention
     }
 
     /// <summary>
-    /// One table's batched DELETE: re-executes <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/>
-    /// statement clearing the oldest one-day slice of expired rows) until a slice deletes nothing — i.e. the
-    /// table is drained. Returns the total rows deleted across all slices, or null when it failed (warned,
-    /// sweep continues). Slicing bounds lock/WAL/dead-tuple growth on a large first purge; a small
-    /// steady-state purge finishes in one slice. The connection and command (with its single bound cutoff
-    /// parameter) are reused across the loop.
+    /// One table's batched DELETE, re-executed until a batch deletes nothing — i.e. the table is drained.
+    /// Returns the total rows deleted across all batches, or null when it failed (warned, sweep continues).
+    /// Batching bounds lock/WAL/dead-tuple growth on a large first purge; a small steady-state purge
+    /// finishes in one batch.
+    ///
+    /// <para>Two shapes, chosen by <paramref name="adaptiveRowCapTimeColumn"/>. Null — every table but the
+    /// plan dimension — runs <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/> or
+    /// single-shot statement) unchanged, with the connection and command — a single bound cutoff parameter
+    /// — reused across the whole drain. Set (the plan dimension, #4130) ignores <paramref name="deleteSql"/>
+    /// and rebuilds each batch from <see cref="RowCappedDeleteSql"/> at whatever cap
+    /// <see cref="NextPlanDimBatchCap"/> has chosen, with <see cref="RunPlanDimBatchAsync"/> retrying a
+    /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
+    /// exists for was one 50k-row batch passing the 300 s command timeout under first-start load, on a
+    /// store whose steady-state margin was ~2x rather than the cap's designed 5x.</para>
     /// </summary>
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
@@ -1197,7 +1218,8 @@ public static class DarlingRetention
         DateTime cutoff,
         ILogger? logger,
         CancellationToken cancellationToken,
-        int batchSize = 1)
+        int batchSize = 1,
+        string? adaptiveRowCapTimeColumn = null)
     {
         /* Accumulated OUTSIDE the try so the catch can report progress (#2386). Each statement
            autocommits, so a timeout on the fifth batch does not undo the first four — but the old
@@ -1223,9 +1245,6 @@ public static class DarlingRetention
                 await lift.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-            command.Parameters.AddWithValue(cutoff);
-
             /* batchSize 1 for the TIME-SLICED statement: it has no row cap, so "fewer than the cap"
                degenerates to "deleted zero rows" — a slice that clears anything means older slices may
                remain. A ROW-capped caller passes its cap instead, which restores the drain loop's real
@@ -1233,16 +1252,56 @@ public static class DarlingRetention
                that IS the whole purge — passes SingleShotStatement, under which no real row count can
                reach the cap and the one execution is terminal. */
             var batches = 0;
-            var drained = await DrainBatchesAsync(
-                async ct =>
-                {
-                    batches++;
-                    var rows = await command.ExecuteNonQueryAsync(ct);
-                    deleted += rows;
-                    return rows;
-                },
-                batchSize,
-                cancellationToken);
+            int drained;
+
+            if (adaptiveRowCapTimeColumn is null)
+            {
+                using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+                command.Parameters.AddWithValue(cutoff);
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        batches++;
+                        var rows = await command.ExecuteNonQueryAsync(ct);
+                        deleted += rows;
+                        return (rows, batchSize);
+                    },
+                    cancellationToken);
+            }
+            else
+            {
+                /* batchSize doubles as the CEILING here — the call site passes PlanDimDeleteRowCap, same
+                   as always. Each run starts back at the ceiling (#4130): throughput is tonight's load,
+                   not a stored fact about the table, so nothing carries a shrunk cap into tomorrow. */
+                var cap = batchSize;
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        var (rows, usedCap, elapsed) = await RunPlanDimBatchAsync(
+                            async (attemptCap, attemptCt) =>
+                            {
+                                batches++;
+                                using var attempt = new NpgsqlCommand(
+                                    RowCappedDeleteSql(tableName, adaptiveRowCapTimeColumn, attemptCap),
+                                    connection)
+                                { CommandTimeout = DeleteTimeoutSeconds };
+                                attempt.Parameters.AddWithValue(cutoff);
+                                var affected = await attempt.ExecuteNonQueryAsync(attemptCt);
+                                deleted += affected;
+                                return affected;
+                            },
+                            cap,
+                            PlanDimDeleteRowFloor,
+                            ct,
+                            logger);
+
+                        cap = NextPlanDimBatchCap(usedCap, elapsed.TotalSeconds, PlanDimDeleteRowFloor, batchSize);
+                        return (rows, usedCap);
+                    },
+                    cancellationToken);
+            }
 
             /* A row-capped drain reports the two facts the sweep summary cannot carry, because both are
                per-table and the summary is fleet-wide.
@@ -1271,37 +1330,179 @@ public static class DarlingRetention
         {
             /* Failure-isolated per table — one stuck DELETE must not stop the sweep. Reports what DID
                land, because those batches are committed and saying otherwise sends an operator looking
-               for a stall that is really a throughput limit. */
+               for a stall that is really a throughput limit. The INNER exception is included (#4130): the
+               field failure this fix exists for logged only the outer "Exception while reading from
+               stream" — Npgsql's wrapper message for every read-side fault alike — which said nothing
+               about which one this was; the inner TimeoutException is what actually names it. */
             logger?.LogWarning(
-                "Retention purge failed for {Table} after removing {Rows} row(s): {Message}",
-                tableName, deleted, ex.Message);
+                "Retention purge failed for {Table} after removing {Rows} row(s): {Failure}",
+                tableName, deleted, DescribePurgeFailure(ex));
             return null;
         }
     }
 
     /// <summary>
-    /// Repeatedly runs <paramref name="executeBatch"/> (one capped batched-DELETE execution, returning its
-    /// rows-affected) and sums the total, stopping when a batch clears fewer than <paramref name="batchSize"/>
-    /// rows — i.e. no expired rows remain and the table is drained. A full-cap batch means there may be more,
-    /// so it goes again; an exact multiple of the cap terminates on the following empty batch. Pure over the
-    /// injected executor so the loop-again + termination is unit-testable without a live store.
+    /// Repeatedly runs <paramref name="executeBatch"/> (one capped batched-DELETE execution, returning both
+    /// its rows-affected AND the cap THAT EXECUTION used) and sums the rows, stopping when a batch clears
+    /// fewer rows than its OWN cap — i.e. no expired rows remain and the table is drained. A full-cap batch
+    /// means there may be more, so it goes again; an exact multiple of the cap terminates on the following
+    /// empty batch.
+    ///
+    /// <para>The cap is read back from each execution rather than fixed once for the whole drain (#4130): the
+    /// plan-dim purge resizes its cap between batches to hold near a time target, so a batch's take can be
+    /// full at a SMALLER cap than the drain started with. Comparing against the starting cap instead would
+    /// stop the drain the moment a batch shrinks — a shrunk batch's full take is, by construction, below the
+    /// original cap even when the table is nowhere near drained. A fixed-size caller (the time-sliced and
+    /// single-shot statements) reports the same cap every time, so this is exactly the old behavior for
+    /// them.</para>
+    ///
+    /// <para>Pure over the injected executor so the loop-again + termination is unit-testable without a live
+    /// store.</para>
     /// </summary>
     internal static async Task<int> DrainBatchesAsync(
-        Func<CancellationToken, Task<int>> executeBatch, int batchSize, CancellationToken cancellationToken)
+        Func<CancellationToken, Task<(int Deleted, int Cap)>> executeBatch, CancellationToken cancellationToken)
     {
         var totalDeleted = 0;
         while (true)
         {
-            var deleted = await executeBatch(cancellationToken);
+            var (deleted, cap) = await executeBatch(cancellationToken);
             totalDeleted += deleted;
 
-            if (deleted < batchSize)
+            if (deleted < cap)
             {
                 break;
             }
         }
 
         return totalDeleted;
+    }
+
+    /// <summary>
+    /// Floor for the plan dimension's adaptive batch cap (#4130): a batch that still times out at this cap
+    /// stops being retried and fails the table for the day, exactly as every batch did before this fix. At
+    /// the slowest rate the field failure measured (~330 rows/sec, see <see cref="PlanDimDeleteRowCap"/>'s
+    /// remarks), 1,000 rows costs ~3 s — nowhere near <see cref="DeleteTimeoutSeconds"/>, so a table that
+    /// cannot clear even the floor inside the timeout has stopped being a batch-sizing problem.
+    /// </summary>
+    internal const int PlanDimDeleteRowFloor = 1_000;
+
+    /// <summary>
+    /// What the plan-dim adaptive sizing (#4130) aims each batch's duration at: comfortably inside
+    /// <see cref="DeleteTimeoutSeconds"/>'s 300 s even under load well past the field failure's ~2x margin,
+    /// and short enough that a timed-out batch's retry-at-half-cap converges in a couple of rounds rather
+    /// than creeping down one shrink at a time.
+    /// </summary>
+    internal const double PlanDimBatchTargetSeconds = 60;
+
+    /// <summary>
+    /// The plan-dim purge's next batch cap (#4130): a batch slower than <see cref="PlanDimBatchTargetSeconds"/>
+    /// halves (floored at <paramref name="floorCap"/>), a batch faster than half that target doubles
+    /// (ceilinged at <paramref name="ceilingCap"/>), and a batch inside that band holds. Nothing persists
+    /// between purge runs — each run starts back at the ceiling — because throughput is a property of
+    /// TONIGHT's load, not a fact about the table: the field failure's store ran at ~2x the cap's designed
+    /// 5x margin under first-start catch-up load, while a store's own steady state (measured: 30.7 s mean at
+    /// the 50k ceiling) never needs to shrink at all. Pure so the shrink/grow/hold arithmetic is testable
+    /// without a timer or a store.
+    /// </summary>
+    internal static int NextPlanDimBatchCap(int lastCap, double lastBatchSeconds, int floorCap, int ceilingCap)
+    {
+        if (lastBatchSeconds > PlanDimBatchTargetSeconds)
+        {
+            return Math.Clamp(lastCap / 2, floorCap, ceilingCap);
+        }
+
+        if (lastBatchSeconds < PlanDimBatchTargetSeconds / 2.0)
+        {
+            return Math.Clamp(lastCap * 2, floorCap, ceilingCap);
+        }
+
+        return Math.Clamp(lastCap, floorCap, ceilingCap);
+    }
+
+    /// <summary>
+    /// True when <paramref name="exception"/> is the plan-dim batch's OWN command timeout expiring, rather
+    /// than a service shutdown's cancel or some unrelated fault (#4130's field failure). The field evidence
+    /// surfaced as a bare <see cref="NpgsqlException"/> ("Exception while reading from stream") wrapping a
+    /// <see cref="TimeoutException"/> — Npgsql giving up on the socket read before the server's cancel
+    /// acknowledgement arrived — which is the first arm. The second covers the race where that
+    /// acknowledgement DOES arrive first: a <see cref="PostgresException"/> at SQLSTATE 57014 ("canceling
+    /// statement due to user request") is what the client's own <see cref="DeleteTimeoutSeconds"/> cancel
+    /// looks like when the server answers before the client's read gives up — but ONLY when
+    /// <paramref name="cancellationToken"/> was not itself the reason: a service shutdown cancels the same
+    /// statement the same way, and that must propagate untouched rather than be read as "shrink and retry",
+    /// or a stop would sit shrinking batches instead of exiting. An
+    /// <see cref="OperationCanceledException"/> is never in this predicate's domain — the caller retries in
+    /// a loop rather than a single catch filter, so the check is repeated here rather than trusted to the
+    /// filter alone.
+    /// </summary>
+    internal static bool IsPlanDimBatchTimeout(Exception exception, CancellationToken cancellationToken)
+    {
+        if (exception is OperationCanceledException)
+        {
+            return false;
+        }
+
+        if (exception is NpgsqlException { InnerException: TimeoutException })
+        {
+            return true;
+        }
+
+        return exception is PostgresException { SqlState: CollectorFaultCancelOrigin.QueryCanceled }
+            && !cancellationToken.IsCancellationRequested;
+    }
+
+    /// <summary>
+    /// Outer type and message, plus the INNER exception's type and message when there is one (#4130). The
+    /// field failure that motivated this logged only "Exception while reading from stream" — Npgsql's own
+    /// wrapper message for a command-timeout read abort — indistinguishable in the log from a dropped
+    /// connection or any other read fault. The inner <see cref="TimeoutException"/> is the one exception in
+    /// the chain that actually says what happened, and the old catch never logged it.
+    /// </summary>
+    private static string DescribePurgeFailure(Exception ex)
+    {
+        var description = $"{ex.GetType().Name}: {ex.Message}";
+        return ex.InnerException is { } inner
+            ? $"{description} ({inner.GetType().Name}: {inner.Message})"
+            : description;
+    }
+
+    /// <summary>
+    /// One plan-dim purge batch (#4130): runs <paramref name="executeAttempt"/> at <paramref name="cap"/>,
+    /// and on a COMMAND TIMEOUT specifically (<see cref="IsPlanDimBatchTimeout"/>) retries the SAME slice at
+    /// half the cap, floored at <paramref name="floorCap"/>, instead of failing the whole table for the day
+    /// the way every batch did before this fix. A batch that still times out AT the floor is not retried
+    /// again — that failure propagates unchanged, and <see cref="PurgeOneAsync"/>'s catch fails the table
+    /// exactly as before.
+    ///
+    /// <para>Returns the cap and elapsed time of the SUCCESSFUL attempt, not the batch's total wall time —
+    /// a timed-out first attempt's ~300 s is dead time at a cap that just proved too large, and folding it
+    /// into the next cap's sizing would shrink the batch a second time for the same slow stretch. The caller
+    /// adapts the NEXT cap from the successful attempt's own throughput only.</para>
+    /// </summary>
+    internal static async Task<(int Deleted, int Cap, TimeSpan Elapsed)> RunPlanDimBatchAsync(
+        Func<int, CancellationToken, Task<int>> executeAttempt,
+        int cap,
+        int floorCap,
+        CancellationToken cancellationToken,
+        ILogger? logger = null)
+    {
+        while (true)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var rows = await executeAttempt(cap, cancellationToken);
+                return (rows, cap, stopwatch.Elapsed);
+            }
+            catch (Exception ex) when (cap > floorCap && IsPlanDimBatchTimeout(ex, cancellationToken))
+            {
+                var retryCap = Math.Max(floorCap, cap / 2);
+                logger?.LogWarning(
+                    "Plan-dim purge batch at cap {Cap} hit the command timeout after {Elapsed:F0}s ({Failure}); retrying at {RetryCap}",
+                    cap, stopwatch.Elapsed.TotalSeconds, DescribePurgeFailure(ex), retryCap);
+                cap = retryCap;
+            }
+        }
     }
 }
 

@@ -124,6 +124,14 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
     public override string? PerDatabaseWatermarkColumn => "database_name";
 
     /// <summary>
+    /// The dedicated session's own delivered-event counter (#4200), carried per server or, on Azure SQL
+    /// DB, per database via <see cref="XeShredGate.KeyFor"/> -- the sibling of <see cref="WatermarkColumn"/>
+    /// for the "did anything arrive?" fact no MAX() over the collected rows can answer when the answer is
+    /// no. See <see cref="XeShredGate"/> for why the counter is exact and which shapes always shred.
+    /// </summary>
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey };
+
+    /// <summary>
     /// This collector's object-resolution cursors return, after the payload, the per-database lookups
     /// they attempted and lost (#1865). Deliberately NOT every failure: the two causes behind an
     /// <c>Unresolved:</c> row want opposite responses, and only one of them is news.
@@ -219,6 +227,14 @@ DECLARE
     @resolve_message nvarchar(4000),
     @resolve_reason nvarchar(64);
 
+/* #4200: the gate. @execution_count is this cycle's read of the target's own delivered-event
+   counter; @shred_needed says whether the cast+shred below runs. Both ride the trailing result
+   set at the very end so ReadAsync can persist @execution_count as next cycle's
+   @last_execution_count regardless of which branch ran. */
+DECLARE
+    @execution_count bigint,
+    @shred_needed bit;
+
 DECLARE
     @PerformanceMonitor_BlockedProcess TABLE
 (
@@ -238,17 +254,39 @@ DECLARE
     error_text nvarchar(4000) NULL
 );
 
-INSERT
-    @PerformanceMonitor_BlockedProcess
-(
-    ring_buffer
-)
-SELECT /* PerformanceMonitorLite */
-    ring_xml = TRY_CAST(xet.target_data AS xml)
+/* #4200: read BEFORE the cast -- no XML materialized, so this costs one integer whether or not
+   anything shreds below. Compared against @last_execution_count (the prior cycle's own read of
+   this same counter, passed in as a parameter): an exact match means nothing has arrived since
+   then, so the cast+shred is skipped. See XeShredGate for why the match test is this narrow. */
+SELECT
+    @execution_count = xet.execution_count
 FROM {ringBufferSource}
 WHERE xes.name = N'{XeSessionName}'
 AND   xet.target_name = N'ring_buffer'
 OPTION(RECOMPILE);
+
+SET @shred_needed =
+    CASE
+        WHEN @execution_count IS NULL THEN 1
+        WHEN @last_execution_count IS NULL THEN 1
+        WHEN @execution_count <> @last_execution_count THEN 1
+        ELSE 0
+    END;
+
+IF @shred_needed = 1
+BEGIN
+    INSERT
+        @PerformanceMonitor_BlockedProcess
+    (
+        ring_buffer
+    )
+    SELECT /* PerformanceMonitorLite */
+        ring_xml = TRY_CAST(xet.target_data AS xml)
+    FROM {ringBufferSource}
+    WHERE xes.name = N'{XeSessionName}'
+    AND   xet.target_name = N'ring_buffer'
+    OPTION(RECOMPILE);
+END;
 
 SELECT
     x.event_time,
@@ -696,6 +734,13 @@ SELECT
 FROM #bpr AS b{planApply}
 OPTION(RECOMPILE);
 
+/* #4200: the gate's own result, between the payload and the probe-failure set. Always one row,
+   whichever branch ran above -- ReadAsync consumes this one itself (NextResultAsync), so the
+   reader is correctly positioned on the probe-failure set below by the time the host reads it. */
+SELECT
+    execution_count = @execution_count,
+    gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;
+
 /* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
    the postures this collector can recognize -- a login without metadata access is screened before
@@ -713,9 +758,15 @@ ORDER BY
            10-minute window on first run. */
         var cutoffTime = context.Watermark ?? context.CollectionTime.AddMinutes(-10);
 
+        /* #4200: the prior cycle's own read of the target's execution_count, per server or (Azure SQL
+           DB) per database -- null on a first run, a restarted host, or a store that lost the row, all
+           of which XeShredGate.ShouldShred treats as "shred". */
+        var lastExecutionCount = XeShredGate.ReadLast(context.State, context.CurrentDatabaseName);
+
         return new CollectorQuery(query, new List<CollectorParameter>
         {
             new("@cutoff_time", cutoffTime, CollectorParameterType.DateTime2),
+            new("@last_execution_count", lastExecutionCount, CollectorParameterType.BigInt),
         });
     }
 
@@ -831,6 +882,9 @@ OUTER APPLY
     /// <summary>Events that became stored rows.</summary>
     public const string EventsStoredMeasurement = "events_stored";
 
+    /// <summary>1 when this cycle's gate (#4200) skipped the cast+shred, else 0.</summary>
+    public const string ShredGatedMeasurement = "shred_gated";
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -886,6 +940,23 @@ OUTER APPLY
             ProcPlaceholder.Register(parsed.BlockedSqlText, context.ProcPlaceholderIds);
             ProcPlaceholder.Register(parsed.BlockingSqlText, context.ProcPlaceholderIds);
             rows.Add(parsed);
+        }
+
+        /* #4200: the gate's own trailing result set (rows, THEN this, THEN the probe-failure set the
+           host reads separately) -- always one row, whichever branch BuildQuery's IF took, so
+           PendingState carries forward exactly what THIS cycle observed regardless of whether it
+           shredded. Read positionally like every other reader here (#1865's rule: the test fake throws
+           from GetName on purpose). Absent only if the batch itself failed, in which case the cycle
+           never reaches here at all. */
+        if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0))
+            {
+                context.PendingState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                    XeShredGate.ToStateValue(reader.GetInt64(0));
+            }
+
+            context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
         }
 
         /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database

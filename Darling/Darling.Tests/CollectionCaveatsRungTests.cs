@@ -27,16 +27,17 @@ namespace Darling.Tests;
 /// is written by the analysis pass's own best-effort writer, not a collector definition).
 ///
 /// <para>This file takes over the "I am the top rung" claims that moved off
-/// <see cref="CheckpointsTimedRungTests"/> (V140) when this rung landed, and handed them on to
-/// <see cref="QueryStoreIntervalLatestRungTests"/> (V143, #3953) when that one did.</para>
+/// <see cref="CheckpointsTimedRungTests"/> (V140) when this rung landed, and hands them on to
+/// <c>IndexObjectStatsServerTimeIndexRungTests</c> (V142, #4196) when that one did.</para>
 /// </summary>
 public sealed class CollectionCaveatsRungTests
 {
     private const int RungVersion = 141;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V143 (#3953,
-    /// the Query Store interval table) appended its own — so this is a position within the signature rather
-    /// than its end.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V142 (#4196,
+    /// the index_object_stats server_time index) appended its own — so this is a position within the
+    /// signature rather than its end, the handoff <see cref="CheckpointsTimedRungTests"/> made to this file one
+    /// rung ago.</summary>
     private const int ProbeOrdinal = 116;
 
     private const string TableName = "analysis_collection_caveats";
@@ -53,10 +54,9 @@ public sealed class CollectionCaveatsRungTests
         Assert.Equal("collection-caveats", V141.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        /* Not `RungVersion == SchemaVersion` any more, and not `Same(V141, Scripts[^1])`: both asserted this
-           rung is the newest, which stopped being true when V143 landed. The invariant that outlives the
-           handoff is that the LADDER's top and the declared version agree, which the two lines above already
-           say. */
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
+           being true when V142 landed. The invariant that outlives the handoff is that the LADDER's top and
+           the declared version agree, which the two lines above already say. */
         Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
@@ -113,7 +113,7 @@ public sealed class CollectionCaveatsRungTests
         var arity = method.GetParameters().Length;
 
         /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V143 appended its own. */
+           NEWEST sentinel, which stopped being true the moment V142 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasCollectionCaveats", method.GetParameters()[ProbeOrdinal].Name);
 
@@ -124,12 +124,15 @@ public sealed class CollectionCaveatsRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(140, (int)method.Invoke(null, behind)!);
 
-        /* In the source, this rung's arm sits ABOVE V140's and BELOW V143's, and returns this build's version. */
+        /* In the source, this rung's arm sits ABOVE V140's and BELOW V142's, and returns this build's version. */
         var thisArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCheckpointsTimed)", StringComparison.Ordinal);
+        var nextArm = viewer.IndexOf("if (hasIndexObjectStatsServerTimeIndex)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V141 sentinel arm — a fully-migrated store would map one rung low");
         Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
+        Assert.True(nextArm >= 0, "the V142 arm is gone, so the handoff this file claims never happened");
         Assert.True(thisArm < previousArm, "the V141 arm sits below V140's, so a current store maps one rung low");
+        Assert.True(nextArm < thisArm, "the V142 arm sits below the V141 arm, so a current V142 store maps one rung low");
         Assert.Contains(
             "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
