@@ -40,7 +40,8 @@ public sealed class QueryTrendPoint
 /// <param name="Tier">The tier <see cref="DurationTrendRouting.ResolveTier"/> picked: raw (bucketed, #4234) or the hourly rollup.</param>
 /// <param name="EffectiveStartUtc">The first served point, or the requested start when nothing came back — <see cref="DurationTrendRouting.DescribeCoverage"/>.</param>
 /// <param name="Truncated">True when the series' head sits more than <see cref="DurationTrendRouting.TruncationSlack"/> after the requested start: the tier did not hold the window's head.</param>
-public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated)
+/// <param name="BucketMinutes">The width the raw tier gathered its points at (#4234), or 0 when every point is one collection (every bucket held one, or the tier is hourly).</param>
+public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated, int BucketMinutes = 0)
 {
     /// <summary>The payload word for the tier — <see cref="DurationTrendRouting.SourceWord"/>, so the chart and the tool use one vocabulary.</summary>
     public string Source => DurationTrendRouting.SourceWord(Tier);
@@ -383,9 +384,11 @@ public sealed partial class ViewerDataService
             startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable(rollups), coverage.For(hourlyView, dailyView));
 
         List<QueryTrendPoint> points;
+        var bucketMinutes = 0;
+        DateTime? firstServedUtc;
         if (tier == RetentionTier.Raw)
         {
-            points = await ReadBucketedDurationTrendAsync(
+            (points, bucketMinutes, firstServedUtc) = await ReadBucketedDurationTrendAsync(
                 rawSql, serverId, startUtc, endUtc, databaseNames,
                 valueOrdinal: 1, executionsOrdinal: 2, firstCollectionTimeOrdinal: 4, collectionCountOrdinal: 6, cancellationToken);
         }
@@ -404,9 +407,12 @@ public sealed partial class ViewerDataService
                     ? hourlySql
                     : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true),
                 serverId, startUtc, endUtc, databaseNames, cancellationToken);
+            firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
         }
-        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
-        return new QueryTrendSeries(points, tier, effectiveStart, truncated);
+        /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
+           collection's own instant, the instant the MCP payload's effective_start names. */
+        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(firstServedUtc, startUtc);
+        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes);
     }
 
     /// <summary>
@@ -539,7 +545,7 @@ public sealed partial class ViewerDataService
     /// never mixes on-grid and off-grid timestamps in one series. A NULL value is a bucket with nothing rated
     /// (#3541 A12 at the bucket level) and is skipped, matching <see cref="ReadTrendPointsAsync"/>.
     /// </summary>
-    private async Task<List<QueryTrendPoint>> ReadBucketedDurationTrendAsync(
+    private async Task<(List<QueryTrendPoint> Points, int BucketMinutes, DateTime? FirstServedUtc)> ReadBucketedDurationTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames,
         int valueOrdinal, int? executionsOrdinal, int firstCollectionTimeOrdinal, int collectionCountOrdinal,
         CancellationToken cancellationToken)
@@ -591,7 +597,7 @@ public sealed partial class ViewerDataService
             });
         }
 
-        return items;
+        return (items, everyBucketSingleton ? 0 : bucketMinutes, rows.Count > 0 ? rows[0].FirstCollectionTime : (DateTime?)null);
     }
 
     /// <summary>
@@ -610,12 +616,23 @@ public sealed partial class ViewerDataService
             startUtc, nowUtc ?? DateTime.UtcNow, rollups.QueryGrainHourly,
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
-        var points = tier == RetentionTier.Raw
-            ? await ReadBucketedDurationTrendAsync(
+        List<QueryTrendPoint> points;
+        var bucketMinutes = 0;
+        DateTime? firstServedUtc;
+        if (tier == RetentionTier.Raw)
+        {
+            (points, bucketMinutes, firstServedUtc) = await ReadBucketedDurationTrendAsync(
                 ExecutionCountTrendSql, serverId, startUtc, endUtc, databaseNames,
-                valueOrdinal: 1, executionsOrdinal: null, firstCollectionTimeOrdinal: 2, collectionCountOrdinal: 3, cancellationToken)
-            : await ReadTrendPointsAsync(QueryDurationTrendHourlySql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, cancellationToken);
-        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
-        return new QueryTrendSeries(points, tier, effectiveStart, truncated);
+                valueOrdinal: 1, executionsOrdinal: null, firstCollectionTimeOrdinal: 2, collectionCountOrdinal: 3, cancellationToken);
+        }
+        else
+        {
+            points = await ReadTrendPointsAsync(QueryDurationTrendHourlySql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, cancellationToken);
+            firstServedUtc = points.Count > 0 ? points[0].CollectionTime : null;
+        }
+        /* A bucket start is not a collection the store held (#4234): "data begins" names the first served
+           collection's own instant, the instant the MCP payload's effective_start names. */
+        var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(firstServedUtc, startUtc);
+        return new QueryTrendSeries(points, tier, effectiveStart, truncated, bucketMinutes);
     }
 }
