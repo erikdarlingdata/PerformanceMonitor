@@ -6031,8 +6031,12 @@ AND   j.hypertable_name = '{relation}'";
            keyed on query_stats_hourly/procedure_stats_hourly would eventually find them EMPTY — their OWN
            retention policy (RetentionPolicies, unchanged by LC) keeps trimming their chunks at
            HourlyRetentionInterval while the freeze stops anything from refilling them past that point — and
-           hold the raw purge forever with no self-release. See SupersededHourlyRollups for the full story. */
-        ("query_stats", "collection_time", new[] { RequireSuccessorOf(QueryStatsHourlyView) }),
+           hold the raw purge forever with no self-release. See SupersededHourlyRollups for the full story.
+           query_stats has TWO consumers, same #1849 reason query_store_stats does below: the query-grain
+           successor AND query_stats_db_interval_hourly (CreateQueryStatsDbIntervalHourlySql), the db-grain
+           successor, both read raw collect.query_stats directly, so raw cannot purge over history either is
+           missing. */
+        ("query_stats", "collection_time", new[] { RequireSuccessorOf(QueryStatsHourlyView), RequireSuccessorOf(QueryStatsDbHourlyView) }),
         ("procedure_stats", "collection_time", new[] { RequireSuccessorOf(ProcedureStatsHourlyView) }),
         /* query_store_stats is not one of #3653's legacy six (see FrozenRollupAggregates) — both consumers
            below go on refreshing, so their coverage is still named directly. */

@@ -52,32 +52,39 @@ public sealed class IntervalHonestHourlyRollupTests
     /* ─────────────────────────── the registry ─────────────────────────── */
 
     /// <summary>
-    /// Three pairs, each legacy REGISTERED (unlike #3698's pair), each successor registered and appended after
-    /// the corrected Query Store pair, each dependent daily registered and hierarchical from the LEGACY. The
-    /// structural facts the "stays registered" reasoning rests on, asserted against the shipped lists and the
-    /// shipped CREATE text rather than restated.
+    /// Three pairs, each legacy FROZEN off the hourly grid and the daily tier since #3653's LC (unlike Q12,
+    /// when both stayed registered and refreshing), each successor holding the hourly position its legacy
+    /// held, each dependent daily frozen beside its legacy rather than hierarchical from the grid. The
+    /// structural facts the freeze's "off the grid for good, never dropped" reasoning rests on, asserted
+    /// against the shipped lists and the shipped CREATE text rather than restated.
     /// </summary>
     [Fact]
-    public void ThreePairs_LegacyStaysRegistered_SuccessorAppended_DailyHangsOffTheLegacy()
+    public void ThreePairs_LegacyFrozenOffTheGrid_SuccessorTakesItsHourlyPosition_DailyFreezesBesideTheLegacy()
     {
         var hourly = TimescaleSupport.HourlyAggregates.Select(a => a.View).ToArray();
         var daily = TimescaleSupport.DailyAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
+        var frozen = TimescaleSupport.FrozenRollupAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
 
         Assert.Equal(3, TimescaleSupport.SupersededHourlyRollups.Length);
-        Assert.Equal(9, hourly.Length);
+        Assert.Equal(6, hourly.Length);
+        Assert.Equal(6, TimescaleSupport.FrozenRollupAggregates.Length);
 
         foreach (var (legacy, successor, dependentDaily) in TimescaleSupport.SupersededHourlyRollups)
         {
-            Assert.Contains(legacy, hourly);
+            Assert.DoesNotContain(legacy, hourly);
+            Assert.Contains(legacy, frozen);
             Assert.Contains(successor, hourly);
             Assert.NotEqual(legacy, successor);
             Assert.True(Array.IndexOf(hourly, successor) > Array.IndexOf(hourly, TimescaleSupport.QueryStoreStatsCorrectedHourlyView),
-                $"{successor} must be appended after the corrected Query Store pair, not inserted beside its legacy — an insertion re-deals the bounded band positions");
+                $"{successor} must hold a position after the corrected Query Store pair, the shape the phase grid derives its light-band ordinals from");
             Assert.Equal(successor, TimescaleSupport.SuccessorOf(legacy));
             Assert.Null(TimescaleSupport.SuccessorOf(successor));
 
-            Assert.Contains(dependentDaily, daily);
-            var dailyCreate = TimescaleSupport.DailyAggregates.Single(a => a.View == dependentDaily).CreateSql;
+            /* The dependent daily froze WITH its legacy: both left HourlyAggregates/DailyAggregates and the
+               phase grid together, so the daily is read off FrozenRollupAggregates now, not DailyAggregates. */
+            Assert.DoesNotContain(dependentDaily, daily);
+            Assert.Contains(dependentDaily, frozen);
+            var dailyCreate = TimescaleSupport.FrozenRollupAggregates.Single(a => a.View == dependentDaily).CreateSql;
             Assert.Contains($"FROM collect.{legacy}", dailyCreate, StringComparison.Ordinal);
             Assert.DoesNotContain($"FROM collect.{successor}", dailyCreate, StringComparison.Ordinal);
         }
@@ -87,7 +94,7 @@ public sealed class IntervalHonestHourlyRollupTests
         Assert.Null(TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStoreStatsIntervalHourlyView));
         Assert.Null(TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStoreStatsCorrectedHourlyView));
 
-        /* Neither list's names appear in the other's: a legacy here is registered, a legacy there is not. */
+        /* Neither list's names appear in the other's: a legacy here is frozen, a legacy there is retired on sight. */
         var baselineLegacies = TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy).ToHashSet(StringComparer.Ordinal);
         Assert.Empty(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Legacy).Intersect(baselineLegacies));
         Assert.Empty(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Legacy).Intersect(TimescaleSupport.RetiredBaselineRelations));
@@ -141,24 +148,52 @@ public sealed class IntervalHonestHourlyRollupTests
             Assert.Equal(new[] { successorDaily }, policy.Coverage);
         }
 
-        /* The raw purge moved onto the two successors with a raw table of their own naming them (#3653 LC).
-           query_stats_db_hourly has no RawTierCoverage row of its own — it shares "query_stats" with
-           query_stats_hourly, already that row's named consumer below — so it was never a raw-gate candidate. */
+        /* The raw purge moved onto the successors with a raw table naming them (#3653 LC). query_stats_db_hourly
+           has no RawTierCoverage row of its own — it shares "query_stats" with query_stats_hourly — but its
+           OWN successor, query_stats_db_interval_hourly, reads raw collect.query_stats directly
+           (CreateQueryStatsDbIntervalHourlySql) and so IS a consumer named in query_stats's row (#3653 A6 lane
+           LC-a4): the raw gate must see it or a purge could destroy history it never materialized. */
         var querySuccessor = TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStatsHourlyView)
             ?? throw new InvalidOperationException($"{TimescaleSupport.QueryStatsHourlyView} must be in {nameof(TimescaleSupport.SupersededHourlyRollups)}.");
         var procedureSuccessor = TimescaleSupport.SuccessorOf(TimescaleSupport.ProcedureStatsHourlyView)
             ?? throw new InvalidOperationException($"{TimescaleSupport.ProcedureStatsHourlyView} must be in {nameof(TimescaleSupport.SupersededHourlyRollups)}.");
         var dbSuccessor = TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStatsDbHourlyView)
             ?? throw new InvalidOperationException($"{TimescaleSupport.QueryStatsDbHourlyView} must be in {nameof(TimescaleSupport.SupersededHourlyRollups)}.");
-        Assert.Equal(new[] { querySuccessor }, TimescaleSupport.RawTierCoverage.Single(t => t.Relation == "query_stats").Coverage);
+        Assert.Equal(new[] { querySuccessor, dbSuccessor }, TimescaleSupport.RawTierCoverage.Single(t => t.Relation == "query_stats").Coverage);
         Assert.Equal(new[] { procedureSuccessor }, TimescaleSupport.RawTierCoverage.Single(t => t.Relation == "procedure_stats").Coverage);
-        Assert.All(TimescaleSupport.RawTierCoverage, tier => Assert.DoesNotContain(dbSuccessor, tier.Coverage));
+        /* dbSuccessor belongs in "query_stats"'s own row (asserted above) and nowhere else — it has no
+           RawTierCoverage row of its own to gate. */
+        Assert.All(TimescaleSupport.RawTierCoverage.Where(t => t.Relation != "query_stats"), tier => Assert.DoesNotContain(dbSuccessor, tier.Coverage));
 
         Assert.False(RollupAvailability.WithoutIntervalHourlies.AllPresent);
         Assert.True(RollupAvailability.All.AllPresent);
         /* 16 through #3653 Q12, +3 for the A6 successor DAILIES this lane registers
            (query_stats_interval_daily, procedure_stats_interval_daily, query_stats_db_interval_daily). */
         Assert.Equal(19, TimescaleSupport.RollupViews.Length);
+    }
+
+    /// <summary>
+    /// #3653 A6 lane LC-a4: <see cref="TimescaleSupport.RawTierCoverage"/>'s own rule, derived rather than
+    /// trusted row by row — each row's Coverage is exactly the View of every non-frozen
+    /// <see cref="TimescaleSupport.RollupViews"/> entry whose Source is that row's raw Relation (a rollup
+    /// reading the raw table directly, not a hierarchical one two hops down). A raw table with a consumer this
+    /// derivation finds and the row's own Coverage does not is exactly the #1784 defect the raw purge gate
+    /// exists to prevent.
+    /// </summary>
+    [Fact]
+    public void RawTierCoverage_IsExactlyEveryNonFrozenRollupThatReadsThatRawTableDirectly()
+    {
+        foreach (var row in TimescaleSupport.RawTierCoverage)
+        {
+            var expectedConsumers = TimescaleSupport.RollupViews
+                .Where(r => string.Equals(r.Source, row.Relation, StringComparison.Ordinal))
+                .Where(r => !TimescaleSupport.IsFrozenRollupAggregate(r.View))
+                .Select(r => r.View)
+                .OrderBy(v => v, StringComparer.Ordinal)
+                .ToArray();
+
+            Assert.Equal(expectedConsumers, row.Coverage.OrderBy(v => v, StringComparer.Ordinal).ToArray());
+        }
     }
 
     /// <summary>
@@ -173,8 +208,10 @@ public sealed class IntervalHonestHourlyRollupTests
     {
         foreach (var (legacy, successor, _) in TimescaleSupport.SupersededHourlyRollups)
         {
-            var legacyText = TimescaleSupport.HourlyAggregates.Single(a => a.View == legacy).CreateSql;
-            var successorText = TimescaleSupport.HourlyAggregates.Single(a => a.View == successor).CreateSql;
+            /* #3653 LC froze the legacy member out of HourlyAggregates, so its CREATE is read off
+               RollupCoverageProbeTargets instead (it still knows the frozen six; see that member's doc). */
+            var legacyText = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == legacy).CreateSql;
+            var successorText = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == successor).CreateSql;
 
             Assert.DoesNotContain("sample_interval_seconds IS DISTINCT FROM 0", legacyText, StringComparison.Ordinal);
             Assert.Contains("sample_interval_seconds IS DISTINCT FROM 0", successorText, StringComparison.Ordinal);
