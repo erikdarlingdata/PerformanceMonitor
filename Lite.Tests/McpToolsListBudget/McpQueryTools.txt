@@ -25,7 +25,7 @@ param get_query_store_duration_trend.as_of 167
 param get_query_store_duration_trend.hours_back 29
 param get_query_store_duration_trend.server_name 28
 
-tool get_query_store_regressions 616
+tool get_query_store_regressions 605
 param get_query_store_regressions.as_of 167
 param get_query_store_regressions.database_name 46
 param get_query_store_regressions.hours_back 110
