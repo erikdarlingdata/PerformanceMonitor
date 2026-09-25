@@ -2246,9 +2246,12 @@ public sealed class PeersConfig
 
                 if (offending is not null)
                 {
+                    /* #4316 round 1 (M3): index, never label — label can BE the offending text (peer.Name is
+                       exactly the field this check inspects), and a config-validation problem list is the kind
+                       of thing that ends up pasted into a support ticket or a log. */
                     problems.Add(
-                        $"{label}: peer text contains '{offending}'. The peers block is DISCLOSURE ONLY — its " +
-                        "text is sent verbatim to every connected MCP client — so it must carry no connection " +
+                        $"peers.stores[{i}]: peer text contains '{offending}'. The peers block is DISCLOSURE ONLY — " +
+                        "its text is sent verbatim to every connected MCP client — so it must carry no connection " +
                         "string and no credential. Describe what the peer monitors, not how to reach it.");
                     break;
                 }

@@ -157,12 +157,14 @@ public sealed partial class PgFactCollector : IFactCollector
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {
             _logger?.LogWarning(
+                ex,
                 "[PgFactCollector] {CollectMethod} did not finish within its command timeout on server {ServerId} ({ServerName}) — that analysis input is MISSING for this pass, which is not the same as the server having none. The store side logs this as 'canceling statement due to user request'. If it repeats, the window this query scans has outgrown the timeout: {Message}",
                 collectMethod, context.ServerId, context.ServerName, ex.Message);
         }
         else if (ex is PostgresException { SqlState: "42P01" or "42703" } pgEx)
         {
             _logger?.LogDebug(
+                ex,
                 "[PgFactCollector] {CollectMethod} skipped on server {ServerId} ({ServerName}): the store does not have a table or column it reads (SQLSTATE {SqlState}), which is the pre-migration / version-skew case, so it contributes no facts. {Message}",
                 collectMethod, context.ServerId, context.ServerName,
                 pgEx.SqlState, ex.Message);
@@ -170,6 +172,7 @@ public sealed partial class PgFactCollector : IFactCollector
         else
         {
             _logger?.LogError(
+                ex,
                 "[PgFactCollector] {CollectMethod} failed on server {ServerId} ({ServerName}) and contributes no facts this pass: {Message}",
                 collectMethod, context.ServerId, context.ServerName, ex.Message);
         }

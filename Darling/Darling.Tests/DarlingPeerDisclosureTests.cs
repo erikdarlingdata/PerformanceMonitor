@@ -256,6 +256,24 @@ public sealed class DarlingPeerDisclosureTests
     }
 
     [Fact]
+    public void Validate_CredentialShapedPeerName_LabelsTheProblemByIndex_NeverByTheName()
+    {
+        /* #4316 round 1 (M3): the label used to echo peer.Name verbatim ("peer '<name>': ...") into the
+           problem text — but Name is exactly the field this credential guard inspects, so a pasted
+           connection string became the label identifying its own violation, secret and all. The problem
+           must point at the peer by position instead, never by the text that tripped the guard. */
+        var problems = PeersConfig.Validate(new PeersConfig
+        {
+            Stores = { new PeerStoreConfig { Name = "Host=x;Username=u;Password=hunter2" } },
+        });
+
+        Assert.Contains(problems, p =>
+            p.Contains("peers.stores[0]", StringComparison.Ordinal)
+            && p.Contains("password=", StringComparison.Ordinal));
+        Assert.DoesNotContain(problems, p => p.Contains("hunter2", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Validate_ChecksThisStoreCovers_EvenWhenStoresIsExplicitJsonNull()
     {
         /* Review finding on #2339. System.Text.Json assigns null OVER the property initializer for an

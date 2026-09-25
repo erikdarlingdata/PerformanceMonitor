@@ -1278,6 +1278,7 @@ public sealed class DarlingWorker : BackgroundService
                 && StartupFailureTriage.IsRetryable(ex))
             {
                 _logger.LogWarning(
+                    ex,
                     "Cannot load configuration yet ({Message}) — attempt {Attempt} of {Total}, retrying in " +
                     "{Delay}s. A file another process is mid-write recovers on its own; a missing, malformed " +
                     "or unreadable one does not and is not retried.",
@@ -1290,7 +1291,7 @@ public sealed class DarlingWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
                 var configStoppedDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Configuration);
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, configStoppedDetail);
                 return;
@@ -1423,6 +1424,7 @@ public sealed class DarlingWorker : BackgroundService
                     && StartupFailureTriage.IsRetryable(ex))
                 {
                     _logger.LogWarning(
+                        ex,
                         "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
                         "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
                         "up recovers on its own; a broken package or a stale credential does not and is " +
@@ -1436,7 +1438,7 @@ public sealed class DarlingWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
+                    _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
                     var managedStoreStoppedDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.ManagedStore);
                     _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore, managedStoreStoppedDetail);
                     return;
@@ -1800,6 +1802,7 @@ public sealed class DarlingWorker : BackgroundService
                    this BackgroundService, and StopHost then takes the process down - a retry path that
                    kills the service harder than the failure it was retrying. */
                 _logger.LogWarning(
+                    ex,
                     "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
                     "coming up recovers on its own; after the last attempt this becomes a critical line " +
@@ -1813,7 +1816,7 @@ public sealed class DarlingWorker : BackgroundService
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogCritical("Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */

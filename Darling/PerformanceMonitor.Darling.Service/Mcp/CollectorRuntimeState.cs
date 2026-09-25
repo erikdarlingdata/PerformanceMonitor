@@ -102,9 +102,11 @@ public sealed class CollectorRuntimeState
     /// <summary>
     /// The fixed <see cref="Snapshot.Detail"/> text for each step's failure (#4316). The worker used to pass
     /// <c>ex.Message</c> straight through, but <c>Detail</c> leaves the process in <c>/api/ping</c>'s response
-    /// body — a 200 any unauthenticated caller who can reach the port gets to read — and an exception's text
-    /// was never vetted for that audience: a connection string, a file path or a driver's inner-exception
-    /// chain can all land in <c>ex.Message</c>. The LogWarning/LogCritical line beside every
+    /// body. In loopback mode that reaches any local process — the whole surface needs no token there; in
+    /// network mode ping sits behind the same CIDR and sign-in gate as every other route (only logout and the
+    /// OIDC routes are exempt, <c>IsAuthFlowPath</c>) — but a signed-in caller is still not the service log,
+    /// and an exception's text was never vetted for that audience: a connection string, a file path or a
+    /// driver's inner-exception chain can all land in <c>ex.Message</c>. The LogWarning/LogCritical line beside every
     /// <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call still logs the exception's full text to
     /// the service log, which is where that detail belongs.
     /// </summary>
