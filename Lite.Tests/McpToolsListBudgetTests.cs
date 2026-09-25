@@ -83,6 +83,8 @@ public sealed class McpToolsListBudgetTests
     /* #4199 (M2b): +162 bytes for get_collection_log's fleet-form server_name/limit descriptions, after
        trimming both to the D2 200-char parameter cap and moving the rest to the tool's tail (get_tool_guide),
        which is not served in tools/list and so is not counted here. Matches Darling's twin change exactly. */
+    /* #4198 (get_query_heatmap): +147 bytes for the new full_text opt-in parameter, matching Darling's twin
+       change exactly. */
 /* #4198 (get_plan_corrections): +137 bytes, matching Darling's twin change exactly — the new full_text
        opt-in parameter only (the head is unchanged; the preview explanation lives in the tail get_tool_guide
        serves). Default row limit dropped 50 -> 25 and the preview 2,000 chars -> 150; neither is a served
@@ -97,7 +99,7 @@ public sealed class McpToolsListBudgetTests
        fields, not the two text columns, were most of the default page's weight). Darling's twin grew by a
        different amount (+391): Darling's description also covers the dedup_key exemption, which Lite's
        get_blocked_process_reports has no dedup_key parameter to need. */
-    private const int TotalCeilingBytes = 90_542;
+    private const int TotalCeilingBytes = 90_689;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
