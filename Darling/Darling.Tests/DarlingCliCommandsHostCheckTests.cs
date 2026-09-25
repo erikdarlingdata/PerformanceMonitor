@@ -137,32 +137,57 @@ public sealed class DarlingCliCommandsHostCheckTests
     public async Task CheckSettingsAsync_ManagedStoreWithAStaleBlock_ReturnsStaleSettingsExitCode_Gated()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
             "Set DARLING_TEST_PG to run the live --check-settings exit-code tests.");
-        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
-            "Set DARLING_TEST_PGRUNTIME to the rig's runtime root — this drives --check-settings through a "
-            + "REAL managed data directory, which DARLING_TEST_PG alone does not locate on disk.");
 
-        var dataDirectory = Path.Combine(runtimeRoot!, "data");
-        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
-        Assert.SkipUnless(File.Exists(confPath), $"DARLING_TEST_PGRUNTIME={runtimeRoot} has no data\\postgresql.conf.");
-
+        var ct = TestContext.Current.CancellationToken;
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
+
+        /* The "managed" connect path (DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential)
+           always targets DarlingManagedPostgres.DatabaseName ("darling") — hardcoded, not read from config —
+           so this test provisions that database itself rather than assuming a hand-built rig already has it.
+           A rig built per the lane's own setup only carries the suite's own database and a scratch database
+           (never "darling"), and asking --check-settings to connect against a database that does not exist
+           fails at StoreUnreachable before it ever reaches a settings verdict — the defect this rewrite fixes
+           (it used to point straight at DARLING_TEST_PGRUNTIME's own data directory and assume "darling"
+           already existed there, which is true of a bootstrapped product install and false of a bare rig). */
+        var adminBuilder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
+        var createdDarlingDatabase = false;
+        await using (var admin = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await admin.OpenAsync(ct);
+            await using var probe = new NpgsqlCommand(
+                "SELECT 1 FROM pg_database WHERE datname = 'darling'", admin);
+            if (await probe.ExecuteScalarAsync(ct) is null)
+            {
+                await using var create = new NpgsqlCommand("CREATE DATABASE darling", admin);
+                await create.ExecuteNonQueryAsync(ct);
+                createdDarlingDatabase = true;
+            }
+        }
+
+        /* A THROWAWAY data directory, never the rig's real one (ruling 7: a live test here must not depend on
+           — or mutate — the rig's own postgresql.conf). AttributeManagedSetting reads the conf file straight
+           off disk; it has no dependency on the directory actually being what PostgreSQL was started from, so
+           a directory holding nothing but a hand-built postgresql.conf is exactly as real an input to it as
+           the rig's own. */
         var root = Directory.CreateTempSubdirectory("darling-checksettings-stale-");
-        var originalConf = File.ReadAllText(confPath);
         try
         {
+            var dataDirectory = Path.Combine(root.FullName, "data");
+            Directory.CreateDirectory(dataDirectory);
+
             /* max_connections = 100 inside a managed (v4) block: PostgreSQL's own untouched default already
                disagrees with today's derivation (DarlingManagedPostgres.TargetMaxConnections = 200), and
                ClassifyVerdict compares the LIVE value against TODAY's derivation — no reload needed. */
-            File.AppendAllText(confPath, "\n" + DarlingManagedPostgres.ConfMarkerV4 + "\nmax_connections = 100\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(dataDirectory, "postgresql.conf"),
+                "\n" + DarlingManagedPostgres.ConfMarkerV4 + "\nmax_connections = 100\n", ct);
 
-            /* The owner credential the "managed" connect path reads (DarlingManagedPostgres.
-               TryBuildConnectionStringFromStoredCredential) — the rig trusts any password (initdb -A trust),
-               so the protected value's content does not have to be the rig's real (nonexistent) password. */
+            /* The owner credential the "managed" connect path reads — the rig trusts any password (initdb
+               -A trust), so the protected value's content does not have to be the rig's real password. */
             var credentialPath = DarlingManagedPostgres.CredentialPathFor(dataDirectory);
-            await File.WriteAllTextAsync(credentialPath, DarlingSecrets.Protect("trust-auth-ignores-this"));
+            await File.WriteAllTextAsync(credentialPath, DarlingSecrets.Protect("trust-auth-ignores-this"), ct);
 
             var configPath = Path.Combine(root.FullName, "darling.json");
             await File.WriteAllTextAsync(configPath, $$"""
@@ -170,19 +195,29 @@ public sealed class DarlingCliCommandsHostCheckTests
                   "postgres": { "managed": true, "port": {{builder.Port}}, "dataDirectory": {{JsonSerializer.Serialize(dataDirectory)}} },
                   "servers": [ { "name": "SQL2022", "host": "SQL2022" } ]
                 }
-                """);
+                """, ct);
 
             var output = new StringWriter();
             var error = new StringWriter();
-            var exit = await DarlingCliCommands.CheckSettingsAsync(configPath, false, output, error, CancellationToken.None);
+            var exit = await DarlingCliCommands.CheckSettingsAsync(configPath, false, output, error, ct);
 
             Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.StaleSettings, exit);
             Assert.Contains("stale-after-hardware-change", output.ToString(), StringComparison.Ordinal);
         }
         finally
         {
-            File.WriteAllText(confPath, originalConf);
             Directory.Delete(root.FullName, recursive: true);
+
+            if (createdDarlingDatabase)
+            {
+                await using var admin = new NpgsqlConnection(adminBuilder.ConnectionString);
+                await admin.OpenAsync(ct);
+                await using var terminate = new NpgsqlCommand(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'darling' AND pid <> pg_backend_pid()", admin);
+                await terminate.ExecuteNonQueryAsync(ct);
+                await using var drop = new NpgsqlCommand("DROP DATABASE IF EXISTS darling", admin);
+                await drop.ExecuteNonQueryAsync(ct);
+            }
         }
     }
 
