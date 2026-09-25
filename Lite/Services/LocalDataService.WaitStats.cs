@@ -246,23 +246,17 @@ ORDER BY collection_time";
     /// keeps <c>bucket_start</c> throughout. Darling's twin is <c>ViewerDataService.WaitTrendsSql</c> /
     /// <c>GetWaitStatsTrendsByTypesAsync</c> (#4234, PR #4304).</para>
     /// </summary>
-    public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(int serverId, List<string> waitTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    /// <summary>
+    /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetWaitStatsTrendsByTypesAsync"/>
+    /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>wait_type IN (...)</c>
+    /// list so that list's <c>$4..</c> numbering does not shift) is checkable without a live DuckDB. Darling's
+    /// twin is <c>ViewerDataService.WaitTrendsSql</c>.
+    /// </summary>
+    internal static string WaitTrendsSql(int waitTypeCount)
     {
-        using var _q = TimeQuery("GetWaitStatsTrendsByTypesAsync", "v_wait_stats trends batched by type, bucketed");
-        var result = new Dictionary<string, List<WaitStatsTrendPoint>>();
-        if (waitTypes.Count == 0) return result;
-
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
-        var typeParams = string.Join(", ", waitTypes.Select((_, i) => "$" + (i + 4)));
-        var widthParam = "$" + (waitTypes.Count + 4);
-
-        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
-        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
-
-        command.CommandText = $@"
+        var typeParams = string.Join(", ", Enumerable.Range(0, waitTypeCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (waitTypeCount + 4);
+        return $@"
 WITH raw AS
 (
     SELECT
@@ -305,6 +299,23 @@ FROM rated
 GROUP BY wait_type, 2
 HAVING COUNT(rated_seconds) > 0
 ORDER BY wait_type, 2";
+    }
+
+    public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(int serverId, List<string> waitTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var _q = TimeQuery("GetWaitStatsTrendsByTypesAsync", "v_wait_stats trends batched by type, bucketed");
+        var result = new Dictionary<string, List<WaitStatsTrendPoint>>();
+        if (waitTypes.Count == 0) return result;
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = WaitTrendsSql(waitTypes.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });

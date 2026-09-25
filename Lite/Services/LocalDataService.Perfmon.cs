@@ -171,23 +171,17 @@ ORDER BY collection_time";
     /// bucket anywhere (any counter) keeps <c>bucket_start</c> throughout. Darling's twin is
     /// <c>ViewerDataService.PerfmonTrendsSql</c> / <c>GetPerfmonTrendsByCountersAsync</c> (#4234, PR #4304).</para>
     /// </summary>
-    public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(int serverId, List<string> counterNames, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    /// <summary>
+    /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetPerfmonTrendsByCountersAsync"/>
+    /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>counter_name IN (...)</c>
+    /// list so that list's numbering does not shift) is checkable without a live DuckDB. Darling's twin is
+    /// <c>ViewerDataService.PerfmonTrendsSql</c>.
+    /// </summary>
+    internal static string PerfmonTrendsSql(int counterCount)
     {
-        using var _q = TimeQuery("GetPerfmonTrendsByCountersAsync", "v_perfmon_stats trends batched by counter, bucketed");
-        var result = new Dictionary<string, List<PerfmonTrendPoint>>();
-        if (counterNames.Count == 0) return result;
-
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
-        var nameParams = string.Join(", ", counterNames.Select((_, i) => "$" + (i + 4)));
-        var widthParam = "$" + (counterNames.Count + 4);
-
-        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
-        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
-
-        command.CommandText = $@"
+        var nameParams = string.Join(", ", Enumerable.Range(0, counterCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (counterCount + 4);
+        return $@"
 SELECT
     counter_name,
     GREATEST(time_bucket(to_minutes(CAST({widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
@@ -214,6 +208,23 @@ FROM (
 ) AS collections
 GROUP BY counter_name, 2
 ORDER BY counter_name, 2";
+    }
+
+    public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(int serverId, List<string> counterNames, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
+    {
+        using var _q = TimeQuery("GetPerfmonTrendsByCountersAsync", "v_perfmon_stats trends batched by counter, bucketed");
+        var result = new Dictionary<string, List<PerfmonTrendPoint>>();
+        if (counterNames.Count == 0) return result;
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = PerfmonTrendsSql(counterNames.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
