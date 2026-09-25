@@ -73,10 +73,14 @@ public sealed class ServerInventoryFleetMetricsTests
         Assert.Contains("CROSS JOIN LATERAL", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 1", sql, StringComparison.Ordinal);
 
-        /* The idle check's own predicate, unrouted: any execution in the window is active. */
+        /* The idle check's own predicate, unrouted: any execution in the window is active. idle_dbs is
+           rooted at servers (a LEFT JOIN, not an EXCEPT grouped by server_id), so a server whose every
+           known database is active still gets a row — idle_db_count 0, not a missing row that reads
+           NULL through the outer LEFT JOIN (the bug the live parity test caught). */
         Assert.Contains("active_dbs AS (", sql, StringComparison.Ordinal);
         Assert.Contains("latest_dbs", sql, StringComparison.Ordinal);
-        Assert.Contains("EXCEPT", sql, StringComparison.Ordinal);
+        Assert.Contains("LEFT JOIN latest_dbs ld ON ld.server_id = s.server_id", sql, StringComparison.Ordinal);
+        Assert.Contains("FILTER (WHERE ad.database_name IS NULL)", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
 
         /* Only two binds now: cpu cutoff, idle cutoff — server_id is gone. */

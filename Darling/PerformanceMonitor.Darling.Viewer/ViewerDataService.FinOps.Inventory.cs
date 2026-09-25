@@ -128,14 +128,24 @@ active_dbs AS (
     WHERE collection_time >= $2
     AND   delta_execution_count > 0
 ),
+/* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
+   active has ZERO rows surviving an EXCEPT, and GROUP BY over zero rows contributes NO ROW for that
+   server at all -- the outer LEFT JOIN then reads idle_db_count as NULL, not 0, and the loader's overlay-
+   only-what-arrived rule (FinOpsTab.Loaders.cs) leaves the grid showing whatever idle count it last had
+   instead of the fresh, correct zero. The old per-server statement never had this trap: its idle_dbs was
+   a bare COUNT(DISTINCT ...) with no GROUP BY, which always returns exactly one row, 0 for zero matches.
+   Rooting this CTE at servers (like size_latest/mem_latest) keeps that same one-row-always guarantee once
+   the read went fleet-wide (#4227, caught by the live parity test). */
 idle_dbs AS (
-    SELECT server_id, COUNT(*) AS idle_db_count
-    FROM (
-        SELECT server_id, database_name FROM latest_dbs
-        EXCEPT
-        SELECT server_id, database_name FROM active_dbs
-    ) AS idle
-    GROUP BY server_id
+    SELECT
+        s.server_id,
+        COUNT(ld.database_name) FILTER (WHERE ad.database_name IS NULL) AS idle_db_count
+    FROM servers s
+    LEFT JOIN latest_dbs ld ON ld.server_id = s.server_id
+    LEFT JOIN active_dbs ad
+      ON ad.server_id = ld.server_id
+     AND ad.database_name = ld.database_name
+    GROUP BY s.server_id
 )
 SELECT
     s.server_id,
