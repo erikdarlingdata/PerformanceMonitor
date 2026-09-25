@@ -124,6 +124,28 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                 Assert.True(managed.RootElement.GetProperty("any_stale").GetBoolean(),
                     $"{role}: any_stale should be true with a stale_after_hardware_change row present.");
 
+                /* store facts, under the least-privilege role (item 5): size_bytes and timescale_version
+                   both come off PostgreSQL/TimescaleDB reads PUBLIC can run with no Darling-authored GRANT
+                   (this file's own class doc comment) — a regression there is a silent "unavailable" null,
+                   not a thrown exception, so only an explicit not-null assertion catches it. */
+                var store = managed.RootElement.GetProperty("store");
+                Assert.NotEqual(JsonValueKind.Null, store.GetProperty("size_bytes").ValueKind);
+                Assert.NotEqual(JsonValueKind.Null, store.GetProperty("timescale_version").ValueKind);
+
+                /* uncompressed_chunk_count against a fresh OWNER-side read of the exact same query
+                   (DarlingStoreHostProfile.UncompressedChunkSizeSql, ruling 1 — one formula, not a second
+                   copy here) taken immediately after the tool call, under the role that actually granted
+                   the schema surface (this file's whole point) rather than trusting the row count alone. */
+                long ownerUncompressedChunkCount;
+                await using (var chunkCmd = new NpgsqlCommand(DarlingStoreHostProfile.UncompressedChunkSizeSql, owner))
+                await using (var chunkReader = await chunkCmd.ExecuteReaderAsync(ct))
+                {
+                    await chunkReader.ReadAsync(ct);
+                    ownerUncompressedChunkCount = chunkReader.GetInt32(1);
+                }
+
+                Assert.Equal(ownerUncompressedChunkCount, store.GetProperty("uncompressed_chunk_count").GetInt32());
+
                 var byoJson = await DarlingMcpStoreHostTools.GetStoreHost(
                     dataSource, byoConfig, new StoreHostProfileCache(TimeSpan.FromMinutes(5)));
                 using var byo = JsonDocument.Parse(byoJson);
