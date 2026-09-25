@@ -120,7 +120,12 @@ public sealed class McpToolsListBudgetTests
        of active_queries (#4261) + object_locking (#4258) changes on top of dev. */
     /* #4198 (collection_log, merge): re-measured after merging origin/dev (dev now includes #4261+#4258);
        combined total with collection_log (#4265) changes on top. */
-    private const int TotalCeilingBytes = 172_760;
+    /* #4231: +550 bytes for get_top_queries_by_cpu's and get_top_procedures_by_cpu's new window_truncated /
+       effective_start / effective_hours_back disclosure — a short served-head sentence naming the raw tier's
+       retention floor (272 / 268 bytes), matching get_query_store_top's own #2364 disclosure. The full clause
+       (McpHelpers.WindowTruncatedDescription) lands in each tool's get_tool_guide tail, which this ceiling does
+       not count. */
+    private const int TotalCeilingBytes = 173_310;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
