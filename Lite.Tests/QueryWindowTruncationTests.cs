@@ -9,9 +9,13 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -289,4 +293,113 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         Assert.True(Math.Abs((floor!.Value - archivedFloor).TotalMinutes) < 2,
             $"floor {floor:o} should be the ARCHIVED start {archivedFloor:o}, not the hot table's {hotStart:o}");
     }
+
+    /// <summary>
+    /// #4231 ruling: "the WPF Top Queries, Top Procedures and Query Store grids show 'Showing since &lt;time&gt;'
+    /// in the header when the window is cut short." Pins <see cref="ServerTab.SetWindowTruncatedBanner"/> --
+    /// the same text/visibility plumbing every one of the three grids' refresh paths and their matching
+    /// OnXSlicerChanged handler call -- directly, rather than through ServerTab's full UI (no InitializeComponent,
+    /// no server connection needed to pin the banner text). WPF objects need an STA thread to construct even
+    /// off-screen; same shape as MainWindowAccessKeyTests/ThemeColorOverrideTests' OnStaThread.
+    /// </summary>
+    [Fact]
+    public void SetWindowTruncatedBanner_Truncated_ShowsSinceEffectiveStart()
+    {
+        var effectiveStart = new DateTime(2026, 1, 15, 8, 30, 0, DateTimeKind.Unspecified);
+
+        var (visibility, text) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.SetWindowTruncatedBanner(banner, truncated: true, effectiveStart);
+            return (banner.Visibility, banner.Text);
+        });
+
+        Assert.Equal(System.Windows.Visibility.Visible, visibility);
+        Assert.Equal($"Showing since {ServerTimeHelper.FormatServerTime(effectiveStart)}", text);
+    }
+
+    /// <summary>#4231: a floor inside the slack (or no truncation at all) must hide the banner and clear stale text.</summary>
+    [Fact]
+    public void SetWindowTruncatedBanner_NotTruncated_HidesBanner()
+    {
+        var (visibility, text) = OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock
+            {
+                Visibility = System.Windows.Visibility.Visible,
+                Text = "Showing since 2020-01-01 00:00:00"
+            };
+            ServerTab.SetWindowTruncatedBanner(banner, truncated: false, DateTime.UtcNow);
+            return (banner.Visibility, banner.Text);
+        });
+
+        Assert.Equal(System.Windows.Visibility.Collapsed, visibility);
+        Assert.Equal(string.Empty, text);
+    }
+
+    /// <summary>WPF objects require STA; same shape as MainWindowAccessKeyTests/ThemeColorOverrideTests.</summary>
+    private static T OnStaThread<T>(Func<T> body)
+    {
+        T result = default!;
+        Exception? error = null;
+        var thread = new Thread(() =>
+        {
+            try { result = body(); }
+            catch (Exception ex) { error = ex; }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        if (error is not null)
+        {
+            throw error;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// #4231 ruling 6's source pin: every Queries-tab grid read of the three raw-only relations routes through
+    /// the ONE shared <see cref="LocalDataService.GetQueryWindowFloorAsync"/> probe -- never a second hand-rolled
+    /// copy -- and every grid-refresh call site (sub-tab switch, full refresh, and the matching slicer handler,
+    /// which re-reads the same grid over a narrower window) calls the shared banner helper. Text-scans SOURCE,
+    /// not a loaded assembly, matching ServerTabCapabilityPinTests' mechanism.
+    /// </summary>
+    [Fact]
+    public void QueriesTabGridReads_RouteThroughSharedWindowFloorHelper()
+    {
+        var refreshSource = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
+        var combined = refreshSource + "\n" + File.ReadAllText(ControlsFile("ServerTab.Slicers.cs"));
+
+        // The raw probe itself must have exactly ONE call site -- the shared RefreshWindowTruncatedBannerAsync
+        // helper (ServerTab.Refresh.cs), which takes `relation` as a parameter rather than repeating the
+        // literal per table, so every grid/slicer read forwards through the same probe call.
+        var floorCalls = Regex.Matches(refreshSource, @"_dataService\.GetQueryWindowFloorAsync\(").Count;
+        Assert.True(floorCalls == 1,
+            $"expected exactly one _dataService.GetQueryWindowFloorAsync(...) call site in ServerTab.Refresh.cs " +
+            $"(found {floorCalls}) -- every Queries-tab grid/slicer read must route through the ONE shared " +
+            "RefreshWindowTruncatedBannerAsync helper, not a second copy of the probe (#4231).");
+
+        foreach (var relation in new[] { "QueryStats", "ProcedureStats", "QueryStoreStats" })
+        {
+            var bannerCalls = Regex.Matches(combined, $@"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.{relation}\b").Count;
+            Assert.True(bannerCalls >= 3,
+                $"expected at least 3 RefreshWindowTruncatedBannerAsync(QueryWindowRelation.{relation}...) call " +
+                $"sites (sub-tab switch + full refresh + slicer handler), found {bannerCalls} -- a Queries-tab " +
+                "grid read of that relation is missing its window-truncated banner refresh (#4231).");
+        }
+
+        foreach (var file in Directory.EnumerateFiles(ControlsDir(), "ServerTab*.cs"))
+        {
+            Assert.False(File.ReadAllText(file).Contains("MIN(collection_time)", StringComparison.OrdinalIgnoreCase),
+                $"{Path.GetFileName(file)} hand-rolls a MIN(collection_time) query -- route it through " +
+                "LocalDataService.GetQueryWindowFloorAsync instead (#4231).");
+        }
+    }
+
+    private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);
+
+    private static string ControlsDir([CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Controls"));
 }
