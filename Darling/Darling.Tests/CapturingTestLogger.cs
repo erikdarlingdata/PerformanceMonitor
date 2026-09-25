@@ -23,6 +23,7 @@ namespace Darling.Tests;
 internal sealed class CapturingTestLogger : ILogger
 {
     private readonly List<string> _lines = new();
+    private readonly List<Exception?> _exceptions = new();
 
     /// <summary>Every line logged so far, joined for embedding in an assertion message.</summary>
     public string Joined
@@ -46,6 +47,26 @@ internal sealed class CapturingTestLogger : ILogger
         }
     }
 
+    /// <summary>The <see cref="Exception"/> argument of every line logged at exactly this level, in log
+    /// order, non-null entries only -- lets a test assert an entry's real exception reached the sink
+    /// (the <c>logger.LogError(ex, ...)</c> overload), not just that its message text was baked into
+    /// the formatted string by a <c>{Message}</c> template placeholder.</summary>
+    public IReadOnlyList<Exception> ExceptionsAtLevel(LogLevel level)
+    {
+        lock (_lines)
+        {
+            var matches = new List<Exception>();
+            for (var i = 0; i < _lines.Count; i++)
+            {
+                if (_lines[i].StartsWith(level.ToString() + ":", StringComparison.Ordinal) && _exceptions[i] is not null)
+                {
+                    matches.Add(_exceptions[i]!);
+                }
+            }
+            return matches;
+        }
+    }
+
     public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
     public bool IsEnabled(LogLevel logLevel) => true;
@@ -56,6 +77,7 @@ internal sealed class CapturingTestLogger : ILogger
         lock (_lines)
         {
             _lines.Add($"{logLevel}: {formatter(state, exception)}");
+            _exceptions.Add(exception);
         }
     }
 }

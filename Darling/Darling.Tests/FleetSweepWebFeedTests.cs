@@ -649,8 +649,10 @@ public sealed class FleetSweepWebFeedTests
     {
         var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingFleetSweepEndpoints.cs");
 
+        AssertNoLocalCatch(raw, "/api/sweeps", "\"/api/sweeps\"");
         AssertNoLocalCatch(raw, "/api/sweeps/latest", "\"/api/sweeps/latest\"");
         AssertNoLocalCatch(raw, "/api/sweeps/{id:long}", "\"/api/sweeps/{id:long}\"");
+        AssertNoLocalCatch(raw, "/api/sweeps/watch-items", "\"/api/sweeps/watch-items\"");
     }
 
     /// <summary>Slices ONE MapGet's body out of the endpoint file (from its route literal to the next

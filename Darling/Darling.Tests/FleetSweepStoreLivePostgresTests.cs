@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -416,13 +417,27 @@ public sealed class FleetSweepStoreLivePostgresTests
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var span = new DateTime(2026, 9, 15, 10, 0, 0, DateTimeKind.Utc);
 
-        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetSweepsBySpanAsync(
+        /* PostgresException with SqlState 42P01 (undefined_table) specifically, not just "some
+           exception" -- the realistic fault shape a dropped relation raises, and the one both
+           surfaces' catches key their classification on. */
+        const string UndefinedTable = "42P01";
+
+        var spanFault = await Assert.ThrowsAsync<PostgresException>(() => FleetSweepStore.GetSweepsBySpanAsync(
             postgres, span.AddHours(-1), span, ct));
-        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetServerVerdictsAsync(postgres, 1, ct));
-        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetWouldHavePagedAsync(postgres, 1, ct));
-        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetWatchItemsByStateAsync(
+        Assert.Equal(UndefinedTable, spanFault.SqlState);
+
+        var verdictsFault = await Assert.ThrowsAsync<PostgresException>(() => FleetSweepStore.GetServerVerdictsAsync(postgres, 1, ct));
+        Assert.Equal(UndefinedTable, verdictsFault.SqlState);
+
+        var ledgerFault = await Assert.ThrowsAsync<PostgresException>(() => FleetSweepStore.GetWouldHavePagedAsync(postgres, 1, ct));
+        Assert.Equal(UndefinedTable, ledgerFault.SqlState);
+
+        var watchStateFault = await Assert.ThrowsAsync<PostgresException>(() => FleetSweepStore.GetWatchItemsByStateAsync(
             postgres, FleetSweepWatchStateMachine.Open, ct));
-        await Assert.ThrowsAnyAsync<Exception>(() => FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, ct));
+        Assert.Equal(UndefinedTable, watchStateFault.SqlState);
+
+        var openCarriedFault = await Assert.ThrowsAsync<PostgresException>(() => FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, ct));
+        Assert.Equal(UndefinedTable, openCarriedFault.SqlState);
     }
 
     /// <summary>
@@ -475,6 +490,53 @@ public sealed class FleetSweepStoreLivePostgresTests
 
         Assert.Equal("error", doc.RootElement.GetProperty("status").GetString());
         Assert.False(doc.RootElement.TryGetProperty("sweeps", out _), "an error answer must not also carry a timeline");
+    }
+
+    /// <summary>
+    /// #4315 round 1, Low 3: <c>get_sweep_reports</c>' outer catch logs a store fault exactly ONCE, with
+    /// the real <see cref="Exception"/> attached to the log entry (the <c>logger.LogError(ex, ...)</c>
+    /// overload) rather than just the exception's message baked into the formatted text -- and answers
+    /// the error envelope, never <c>empty</c>, which would read as a genuinely quiet sweep. Same
+    /// dropped-table fault as <see cref="EachPresentationRead_ThrowsOnAStoreFault_NeverDegradesToEmpty"/>,
+    /// reached this time through the tool entry point itself with a capturing logger standing in for the
+    /// service logger.
+    /// </summary>
+    [Fact]
+    public async Task GetSweepReports_LogsExactlyOnce_WithTheExceptionAttached_OnAStoreFault()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_sweep_reports log-line test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, null, ct);
+
+            await using var drop = new NpgsqlCommand(
+                "DROP TABLE collect.fleet_sweep_runs, collect.fleet_sweep_server_verdicts, " +
+                "collect.fleet_sweep_would_have_paged, collect.fleet_sweep_watch_items;",
+                migrate);
+            await drop.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var logger = new CapturingTestLogger();
+
+        var raw = await DarlingMcpFleetSweepTools.GetSweepReports(postgres, logger);
+        using var doc = JsonDocument.Parse(raw);
+
+        Assert.Equal("error", doc.RootElement.GetProperty("status").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("sweeps", out _), "an error answer must not also carry a timeline: " + logger.Joined);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        var errorExceptions = logger.ExceptionsAtLevel(LogLevel.Error);
+        var attached = Assert.Single(errorExceptions);
+        Assert.IsAssignableFrom<PostgresException>(attached);
     }
 
     /// <summary>
