@@ -57,7 +57,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
         finally
         {
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 
@@ -85,7 +85,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
         finally
         {
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 
@@ -129,7 +129,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
         finally
         {
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 
@@ -182,7 +182,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         finally
         {
             File.WriteAllText(confPath, originalConf);
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 
@@ -226,7 +226,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
         finally
         {
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 
@@ -276,7 +276,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
         finally
         {
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 
@@ -309,7 +309,7 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
         finally
         {
-            root.Delete(recursive: true);
+            Directory.Delete(root.FullName, recursive: true);
         }
     }
 }
