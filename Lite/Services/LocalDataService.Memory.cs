@@ -253,19 +253,6 @@ ORDER BY SUM(memory_mb) DESC";
     }
 
     /// <summary>
-    /// Batched sibling of the removed per-clerk loop: fetches the trend for ALL selected clerk types in ONE
-    /// query, grouped by clerk type.
-    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
-    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>, the ruling's own wording). A clerk's memory is a
-    /// GAUGE, not a counter, so a bucket's value is the plain average of the collections inside it — there is
-    /// no unrated-row concept here (#3540 only marks delta rows), so every row in the window counts and no
-    /// <c>HAVING</c> is needed to drop a bucket. When EVERY bucket the whole call returned holds exactly one
-    /// physical collection, each point is stamped at its bucket's raw <c>first_collection_time</c> instead of
-    /// the <c>time_bucket</c> grid line; a single merged bucket anywhere (any clerk type) keeps
-    /// <c>bucket_start</c> throughout — the same rule <see cref="WaitTrendsSql"/> and <c>PerfmonTrendsSql</c>
-    /// use.</para>
-    /// </summary>
-    /// <summary>
     /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetMemoryClerkTrendsByTypesAsync"/>
     /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>clerk_type IN (...)</c>
     /// list so that list's numbering does not shift) is checkable without a live DuckDB.
@@ -290,6 +277,19 @@ GROUP BY clerk_type, 2
 ORDER BY clerk_type, 2";
     }
 
+    /// <summary>
+    /// Batched sibling of the removed per-clerk loop: fetches the trend for ALL selected clerk types in ONE
+    /// query, grouped by clerk type.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
+    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>, the ruling's own wording). A clerk's memory is a
+    /// GAUGE, not a counter, so a bucket's value is the plain average of the collections inside it — there is
+    /// no unrated-row concept here (#3540 only marks delta rows), so every row in the window counts and no
+    /// <c>HAVING</c> is needed to drop a bucket. When EVERY bucket the whole call returned holds exactly one
+    /// physical collection, each point is stamped at its bucket's raw <c>first_collection_time</c> instead of
+    /// the <c>time_bucket</c> grid line; a single merged bucket anywhere (any clerk type) keeps
+    /// <c>bucket_start</c> throughout — the same rule <see cref="WaitTrendsSql"/> and <c>PerfmonTrendsSql</c>
+    /// use.</para>
+    /// </summary>
     public async Task<Dictionary<string, List<MemoryClerkTrendPoint>>> GetMemoryClerkTrendsByTypesAsync(int serverId, List<string> clerkTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetMemoryClerkTrendsByTypesAsync", "v_memory_clerks trends batched by type, bucketed");

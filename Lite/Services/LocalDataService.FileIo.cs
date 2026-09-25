@@ -71,20 +71,6 @@ ORDER BY (delta_stall_read_ms + delta_stall_write_ms) DESC";
     }
 
     /// <summary>
-    /// Gets file I/O latency trend data broken down by file for charting (top 10 files by I/O activity).
-    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
-    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>). The top-10 ranking (<c>top_files</c>) stays an
-    /// unbucketed scan of the whole call window, exactly as before — only the per-collection SELECT beneath it
-    /// buckets. Latency is a ratio (summed stall over summed operations), not a rate, so unlike throughput it
-    /// needs no interval arithmetic; a <c>rated</c> row is simply one whose stored interval is not the #3540
-    /// sentinel 0, nulled (not filtered) so an unrated row still counts toward <c>collection_count</c> — the
-    /// same reason <see cref="WaitTrendsSql"/> keeps its unrated rows in its CTE instead of excluding them
-    /// outright. <c>HAVING</c> drops a bucket with no rated row, so it stays absent, not 0. When EVERY bucket
-    /// the whole call returned holds exactly one physical collection, each point is stamped at its bucket's raw
-    /// <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged bucket
-    /// anywhere (any file) keeps <c>bucket_start</c> throughout.</para>
-    /// </summary>
-    /// <summary>
     /// The bucketed statement text (#4234), pulled out of <see cref="GetFileIoLatencyTrendAsync"/> so its shape
     /// is checkable without a live DuckDB.
     /// </summary>
@@ -136,6 +122,20 @@ GROUP BY database_name, file_name, 3
 HAVING COUNT(rated_reads) > 0
 ORDER BY database_name, file_name, 3";
 
+    /// <summary>
+    /// Gets file I/O latency trend data broken down by file for charting (top 10 files by I/O activity).
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
+    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>). The top-10 ranking (<c>top_files</c>) stays an
+    /// unbucketed scan of the whole call window, exactly as before — only the per-collection SELECT beneath it
+    /// buckets. Latency is a ratio (summed stall over summed operations), not a rate, so unlike throughput it
+    /// needs no interval arithmetic; a <c>rated</c> row is simply one whose stored interval is not the #3540
+    /// sentinel 0, nulled (not filtered) so an unrated row still counts toward <c>collection_count</c> — the
+    /// same reason <see cref="WaitTrendsSql"/> keeps its unrated rows in its CTE instead of excluding them
+    /// outright. <c>HAVING</c> drops a bucket with no rated row, so it stays absent, not 0. When EVERY bucket
+    /// the whole call returned holds exactly one physical collection, each point is stamped at its bucket's raw
+    /// <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged bucket
+    /// anywhere (any file) keeps <c>bucket_start</c> throughout.</para>
+    /// </summary>
     public async Task<List<FileIoTrendPoint>> GetFileIoLatencyTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetFileIoLatencyTrendAsync", "v_file_io_stats top-10 files, bucketed");
@@ -217,19 +217,6 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Gets file I/O throughput trend data (MB/s) broken down by file for charting.
-    /// Divides by each row's stored sample_interval_seconds; a pre-v60 row that never recorded one falls
-    /// back to the LAG() over collection_time this read always used (#3540).
-    /// <para>#3653 (#3540 rule 1, readers NULL-not-0 on unknowable): the two rate arms end at <c>END</c>,
-    /// not <c>ELSE 0</c>.</para>
-    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES. The LAG-derived
-    /// interval is computed once over the RAW per-collection rows (<c>with_interval</c>), before bucketing —
-    /// a bucket's rate is summed bytes over summed rated seconds (time-weighted, never an average of
-    /// per-collection rates), and a bucket with no rated collection is dropped (<c>HAVING</c>), same as the
-    /// per-collection read always dropped that collection. Singleton stamping follows
-    /// <see cref="WaitTrendsSql"/>'s rule.</para>
-    /// </summary>
-    /// <summary>
     /// The bucketed statement text (#4234), pulled out of <see cref="GetFileIoThroughputTrendAsync"/> so its
     /// shape is checkable without a live DuckDB.
     /// </summary>
@@ -287,6 +274,19 @@ GROUP BY file_label, 2
 HAVING COUNT(rated_seconds) > 0
 ORDER BY file_label, 2";
 
+    /// <summary>
+    /// Gets file I/O throughput trend data (MB/s) broken down by file for charting.
+    /// Divides by each row's stored sample_interval_seconds; a pre-v60 row that never recorded one falls
+    /// back to the LAG() over collection_time this read always used (#3540).
+    /// <para>#3653 (#3540 rule 1, readers NULL-not-0 on unknowable): the two rate arms end at <c>END</c>,
+    /// not <c>ELSE 0</c>.</para>
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES. The LAG-derived
+    /// interval is computed once over the RAW per-collection rows (<c>with_interval</c>), before bucketing —
+    /// a bucket's rate is summed bytes over summed rated seconds (time-weighted, never an average of
+    /// per-collection rates), and a bucket with no rated collection is dropped (<c>HAVING</c>), same as the
+    /// per-collection read always dropped that collection. Singleton stamping follows
+    /// <see cref="WaitTrendsSql"/>'s rule.</para>
+    /// </summary>
     public async Task<List<FileIoThroughputPoint>> GetFileIoThroughputTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetFileIoThroughputTrendAsync", "v_file_io_stats top-10 files by bytes, bucketed");
@@ -342,15 +342,6 @@ ORDER BY file_label, 2";
     }
 
     /// <summary>
-    /// Gets file I/O latency trend data for tempdb files only, broken down by file name.
-    /// <para>#4234: bucketed the same way as <see cref="GetFileIoLatencyTrendAsync"/> — see that method's doc
-    /// for the rated/HAVING/singleton-stamping rules; this read has no top-10 ranking pass (tempdb's own file
-    /// count is already small) and no queued-latency columns (this table's caller chart never drew them).
-    /// <c>DatabaseName</c> carries the FILE name here, not the database (always <c>tempdb</c>) — preserved
-    /// exactly as the pre-#4234 reader mapped it, since <c>ServerTab.Charts.UpdateTempDbFileIoChart</c> groups
-    /// its series on that field.</para>
-    /// </summary>
-    /// <summary>
     /// The bucketed statement text (#4234), pulled out of <see cref="GetTempDbFileIoTrendAsync"/> so its shape
     /// is checkable without a live DuckDB.
     /// </summary>
@@ -382,6 +373,15 @@ GROUP BY file_name, 2
 HAVING COUNT(rated_reads) > 0
 ORDER BY file_name, 2";
 
+    /// <summary>
+    /// Gets file I/O latency trend data for tempdb files only, broken down by file name.
+    /// <para>#4234: bucketed the same way as <see cref="GetFileIoLatencyTrendAsync"/> — see that method's doc
+    /// for the rated/HAVING/singleton-stamping rules; this read has no top-10 ranking pass (tempdb's own file
+    /// count is already small) and no queued-latency columns (this table's caller chart never drew them).
+    /// <c>DatabaseName</c> carries the FILE name here, not the database (always <c>tempdb</c>) — preserved
+    /// exactly as the pre-#4234 reader mapped it, since <c>ServerTab.Charts.UpdateTempDbFileIoChart</c> groups
+    /// its series on that field.</para>
+    /// </summary>
     public async Task<List<FileIoTrendPoint>> GetTempDbFileIoTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetTempDbFileIoTrendAsync", "v_file_io_stats tempdb files, bucketed");
