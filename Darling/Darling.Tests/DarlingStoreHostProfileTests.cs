@@ -248,6 +248,39 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(sourceDescription, source);
     }
 
+    /* --------------------------------------- TryResolveProfileDataDirectory / UNC refusal (round-1 review, Low 4) --------------------------------------- */
+    /* A UNC-configured managed data directory is refused rather than reached over the network as the service's
+       own identity (the NTLM-relay vector Low 4 describes) — mirrors DarlingManagedPostgres.TryResolveConfPath's
+       own UNC refusal for an include directive. */
+
+    [Fact]
+    public void TryResolveProfileDataDirectory_UncDataDirectory_ReturnsNull()
+    {
+        var postgres = new PostgresConfig { Managed = true, DataDirectory = @"\\host\share\pg" };
+
+        Assert.Null(DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgres));
+    }
+
+    [Fact]
+    public void TryResolveProfileDataDirectory_LocalDataDirectory_ReturnsResolvedPath()
+    {
+        var local = Path.Combine(Path.GetTempPath(), "pmdarling-test-pgdata");
+        var postgres = new PostgresConfig { Managed = true, DataDirectory = local };
+
+        var resolved = DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgres);
+
+        Assert.NotNull(resolved);
+        Assert.Equal(Path.GetFullPath(local), resolved);
+    }
+
+    [Fact]
+    public void ResolveVolumeAnchor_ManagedUncDataDirectory_FallsBackToServiceBaseDirectory()
+    {
+        var postgres = new PostgresConfig { Managed = true, DataDirectory = @"\\host\share\pg" };
+
+        Assert.Equal(AppContext.BaseDirectory, DarlingStoreHostProfile.ResolveVolumeAnchor(postgres));
+    }
+
     /* --------------------------------------------- pg_settings unit normalization --------------------------------------------- */
 
     [Theory]

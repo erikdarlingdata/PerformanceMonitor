@@ -318,6 +318,22 @@ internal static class DarlingStoreHostProfile
     }
 
     /// <summary>
+    /// The managed data directory, refused when it resolves to a UNC path (round-1 review, Low 4): a remote
+    /// MCP/web caller has no way to set <c>postgres.dataDirectory</c> today, but if it is ever configured to a
+    /// UNC path, this process would otherwise reach out to that share AS ITS OWN IDENTITY purely to read a conf
+    /// file for attribution or to stat the volume — an NTLM-relay vector, not just an unwanted network hop.
+    /// Deliberately NOT a change to <see cref="DarlingManagedPostgres.ResolveDataDirectory"/> itself — that
+    /// helper is shared by the writer/provisioning path too, where a UNC data directory is a different, out of
+    /// scope question. Mirrors <c>DarlingManagedPostgres.TryResolveConfPath</c>'s own UNC refusal for an include
+    /// directive.
+    /// </summary>
+    internal static string? TryResolveProfileDataDirectory(PostgresConfig postgres)
+    {
+        var resolved = DarlingManagedPostgres.ResolveDataDirectory(postgres);
+        return resolved.StartsWith(@"\\", StringComparison.Ordinal) ? null : resolved;
+    }
+
+    /// <summary>
     /// The BYO fallback anchor for the "data volume" fact (#4214): a bring-your-own store has no data
     /// directory this process necessarily knows about — <c>postgres.connectionString</c> may point at a
     /// different host entirely. The smallest reasonable call, made explicitly rather than left unhandled:
@@ -325,10 +341,12 @@ internal static class DarlingStoreHostProfile
     /// service's disk rather than the store's. A co-located BYO deployment (Docker Compose, same VM — the
     /// common case) gets a real, useful answer; a genuinely remote store gets a labelled figure instead of a
     /// missing one. Part 2 (get_store_host / the web panel) can revisit this once it has a place to say "this
-    /// may not be the store's own disk" beyond a CLI comment.
+    /// may not be the store's own disk" beyond a CLI comment. A managed store whose data directory resolves to
+    /// a UNC path (Low 4) takes the SAME fallback as BYO — <see cref="TryResolveProfileDataDirectory"/> refuses
+    /// it rather than reaching out to the share.
     /// </summary>
     internal static string ResolveVolumeAnchor(PostgresConfig postgres)
-        => postgres.Managed ? DarlingManagedPostgres.ResolveDataDirectory(postgres) : AppContext.BaseDirectory;
+        => postgres.Managed ? (TryResolveProfileDataDirectory(postgres) ?? AppContext.BaseDirectory) : AppContext.BaseDirectory;
 
     /* ======================================== Store facts (SQL) ========================================== */
 
@@ -676,7 +694,10 @@ WHERE NOT is_compressed";
             }
         }
 
-        var dataDirectory = postgres.Managed ? DarlingManagedPostgres.ResolveDataDirectory(postgres) : null;
+        /* Round-1 review, Low 4: TryResolveProfileDataDirectory refuses a UNC-resolved data directory (null),
+           which falls through to the dataDirectory-is-null branch below exactly like a bring-your-own store —
+           every setting reports not-managed, and this method never reads a file off the share. */
+        var dataDirectory = postgres.Managed ? TryResolveProfileDataDirectory(postgres) : null;
         var results = new List<HostSettingProfile>(targets.Length);
 
         foreach (var (name, derivedValue, unit) in targets)
