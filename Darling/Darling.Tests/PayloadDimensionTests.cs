@@ -445,9 +445,24 @@ public sealed class PayloadDimensionTests
             "INSERT INTO query_text_dim (digest, query_text, last_seen)\n" +
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
+            "WHERE NOT EXISTS (\n" +
+            "    SELECT 1 FROM query_text_dim d\n" +
+            "    WHERE d.digest = u.digest\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '1 hour')\n" +
+            "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
             "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
             sql);
+
+        /* #4249: the pre-filter is a plain MVCC read (no lock) that keeps an already-fresh digest from
+           ever reaching INSERT or ON CONFLICT — that is what stops the write, not the conflict guard
+           above, which only ever stopped the UPDATE. */
+        Assert.Contains("WHERE NOT EXISTS (", sql, StringComparison.Ordinal);
+
+        /* #4249: the anti-join gives the planner a row source it can reorder (a hash anti-join returns
+           survivors in hash order), so client-side digest ordering alone no longer fixes the order rows
+           reach ON CONFLICT. Both branches must carry this. */
+        Assert.Contains("ORDER BY u.digest", sql, StringComparison.Ordinal);
 
         /* The plan dimension upserts gzip BYTES into query_plan_gz (#2069) — same statement shape,
            same conflict semantics, bytea payload array instead of text. The text column is never
@@ -456,6 +471,11 @@ public sealed class PayloadDimensionTests
             "INSERT INTO query_plan_dim (digest, query_plan_gz, last_seen)\n" +
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
+            "WHERE NOT EXISTS (\n" +
+            "    SELECT 1 FROM query_plan_dim d\n" +
+            "    WHERE d.digest = u.digest\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '1 hour')\n" +
+            "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
             "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
@@ -467,6 +487,11 @@ public sealed class PayloadDimensionTests
             "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen)\n" +
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
+            "WHERE NOT EXISTS (\n" +
+            "    SELECT 1 FROM query_plan_dim d\n" +
+            "    WHERE d.digest = u.digest\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '1 hour')\n" +
+            "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
             "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false));
@@ -477,6 +502,30 @@ public sealed class PayloadDimensionTests
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: true));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => PayloadDimensions.UpsertSql("not_a_dim"));
+    }
+
+    /// <summary>
+    /// #4249's source pin: reads <c>PayloadDimensions.cs</c> itself and requires BOTH branches of
+    /// <c>UpsertSql</c> — the compressed-content early return and the shared text/plan-xml tail — to carry
+    /// <c>ORDER BY u.digest</c>. The exact-string assertions above already cover the shipped shape, but they
+    /// pin the STRING; this pins the SOURCE, so a future edit that special-cases one branch and drops the
+    /// other's ORDER BY fails here even if nobody updates the string pins to match.
+    /// </summary>
+    [Fact]
+    public void UpsertSql_SourceCarriesOrderByOnBothBranches()
+    {
+        var root = FindRepoRoot();
+        Assert.True(root is not null, RepoRootNotFound);
+
+        var source = File.ReadAllText(Path.Combine(
+            root!, "Darling", "PerformanceMonitor.Darling.Storage", "PayloadDimensions.cs"));
+
+        var body = MethodBody(source, "public static string UpsertSql(string dimTable, bool compressContent = true)");
+        Assert.False(string.IsNullOrEmpty(body),
+            "could not locate UpsertSql -- this guard must fail rather than silently pass on a parse miss");
+
+        var occurrences = System.Text.RegularExpressions.Regex.Matches(body, "ORDER BY u.digest").Count;
+        Assert.Equal(2, occurrences);
     }
 
     // ── the gzip codec (#2069) ──
