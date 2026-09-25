@@ -424,20 +424,33 @@ public partial class WaitDrillDownWindow : Window
     private void CopyAllRows_Click(object sender, RoutedEventArgs e) => DataGridExport.CopyAllRows(sender);
     private void ExportToCsv_Click(object sender, RoutedEventArgs e) => DataGridExport.ExportToCsv(sender, "wait_drill_down", App.CsvSeparator);
 
+    /// <summary>Live-if-present, else estimated (#4239) — mirrors the old in-row <c>LiveQueryPlan ?? QueryPlan</c>
+    /// read. <c>ResolveSnapshot*PlanAsync</c> reads the in-row XML first when a caller already populated it
+    /// (the ServerTab Live Snapshot path builds rows that are never written to the store), and only falls
+    /// back to a capture-key fetch when the row's flag says a plan exists but the payload is null.</summary>
+    private System.Threading.Tasks.Task<string?> FetchSnapshotPlanAsync(QuerySnapshotRow row) =>
+        System.Threading.Tasks.Task.Run(async () => await _dataService.ResolveSnapshotLivePlanAsync(_serverId, row)
+            ?? await _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, row));
+
     private async void ViewPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
         await _planActions.ViewPlanAsync(
-            () => System.Threading.Tasks.Task.FromResult<string?>(row.LiveQueryPlan ?? row.QueryPlan),
+            () => FetchSnapshotPlanAsync(row),
             $"Est Plan - SPID {row.SessionId}", row.QueryText);
     }
 
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not QuerySnapshotRow row) return;
+        /* #4239: fetch before passing estimatedPlanXml on — it feeds ReproScriptBuilder's SET-options
+           extraction (ActualPlanExecutor, #233); a null plan silently loses that fidelity. (This path's
+           confirm dialog is PlanNavigationController's generic one — Lite's only QueryModificationDetector
+           call is ServerTab.Plans.cs's GetActualPlan_Click, unaffected by this window.) */
+        var estimatedPlanXml = await FetchSnapshotPlanAsync(row);
         await _planActions.GetActualPlanAsync(row.QueryText, row.DatabaseName ?? "",
             $"Actual Plan - SPID {row.SessionId}",
-            estimatedPlanXml: row.LiveQueryPlan ?? row.QueryPlan,
+            estimatedPlanXml: estimatedPlanXml,
             isolationLevel: row.TransactionIsolationLevel);
     }
 
