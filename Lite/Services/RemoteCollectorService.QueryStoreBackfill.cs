@@ -480,7 +480,7 @@ public partial class RemoteCollectorService
     /// then merged with <see cref="QueryStoreBackfillState.MergeHoleDatabases"/> so a database that
     /// has gone fully quiet does not lose a recorded hole. DuckDB has no chunks to decompress, so the
     /// bound buys Lite nothing but the shared rule; see the PR body's measured table.</summary>
-    private async Task<List<string>> GetBackfillCandidateDatabasesAsync(
+    internal async Task<List<string>> GetBackfillCandidateDatabasesAsync(
         int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
     {
         var databases = new List<string>();
@@ -514,7 +514,7 @@ public partial class RemoteCollectorService
     /// a boundary. #4197: the twin of Darling's exact bounded form — see
     /// <c>QueryStoreBackfill.GetStoredFloorAsync</c> for why the EXISTS-then-bounded-MIN pair returns
     /// the same value an unbounded MIN would.</summary>
-    private async Task<DateTime?> GetMinCollectedTimeForDatabaseAsync(
+    internal async Task<DateTime?> GetMinCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, DateTime floorLimit, CancellationToken cancellationToken)
     {
         try
