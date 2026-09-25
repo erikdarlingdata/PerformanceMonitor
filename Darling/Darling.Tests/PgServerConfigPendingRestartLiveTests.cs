@@ -83,6 +83,16 @@ public sealed class PgServerConfigPendingRestartLiveTests
 
         await using var setup = new NpgsqlConnection(cs);
         await setup.OpenAsync(ct);
+
+        /* #4251 round-1 review, L4: this test's own core assertion (line ~107 below) is that a FRESH
+           connection reads pending_restart = false right after a reload. That is #4251 itself, but only on
+           Windows (EXEC_BACKEND): a new backend there rebuilds its settings from the postmaster's saved
+           values, and the pending flag is not among them. On a non-Windows target a fresh connection sees the
+           flag correctly, so the assertion below would fail rather than confirm anything. */
+        var versionText = (string)(await new NpgsqlCommand("SELECT version()", setup).ExecuteScalarAsync(ct))!;
+        Assert.SkipWhen(!versionText.Contains("Windows", StringComparison.OrdinalIgnoreCase),
+            "This #4251 repro only reproduces on Windows (EXEC_BACKEND); the target's version() does not say Windows.");
+
         await AlterSystemAndReloadAsync(setup, "ALTER SYSTEM RESET shared_buffers", ct);
 
         var bodySucceeded = false;
@@ -153,6 +163,11 @@ public sealed class PgServerConfigPendingRestartLiveTests
            write this, so the file is edited directly (a SHOW data_directory + File.AppendAllText round trip
            below), which is exactly how a hand-edited postgresql.conf produces the same row in production. */
         var dataDirectory = (string)(await new NpgsqlCommand("SHOW data_directory", setup).ExecuteScalarAsync(ct))!;
+        /* #4251 round-1 review, L4: this reads and writes postgresql.auto.conf through the local file system,
+           which throws against any server whose data directory is not on this machine. Both pass in CI, whose
+           runner is Windows and whose rig is local; skip rather than fail elsewhere. */
+        Assert.SkipWhen(!System.IO.Directory.Exists(dataDirectory),
+            $"The target's data directory ({dataDirectory}) is not on this machine, so its config files cannot be edited here.");
         var autoConfPath = System.IO.Path.Combine(dataDirectory, "postgresql.auto.conf");
         var originalContents = await System.IO.File.ReadAllTextAsync(autoConfPath, ct);
 
@@ -179,6 +194,124 @@ public sealed class PgServerConfigPendingRestartLiveTests
         {
             /* #1902: RunOwnedAsync — the file write and the reload that makes it take effect both have to run
                against this rig's own data directory and `setup` connection, not a fresh store connection. */
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await System.IO.File.WriteAllTextAsync(autoConfPath, originalContents, ct);
+                await using var reload = setup.CreateCommand();
+                reload.CommandText = "SELECT pg_reload_conf()";
+                await reload.ExecuteNonQueryAsync(ct);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4251 round-1 review, M3: a postmaster-context setting that leaves EVERY config file (here, removed
+    /// from postgresql.conf outright) cannot be reverted without a restart either, and PostgreSQL records that
+    /// as a pg_file_settings row with no name — <c>pfs.name = s.name</c> alone can never match it. The rig's
+    /// own postgresql.conf sets <c>max_worker_processes</c> (see the PostgreSQL rig setup), so removing that
+    /// line reproduces it without touching anything this test does not own.
+    /// </summary>
+    [Fact]
+    public async Task APostmasterSettingRemovedFromEveryFile_StillReadsPendingARestart()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4251 removed-setting round trip.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var setup = new NpgsqlConnection(cs);
+        await setup.OpenAsync(ct);
+
+        var dataDirectory = (string)(await new NpgsqlCommand("SHOW data_directory", setup).ExecuteScalarAsync(ct))!;
+        /* #4251 round-1 review, L4: local file access only — see the same skip on the test above. */
+        Assert.SkipWhen(!System.IO.Directory.Exists(dataDirectory),
+            $"The target's data directory ({dataDirectory}) is not on this machine, so its config files cannot be edited here.");
+        var confPath = System.IO.Path.Combine(dataDirectory, "postgresql.conf");
+        var originalContents = await System.IO.File.ReadAllTextAsync(confPath, ct);
+        var withoutSetting = string.Join('\n', originalContents.Split('\n')
+            .Where(line => !line.TrimStart().StartsWith("max_worker_processes", StringComparison.OrdinalIgnoreCase)));
+        Assert.NotEqual(originalContents, withoutSetting);
+
+        var bodySucceeded = false;
+        try
+        {
+            await System.IO.File.WriteAllTextAsync(confPath, withoutSetting, ct);
+            await using (var reload = setup.CreateCommand())
+            {
+                reload.CommandText = "SELECT pg_reload_conf()";
+                await reload.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var afterConnection = new NpgsqlConnection(PooledOffConnectionString(cs!));
+            await afterConnection.OpenAsync(ct);
+            var after = await RunCollectorAsync(afterConnection, fileSettingsReadable: true, "max_worker_processes");
+            Assert.NotNull(after);
+            Assert.Equal("postmaster", after!.Value.Context);
+            Assert.True(after.Value.PendingRestart, "a postmaster-context setting removed from every config file still needs a restart to take effect; pg_file_settings records that as a nameless row, and the fixed query must still find it by its error text.");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* #1902: RunOwnedAsync — the file write and the reload that makes it take effect both have to run
+               against this rig's own data directory and `setup` connection, not a fresh store connection. */
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
+            {
+                await System.IO.File.WriteAllTextAsync(confPath, originalContents, ct);
+                await using var reload = setup.CreateCommand();
+                reload.CommandText = "SELECT pg_reload_conf()";
+                await reload.ExecuteNonQueryAsync(ct);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4251 round-1 review, M2: pg_file_settings has no column that tells "pending" (a real, valid,
+    /// postmaster-context edit awaiting a restart) apart from "rejected" (an invalid one that would stop the
+    /// next start) — both set error = 'setting could not be applied'. This pins the documented caveat rather
+    /// than a bug: get_pg_server_config's reading guide now says a true here can mean either. max_connections
+    /// is context=postmaster, so — like work_mem above — ALTER SYSTEM validates range itself and refuses an
+    /// out-of-range value; the file is edited directly instead.
+    /// </summary>
+    [Fact]
+    public async Task ARejectedValueAtAPostmasterContext_CannotBeToldApartFromPending_AndReadsTrueToo()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4251 postmaster-rejection round trip.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var setup = new NpgsqlConnection(cs);
+        await setup.OpenAsync(ct);
+
+        var dataDirectory = (string)(await new NpgsqlCommand("SHOW data_directory", setup).ExecuteScalarAsync(ct))!;
+        /* #4251 round-1 review, L4: local file access only — see the same skip on the work_mem test above. */
+        Assert.SkipWhen(!System.IO.Directory.Exists(dataDirectory),
+            $"The target's data directory ({dataDirectory}) is not on this machine, so its config files cannot be edited here.");
+        var autoConfPath = System.IO.Path.Combine(dataDirectory, "postgresql.auto.conf");
+        var originalContents = await System.IO.File.ReadAllTextAsync(autoConfPath, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await System.IO.File.AppendAllTextAsync(autoConfPath, "\nmax_connections = 0\n", ct);
+            await using (var reload = setup.CreateCommand())
+            {
+                reload.CommandText = "SELECT pg_reload_conf()";
+                await reload.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var afterConnection = new NpgsqlConnection(PooledOffConnectionString(cs!));
+            await afterConnection.OpenAsync(ct);
+            var after = await RunCollectorAsync(afterConnection, fileSettingsReadable: true, "max_connections");
+            Assert.NotNull(after);
+            Assert.Equal("postmaster", after!.Value.Context);
+            Assert.True(after.Value.PendingRestart, "pg_file_settings cannot tell a rejected postmaster-context value apart from one truly pending a restart, so the fixed query reads pending_restart = true here too — documented, not fixable from this view alone.");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            /* #1902: RunOwnedAsync — see the work_mem test above for why this needs the SAME admin `setup`
+               connection rather than a fresh one. */
             await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, async () =>
             {
                 await System.IO.File.WriteAllTextAsync(autoConfPath, originalContents, ct);

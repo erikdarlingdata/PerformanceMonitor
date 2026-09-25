@@ -561,6 +561,37 @@ public sealed class PgServerConfigScopeRungTests
         return Regex.Replace(noBlocks, @"^\s*///?.*$", string.Empty, RegexOptions.Multiline);
     }
 
+    /// <summary>
+    /// #4251 round-1 review, L1: nothing offline kept <see cref="PgServerConfigCollector"/>'s two query texts
+    /// (plain, and the <c>pg_file_settings</c> route) in step — only a live run with a granted role ever
+    /// exercised the second one. This pins that the two BuildQuery outputs differ in exactly one span: the
+    /// <c>pending_restart</c> column. A column added to one text alone, or a file-settings predicate that
+    /// drifted from what <c>PayloadColumns</c> expects, fails this without needing a live database.
+    /// </summary>
+    [Fact]
+    public void TheFileSettingsQuery_IsTheDefaultQuery_WithOnlyThePendingRestartColumnChanged()
+    {
+        static string Text(bool readable) => PgServerConfigCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = -4251,
+            ServerName = "pin-4251",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = NoDeltas.Instance,
+            PgFileSettingsReadable = readable,
+        }).Text;
+
+        var plain = Text(false);
+        var withFile = Text(true);
+        const string plainColumn = "    s.pending_restart                       AS pending_restart,";
+        Assert.Single(Regex.Matches(plain, Regex.Escape(plainColumn)));
+
+        var start = withFile.IndexOf("    (s.pending_restart", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        const string tail = "AS pending_restart,";
+        var end = withFile.IndexOf(tail, start, StringComparison.Ordinal) + tail.Length;
+        Assert.Equal(plain, withFile[..start] + plainColumn + withFile[end..]);
+    }
+
     private sealed class NoDeltas : ICollectorDeltaCalculator
     {
         public static readonly NoDeltas Instance = new();

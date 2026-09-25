@@ -195,12 +195,21 @@ CROSS JOIN LATERAL (
        CASE or subquery that only reaches pg_file_settings on some rows still throws for a role with no grant
        on it, and this collector must never lose the whole pg_settings snapshot to that.
 
-       The EXISTS is correlated on name AND requires s.context = 'postmaster': pg_file_settings.error is
-       'setting could not be applied' both for a value truly pending a restart (a postmaster-context setting
-       whose file value cannot take effect without one) and for a value PostgreSQL rejected outright at any
-       other context (PostgreSQL guc.c) - same text, two different facts - so context is what tells them
-       apart, never the error text alone. The override arm (pg_db_role_setting) is untouched: an override has
-       no file line and cannot be pending a restart, per its own comment above. */
+       The EXISTS matches a pg_file_settings row for a postmaster-context setting (s.context = 'postmaster'):
+       either by name, case-insensitively since ParseConfigFp stores the name as written and a hand-edited
+       "Shared_Buffers = ..." would otherwise miss it, with error 'setting could not be applied'; or, for the
+       row PostgreSQL records with no name when a postmaster-context setting leaves every config file (ALTER
+       SYSTEM RESET, or a deleted line), by matching that row's exact error text, since pfs.name is empty on
+       it and there is nothing to correlate by name. Neither error string is translated -
+       pstrdup("setting could not be applied") and the psprintf building the second, guc-file.l:14 and :18 -
+       so lc_messages never changes either one.
+
+       s.context = 'postmaster' does NOT separate "pending" from "rejected": pg_file_settings has no column
+       for that, so 'setting could not be applied' is set both for a postmaster-context value truly pending a
+       restart and for one PostgreSQL rejected outright (bad syntax, out of range), which a restart would only
+       fail to start on. get_pg_server_config's reading guide for pending_restart says so. The override arm
+       (pg_db_role_setting) is untouched: an override has no file line and cannot be pending a restart, per its
+       own comment above. */
     private const string QueryTextWithFileSettings = @"
 SELECT
     s.name                                  AS name,
@@ -215,13 +224,15 @@ SELECT
     s.sourcefile                            AS sourcefile,
     coalesce(s.sourceline, 0)               AS sourceline,
     (s.pending_restart
-        OR EXISTS (
-            SELECT 1
-            FROM pg_catalog.pg_file_settings AS pfs
-            WHERE pfs.name  = s.name
-            AND   pfs.error = 'setting could not be applied'
-            AND   s.context = 'postmaster'
-        ))                                   AS pending_restart,
+        OR (s.context = 'postmaster'
+            AND EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_file_settings AS pfs
+                WHERE (lower(pfs.name) = lower(s.name)
+                       AND pfs.error = 'setting could not be applied')
+                OR    pfs.error = 'parameter ""' || s.name
+                                  || '"" cannot be changed without restarting the server'
+            )))                             AS pending_restart,
     s.short_desc                            AS short_desc,
     NULL::text                              AS database_name,
     NULL::text                              AS role_name
