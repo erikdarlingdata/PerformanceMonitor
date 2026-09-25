@@ -129,10 +129,10 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// </summary>
     private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
     {
-        /* Same gap as Darling's twin (#4268, still open): compaction only fires on collectors with nothing to
-           report, and this fixture's collectors are deliberately unhealthy (mixed SUCCESS/ERROR), so nothing
-           compacts and the reply stays over. Measured on this fixture at 43,115 B. */
-        ["get_collection_health"] = 43_115,          // #4198, #4268
+        /* #4268 (merged) compacts only HEALTHY collectors with nothing to report; this fixture's collectors are
+           deliberately not healthy (mixed SUCCESS/ERROR), so nothing compacts and the reply is still over.
+           Measured on this fixture at 43,115 B. Stays open under #4198, like Darling's twin row. */
+        ["get_collection_health"] = 43_115,          // #4198
     };
 
     [Fact]
