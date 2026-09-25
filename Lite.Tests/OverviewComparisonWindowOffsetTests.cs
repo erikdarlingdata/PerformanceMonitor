@@ -149,6 +149,60 @@ public sealed class OverviewComparisonWindowOffsetTests
         Assert.Contains("var daysBack = (range.CurrentFrom - range.From).TotalDays;", lanesSource);
     }
 
+    /// <summary>
+    /// #4320: under a CUSTOM range, RefreshAsync's baseline reference time is fromDate converted back to
+    /// UTC (fromDate - utcOffsetMinutes). <c>BaselineLocalClock.LocalKey</c> expects UTC and converts it to
+    /// server-local itself, so passing a server-local fromDate straight through (the pre-#4320 bug) shifted
+    /// the baseline's local-hour lookup a SECOND time, by the server's own offset.
+    /// </summary>
+    [Theory]
+    [InlineData(300)]   // UTC+5
+    [InlineData(-420)]  // UTC-7
+    public void GetBaselineReferenceTimeUtc_CustomRange_ConvertsFromDateBackToUtc(int utcOffsetMinutes)
+    {
+        var from = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
+
+        var referenceTime = CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(
+            hoursBack: 6, from, FixedUtcNow, utcOffsetMinutes);
+
+        Assert.Equal(from.AddMinutes(-utcOffsetMinutes), referenceTime);
+        Assert.NotEqual(from, referenceTime);
+    }
+
+    /// <summary>
+    /// #4320: under a PRESET range (fromDate null), the baseline reference time is utcNow.AddHours(-hoursBack),
+    /// unchanged -- it's already UTC and needs no conversion, regardless of the server's offset.
+    /// </summary>
+    [Theory]
+    [InlineData(300)]
+    [InlineData(-420)]
+    public void GetBaselineReferenceTimeUtc_PresetRange_UsesUtcNowUnchanged(int utcOffsetMinutes)
+    {
+        var referenceTime = CorrelatedTimelineLanesControl.GetBaselineReferenceTimeUtc(
+            hoursBack: 6, null, FixedUtcNow, utcOffsetMinutes);
+
+        Assert.Equal(FixedUtcNow.AddHours(-6), referenceTime);
+    }
+
+    /// <summary>
+    /// #4320 ruling's source pin. Confirmed by checking out CorrelatedTimelineLanesControl.xaml.cs from this
+    /// branch's parent commit (pre-#4320) and re-running this assertion against that source: it failed --
+    /// RefreshAsync's referenceTime fell back to "fromDate ?? DateTime.UtcNow.AddHours(-hoursBack)" directly,
+    /// passing a custom range's server-local fromDate to GetBaselineForLaneAsync as if it were UTC.
+    /// </summary>
+    [Fact]
+    public void BaselineReferenceTime_UsesHelper_NotFromDateDirectly()
+    {
+        var lanesSource = File.ReadAllText(ControlsFile("CorrelatedTimelineLanesControl.xaml.cs"));
+
+        Assert.False(lanesSource.Contains("var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);"),
+            "RefreshAsync's referenceTime still falls back to a raw fromDate, which is server-local under a " +
+            "custom range but is passed to GetBaselineForLaneAsync as if it were UTC (#4320).");
+        Assert.Contains(
+            "var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, utcOffsetMinutes);",
+            lanesSource);
+    }
+
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);
 
     private static string ControlsDir([CallerFilePath] string thisFile = "") =>

@@ -45,27 +45,41 @@ public sealed class PerfmonIntervalAggregationTests
         Assert.Equal(2, max);
     }
 
-    /// <summary>The failure mode itself: a summed interval anywhere in this read path is the 12-17x
-    /// denominator inflation, and it is silent — the column is populated, the query succeeds, and only
-    /// the derived rate is wrong.</summary>
+    /// <summary>The failure mode itself: a summed interval across a collection's INSTANCE rows is the
+    /// 12-17x denominator inflation, and it is silent — the column is populated, the query succeeds, and
+    /// only the derived rate is wrong.
+    /// <para>#4234: the batched trend's bucketing legitimately adds a SECOND, different SUM over
+    /// <c>sample_interval_seconds</c> — the outer GROUP BY <c>counter_name, bucket_start</c> summing each
+    /// COLLECTION's own already-<c>MAX</c>'d interval across the collections a bucket holds (the ruling's
+    /// summed-intervals rate), never raw instance rows. That SUM always carries this exact
+    /// <c>FILTER (WHERE sample_interval_seconds &gt; 0)</c> right after it, so stripping just that
+    /// substring isolates exactly the original bug shape: a bare, unfiltered
+    /// <c>SUM(sample_interval_seconds)</c> grouped over instance rows.</para></summary>
     [Fact]
-    public void NoPerfmonTrendRead_SumsTheInterval()
+    public void NoPerfmonTrendRead_SumsTheIntervalAcrossInstanceRows()
     {
         var source = ParitySource.ReadFile(ReadPath);
 
-        Assert.DoesNotContain("SUM(sample_interval_seconds)", source, StringComparison.Ordinal);
+        var withoutTheBucketedSum = source.Replace(
+            "SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0)", string.Empty);
+        Assert.DoesNotContain("SUM(sample_interval_seconds)", withoutTheBucketedSum, StringComparison.Ordinal);
     }
 
     /// <summary>Guards the fix from being over-applied: the two columns that ARE additive must stay sums,
     /// in both reads. A well-meant "make it consistent" edit that turned these into MAX would silently
-    /// report one instance's value as the whole counter.</summary>
+    /// report one instance's value as the whole counter.
+    /// <para>#4234: <c>delta_cntr_value</c> is 3, not 2 — the batched trend's bucketing adds one more SUM,
+    /// the outer GROUP BY <c>counter_name, bucket_start</c> summing each collection's already-summed delta
+    /// across the bucket's collections (the ruling's summed-deltas rate), same additive column, one layer
+    /// higher. <c>cntr_value</c> stays 2: that outer layer AVERAGES (the ruling's gauge rule), so it adds no
+    /// third SUM.</para></summary>
     [Fact]
     public void TheAdditiveColumnsStaySummed()
     {
         var source = ParitySource.ReadFile(ReadPath);
 
         Assert.Equal(2, CountOccurrences(source, "SUM(cntr_value)"));
-        Assert.Equal(2, CountOccurrences(source, "SUM(delta_cntr_value)"));
+        Assert.Equal(3, CountOccurrences(source, "SUM(delta_cntr_value)"));
         Assert.DoesNotContain("MAX(cntr_value)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("MAX(delta_cntr_value)", source, StringComparison.Ordinal);
     }

@@ -142,6 +142,22 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
+    /// #4320: the UTC instant RefreshAsync's baseline lookups (<c>LocalDataService.GetBaselineForLaneAsync</c>
+    /// -&gt; <c>BaselineProvider.GetBaselineAsync</c> -&gt; <c>BaselineLocalClock.LocalKey</c>) should key their
+    /// server-local hour/day-of-week from. <c>LocalKey</c> expects UTC and converts it to server-local itself.
+    /// Under a CUSTOM range, fromDate already IS server-local (see <see cref="GetCurrentWindowServerLocal"/>),
+    /// so passing it straight through as if it were UTC shifted the baseline's local-hour lookup a SECOND
+    /// time, by the server's own UTC offset, on any server not on UTC -- converting it back to UTC here
+    /// undoes that. Under a PRESET range (fromDate null) utcNow.AddHours(-hoursBack) is already UTC and
+    /// needs no conversion. utcNow/utcOffsetMinutes are explicit parameters for the same reason
+    /// <see cref="GetCurrentWindowServerLocal"/>'s are: a test can drive this deterministically for a server
+    /// on either side of UTC, under either range kind.
+    /// </summary>
+    internal static DateTime GetBaselineReferenceTimeUtc(
+        int hoursBack, DateTime? fromDate, DateTime utcNow, int utcOffsetMinutes) =>
+        fromDate.HasValue ? fromDate.Value.AddMinutes(-utcOffsetMinutes) : utcNow.AddHours(-hoursBack);
+
+    /// <summary>
     /// #4296: RefreshOverviewAsync's comparison range for the Overview tab's ghost-line overlay. NOT
     /// ServerTab.Comparison.cs's GetComparisonRange -- that one's preset-range fallback is a raw UTC now,
     /// correct for the Queries-tab's three comparison reads it also serves (UTC collection_time, no offset
@@ -168,7 +184,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// <summary>
     /// Refreshes all lane data for the given time range.
     /// </summary>
-    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate,
+    public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes,
         (DateTime From, DateTime To, DateTime CurrentFrom)? comparisonRange = null)
     {
         if (_dataService == null || _isRefreshing) return;
@@ -185,8 +201,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var memoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, hoursBack, fromDate, toDate));
             var fileIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
-            // Fetch baselines for band rendering — chart-unit-matched metrics
-            var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+            // Fetch baselines for band rendering — chart-unit-matched metrics. #4320: GetBaselineReferenceTimeUtc
+            // converts a server-local custom-range fromDate back to UTC before BaselineLocalClock.LocalKey
+            // converts it to server-local again; a preset range's utcNow.AddHours(-hoursBack) is already UTC.
+            var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, utcOffsetMinutes);
             var cpuBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime));
             var waitBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime));
             var ioBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime));

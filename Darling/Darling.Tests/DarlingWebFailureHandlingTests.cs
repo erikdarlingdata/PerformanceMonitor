@@ -443,7 +443,7 @@ public sealed class DarlingWebFailureHandlingTests
         var loopStart = code.IndexOf("foreach (var (name, handler) in BuildReadDispatch", StringComparison.Ordinal);
         Assert.True(loopStart >= 0, "MapAll no longer builds the /api/read/* dispatch loop this pin is reading.");
 
-        var loopEnd = code.IndexOf("return ToHttpResult(result);", loopStart, StringComparison.Ordinal);
+        var loopEnd = code.IndexOf("return ToHttpResult(result,", loopStart, StringComparison.Ordinal);
         Assert.True(loopEnd >= 0, "The dispatch loop no longer falls through to ToHttpResult; this pin is reading nothing.");
 
         var catchBlock = code[loopStart..loopEnd];

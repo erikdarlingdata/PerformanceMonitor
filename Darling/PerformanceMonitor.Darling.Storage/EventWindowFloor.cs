@@ -25,9 +25,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// clock, which stamps the event, and the collector host's, which stamps the collection. Measured on the same
 /// store: blocked-process reports land 4.8 s to 62 s after their <c>event_time</c>, a DMV blocking snapshot's
 /// <c>event_time</c> IS its <c>collection_time</c>, and the worst deadlock sat 27 ms AFTER its collection.
-/// <see cref="SkewAllowance"/> is one whole chunk — a day — so a monitored clock would have to run a day
-/// ahead of the collector's before a row fell out, and the floor costs at most one chunk more than the window
-/// itself while still excluding every chunk older than that.</para>
+/// <see cref="SkewAllowance"/> is one day — a day — so a monitored clock would have to run a day ahead of the
+/// collector's before a row fell out, and the floor costs at most one day more than the window itself while
+/// still excluding every chunk older than that.</para>
 ///
 /// <para><b>Deliberately no upper bound on <c>collection_time</c>.</b> An event collected late — the catch-up
 /// after an outage — is still an event inside the window, and it is exactly the row an upper bound would
@@ -35,10 +35,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class EventWindowFloor
 {
-    /// <summary>How far before an event's own timestamp its <c>collection_time</c> may fall and still be read:
-    /// the store's chunk width, derived from it so "at most one chunk beyond the window" stays true if the
-    /// width ever moves.</summary>
-    public static readonly TimeSpan SkewAllowance = TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays);
+    /// <summary>How far before an event's own timestamp its <c>collection_time</c> may fall and still be
+    /// read. Its OWN 1-day constant (#4211) — a clock-skew tolerance, not the store's chunk width: since
+    /// #4211, a raw hypertable's <c>chunk_time_interval</c> can be narrower than a day for the heaviest
+    /// tables (<see cref="RawChunkIntervalPlanner"/>), while <see cref="TimescaleSupport.ChunkIntervalDays"/>
+    /// stays only the ladder's CEILING. <c>blocked_process_reports</c>, <c>dmv_blocking_snapshots</c> and
+    /// <c>deadlocks</c> — the three tables this floor exists for — are not among the heavy query tables the
+    /// planner narrows, so they stay at the 24-hour ceiling regardless, and a day of allowance still costs at
+    /// most one of their chunks.</summary>
+    public static readonly TimeSpan SkewAllowance = TimeSpan.FromDays(1);
 
     /// <summary>The <c>collection_time</c> floor for an event window starting at
     /// <paramref name="eventWindowStartUtc"/>, as naive UTC — the store's timestamp convention, so the bind

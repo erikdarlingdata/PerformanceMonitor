@@ -12,7 +12,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -48,10 +50,16 @@ public sealed partial class ViewerDataService
     /// the interval for a per-second rate (delta CAST to double precision for the typed reader), NULL — and
     /// the point dropped — when the whole collection was unknowable. Lite's
     /// per-user <c>IgnoredWaitTypes</c> exclusion clause is deliberately DROPPED — the viewer has no
-    /// per-user ignore config, matching the W1b wait-picker read. $1 server_id, $2 window start, $3 window
-    /// end (naive UTC).
+    /// per-user ignore config, matching the W1b wait-picker read.
+    ///
+    /// <para><b>#4234: BUCKETED</b> — a rate is the summed delta over the summed interval (ruling item 2),
+    /// the same time-weighted rule <c>WaitTrendsSql</c> uses for the per-type picker trend, generalized to
+    /// one aggregate series. A bucket with no rated collection is dropped (<c>HAVING</c>), matching the old
+    /// per-collection read's own drop of an unrated collection. <c>first_collection_time</c> /
+    /// <c>collection_count</c> let the C# reader stamp a bucket that merged nothing at its one collection's
+    /// own raw time (ruling item 3) rather than the bucket grid. $4 the bucket width in minutes.</para>
     /// </summary>
-    public const string TotalWaitTrendSql = """
+    public static readonly string TotalWaitTrendSql = $"""
         WITH per_collection AS
         (
             SELECT
@@ -71,44 +79,70 @@ public sealed partial class ViewerDataService
             AND   collection_time >= $2
             AND   collection_time <= $3
             GROUP BY collection_time
+        ),
+        rated AS
+        (
+            SELECT
+                collection_time,
+                CASE WHEN interval_seconds > 0 THEN total_delta_ms END AS rated_delta_ms,
+                CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+            FROM per_collection
         )
         SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second
-        FROM per_collection
-        ORDER BY collection_time
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            CAST(SUM(rated_delta_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM rated
+        GROUP BY 1
+        HAVING COUNT(rated_seconds) > 0
+        ORDER BY 1
         """;
 
     /// <summary>
     /// The memory trend — Lite's <c>GetMemoryTrendAsync</c> ported to Postgres. Reads the four MB metrics
     /// from <c>v_memory_stats</c>; each is <c>numeric(18,2)</c> in the store, so all four are CAST to
     /// double precision for the typed GetDouble reader (the same numeric→double adaptation the CPU/File-IO
-    /// reads make). $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// reads make).
+    ///
+    /// <para><b>#4234: BUCKETED</b> — all four are gauges (ruling item 2): each bucket's value is the
+    /// average of its collections, with no MAX/peak column since the Overview's buffer-pool lane (the only
+    /// consumer, along with the Memory tab, both plain lines) draws none. <c>first_collection_time</c> /
+    /// <c>collection_count</c> let the C# reader stamp a bucket that merged nothing at its one collection's
+    /// own raw time (ruling item 3). $4 the bucket width in minutes.</para>
     /// </summary>
-    public const string MemoryTrendSql = """
+    public static readonly string MemoryTrendSql = $"""
         SELECT
-            collection_time,
-            CAST(total_server_memory_mb AS double precision) AS total_server_memory_mb,
-            CAST(target_server_memory_mb AS double precision) AS target_server_memory_mb,
-            CAST(buffer_pool_mb AS double precision) AS buffer_pool_mb,
-            CAST(plan_cache_mb AS double precision) AS plan_cache_mb
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(CAST(total_server_memory_mb AS double precision)) AS total_server_memory_mb,
+            AVG(CAST(target_server_memory_mb AS double precision)) AS target_server_memory_mb,
+            AVG(CAST(buffer_pool_mb AS double precision)) AS buffer_pool_mb,
+            AVG(CAST(plan_cache_mb AS double precision)) AS plan_cache_mb,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
         FROM v_memory_stats
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
-        ORDER BY collection_time
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
-    /// Total wait ms/sec across all types for one server over the window (the Overview's wait lane). The
-    /// read produces only <c>CollectionTime</c> + <c>WaitTimeMsPerSecond</c>; the reused
+    /// Total wait ms/sec across all types for one server over the window (the Overview's wait lane),
+    /// bucketed to <see cref="TrendBudget.Chart"/>'s width (#4234; single series, so <c>seriesCount</c> is
+    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>, matching <c>GetWaitStatsTrendsByTypesAsync</c>).
+    /// The read produces only <c>CollectionTime</c> + <c>WaitTimeMsPerSecond</c>; the reused
     /// <see cref="WaitStatsTrendPoint"/>'s signal-wait / avg-per-wait fields are left 0 (mirroring Lite,
-    /// whose <c>GetTotalWaitTrendAsync</c> returns the same record shape with those two unset).
+    /// whose <c>GetTotalWaitTrendAsync</c> returns the same record shape with those two unset). A bucket
+    /// holding exactly one physical collection is stamped at that collection's own raw time rather than the
+    /// bucket grid when EVERY bucket this call returned is such a singleton (ruling item 3).
     /// </summary>
     public async Task<List<WaitStatsTrendPoint>> GetTotalWaitTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var items = new List<WaitStatsTrendPoint>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(TotalWaitTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -121,18 +155,35 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. The HAVING
+               clause already excludes an all-unrated bucket, so this is a defensive guard, not a live path. */
             if (reader.IsDBNull(1))
             {
                 continue;
             }
 
+            if (reader.GetInt64(3) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((reader.GetDateTime(0), reader.GetDateTime(2), reader.GetDouble(1)));
+        }
+
+        var items = new List<WaitStatsTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new WaitStatsTrendPoint(
-                reader.GetDateTime(0),
-                reader.GetDouble(1),
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.Rate,
                 0,
                 0));
         }
@@ -141,13 +192,17 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The memory trend (four MB metrics per collection) for one server over the window; the Overview's
-    /// buffer-pool lane uses <see cref="MemoryTrendPoint.BufferPoolMb"/>.
+    /// The memory trend (four MB metrics per bucket) for one server over the window; the Overview's
+    /// buffer-pool lane uses <see cref="MemoryTrendPoint.BufferPoolMb"/>. Bucketed to
+    /// <see cref="TrendBudget.Chart"/>'s width (#4234); a bucket holding exactly one physical collection is
+    /// stamped at that collection's own raw time rather than the bucket grid when EVERY bucket this call
+    /// returned is such a singleton (ruling item 3).
     /// </summary>
     public async Task<List<MemoryTrendPoint>> GetMemoryTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var items = new List<MemoryTrendPoint>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(MemoryTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -160,15 +215,37 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Total, double Target, double BufferPool, double PlanCache)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new MemoryTrendPoint(
+            if (reader.GetInt64(6) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
                 reader.GetDateTime(0),
+                reader.GetDateTime(5),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+        }
+
+        var items = new List<MemoryTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            items.Add(new MemoryTrendPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.Total,
+                row.Target,
+                row.BufferPool,
+                row.PlanCache));
         }
 
         return items;
