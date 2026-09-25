@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Npgsql;
@@ -44,7 +45,15 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
 {
     private const string McpRole = "host_mcp_test";
     private const string ViewerRole = "host_viewer_test";
-    private const string RolePassword = "HostReadTestPw0123456789abcdef01";
+
+    /// <summary>Round-1 review, Low 6: a hardcoded password here is public in this repository, and each of
+    /// these two LOGIN roles gets SELECT on every table in <c>collect</c>. Cleanup runs in <c>finally</c>, but a
+    /// cleanup failure after a failed body is swallowed (<c>LiveStoreCleanup</c>), and a killed run skips
+    /// cleanup outright — generating a fresh password per run means a role that outlives this test is not a
+    /// known, reusable credential. Hex output is safe to interpolate directly into the DDL string below (no
+    /// quoting characters). <c>DarlingSecuritySplitLiveTests</c> uses the same hardcoded-password pattern but is
+    /// explicitly out of scope here.</summary>
+    private static readonly string RolePassword = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
     [Fact]
     public async Task GetStoreHost_AsMcpAndViewerRoles_SurfacesAllFourVerdicts_Live()
