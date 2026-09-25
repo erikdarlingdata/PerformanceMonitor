@@ -31,7 +31,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpObjectStatsTools
 {
-    /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter).</summary>
+    /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter; get_index_usage and
+    /// get_object_locking do, and these are the DEFAULT each falls back to, not a hard cap).</summary>
     private const int TableSizesTop = 100;
 
     /// <summary>
@@ -43,7 +44,14 @@ public sealed class DarlingMcpObjectStatsTools
     /// </summary>
     private const int IndexUsageTop = 75;
 
-    private const int ObjectLockingTop = 200;
+    /// <summary>
+    /// #4198: was a 200-row hard cap with no override and no truncation signal. Measured 71,332 bytes at
+    /// default arguments on a busy production store -- more than double <see cref="McpResponseBudget.DefaultBytes"/>
+    /// -- so this is now the DEFAULT <c>limit</c>, sized from that measurement (~356.7 B/row at 200 rows; 75
+    /// rows leaves headroom under the budget even for wider index/table names than the measuring store's). An
+    /// explicit <c>limit</c> still gets what it asks for, up to <see cref="McpHelpers.MaxTop"/>.
+    /// </summary>
+    private const int ObjectLockingTop = 75;
 
     [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
     public static async Task<string> GetTableIndexSizes(
@@ -243,14 +251,23 @@ public sealed class DarlingMcpObjectStatsTools
     [McpServerTool(Name = "get_object_locking"), Description("Gets per-index locking and latch contention (row/page lock waits in ms, lock escalations, page-latch and page-IO-latch waits) from the latest daily snapshot, top contended objects first. Use to find tables/indexes driving blocking and contention. Counters are cumulative since the last instance restart. LATEST IS A TIME: this reads the newest index/object snapshot for the server, not a window, and captured_at is the instant it was collected - these are the databases and indexes that existed AT that stamp, and because object stats are collected DAILY the stamp can be most of a day old on a healthy server and older still on one whose collector has stalled.")]
     public static async Task<string> GetObjectLocking(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
 
+        var validation = McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
         try
         {
-            var rows = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, ObjectLockingTop);
+            /* #4198: limit + 1 as the fetch, the extra row as the OBSERVED truncation signal (#3653's
+               dialect) -- McpHelpers.BoundPage trims the page back to `limit`, so objects_returned below is
+               always a count of the page and never of the over-fetch. */
+            var fetched = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats")
                     ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
@@ -285,6 +302,16 @@ public sealed class DarlingMcpObjectStatsTools
                    the shrink-only roster shrinks. A daily-collected read most needs this: without it an
                    agent reads a 23-hour-old contention picture as "now". */
                 captured_at = rows[0].CollectionTime.ToString("o"),
+                objects_returned = rows.Count,
+                truncated,
+                /* #4198: no separate match-count query (unlike get_index_usage) -- BoundPage's over-fetch
+                   only OBSERVES "more than limit", not how many more, so the note says that and no more. */
+                note = truncated
+                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention at the latest "
+                      + "snapshot. Rows are ordered by total wait time (row lock + page lock + page latch + "
+                      + "page I/O latch) descending, so the highest-contention indexes are returned first; "
+                      + "raise limit to see more."
+                    : "Complete: every index with lock/latch contention at the latest snapshot is included.",
                 objects = result
             }, McpHelpers.JsonOptions);
         }

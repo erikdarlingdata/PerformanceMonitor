@@ -12,11 +12,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// Explicit command deadlines for this project's store access (#2874), one constant per BUDGET REGIME.
 ///
 /// <para><c>.Service</c> is roughly fifteen regimes, not one, and they are being closed a regime at a
-/// time; this file is where each one's constant lands. Eleven are here: the collection sweep (#2928),
-/// the post-analysis force-plan hook and the two CLI verbs (group E), the startup/bootstrap path and
-/// its connect probe and the serial collection-loop thread (#2946), and the command plane, the
-/// actual-plan store resolve, the Query Store backfill's reads and the control-plane reload beacon
-/// (group D).
+/// time; this file is where each one's constant lands. Twelve are here: the collection sweep (#2928),
+/// the post-analysis force-plan hook and the two CLI verbs (group E), the startup/bootstrap path, its
+/// connect probe, the serial collection-loop thread and the once-per-start host/settings profile log
+/// (#2946, #4214), and the command plane, the actual-plan store resolve, the Query Store backfill's
+/// reads and the control-plane reload beacon (group D).
 /// <b>Do not reuse a constant across regimes</b> — the four numbers this sweep has already produced
 /// (60 s in <c>.Analysis</c> from a 120 s <c>CancelAfter</c>, 10 s for the alert pass from its 30 s
 /// cadence, <c>.Storage</c>'s five, <c>.Viewer</c>'s 15/5/10 from a connection permit) each came from a
@@ -421,6 +421,34 @@ public static class ServiceCommandDeadlines
     /// it. None of the four numbers in this file's group C entries includes it.</para>
     /// </summary>
     public const int SerialLoopSeconds = 5;
+
+    /// <summary>
+    /// The once-per-start store host/settings profile log (#4214 ruling 9): after the store migrates,
+    /// <c>DarlingWorker</c> wraps <c>DarlingStoreHostProfile.GatherStartupProfileAsync</c> in one linked CTS
+    /// at this bound — the host facts, the <c>pg_settings</c> read and the managed conf-file attribution for
+    /// the eight sizing settings. Deliberately excludes the STORE facts that scale with the store (size,
+    /// uncompressed-chunk totals): those stay in <c>--check-settings</c> and the later MCP read, under
+    /// <see cref="CliStoreReadSeconds"/> or a budget of their own, off this path entirely — see
+    /// <c>SerialLoopStoreSizeSourceTests</c> (#3199) for why that split is load-bearing rather than
+    /// cosmetic.
+    ///
+    /// <para><b>Why this is its own regime and not <see cref="BootstrapSeconds"/>.</b> Every bootstrap
+    /// site's failure is terminal — <c>LogCritical</c> then <c>return</c> — which is why that regime errs
+    /// long: waiting is the cheap direction when the alternative is a dead service. This step is the
+    /// opposite. Ruling 9 requires it to "never fail or delay startup," so a slow-but-healthy store here
+    /// degrades to one missing log line, not to a stalled start, and the deadline stays short rather than
+    /// generous — the collection loop must not sit behind a diagnostic.</para>
+    ///
+    /// <para><b>ABOVE the one query it wraps, not an independent number.</b>
+    /// <c>GatherSettingProfilesAsync</c>'s single <c>pg_settings</c> read already carries
+    /// <see cref="CliStoreReadSeconds"/> as its own <c>CommandTimeout</c> — it is the same shared helper
+    /// <c>--check-settings</c> calls, so that per-statement bound is not this constant's to change. This
+    /// constant only has to backstop what that command timeout does not cover: <c>OpenAsync</c> and the
+    /// eight settings' conf-file reads (local disk, small files, sub-millisecond in practice). Set to
+    /// <see cref="CliStoreReadSeconds"/> + 5 for the same reason <see cref="CliBudgetBackstopSeconds"/> sits
+    /// above the query it backstops rather than tying it.</para>
+    /// </summary>
+    public const int StartupHostProfileSeconds = CliStoreReadSeconds + 5;
 
     /// <summary>
     /// The store&lt;-&gt;service COMMAND plane's own bookkeeping — the stale-command reaper, the atomic

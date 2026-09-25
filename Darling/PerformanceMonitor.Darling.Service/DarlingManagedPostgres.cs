@@ -494,6 +494,21 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV14 = "# Managed by PerformanceMonitor Darling (v14 PostgreSQL 17 maintenance_work_mem limit) -- do not remove this block";
 
     /// <summary>
+    /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
+    /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
+    /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
+    /// what <see cref="BuildMemorySizingConfAppend"/>/<see cref="BuildHardwareSizingConfAppend"/>/etc. decide,
+    /// and a second list keyed the other way (setting -> marker) would be one more place those two could drift.
+    /// v1 (<see cref="ConfMarker"/>) is included even though it never carries one of the seven checked
+    /// settings — harmless, since a scan for a setting v1 never sets simply never lands inside its span.
+    /// </summary>
+    internal static readonly string[] AllManagedConfMarkers =
+    [
+        ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
+        ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
+    ];
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -749,10 +764,19 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV4).Append('\n');
-        builder.Append("max_connections = 200\n");
+        builder.Append("max_connections = ").Append(TargetMaxConnections).Append('\n');
         builder.Append("max_wal_size = 4GB\n");
         return builder.ToString();
     }
+
+    /// <summary>
+    /// The fixed <c>max_connections</c> the v4 block writes (#4214): a single named constant instead of the
+    /// literal <c>200</c> living in two places (this append, and the host-profile check's "value derived for
+    /// this host" for the same setting), which is not RAM/hypertable-derived like the settings in
+    /// <see cref="DeriveMemorySettings"/> — it is a fixed headroom figure, so there is no <c>Derive*</c>
+    /// function to share; this constant is the shared source instead.
+    /// </summary>
+    internal const int TargetMaxConnections = 200;
 
     /// <summary>
     /// The v5 co-located-sizing override block (#1559): re-states <c>shared_buffers</c> at the CAPPED
@@ -1283,7 +1307,11 @@ public sealed class DarlingManagedPostgres
     /// that does not follow that convention. <c>ALTER SYSTEM</c> (postgresql.auto.conf) is unaffected either
     /// way, since this function never reads that file.</para>
     /// </summary>
-    private static int FindHardwareSizingBlockEnd(string conf, int markerStart)
+    /// <remarks>Internal, not private (#4214): the body never mentions v8 specifically — it walks from a
+    /// marker line to the next blank line or EOF, which is the same shape every <c>Build*ConfAppend</c> in
+    /// this class writes. The host-profile check's generic managed-block scan reuses this exact walk for
+    /// EVERY marker rather than re-implementing it, so the two cannot drift on what "a block's span" means.</remarks>
+    internal static int FindHardwareSizingBlockEnd(string conf, int markerStart)
     {
         var cursor = conf.IndexOf('\n', markerStart);
         if (cursor < 0)
@@ -3229,24 +3257,57 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     private bool TryGetAuthoritativePhysicalMemoryBytes(out long totalPhysicalMemoryBytes)
     {
+        if (TryReadWindowsPhysicalMemoryBytes(out totalPhysicalMemoryBytes, out var win32Error, out var thrown))
+        {
+            return true;
+        }
+
+        if (thrown is not null)
+        {
+            _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", thrown.Message);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "GlobalMemoryStatusEx did not return total physical memory (Win32 error {Error}); sizing Postgres memory from a fallback.",
+                win32Error);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The RAW <c>GlobalMemoryStatusEx</c> read, with no logger dependency (#4214) — split out of
+    /// <see cref="TryGetAuthoritativePhysicalMemoryBytes"/> so the host-profile check's RAM fact can call the
+    /// SAME authoritative read this class sizes Postgres from, rather than a second P/Invoke of the same API
+    /// (the "RAM: reuse the authoritative read on Windows" ruling). <paramref name="thrown"/> carries the
+    /// exception on the rare throw path so each caller can log its own wording without this method taking a
+    /// logger; <paramref name="win32Error"/> is <see cref="Marshal.GetLastWin32Error"/> on a clean false.
+    /// </summary>
+    internal static bool TryReadWindowsPhysicalMemoryBytes(out long totalPhysicalMemoryBytes, out int win32Error, out Exception? thrown)
+    {
         try
         {
             var status = new MemoryStatusEx();
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
                 totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                win32Error = 0;
+                thrown = null;
                 return true;
             }
 
-            _logger.LogWarning(
-                "GlobalMemoryStatusEx did not return total physical memory (Win32 error {Error}); sizing Postgres memory from a fallback.",
-                Marshal.GetLastWin32Error());
+            win32Error = Marshal.GetLastWin32Error();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", ex.Message);
+            thrown = ex;
+            totalPhysicalMemoryBytes = 0;
+            win32Error = 0;
+            return false;
         }
 
+        thrown = null;
         totalPhysicalMemoryBytes = 0;
         return false;
     }

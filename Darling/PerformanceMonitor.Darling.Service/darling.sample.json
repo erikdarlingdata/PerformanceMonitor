@@ -381,10 +381,24 @@
     "enabled": false,
     "port": 5153,
 
-    // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153"). Set it and every
-    // alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}}) carries a per-alert triage-page link;
-    // leave it empty (the default) and alerts carry no link. Not derived from network.listen on purpose:
-    // what the service binds is not necessarily what recipients can reach (DNS name, proxy, TLS host).
+    // The base URL RECIPIENTS can reach this dashboard on (e.g. "http://10.0.0.5:5153", or a DNS name
+    // fronted by a proxy). Set it and every alert webhook (Teams/Slack/PagerDuty/generic {{triage_url}})
+    // and email carries a per-alert triage-page link; leave it empty (the default) and alerts carry no
+    // link. Not derived from network.listen on purpose: what the service binds is not necessarily what
+    // recipients can reach (DNS name, proxy, TLS host).
+    //
+    // The link is left off ONLY when "enabled" above is false (nothing to open). It is still sent when the
+    // dashboard is loopback-only, and when this names a host other than "network.listen" -- this exact host
+    // is admitted to the Host-header allowlist as one extra name for that reason (#4220), so a DNS name (or
+    // a proxied/NATed address) works end to end instead of every request to it getting a 400. A value that
+    // includes a query string, a fragment, or user:pass@ -- e.g. this dashboard's own sign-in link,
+    // "http://host:port/?token=..." -- is sent as configured, not refused; the service logs a warning once
+    // at startup so that stays a deliberate choice.
+    //
+    // OIDC sign-in (see "oidc" below): register "{this value}/auth/oidc/callback" at the IdP too, beside
+    // "listen"/localhost -- #4220 is what makes that host reachable at all.
+    // TLS: if this value's host is an IP literal rather than a DNS name, the certificate needs an IP
+    // Subject Alternative Name for that literal -- a DNS-name/CN entry alone will not validate for it.
     "publicBaseUrl": "",
 
     // Uncomment to expose the dashboard on the LAN (a comma already follows "port" above):
@@ -410,11 +424,12 @@
     //   // OPTIONAL per-user OIDC sign-in (#2550) -- omit the whole block to keep the shared token as the only
     //   // credential. When set, the login page adds an SSO button (authorization code + PKCE) and the shared
     //   // token KEEPS working beside it (scripted callers / break-glass). Register this redirect URI at the
-    //   // IdP: {scheme}://{host}:{port}/auth/oidc/callback for every host browsers will use -- which today
-    //   // means the "listen" IP or localhost, because the anti-DNS-rebind Host allowlist admits only those.
+    //   // IdP: {scheme}://{host}:{port}/auth/oidc/callback for every host browsers will use -- the "listen"
+    //   // IP, localhost, and (#4220) web.publicBaseUrl's host above, because the anti-DNS-rebind Host
+    //   // allowlist admits exactly those and no others.
     //   // NOTE: providers differ on IP-literal redirect URIs -- Microsoft Entra permits them (and recommends
-    //   // the literal 127.0.0.1 over "localhost"), Okta requires a DNS name. A configured-DNS-name path is
-    //   // deliberately NOT in this change; see #2550 for that follow-up.
+    //   // the literal 127.0.0.1 over "localhost"), Okta requires a DNS name -- set publicBaseUrl to a DNS
+    //   // name above if your IdP needs one.
     //   "oidc": {
     //     "authority": "https://login.microsoftonline.com/<tenant-id>/v2.0", // the issuer; discovery is fetched from {authority}/.well-known/openid-configuration
     //     "clientId": "<application/client id>",

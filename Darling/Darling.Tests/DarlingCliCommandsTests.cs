@@ -1664,7 +1664,7 @@ public sealed class DarlingMissingCredentialMessageTests
            it is the point — a verb that grew its OWN copy of the advice instead would fail the two
            DoesNotContain assertions above). */
         Assert.Equal(1, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingCredentialMessage("));
-        Assert.Equal(6, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage("));
+        Assert.Equal(7, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage("));
     }
 
     private static string WriteManagedConfig(string directory, string dataDirectory)

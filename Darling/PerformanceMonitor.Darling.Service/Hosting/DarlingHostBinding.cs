@@ -210,9 +210,19 @@ internal static class DarlingHostBinding
     /// <see cref="PerformanceMonitor.Common.HostHeaderGuard"/> so Lite's MCP host runs the SAME code (#1648);
     /// this forwarder keeps it reachable where the rest of the two hosts' bind/auth helpers live, so neither
     /// host reaches past this class. Pass <paramref name="networkListenIp"/> = null in loopback-only mode.
+    ///
+    /// <para><paramref name="extraAllowedHost"/> (#4220) admits ONE more exact Host value beside
+    /// <see cref="HostHeaderGuard"/>'s own list — the web host passes <c>web.publicBaseUrl</c>'s host, since
+    /// that value is operator-configured (darling.json on this box), not attacker-reachable, and is exactly
+    /// the standard <c>AllowedHosts</c> pattern: a DNS rebind needs a hostname the ATTACKER chooses, and this
+    /// admits only the one the OPERATOR chose. Defaults to null so every existing 2-arg caller (the MCP hosts)
+    /// is byte-for-byte unchanged — <see cref="HostHeaderGuard"/>'s own default stays exactly as it was.
+    /// Compared case-insensitively, with no port (the caller already split that off).</para>
     /// </summary>
-    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp)
-        => HostHeaderGuard.IsAllowedHost(host, networkListenIp);
+    internal static bool IsAllowedHost(string? host, IPAddress? networkListenIp, string? extraAllowedHost = null)
+        => HostHeaderGuard.IsAllowedHost(host, networkListenIp)
+        || (!string.IsNullOrEmpty(host) && !string.IsNullOrEmpty(extraAllowedHost)
+            && string.Equals(host, extraAllowedHost, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// PURE constant-time token comparison. Both tokens are hashed to a fixed 32 bytes first, so the compare
