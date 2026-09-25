@@ -1385,7 +1385,7 @@ public sealed class DarlingWorker : BackgroundService
 
             managedPostgres = new DarlingManagedPostgres(config.Postgres, _logger);
             /* #2936: the sharpest of the three sites, because the judgment already existed and was being
-               thrown away. EnsureDatabaseAsync inside this bootstrap classifies transient connection
+               thrown away. OpenProbedMaintenanceConnectionAsync inside this bootstrap classifies transient connection
                faults and retries 6 times 2 s apart — and when that runs out it throws, and this catch
                discarded the fact that the failure had been RULED transient. Re-classifying here is what
                makes that verdict mean something.
@@ -1759,8 +1759,8 @@ public sealed class DarlingWorker : BackgroundService
            spend MigrationLockWaitTimeoutSeconds — so the wall-clock budget is what stops 25 attempts from
            becoming ten hours, and the attempt count is what the warning line reports.
            A FRESH connection per attempt, not a reuse of the old one — its connector is dead after a
-           transport failure, the same reason DarlingManagedPostgres.EnsureDatabaseAsync retries the whole
-           unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
+           transport failure, the same reason DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync retries
+           the connect and its first query as one unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
            each rung's DDL and its darling_schema_version stamp in ONE transaction: a rung that failed
            part-way left nothing applied and nothing stamped, and rungs at or below the stamp are skipped,
            so a retry resumes at the rung that failed instead of redoing the ladder. That rests on the

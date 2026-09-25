@@ -777,13 +777,94 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
     }
 
     /// <summary>Boots the cluster (its <c>darling</c> login is the bootstrap superuser, as on the compose store)
-    /// and migrates it, since provisioning names migrated tables.</summary>
+    /// and migrates it, since provisioning names migrated tables. A boot failure carries the cluster's own
+    /// server log tail (#4352): the CI failure artifact does not collect it, and a bare exception message
+    /// ("connection open timed out", "CREATE DATABASE timed out") does not say what the server was doing.</summary>
     private static async Task<string> BootMigratedAsync(DarlingManagedPostgres cluster, CancellationToken ct)
     {
-        var owner = new NpgsqlConnectionStringBuilder(await cluster.EnsureRunningAsync(ct)) { Pooling = false }.ConnectionString;
+        string connectionString;
+        try
+        {
+            connectionString = await cluster.EnsureRunningAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"The test cluster at {cluster.DataDirectory} did not boot: {ex.Message}{Environment.NewLine}{ServerLogTail(cluster.DataDirectory)}",
+                ex);
+        }
+
+        var owner = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
         await using var connection = await OpenAsync(owner, ct);
         await PgMigrations.MigrateAsync(connection, ct);
         return owner;
+    }
+
+    /// <summary>The last ~200 lines of every log the cluster writes: pg_ctl's start log (one file, next to the
+    /// data directory) and the logging collector's output (one or more files under <c>&lt;data directory&gt;/log</c>).
+    /// A missing or unreadable file adds a one-line note instead of throwing, since this runs from a catch block.</summary>
+    private static string ServerLogTail(string dataDirectory)
+    {
+        const int TailLines = 200;
+        var builder = new System.Text.StringBuilder();
+
+        var startLog = Path.Combine(Path.GetDirectoryName(dataDirectory) ?? dataDirectory, DarlingManagedPostgres.ServerLogFileName);
+        AppendLogTail(builder, startLog, TailLines);
+
+        var collectorDirectory = Path.Combine(dataDirectory, "log");
+        try
+        {
+            if (Directory.Exists(collectorDirectory))
+            {
+                foreach (var path in Directory.EnumerateFiles(collectorDirectory).OrderBy(p => p, StringComparer.Ordinal))
+                {
+                    AppendLogTail(builder, path, TailLines);
+                }
+            }
+            else
+            {
+                builder.AppendLine($"--- {collectorDirectory} ---").AppendLine("(no logging-collector directory)");
+            }
+        }
+        catch (Exception ex)
+        {
+            builder.AppendLine($"--- {collectorDirectory} ---").AppendLine($"(could not list: {ex.Message})");
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendLogTail(System.Text.StringBuilder builder, string path, int tailLines)
+    {
+        builder.AppendLine($"--- {path} ---");
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            var lines = new List<string>();
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                lines.Add(line);
+                if (lines.Count > tailLines)
+                {
+                    lines.RemoveAt(0);
+                }
+            }
+
+            foreach (var kept in lines)
+            {
+                builder.AppendLine(kept);
+            }
+        }
+        catch (Exception ex)
+        {
+            builder.AppendLine($"(could not read: {ex.Message})");
+        }
     }
 
     /// <summary>The login connects as <paramref name="role"/>, carries the statement_timeout backstop, and is
