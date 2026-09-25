@@ -586,7 +586,9 @@ public sealed class FleetSweepWebFeedTests
 
         var app = FrontendSource("js/app.js");
         Assert.Contains("import { renderSweeps } from \"./pages/sweeps.js\";", app, StringComparison.Ordinal);
-        Assert.Contains("renderSweeps(main)", app, StringComparison.Ordinal);
+        /* renderSweeps(main, opts) (#4214 round-1 review), not renderSweeps(main) — opts carries the poll
+           tick's { poll: true } through to the store host card, so it replays instead of re-fetching. */
+        Assert.Contains("renderSweeps(main, opts)", app, StringComparison.Ordinal);
         Assert.Contains("#/sweeps", app, StringComparison.Ordinal);
     }
 

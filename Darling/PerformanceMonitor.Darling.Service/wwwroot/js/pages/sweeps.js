@@ -54,7 +54,11 @@ let sweepSpanHours = 1;
 let selectedSweepId = null;
 let watchStateShown = null; // null = the open + carried default view; "closed" etc. on request
 
-export async function renderSweeps(main) {
+/* The store host card's last successfully fetched payload (#4214 round-1 review): a poll tick replays this
+   instead of re-fetching — see renderStoreHost below for why. null until the first successful fetch. */
+let lastStoreHostPayload = null;
+
+export async function renderSweeps(main, opts) {
   const detailBox = el("div", {});
   const timelineBox = el("div", {});
   const watchBox = el("div", {});
@@ -82,7 +86,7 @@ export async function renderSweeps(main) {
   renderDetail(detailBox);
   renderTimeline(timelineBox, detailBox);
   renderWatchItems(watchBox);
-  renderStoreHost(storeHostBox);
+  renderStoreHost(storeHostBox, opts);
 }
 
 /* ─────────────────────────── the cadence display (read-only) ─────────────────────────── */
@@ -421,14 +425,32 @@ function watchStateSev(state) {
 /* get_store_host: is the monitoring STORE itself sized right, not a monitored server — a read-only snapshot
    (platform/RAM/data volume, PostgreSQL/TimescaleDB facts, one row per sizing-relevant setting). Read-only on
    this page like every other section here: the CLI --check-settings verb and the companion sizing issue own
-   any write. Darling-only (Lite has no managed PostgreSQL store), so this section has no Lite parity to keep. */
-async function renderStoreHost(box) {
+   any write. Darling-only (Lite has no managed PostgreSQL store), so this section has no Lite parity to keep.
+
+   #4214 round-1 review: a poll tick (opts.poll — see app.js's route() doc comment) with an already-fetched
+   payload replays it instead of re-fetching. The tool's own server-side cache already makes a burst of calls
+   cheap (5 minutes, shared across callers), but this page's 60s poll would still cross the network and pay
+   the JSON round-trip every tick for a profile that changes only on a hardware or version change — never
+   per-tick. A hashchange/first-paint/span-change call (opts.poll not true) always fetches fresh. */
+async function renderStoreHost(box, opts) {
+  const isPoll = !!(opts && opts.poll === true);
+  if (isPoll && lastStoreHostPayload) {
+    renderStoreHostPayload(box, lastStoreHostPayload);
+    return;
+  }
+
   mount(box, loadingStrip("Loading store host…"));
   const res = await readTool("get_store_host", {});
   if (res.kind === "error") return mount(box, errorStrip(res.message));
   if (res.kind !== "data") return mount(box, emptyStrip(res.message || "Store host profile not available."));
 
-  const p = res.data || {};
+  lastStoreHostPayload = res.data || {};
+  renderStoreHostPayload(box, lastStoreHostPayload);
+}
+
+/** The store host card's actual render, split out from the fetch above (#4214 round-1 review) so a poll tick
+    can replay a previously fetched payload through the SAME render path a fresh fetch uses. */
+function renderStoreHostPayload(box, p) {
   const ram = p.ram || {};
   const vol = p.data_volume || {};
   const store = p.store || {};
