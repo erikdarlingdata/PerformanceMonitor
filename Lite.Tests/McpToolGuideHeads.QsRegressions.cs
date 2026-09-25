@@ -24,10 +24,9 @@ public sealed class McpToolGuideHeadsQsRegressionsTests
     [
         "get_query_store_top ranks EXPENSIVE, this ranks CHANGED.",
         "Gated: average CPU regressed over 25%.",
-        "duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0",
-        "severity is null with the former",
+        "duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0",
         "additional_duration_ms is the ranking key.",
-        "empty: no regression (all clear), or a baseline with nothing yet in the window.",
+        "empty: no regression, or nothing yet in the baseline window.",
         "unavailable: no baseline exists yet.",
         "not_collected: this server's engine cannot run Query Store.",
     ];

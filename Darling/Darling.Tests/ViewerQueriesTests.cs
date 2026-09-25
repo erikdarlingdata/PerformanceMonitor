@@ -504,7 +504,7 @@ public sealed class ViewerQueriesDisplayTests
 
 /// <summary>
 /// Pins the Query Store Regressions read (the Dashboard's <c>report.query_store_regressions</c> TVF ported
-/// to Postgres): the baseline-before-window vs. recent-in-window split ON <c>collection_time</c> (not the
+/// to Postgres): the fixed-7-day-baseline vs. recent-in-window split ON <c>collection_time</c> (not the
 /// TVF's <c>server_last_execution_time</c>), the CPU-regression &gt; 25% gate, the added-duration ranking +
 /// TOP (50) cap, the duration-driven severity bands, the summed/counted CASTs, and the #1319 database
 /// filter — plus the row model's stored-UTC display conversion. String + pure-logic pins only (no live
@@ -518,13 +518,26 @@ public sealed class ViewerQueryStoreRegressionsTests
         var sql = ViewerDataService.QueryStoreRegressionsSql;
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal); /* viewer reads base tables */
-        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);   /* baseline: everything before the window */
+        /* #4217: the baseline is a fixed BaselineLookbackDays window ending at the window start, not
+           "everything before the window" — this is the assertion that fails against the pre-#4217 shape,
+           which had no lower bound on the baseline arm at all. */
+        Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
+        Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);   /* baseline: up to the window start */
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);  /* recent: window start */
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);  /* recent: window end */
         Assert.Contains("GROUP BY database_name, query_id", sql, StringComparison.Ordinal);
         /* Darling windows the split on collection_time — the Dashboard TVF's server_last_execution_time is
            the server's LOCAL wall clock in Darling's store and must not be windowed against UTC bounds. */
         Assert.DoesNotContain("server_last_execution_time", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BaselineLookbackDays_IsSevenDays_SameAsTheMcpReaderAndLite()
+    {
+        /* #4217: the viewer keeps its own copy of the same constant DarlingQueryStoreRegressionReader and
+           Lite's LocalDataService each keep, because it cannot reference either project. Pinned so the three
+           cannot silently drift apart. */
+        Assert.Equal(7, ViewerDataService.BaselineLookbackDays);
     }
 
     [Fact]
@@ -1228,9 +1241,19 @@ public sealed class ViewerQueriesLivePostgresTests
             await InsertQueryStoreAsync(connection, RegressionsServerId, recent, "StackOverflow", queryId: 300, planId: 1,
                 execCount: 9, avgDurationUs: 9000, avgCpuUs: 9000, forced: false, maxMemPages: 0, queryText: "SELECT new");
 
+            /* Query 400 (#4217): its ONLY baseline snapshot is 8 days before the window start — outside the
+               fixed 7-day baseline bound. Before #4217 (unbounded baseline) this row would have joined and
+               cleared the CPU gate (1ms → 5ms = 400%); after #4217 the baseline arm never reaches 8 days
+               back, so query 400 has no baseline row post-bound and the INNER JOIN drops it, same as query
+               300. This is the runtime pin that the bound is actually applied, not just present in the SQL. */
+            await InsertQueryStoreAsync(connection, RegressionsServerId, start.AddDays(-8), "StackOverflow", queryId: 400, planId: 1,
+                execCount: 3, avgDurationUs: 1000, avgCpuUs: 1000, forced: false, maxMemPages: 0, queryText: "SELECT stale baseline");
+            await InsertQueryStoreAsync(connection, RegressionsServerId, recent, "StackOverflow", queryId: 400, planId: 1,
+                execCount: 3, avgDurationUs: 5000, avgCpuUs: 5000, forced: false, maxMemPages: 0, queryText: "SELECT stale baseline");
+
             var rows = await viewer.GetQueryStoreRegressionsAsync(RegressionsServerId, start, end);
 
-            var r = Assert.Single(rows);                    /* only query 100 clears the CPU gate + INNER JOIN */
+            var r = Assert.Single(rows);                    /* only query 100: 200 below gate, 300 no baseline ever, 400 baseline outside the 7-day bound */
             Assert.Equal(100, r.QueryId);
             Assert.Equal("CRITICAL", r.Severity);
             Assert.Equal(2.0, r.BaselineDurationMs, 3);
