@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+// Size tests for describe_custom_view_catalog's compact and full-detail modes.
 using System.Linq;
 using System.Text;
 using System.Text.Json;
