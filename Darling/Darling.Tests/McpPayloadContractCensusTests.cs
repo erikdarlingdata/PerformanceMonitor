@@ -1512,8 +1512,8 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
-        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
-            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier)"),
+        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpQueryTools.cs"],
+            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier); on Lite's get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top (#4231), the same window-floor note, from LocalDataService.GetQueryWindowFloorAsync"),
         ("findings_truncated_note", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: the prose beside findings_truncated — how many diagnostic chains were active in the window and that raising limit or narrowing hours_back would show more of them"),
     ];
@@ -1754,18 +1754,26 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        /* Two: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
-           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer holds. */
-        ("DarlingMcpDataTools.cs", "initializer", 2),
+        /* Four: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer
+           holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
+           disclosure over query_stats and procedure_stats. */
+        ("DarlingMcpDataTools.cs", "initializer", 4),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
         ("McpQueryTools.cs", "envelope", 1),
+        /* #4231: Lite's own get_query_store_top initializer (mirroring DarlingMcpDataTools.cs's 2, but Lite's
+           get_query_store_top has no module_name-miss hint block of its own, so 1), plus get_top_queries_by_cpu
+           and get_top_procedures_by_cpu, newly given the same raw-tier disclosure. */
+        ("McpQueryTools.cs", "initializer", 4),
     ];
 
     public static readonly (string File, string Tool)[] WindowFloorTools =
     [
         ("DarlingMcpDataTools.cs", "get_query_store_top"),
+        ("DarlingMcpDataTools.cs", "get_top_procedures_by_cpu"),
+        ("DarlingMcpDataTools.cs", "get_top_queries_by_cpu"),
         ("DarlingMcpQueryStoreClutterTools.cs", "get_query_store_clutter"),
         ("DarlingMcpTrendTools.cs", "get_procedure_duration_trend"),
         ("DarlingMcpTrendTools.cs", "get_query_duration_trend"),
@@ -1774,7 +1782,10 @@ public sealed class McpPayloadContractCensusTests
         ("McpQueryTools.cs", "get_procedure_duration_trend"),
         ("McpQueryTools.cs", "get_query_duration_trend"),
         ("McpQueryTools.cs", "get_query_store_duration_trend"),
+        ("McpQueryTools.cs", "get_query_store_top"),
         ("McpQueryTools.cs", "get_query_trend"),
+        ("McpQueryTools.cs", "get_top_procedures_by_cpu"),
+        ("McpQueryTools.cs", "get_top_queries_by_cpu"),
     ];
 
     /// <summary>The reach key: the one neighbour only the window floor has.</summary>

@@ -312,6 +312,17 @@ public static class PayloadDimensions
     /// hour, 60x less churn, and stays correct as long as the GC margin exceeds an hour (it is a
     /// full day).</para>
     ///
+    /// <para><b>#4249: the conflict guard only stops the UPDATE, not the WRITE.</b> Postgres locks every
+    /// conflicting row BEFORE evaluating the <c>WHERE</c> on <c>DO UPDATE</c> — "all rows will be locked
+    /// when the ON CONFLICT DO UPDATE action is taken" per the INSERT reference — so a digest re-sighted
+    /// inside the hour still took a <c>Heap/LOCK</c> WAL record and a dirtied page every cycle, measured
+    /// at 12-23% of one store's WAL. The <c>WHERE NOT EXISTS</c> pre-filter on the <c>SELECT</c> fixes
+    /// that: it is a plain MVCC read, which takes no lock, so a digest whose stored <see
+    /// cref="LastSeenColumn"/> is already within the hour never reaches <c>INSERT</c> or <c>ON
+    /// CONFLICT</c> at all and writes nothing. The <c>ON CONFLICT ... WHERE</c> arm stays for the race
+    /// the pre-filter cannot close: two sessions whose pre-filter reads both land before either commits
+    /// can both decide the same digest is stale and both attempt the insert.</para>
+    ///
     /// <para>Callers MUST pass digest-deduplicated arrays: Postgres raises 21000 ("ON CONFLICT DO
     /// UPDATE command cannot affect row a second time") when one statement presents the same key
     /// twice, and a 200-row batch sharing a handful of plans presents duplicates constantly. The
@@ -321,9 +332,20 @@ public static class PayloadDimensions
     /// supply: dedup makes a batch conflict-free with ITSELF, ordering makes it conflict-free with its
     /// SIBLINGS. This statement takes one row lock per conflict key, so two concurrent sessions whose
     /// batches share two digests in opposite relative order each hold the lock the other needs next and
-    /// deadlock (40P01, #1801). <c>PayloadDimensionBatch.ToArrays</c> is the single point that imposes
-    /// it -- deliberately client-side rather than an ORDER BY here, so the lock order is a property of
-    /// the values bound and owes nothing to how the planner chooses to execute this statement.</para>
+    /// deadlock (40P01, #1801). <c>PayloadDimensionBatch.ToArrays</c> imposes that order client-side, and
+    /// until #4249 that was the WHOLE mechanism — deliberately client-side rather than an <c>ORDER BY</c>
+    /// here, so the lock order owed nothing to how the planner executed the statement.</para>
+    ///
+    /// <para><b>#4249 added the <c>WHERE NOT EXISTS</c> anti-join above, and that changes the claim.</b>
+    /// A join gives the planner a row source it can execute in whatever order it finds cheapest — a hash
+    /// anti-join against a large dim table returns survivors in HASH order, not <c>unnest</c>'s input
+    /// order — so client order alone no longer fixes the order rows reach <c>ON CONFLICT</c>. Both
+    /// branches carry <c>ORDER BY u.digest</c> on the <c>SELECT</c> now, restoring a deterministic
+    /// acquisition order for the rows that actually proceed to lock. The client-side sort still matters:
+    /// it is what makes a batch conflict-free with itself (dedup) actually land in digest order for the
+    /// <c>unnest</c> arrays this <c>ORDER BY</c> re-sorts, and it is the order every other digest-keyed
+    /// caller in this design relies on. Belt and suspenders, not redundant — the sort fixes the INPUT
+    /// order, the <c>ORDER BY</c> fixes the order the FILTERED, JOINED plan actually locks in.</para>
     /// </summary>
     /// <para>#2069: the compressed-content dim upserts gzip BYTES into
     /// <see cref="CompressedContentColumn"/> (text column left NULL on new rows); every other dim
@@ -341,6 +363,11 @@ public static class PayloadDimensions
                 $"INSERT INTO {dimTable} ({DigestColumn}, {CompressedContentColumn}, {LastSeenColumn})\n" +
                 $"SELECT u.digest, u.payload, $3\n" +
                 $"FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
+                $"WHERE NOT EXISTS (\n" +
+                $"    SELECT 1 FROM {dimTable} d\n" +
+                $"    WHERE d.{DigestColumn} = u.digest\n" +
+                $"    AND   d.{LastSeenColumn} >= $3 - INTERVAL '1 hour')\n" +
+                $"ORDER BY u.digest\n" +
                 $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
                 $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - INTERVAL '1 hour'";
         }
@@ -350,6 +377,11 @@ public static class PayloadDimensions
             $"INSERT INTO {dimTable} ({DigestColumn}, {payloadColumn}, {LastSeenColumn})\n" +
             $"SELECT u.digest, u.payload, $3\n" +
             $"FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
+            $"WHERE NOT EXISTS (\n" +
+            $"    SELECT 1 FROM {dimTable} d\n" +
+            $"    WHERE d.{DigestColumn} = u.digest\n" +
+            $"    AND   d.{LastSeenColumn} >= $3 - INTERVAL '1 hour')\n" +
+            $"ORDER BY u.digest\n" +
             $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
             $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - INTERVAL '1 hour'";
     }

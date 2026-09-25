@@ -22,6 +22,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -403,7 +404,7 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
                scope — the supervisor may keep the app running across many poll ticks. */
-            var postgres = NpgsqlDataSource.Create(storeConnectionString);
+            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
             _appDataSource = postgres;
 
             /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).
@@ -454,7 +455,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 },
                 _logger);
 
-            var builder = WebApplication.CreateBuilder();
+            /* #4286 review, Low 1: with no EnvironmentName set here, an ASPNETCORE_ENVIRONMENT or
+               DOTNET_ENVIRONMENT of "Development" left set anywhere on the machine would add the developer
+               exception page ahead of the Host guard and the bearer check -- a throw that escapes then answers
+               with the exception message and stack trace on the loopback bind, which has no token. Same pin as
+               the web host (DarlingWebHostService, #4281 review finding 4). */
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Production,
+            });
 
             builder.WebHost.ConfigureKestrel(options =>
             {

@@ -631,6 +631,50 @@ public sealed class FleetSweepWebFeedTests
             host, StringComparison.Ordinal);
     }
 
+    /* ---- #4286 review, Low 3: the two sweep GETs answer through the dispatcher's failure pattern --------- */
+
+    /// <summary>
+    /// #4286 round-1 review, Low 3: <c>/api/sweeps/latest</c> and <c>/api/sweeps/{id}</c> used to answer a
+    /// store fault with a bare 500 and <c>ex.Message</c> on the wire, logging nothing -- the same
+    /// information leak and #4276 gap the dispatcher's own catch was pinned against
+    /// (<c>ReadDispatchCatch_AnswersTheRuledBodyAndStatus_NotFormatError</c> in
+    /// <see cref="DarlingWebFailureHandlingTests"/>), on two GETs #4283's list does not cover (it tracks only
+    /// the write routes that need an editing seat). Both catch blocks must answer through
+    /// <c>DarlingWebFailureLog</c>'s ruled body and status instead. Source pin, not a TestServer test:
+    /// producing a genuine store fault needs a broken NpgsqlDataSource this file otherwise never builds.
+    /// </summary>
+    [Fact]
+    public void TheSweepReadCatches_AnswerTheRuledBodyAndStatus_NotExMessage()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingFleetSweepEndpoints.cs");
+
+        AssertCatchAnswersRuledBodyAndStatus(raw, "/api/sweeps/latest", "\"/api/sweeps/latest\"");
+        AssertCatchAnswersRuledBodyAndStatus(raw, "/api/sweeps/{id:long}", "\"/api/sweeps/{id:long}\"");
+    }
+
+    /// <summary>Slices ONE MapGet's body out of the endpoint file (from its route literal to the next
+    /// MapGet, or end of file for the last one) and asserts its catch block uses the ruled failure pattern --
+    /// the DarlingWebEndpoints dispatcher pin's approach, applied per-route since these two sit in the same
+    /// Map method rather than a loop. Boundaries are found in RAW source, because the route literal itself is
+    /// plain string CONTENT that <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> blanks; the slice is
+    /// then stripped before the content assertions, so neither a doc comment mentioning "ex.Message" (this
+    /// file's own review-note comments do) nor the plain-string route name argument to
+    /// DarlingWebFailureLog.Report can produce a false pass or a false failure.</summary>
+    private static void AssertCatchAnswersRuledBodyAndStatus(string raw, string routeForMessage, string routeLiteral)
+    {
+        var start = raw.IndexOf(routeLiteral, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{routeForMessage}'s MapGet was not found; this pin is reading nothing.");
+
+        var nextMapGet = raw.IndexOf("app.MapGet(", start + routeLiteral.Length, StringComparison.Ordinal);
+        var end = nextMapGet >= 0 ? nextMapGet : raw.Length;
+        var body = CSharpSourceWalker.StripCommentsAndStrings(raw[start..end]);
+
+        Assert.Contains("DarlingWebFailureLog.Report(logger,", body, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebFailureLog.Body(ex)", body, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebFailureLog.StatusCode(ex)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ex.Message", body, StringComparison.Ordinal);
+    }
+
     /* ---- helpers --------------------------------------------------------------------------------------- */
 
     /// <summary>Parses a flat <c>key: "value",</c> object literal out of frontend source — the

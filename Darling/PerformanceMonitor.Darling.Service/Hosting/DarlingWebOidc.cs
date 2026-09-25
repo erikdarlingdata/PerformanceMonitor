@@ -591,18 +591,25 @@ internal static class DarlingWebOidc
     internal static string CreateFlowValue() => Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
 
     /// <summary>
-    /// True when a resolved subject carries ASCII control characters (review catch on #2730). No legitimate
+    /// True when a resolved subject carries control characters (review catch on #2730). No legitimate
     /// <c>preferred_username</c>/<c>email</c>/<c>sub</c> contains one, and a subject with CR/LF in it could
     /// forge lines in the very audit trail this feature adds — so the sign-in REFUSES it, the same
     /// decision as the length cap: refusing a hostile identity is recoverable, laundering it into something
     /// printable and then attributing writes to the laundered form is not. The audit log lines additionally
     /// sanitize on output as defense in depth.
+    ///
+    /// <para>#4286 review, Low 4: this used to check only <c>c &lt; ' ' || c == 0x7f</c> (C0 plus DEL) — the
+    /// C1 controls (U+0080-U+009F, including NEL/U+0085) and U+2028/U+2029 (Unicode LINE/PARAGRAPH
+    /// SEPARATOR) passed. An identity provider can put either in a subject claim, and a reader that splits
+    /// log lines on them (for example Python's <c>str.splitlines()</c>, unlike <c>ReadLine</c> or grep) would
+    /// see a forged entry that ReadLine-based tooling does not — the exact class of forgery this check
+    /// exists to refuse before it ever reaches the audit trail.</para>
     /// </summary>
     internal static bool SubjectCarriesControlCharacters(string subject)
     {
         foreach (var c in subject)
         {
-            if (c < ' ' || c == '\x7f')
+            if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029)
             {
                 return true;
             }

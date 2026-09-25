@@ -318,13 +318,15 @@ public static class DarlingWebEndpoints
                 }
                 catch (Exception ex)
                 {
-                    /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope; this is only a
-                       backstop for a binding-layer throw, built by the same helper so it maps the same way
-                       (-> HTTP 500) and no bare "Error during ..." sentence is produced anywhere any more.
-                       #4276: also the one log line this surface was missing — through the same helper the
-                       top-of-pipeline backstop uses, so the wording and the timeout/error split cannot drift. */
+                    /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope (the common
+                       case, ToHttpResult's ServerError arm below still answers that shape -- #4283, pending a
+                       design decision); this catch is only a backstop for a binding-layer throw. #4276: also the
+                       one log line this surface was missing. #4281 review, finding 2: this used to fall through
+                       to ToHttpResult too, which put ex.Message on the wire -- answer with the SAME body and
+                       status the top-of-pipeline backstop gives, so the wording and the timeout/error split
+                       cannot drift between the two call sites. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
-                    result = McpHelpers.FormatError(name, ex);
+                    return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
                 return ToHttpResult(result);

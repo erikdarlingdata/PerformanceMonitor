@@ -9,6 +9,7 @@
 using System;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
@@ -29,6 +30,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -694,7 +696,7 @@ public sealed class DarlingWebHostService : BackgroundService
             }
 
             /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. */
-            var postgres = NpgsqlDataSource.Create(storeConnectionString);
+            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
             _appDataSource = postgres;
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
@@ -704,6 +706,12 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 ContentRootPath = AppContext.BaseDirectory,
                 WebRootPath = "wwwroot",
+                /* #4281 review, finding 4: with no EnvironmentName set here, an ASPNETCORE_ENVIRONMENT or
+                   DOTNET_ENVIRONMENT of "Development" left set anywhere on the machine (a leftover from testing
+                   something unrelated) would add the developer exception page ahead of the Host guard — a
+                   caller with NO credentials then gets the exception message and stack trace for any throw
+                   that escapes. Pinned so the ambient variable can never reach this host. */
+                EnvironmentName = Environments.Production,
             });
 
             var listenerCertificate = serverCertificate;
@@ -1197,11 +1205,10 @@ public sealed class DarlingWebHostService : BackgroundService
            own examples, /api/ag and /api/fleet, plus any future one) cannot reach ASP.NET Core's own error
            handling — which writes into the providers ClearProviders silenced above, so the browser got an
            empty 500 with no trace anywhere. AFTER the Host-allowlist guard and the auth gate on purpose (see
-           the pipeline-order comment above app.UseResponseCompression): both already handle their own
-           exceptions (HandleAuthFlowAsync's try/catch above), so this only ever fires for an UNANTICIPATED
-           throw from a gate, or an uncaught one from a route MapAll wires. A client that closed the page is
-           not a failure — DarlingWebFailureLog never sees it, and nothing is written to a caller who is
-           gone. */
+           the pipeline-order comment above app.UseResponseCompression) — but that means it covers the ROUTES
+           ONLY: it is registered after both gates, so a gate throw never enters this try, and is not logged
+           here (#4281 review, finding 4). A client that closed the page is not a failure — DarlingWebFailureLog
+           never sees it, and nothing is written to a caller who is gone. */
         app.Use(async (context, next) =>
         {
             var route = context.Request.Path.Value ?? "/";
@@ -1210,8 +1217,36 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 await next(context);
             }
-            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            catch (Exception ex) when ((ex is OperationCanceledException or IOException)
+                && context.RequestAborted.IsCancellationRequested)
             {
+                /* #4286 review, Low 2: a client that resets an upload or an HTTP/2 stream during a body read
+                   does not always surface as OperationCanceledException -- Kestrel can report it as an
+                   IOException (a TCP reset, or "The client reset the request stream." on HTTP/2), which used
+                   to fall to the generic arm below and write an unthrottled Error line for a caller who is
+                   already gone. Same filter ASP.NET Core's own exception handler middleware uses to classify a
+                   client abort. */
+            }
+            catch (BadHttpRequestException bad)
+            {
+                /* #4281 review, finding 3: Kestrel throws this for a malformed or oversized request body (a
+                   413/400/408 a client can trigger on purpose at no cost) — it is not a service failure, so it
+                   must not cost the generic 500 or an Error line the way a real failure does. Debug only: the
+                   default LoggerFilterOptions.MinLevel (Information) keeps it out of the file in production,
+                   same as every other Debug call site, while still letting an operator opt in. No body beyond
+                   what Kestrel itself would have written before this backstop existed. #4286 review, Low 5:
+                   {Message} dropped -- a template argument becomes part of the FORMATTED message, which used
+                   to bypass DarlingFileLoggerProvider's sanitize entirely (it only cleaned the exception
+                   OBJECT's own Message). The exception object passed as the first argument still carries
+                   bad.Message to any provider that wants it, and the file sink now cleans the whole assembled
+                   line regardless (#4286 review, Low 5) -- but dropping the template argument is still the
+                   right fix, matching the ruled Debug line the review gives verbatim. */
+                _logger.LogDebug(bad, "Web dashboard request rejected ({StatusCode})", bad.StatusCode);
+
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.StatusCode = bad.StatusCode;
+                }
             }
             catch (Exception ex)
             {

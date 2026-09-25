@@ -494,6 +494,46 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV14 = "# Managed by PerformanceMonitor Darling (v14 PostgreSQL 17 maintenance_work_mem limit) -- do not remove this block";
 
     /// <summary>
+    /// The v15 marker (#4246): <c>wal_compression = lz4</c> only. Across two production stores, <c>pg_waldump
+    /// --stats=record</c> over live WAL showed 66-90% of bytes were full-page images (FPI) — mostly
+    /// <c>FPI_FOR_HINT</c>, the image data checksums force on a page's first hint-bit change, plus random-key
+    /// btree leaf inserts. <c>wal_compression</c> shrinks every one of those images, <c>FPI_FOR_HINT</c>
+    /// included, no matter how often checkpoints run.
+    ///
+    /// <para><b><c>lz4</c>, not <c>zstd</c> or <c>pglz</c>.</b> <c>default_toast_compression = lz4</c> (v1)
+    /// already proves lz4 ships in the bundled runtime; it costs less CPU than zstd for a few GB/hour of
+    /// image data, the same trade the TOAST setting already made.</para>
+    ///
+    /// <para><b>The checkpoint interval is held, not shipped.</b> A longer <c>checkpoint_timeout</c> would cut
+    /// WAL further by re-imaging each hot page less often — #4246 found roughly two-thirds of one 5-minute
+    /// cycle's images repeated the previous cycle's — but it risks the store's own checkpointer self-alert:
+    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a checkpoint's sync phase
+    /// averages more than 10 seconds, a bar that exists because sync phases of 14.0s and 25.2s killed reads on
+    /// a production store. #3892 found that a longer interval puts more files into each checkpoint, which
+    /// makes each sync phase longer, so a 15-minute interval risks trading WAL volume for killed reads and for
+    /// alerts firing on a healthy store. One production store measures the interval first, through <c>ALTER
+    /// SYSTEM</c> and a reload rather than this block; it ships here later, in its own marker, only if that
+    /// measurement stays under the sync bar.</para>
+    ///
+    /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
+    /// by free disk, and this block leaves that bound alone.</para>
+    ///
+    /// <para><b>Field note.</b> The heaviest measured sample followed a restart: most of its images were
+    /// <c>FPI_FOR_HINT</c> from the first cycle's reads setting hint bits on pages nothing had touched since
+    /// the previous shutdown. <c>wal_compression</c> compresses those images too, so the heaviest hour a
+    /// store sees after a restart is also where it pays off most.</para>
+    ///
+    /// <para><c>wal_compression</c> is <c>superuser</c>-context, not <c>sighup</c> (confirmed live) — but like
+    /// a <c>sighup</c> setting it still takes effect from <c>postgresql.conf</c> on a reload, and this append
+    /// runs before <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the
+    /// block, the v9-v11 story. Managed stores only; a bring-your-own store keeps whatever
+    /// <c>wal_compression</c> its owner set. A later change to this value needs a NEW marker (the v11/v14
+    /// precedent): this block heals by its marker's absence, so an edited value in an already-marked file
+    /// would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV15 = "# Managed by PerformanceMonitor Darling (v15 WAL compression) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -506,6 +546,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
+        ConfMarkerV15,
     ];
 
     /// <summary>
@@ -2094,6 +2135,23 @@ public sealed class DarlingManagedPostgres
         }
     }
 
+    /* ===================== v15 WAL compression (#4246) ===================== */
+
+    /// <summary>
+    /// The v15 block: <c>wal_compression = lz4</c> only. See <see cref="ConfMarkerV15"/> for the measurement,
+    /// why lz4, why the checkpoint interval is held rather than shipped here, and why this deliberately does
+    /// not touch <c>max_wal_size</c>. Carries no fingerprint or stamp line, so the v8 and v12 staleness checks
+    /// are untouched by this block.
+    /// </summary>
+    public static string BuildWalVolumeConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV15).Append('\n');
+        builder.Append("wal_compression = lz4\n");
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
@@ -3135,6 +3193,19 @@ public sealed class DarlingManagedPostgres
             LogLegacyMaintenanceWorkMemCap(v14OverLimit);
         }
 
+        /* v15 (#4246): keyed on its marker's absence like v9-v11 and v13, and placed last so it stays the
+           block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. wal_compression is superuser-context (confirmed live, not sighup),
+           but still takes effect from postgresql.conf on a reload, and this is appended before pg_ctl start,
+           so a service-owned start applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV15, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildWalVolumeConfAppend());
+            _logger.LogInformation(
+                "Appended v15 WAL compression to postgresql.conf (wal_compression = lz4): most of this store's WAL is full-page images, and compression shrinks every one of them. Effective on this start when the service owns it.");
+        }
+
         LogStatementStatisticsPreloadCoverage(dataDirectory);
     }
 
@@ -3737,7 +3808,7 @@ public sealed class DarlingManagedPostgres
     private async Task EnsureDatabaseOnceAsync(string connectionString, CancellationToken cancellationToken)
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
-        await using var connection = new NpgsqlConnection(builder.ConnectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
         await connection.OpenAsync(cancellationToken);
 
         using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds })
@@ -4410,7 +4481,7 @@ public sealed class DarlingManagedPostgres
         var exposed = plan.Mode == NetworkMode.Exposed;
         try
         {
-            await using var connection = new NpgsqlConnection(ownerConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString));
             await connection.OpenAsync(cancellationToken);
 
             await using (var errors = new NpgsqlCommand(
@@ -4502,7 +4573,7 @@ public sealed class DarlingManagedPostgres
     {
         try
         {
-            await using var connection = new NpgsqlConnection(ownerConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand("SHOW listen_addresses", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var liveListen = await command.ExecuteScalarAsync(cancellationToken) as string ?? string.Empty;
