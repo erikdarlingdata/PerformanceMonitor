@@ -91,7 +91,9 @@ public sealed class McpToolsListBudgetTests
        tools/list and so is not counted here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
-    private const int TotalCeilingBytes = 171_719;
+    /* #4198: get_query_store_regressions gained full_text (its own preview opt-in, +84 bytes) and its
+       limit description grew to explain the new lower default (+78 bytes over the old 86). +214 bytes net. */
+    private const int TotalCeilingBytes = 171_933;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
