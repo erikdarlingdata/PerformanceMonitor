@@ -158,6 +158,19 @@ public sealed class DarlingConfig
     public bool CollectSchemaChangeEvents { get; set; } = true;
 
     /// <summary>
+    /// Whether the raw hypertable chunk-interval reconcile runs at all (#4211). Default TRUE. Rides the daily
+    /// retention purge tick (first pass after startup, then every 24h) and, for every raw hypertable, applies
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner"/>'s decisions with
+    /// <c>set_chunk_time_interval</c>. Set false to keep every table's interval exactly where it is — an
+    /// operator override survives restarts, and nothing is applied or recorded to
+    /// <c>collect.raw_chunk_interval_rung_history</c> while this is off. A file-only knob (not seeded into the
+    /// control-plane store, unlike <see cref="QueryStoreBackfillEnabled"/>), so an edit takes effect on the
+    /// next restart.
+    /// </summary>
+    [JsonPropertyName("rawChunkIntervalReconcileEnabled")]
+    public bool RawChunkIntervalReconcileEnabled { get; set; } = true;
+
+    /// <summary>
     /// #2862: how many collection cycles pass between plan-XML captures for <c>procedure_stats</c> — 1 is
     /// every cycle (the pre-#2862 collector, byte-identical), 4 is one cycle in four. Clamped to [1,60] on
     /// read. Only <c>procedure_stats</c> is gated; every other plan-capturing collector is untouched.

@@ -7779,6 +7779,75 @@ LIMIT 1";
            CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
         await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
         await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+
+        /* #4211: the raw hypertable chunk-interval reconcile. Rides the daily purge tick like every other
+           maintenance chore above — first pass after startup (TryStartScheduledPurge's own MinValue seed),
+           then every 24h. TimescaleDB-only (chunk_time_interval has no meaning on plain PostgreSQL) and
+           behind its own off switch; never throws — a bad reading on one run degrades to "no changes" on the
+           next, the same failure shape as the AN3 cleanup just above. */
+        if (_timescaleAvailable && config.RawChunkIntervalReconcileEnabled)
+        {
+            try
+            {
+                var budgetBytes = await ResolveRawChunkIntervalBudgetBytesAsync(postgres, config, stoppingToken);
+                if (budgetBytes is double resolvedBudget)
+                {
+                    await using var reconcileConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                    await RawChunkIntervalReconciler.ReconcileAsync(
+                        reconcileConnection, resolvedBudget, DateTime.UtcNow, _logger, stoppingToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown drain. */
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "raw chunk interval reconcile failed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Budget B for <see cref="RawChunkIntervalReconciler.ReconcileAsync"/> (#4211 ruling decision 2). A
+    /// managed store reads the SAME raw RAM figure <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>
+    /// sizes Postgres itself from — <see cref="DarlingStoreHostProfile.GatherHostFacts"/>'s
+    /// <c>Memory.TotalBytes</c>, which on Windows is already the reused
+    /// <see cref="DarlingManagedPostgres.TryReadWindowsPhysicalMemoryBytes"/> read (ruling 2's "reuse the
+    /// authoritative read", never a second <c>GlobalMemoryStatusEx</c>), quantized the same way — NOT
+    /// <see cref="DarlingManagedPostgres.MemorySettings.SharedBuffersMb"/>, which is capped at 1 GB for the
+    /// co-located / Windows 487 mitigation (#1559) and is a real setting, not a sizing ceiling (see
+    /// <see cref="RawChunkIntervalPlanner.ManagedBudgetBytes"/>'s remarks). A bring-your-own store instead reads
+    /// <c>shared_buffers</c>/<c>effective_cache_size</c> live off <c>pg_settings</c>, through
+    /// <c>pg_size_bytes(current_setting(...))</c> so the GUC's storage unit (blocks, kB, whatever) never has to
+    /// be parsed by hand. Returns null only when the BYO read fails (an unreachable store on this tick) —
+    /// the caller then skips the whole reconcile pass rather than plan against a made-up budget.
+    ///
+    /// <para>Internal, not private, so a live test can drive the bring-your-own <c>pg_settings</c> path against
+    /// a real connection without constructing the whole worker — the same reach
+    /// <see cref="DarlingManagedPostgres.TryReadWindowsPhysicalMemoryBytes"/> is internal for.</para>
+    /// </summary>
+    internal static async Task<double?> ResolveRawChunkIntervalBudgetBytesAsync(
+        NpgsqlDataSource postgres, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (config.Postgres.Managed)
+        {
+            var hostFacts = DarlingStoreHostProfile.GatherHostFacts();
+            return RawChunkIntervalPlanner.ManagedBudgetBytes(DarlingManagedPostgres.QuantizeRam(hostFacts.Memory.TotalBytes));
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('effective_cache_size'))",
+            connection)
+        { CommandTimeout = 30 };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return RawChunkIntervalPlanner.BringYourOwnBudgetBytes(reader.GetInt64(0), reader.GetInt64(1));
+        }
+
+        return null;
     }
 
     /// <summary>

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -354,5 +355,48 @@ public sealed class RawChunkIntervalPlannerTests
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         Assert.True(decisions.Values.Any(d => d.Changes), "expected at least one table to narrow once the combined total exceeded budget");
+    }
+
+    /// <summary>
+    /// The store now PERSISTS <see cref="RawChunkIntervalPlanner.Decision.Reason"/> to
+    /// <c>collect.raw_chunk_interval_rung_history.reason</c> (V144), so its <c>N0</c> formatting has to read the
+    /// same on every host regardless of the OS culture, unlike a log line that is merely displayed once. Runs a
+    /// narrowing <see cref="RawChunkIntervalPlanner.Plan"/> and a widening one under de-DE and asserts each
+    /// changing decision's reason carries the invariant, comma-grouped text — not de-DE's dot grouping.
+    /// </summary>
+    [Fact]
+    public void ReasonText_FormatsNumbersInvariantly_UnderACommaDecimalCulture()
+    {
+        using var _ = new CultureScope("de-DE");
+        Assert.Equal(",", CultureInfo.CurrentCulture.NumberFormat.NumberDecimalSeparator);
+
+        var narrowing = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1_000_000, 24, null),
+        };
+        var narrowed = RawChunkIntervalPlanner.Plan(narrowing, budgetBytes: 1_000_000, currentTotalChunkCount: 10, AsOf).Single();
+        Assert.True(narrowed.Changes);
+        Assert.Equal(
+            "moved to 12 h: store-wide open-chunk bytes exceeded the 1,000,000 B budget (rate-ordered, 1,000,000 B/h)",
+            narrowed.Reason);
+
+        var widening = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 100_000, 6, AsOf.AddDays(-3)),
+        };
+        var widened = RawChunkIntervalPlanner.Plan(widening, budgetBytes: 2_400_000, currentTotalChunkCount: 10, AsOf).Single();
+        Assert.True(widened.Changes);
+        Assert.Equal(
+            "moved up to 12 h: the store holds 1,200,000 B, under half the 2,400,000 B budget",
+            widened.Reason);
+    }
+
+    /// <summary>Sets the thread's culture for the scope and restores it on dispose — same pattern as
+    /// <c>PgLogEventMetricsTests.CultureScope</c>.</summary>
+    private sealed class CultureScope : IDisposable
+    {
+        private readonly CultureInfo _before = CultureInfo.CurrentCulture;
+        public CultureScope(string name) => CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(name);
+        public void Dispose() => CultureInfo.CurrentCulture = _before;
     }
 }
