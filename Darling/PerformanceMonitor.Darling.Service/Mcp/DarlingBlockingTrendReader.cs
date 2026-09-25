@@ -39,19 +39,24 @@ internal static class DarlingBlockingTrendReader
     /// (<c>v_blocked_process_reports</c>) are the primary source, bucketed on <c>event_time</c>; the always-on
     /// DMV snapshot (<c>v_dmv_blocking_snapshots</c>) is appended only when the XE source has no rows in the
     /// window (<c>WHERE NOT EXISTS</c>), so a server with both sources never double-counts. $1 server_id,
-    /// $2 window start, $3 window end (naive UTC).
+    /// $2 window start, $3 window end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both
+    /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone gives
+    /// the planner nothing to exclude a chunk on (#4229); the floor lets it skip every chunk older than the
+    /// window, without being able to drop a row (an event is collected after it happens).
     /// </summary>
     public const string BlockingTrendSql = """
         WITH bpr AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, incident_count FROM bpr
@@ -178,12 +183,12 @@ internal static class DarlingBlockingTrendReader
     /// <summary>Blocking-incident-per-minute buckets for one server over the window.</summary>
     public static Task<List<BlockingTrendReadPoint>> GetBlockingTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadCountTrendAsync(postgres, BlockingTrendSql, serverId, startUtc, endUtc, cancellationToken);
+        => ReadCountTrendAsync(postgres, BlockingTrendSql, serverId, startUtc, endUtc, boundEventWindow: true, cancellationToken);
 
     /// <summary>Deadlock-per-minute buckets for one server over the window.</summary>
     public static Task<List<BlockingTrendReadPoint>> GetDeadlockTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
-        => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, cancellationToken);
+        => ReadCountTrendAsync(postgres, DeadlockTrendSql, serverId, startUtc, endUtc, boundEventWindow: false, cancellationToken);
 
     /// <summary>
     /// The lock-wait family for one server over the window, one point per bucket of <paramref name="bucketMinutes"/>
@@ -235,12 +240,15 @@ internal static class DarlingBlockingTrendReader
     /// <summary>The blocking and deadlock trends share a (bucket timestamp, COUNT(*)) shape, so one reader
     /// maps both. COUNT(*) is bigint in Postgres, read via GetInt64 and narrowed to the point's int.</summary>
     private static async Task<List<BlockingTrendReadPoint>> ReadCountTrendAsync(
-        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string sql, int serverId, DateTime startUtc, DateTime endUtc,
+        bool boundEventWindow, CancellationToken cancellationToken)
     {
         var items = new List<BlockingTrendReadPoint>();
         await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        if (boundEventWindow)
+            DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

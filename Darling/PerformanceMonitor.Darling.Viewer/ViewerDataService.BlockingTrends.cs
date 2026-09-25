@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -49,13 +50,18 @@ public sealed partial class ViewerDataService
     /// XE blocked-process reports (<c>v_blocked_process_reports</c>) are the primary source, bucketed on
     /// <c>event_time</c>; the always-on DMV snapshot (<c>v_dmv_blocking_snapshots</c>) is appended only
     /// when the XE source has no rows in the window (<c>WHERE NOT EXISTS</c>), so a server with both
-    /// sources never double-counts. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// sources never double-counts. $1 server_id, $2 window start, $3 window end (naive UTC), $4 database
+    /// filter. $5 is the <see cref="EventWindowFloor"/> for $2 — both tables are hypertables partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a chunk
+    /// on (#4229); the floor lets it skip every chunk older than the window, without being able to drop a row
+    /// (an event is collected after it happens).
     /// </summary>
     public const string BlockingTrendSql = """
         WITH bpr AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
@@ -63,6 +69,7 @@ public sealed partial class ViewerDataService
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY DATE_TRUNC('minute', event_time)
         )
@@ -182,7 +189,7 @@ public sealed partial class ViewerDataService
     /// <summary>Blocking-incident-per-minute buckets for one server over the window (Blocking Trends).</summary>
     public async Task<List<BlockingTrendPoint>> GetBlockingTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
-        => await ReadCountTrendAsync(BlockingTrendSql, serverId, startUtc, endUtc, applyDatabaseFilter: true, databaseNames: databaseNames, cancellationToken: cancellationToken);
+        => await ReadCountTrendAsync(BlockingTrendSql, serverId, startUtc, endUtc, applyDatabaseFilter: true, databaseNames: databaseNames, boundEventWindow: true, cancellationToken: cancellationToken);
 
     /// <summary>Deadlock-per-minute buckets for one server over the window (Blocking Trends).</summary>
     public async Task<List<BlockingTrendPoint>> GetDeadlockTrendAsync(
@@ -197,7 +204,8 @@ public sealed partial class ViewerDataService
     /// </summary>
     private async Task<List<BlockingTrendPoint>> ReadCountTrendAsync(
         string sql, int serverId, DateTime startUtc, DateTime endUtc,
-        bool applyDatabaseFilter = false, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        bool applyDatabaseFilter = false, IReadOnlyList<string>? databaseNames = null,
+        bool boundEventWindow = false, CancellationToken cancellationToken = default)
     {
         var items = new List<BlockingTrendPoint>();
 
@@ -214,6 +222,8 @@ public sealed partial class ViewerDataService
         });
         if (applyDatabaseFilter)
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        if (boundEventWindow)
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
