@@ -335,8 +335,10 @@ public static class ComposeSourceRouter
            into the window as the legacy does, the legacy otherwise. Same dimensions, same column names on both,
            so the compiled SQL and ComposeCaggValueMapper are identical either way — the #1849 arrangement, one
            relation name swapped. The Query Store family has no successor here and comes back unchanged. The
-           daily tier is untouched: the dailies are hierarchical from the LEGACY hourly and have no successor of
-           their own yet (TimescaleSupport.SupersededHourlyRollups states why). */
+           daily tier's RELATION is chosen the same way as the hourly's, below (#3653 A6): CaggRelation is still
+           the by-name answer for probes/logs/registry lookups, and CaggFromClause may stitch the legacy daily to
+           its own interval-honest successor daily at F_d — the tier CHOICE itself stays on the legacy pair
+           (coverage.For above), only the RELATION within the chosen tier can be a stitch. */
         return tier switch
         {
             RetentionTier.Raw => (ComposeRoute.Raw, null),
@@ -350,7 +352,14 @@ public static class ComposeSourceRouter
                 coverage.HourlyRelationNameFor(hourlyView, windowStartUtc),
                 coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly)),
                 tierCoverage.HourlyFloorUtc),
-            _ => (new ComposeRoute(ComposeSourceTier.Daily, dailyView!), tierCoverage.DailyFloorUtc),
+            /* #3653 A6: same shape as the hourly arm above, but StitchTier.Daily — the successor daily's own
+               floor and its successor hourly's ceiling-of-day decide F_d (RollupCoverage.StitchedRelationSql).
+               With no successor daily this is byte-identical to "collect.<dailyView> AS f", same as today. */
+            _ => (new ComposeRoute(
+                ComposeSourceTier.Daily,
+                dailyView!,
+                coverage.StitchedRelationSql(dailyView!, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Daily)),
+                tierCoverage.DailyFloorUtc),
         };
     }
 }
