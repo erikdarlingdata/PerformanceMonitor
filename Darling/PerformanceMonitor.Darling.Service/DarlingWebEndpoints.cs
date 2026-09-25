@@ -949,14 +949,18 @@ public static class DarlingWebEndpoints
     /// failure (HTTP 500). <see cref="Fault"/> (#4283 review round 1, M1) rides along on a BadRequest for a
     /// PostgresException the panel author cannot act on — the real exception, so the WEB endpoint mapping can
     /// answer it through the same backstop as an uncaught one; <see cref="Error"/>/<see cref="IsServerError"/>
-    /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.</summary>
-    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null)
+    /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.
+    /// <see cref="AuthorSqlState"/> (#4293 round 2) is set only on the author-actionable PostgresException arm,
+    /// so the web log line can name the SQLSTATE without re-deriving it.</summary>
+    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null)
     {
         internal static ComposeRunOutcome Ok(JsonObject payload) => new(payload, null, false);
 
         internal static ComposeRunOutcome BadRequest(string error) => new(null, error, false);
 
         internal static ComposeRunOutcome BadRequest(string error, PostgresException fault) => new(null, error, false, fault);
+
+        internal static ComposeRunOutcome AuthorQueryError(string error, string? sqlState) => new(null, error, false, null, sqlState);
 
         internal static ComposeRunOutcome ServerError(string error) => new(null, error, true);
     }
@@ -970,6 +974,15 @@ public static class DarlingWebEndpoints
         sqlState == "57014"
         || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
         || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
+
+    /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
+    /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
+    /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
+    /// server rejects answers FATAL 22023 or 42704, which names the configured setting and its value).</summary>
+    internal static ComposeRunOutcome FromPostgresException(PostgresException ex) =>
+        IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+            ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
+            : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1123,10 +1136,10 @@ public static class DarlingWebEndpoints
                is a STORE fault the author cannot fix; the real exception rides back on Fault so the WEB
                endpoint (which has the logger) can answer through the same backstop shape #4276 gives an
                uncaught one. outcome.Error/IsServerError stay exactly what they always were either way, so
-               run_custom_view_panel's MCP answer does not change. */
-            return IsComposeRunAuthorActionable(ex.SqlState)
-                ? ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}")
-                : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+               run_custom_view_panel's MCP answer does not change.
+               #4293 round 2: the decision (including the FATAL/PANIC override) lives in FromPostgresException,
+               so a test can run it without a live Postgres round trip. */
+            return FromPostgresException(ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1154,6 +1167,16 @@ public static class DarlingWebEndpoints
         {
             DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault);
             return Results.Json(DarlingWebFailureLog.Body(outcome.Fault), statusCode: DarlingWebFailureLog.StatusCode(outcome.Fault));
+        }
+
+        if (!outcome.IsServerError && outcome.AuthorSqlState is { } sqlState)
+        {
+            /* #4293 round 2 (R2-L1): a panel's own query error still answers its text at 400 so the author can fix
+               the panel, but it is logged once too, so store drift (42P01/42703 after a migration that did not
+               finish) reaches the service log, not only one author's browser. */
+            logger.LogWarning(
+                "{Route} answered a Custom View panel's query error at 400 after {ElapsedMs} ms (SQLSTATE {SqlState}): {Error}",
+                route, elapsedMs, sqlState, outcome.Error);
         }
 
         return outcome.IsServerError

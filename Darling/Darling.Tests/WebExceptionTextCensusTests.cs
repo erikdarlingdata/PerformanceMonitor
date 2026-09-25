@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -567,11 +567,14 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
     }
 
-    /// <summary>Revert-proof for M1 (run once, by hand, against <c>ComposeRunOutcome.BadRequest(error, fault)</c>
-    /// removed and the catch block's non-actionable arm reverted to the pre-M1
-    /// <c>ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}")</c> for every SQLSTATE): the 28P01
-    /// and 57P01 tests above fail — the role/host text they assert absent is exactly what the old single-arm
-    /// catch put on the wire.</summary>
+    /// <summary>Revert-proof for M1, extended by round 2 (R2-L1, R2-L2): reverting the catch body to the
+    /// pre-M1 single-arm <c>ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}")</c> for every
+    /// SQLSTATE fails the 28P01 and 57P01 tests above (the role/host text they assert absent is exactly what
+    /// the old catch put on the wire) — and, since round 2 pulled the decision into
+    /// <see cref="DarlingWebEndpoints.FromPostgresException"/>, that same revert also fails
+    /// <c>RunComposedPanelAsync_PostgresExceptionCatch_CallsFromPostgresException</c>'s source pin and every
+    /// <c>FromPostgresException_*</c> test below — not only a revert that deletes
+    /// <c>ComposeRunOutcome.AuthorQueryError</c> outright.</summary>
     [Fact]
     public void ComposeRunFailureResult_NonActionableFault_IsServerErrorFalse_ButStillMapsThroughFault()
     {
@@ -587,6 +590,115 @@ public sealed class WebExceptionTextCensusTests
         var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", new CapturingTestLogger(), 5);
         ResultBody(result, out var statusCode);
         Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+    }
+
+    /* ═══════════════════════════ DarlingWebEndpoints.FromPostgresException / ComposeRunOutcome.AuthorSqlState (#4293 round 2, R2-L1/R2-L2) ═══════════════════════════ */
+
+    /// <summary>#4293 round 2 (R2-L2): a FATAL or PANIC severity is a connection-level store fault whatever its
+    /// class - a startup parameter the server rejects answers FATAL 22023 or 42704, which IsComposeRunAuthorActionable
+    /// alone would call author-actionable because it only looks at the SQLSTATE. Those two, plus the
+    /// pre-existing ERROR-severity non-actionable codes (28P01/57P01/53300/42501), all resolve to the SAME
+    /// Fault-carrying arm: a non-null Fault (the same PostgresException instance) and a null AuthorSqlState.</summary>
+    [Fact]
+    public void FromPostgresException_FatalOrPanicOrNonActionable_CarriesFault_NoAuthorSqlState()
+    {
+        foreach (var (message, severity, sqlState) in new[]
+        {
+            ("password authentication failed for user \"app_rw\"", "ERROR", "28P01"),
+            ("terminating connection due to administrator command", "ERROR", "57P01"),
+            ("too many connections for role \"app_rw\"", "ERROR", "53300"),
+            ("permission denied for table t", "ERROR", "42501"),
+            ("invalid value for parameter \"statement_timeout\": \"-1\"", "FATAL", "22023"),
+            ("unrecognized configuration parameter \"nonexistent.setting\"", "FATAL", "42704"),
+        })
+        {
+            var ex = new PostgresException(message, severity, severity, sqlState);
+            var outcome = DarlingWebEndpoints.FromPostgresException(ex);
+
+            Assert.False(outcome.IsServerError, $"sqlState {sqlState} at {severity}");
+            Assert.Same(ex, outcome.Fault);
+            Assert.Null(outcome.AuthorSqlState);
+        }
+    }
+
+    /// <summary>#4293 round 2 (R2-L1): the author-actionable arm, ERROR severity only (57014 / class-22 /
+    /// class-42 except 42501) - a null Fault, AuthorSqlState set to the code, and Error carrying the verbatim
+    /// MessageText, unchanged from round 1's single-arm ternary.</summary>
+    [Fact]
+    public void FromPostgresException_AuthorActionableAtErrorSeverity_CarriesAuthorSqlState_NoFault()
+    {
+        foreach (var (message, sqlState) in new[]
+        {
+            ("canceling statement due to statement timeout", "57014"),
+            ("invalid input syntax for type numeric", "22012"),
+            ("syntax error at or near \"selct\"", "42601"),
+            ("relation \"x\" does not exist", "42P01"),
+        })
+        {
+            var ex = new PostgresException(message, "ERROR", "ERROR", sqlState);
+            var outcome = DarlingWebEndpoints.FromPostgresException(ex);
+
+            Assert.False(outcome.IsServerError, $"sqlState {sqlState}");
+            Assert.Null(outcome.Fault);
+            Assert.Equal(sqlState, outcome.AuthorSqlState);
+            Assert.Equal($"Query failed: {message}", outcome.Error);
+        }
+    }
+
+    /// <summary>Source pin (R2-L1, R2-L2): the PostgresException catch inside RunComposedPanelAsync must call
+    /// FromPostgresException - not re-inline the old single-arm ternary - so a revert of the catch fails a
+    /// test even when it keeps ComposeRunOutcome.AuthorQueryError intact (see the extended revert-proof above
+    /// ComposeRunFailureResult_NonActionableFault_IsServerErrorFalse_ButStillMapsThroughFault).</summary>
+    [Fact]
+    public void RunComposedPanelAsync_PostgresExceptionCatch_CallsFromPostgresException()
+    {
+        var root = RepoFile.Root;
+        var code = StripComments(File.ReadAllText(
+            Path.Combine(root, "Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs")));
+
+        var catchStart = code.IndexOf("catch (PostgresException ex)", StringComparison.Ordinal);
+        Assert.True(catchStart >= 0, "RunComposedPanelAsync's PostgresException catch was not found");
+
+        var catchEnd = code.IndexOf("catch (Exception ex)", catchStart, StringComparison.Ordinal);
+        Assert.True(catchEnd > catchStart, "the generic Exception catch bounding the PostgresException catch was not found");
+
+        var catchBody = code.Substring(catchStart, catchEnd - catchStart);
+        Assert.Contains("return FromPostgresException(ex);", catchBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4293 round 2 (R2-L1): an AuthorQueryError outcome still answers 400 with the panel author's
+    /// own text (unchanged from round 1's "Query failed: {MessageText}"), but ComposeRunFailureResult now logs
+    /// it once - so store drift (42P01/42703 after a migration that did not finish) reaches the service log,
+    /// not only the one browser that hit it. A plain BadRequest with no AuthorSqlState still logs nothing,
+    /// same as every M1 test above.</summary>
+    [Fact]
+    public void ComposeRunFailureResult_AuthorQueryError_AnswersItsText400_LogsOneWarning()
+    {
+        var logger = new CapturingTestLogger();
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.AuthorQueryError("Query failed: syntax error at or near \"selct\"", "42601");
+
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
+        Assert.Equal("Query failed: syntax error at or near \"selct\"", json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public void ComposeRunFailureResult_PlainBadRequest_LogsNothing()
+    {
+        var logger = new CapturingTestLogger();
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest("bad spec");
+
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
+        Assert.Equal("bad spec", json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
     }
 
     /// <summary>Reads an <see cref="IResult"/> built by <c>Results.Json</c>/<c>Results.Text</c> the same way
