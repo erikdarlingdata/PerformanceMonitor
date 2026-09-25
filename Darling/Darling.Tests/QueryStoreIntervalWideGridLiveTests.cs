@@ -84,7 +84,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await AssertRawEqualsTableAsync(connection, WindowStart, WindowEnd, clampLiteral, appliedThrough, TestTop, ct);
 
         /* End to end: ViewerDataService.GetQueryStoreTopQueriesAsync, through its own schema-version probe, lands
-           on the table (V144 is present) and returns exactly the identities/outcomes/totals raw's own SQL does —
+           on the table (V145 is present) and returns exactly the identities/outcomes/totals raw's own SQL does —
            including the open interval's final running-max execution count (20, after three re-fetches). */
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         var endToEndRows = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, WindowEnd);

@@ -1614,6 +1614,14 @@ internal static class DarlingDataReader
     /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
     /// and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
+    /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
+    /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
+    /// two-argument <c>NpgsqlCommand(sqlIdentifier, connection)</c> with <c>Transaction</c> set through the
+    /// object initializer rather than threaded positionally. A three-argument
+    /// <c>NpgsqlCommand(sql, connection, transaction)</c> is also the shape the HypoPG experiment's
+    /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
+    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
+
     private static async Task<List<QueryStoreRow>?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken)
@@ -1623,7 +1631,7 @@ internal static class DarlingDataReader
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
 
-            await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -1637,7 +1645,7 @@ internal static class DarlingDataReader
             }
 
             var rows = new List<QueryStoreRow>();
-            await using var command = new NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            await using var command = new NpgsqlCommand(QueryStoreTopTableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddInt(command, serverId);
             AddTimestamp(command, clampedStart);
             AddTimestamp(command, endUtc);

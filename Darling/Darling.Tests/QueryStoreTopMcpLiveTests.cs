@@ -84,7 +84,7 @@ public sealed class QueryStoreTopMcpLiveTests
         await AssertRawEqualsTableAsync(connection, WindowStart, WindowStart, null, ModuleName, ct);
         await AssertRawEqualsTableAsync(connection, WindowStart, WindowStart, null, "dbo.usp_NoSuchModule", ct);
 
-        /* ---- end to end: DarlingDataReader.GetQueryStoreTopAsync lands on the table (V144 is present) ---- */
+        /* ---- end to end: DarlingDataReader.GetQueryStoreTopAsync lands on the table (V145 is present) ---- */
 
         var mcpRows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, ServerId, WindowStart, queryEnd, TestTop, null, null, null, ct);
         var rawKeys = await RawTopKeysAsync(connection, WindowStart, queryEnd, null, null, ct);

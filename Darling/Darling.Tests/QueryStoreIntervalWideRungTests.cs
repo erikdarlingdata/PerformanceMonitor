@@ -33,14 +33,14 @@ public sealed class QueryStoreIntervalWideRungTests
     /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
     private const int ProbeOrdinal = 120;
 
-    private static PgMigrations.Migration V144 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
+    private static PgMigrations.Migration V145 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
     public void TheRungIsRegisteredAtTheTopOfADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal("query-store-interval-wide", V144.Name);
+        Assert.Equal("query-store-interval-wide", V145.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
@@ -56,7 +56,7 @@ public sealed class QueryStoreIntervalWideRungTests
     [Fact]
     public void TheRungCreatesThreeTablesAndOneUniqueIndex_EnginePlain_AndTouchesNothingOfV143s()
     {
-        var sql = V144.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var sql = V145.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
 
         Assert.Equal(3, CountOf(sql, "CREATE TABLE IF NOT EXISTS collect."));
         Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_wide"));

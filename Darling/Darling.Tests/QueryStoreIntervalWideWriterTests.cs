@@ -20,7 +20,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// The #3953 (V144) wide-table writer against a real PostgreSQL store (<c>DARLING_TEST_PG</c>), driven through the
+/// The #3953 (V145) wide-table writer against a real PostgreSQL store (<c>DARLING_TEST_PG</c>), driven through the
 /// REAL write path (<see cref="DarlingCollectorRunner.WriteBackfillBatchAsync{TRow}"/>), which applies V143's
 /// Regular-only table AND this wide, every-outcome table in the SAME transaction. Mirrors
 /// <see cref="QueryStoreIntervalLatestWriterTests"/>'s shape.
@@ -222,7 +222,7 @@ ORDER BY
             "SELECT COUNT(*) FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id AND failure LIKE '42P10%'", ct));
 
         /* Restored: the next batch replays the queued one, and the wide pending table drains. */
-        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 144).Sql, ct);
+        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 145).Sql, ct);
         await WriteAsync(runner, T0.AddMinutes(65), context, ct, Row("qsB", 3, 31, 100, T0, T0.AddMinutes(58), 9, 310));
 
         Assert.Equal(0, await ScalarLongAsync(connection, "SELECT COUNT(*) FROM collect.query_store_interval_wide_pending", ct));
