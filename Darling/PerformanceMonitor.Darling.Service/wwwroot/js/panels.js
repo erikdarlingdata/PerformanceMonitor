@@ -40,22 +40,47 @@ import {
 } from "./util.js";
 import { renderLineChart, SERIES_COLORS } from "./charts.js";
 
+/* The AbortSignal for the render currently building panels (#4191). A page sets it (setPanelSignal)
+   synchronously, immediately before calling a tab's build()/a page's descriptor array, and renderPanel below
+   captures the CURRENT VALUE into a local const at the moment each panel is built — a later render's signal
+   swap can only affect panels renderPanel has not been called for yet, never one already in flight. This is
+   what lets every page fall in line without threading a signal through table()/stat()/line() and every
+   build(server, ctx) signature: the one seam every panel read already shares picks it up implicitly. A page
+   that never calls setPanelSignal (most of them, today) leaves this undefined, and fetch(path, {signal:
+   undefined}) is exactly the unabortable request every panel already made. */
+let panelSignal;
+
+/** Set (or clear, with no argument) the AbortSignal the NEXT renderPanel() calls will capture — see above. */
+export function setPanelSignal(signal) {
+  panelSignal = signal;
+}
+
 /**
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
- * mapping the three API response kinds (data / empty envelope / error) to the right UI.
+ * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
  */
 export function renderPanel(desc) {
+  const signal = panelSignal;
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null]),
     body,
   ]);
-  loadPanel(desc, body);
+  loadPanel(desc, body, signal);
   return panel;
 }
 
-async function loadPanel(desc, body) {
-  const res = desc.read ? await readTool(desc.read, desc.params) : await apiGet(desc.path + buildQuery(desc.params));
+async function loadPanel(desc, body, signal) {
+  const res = desc.read
+    ? await readTool(desc.read, desc.params, signal)
+    : await apiGet(desc.path + buildQuery(desc.params), signal);
+
+  /* A superseded render's own reads (#4191) or a session that just expired (#4187, its own shell-wide
+     takeover — see util.js) — either way this panel's slot is no longer this code's to fill; the render that
+     owns the screen now already replaced it or is about to. */
+  if (res.kind === "aborted" || res.kind === "auth") {
+    return;
+  }
 
   if (res.kind === "error") {
     /* readErrorStrip degrades the "window too wide" validation error to a notice; every other error stays red

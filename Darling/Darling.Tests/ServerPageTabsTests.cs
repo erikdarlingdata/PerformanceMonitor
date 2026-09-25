@@ -834,9 +834,11 @@ public sealed class ServerPageTabsTests
         Assert.DoesNotContain("SERVER_TABS.map(", ServerJs, StringComparison.Ordinal);
         Assert.Contains("\"#/server/\" + encodeURIComponent(server) + \"/\" + t.id", ServerJs, StringComparison.Ordinal);
 
-        /* And the router parses that second segment back out and hands it to the page. */
+        /* And the router parses that second segment back out and hands it to the page. (#4190/#4191 added a
+           trailing opts argument — the poll flag renderServer uses to decide whether to re-fetch /api/fleet —
+           so this now matches the call's own leading args rather than the whole argument list.) */
         Assert.Contains("function serverRoute(rest)", AppJs, StringComparison.Ordinal);
-        Assert.Contains("renderServer(main, r.param, r.tab)", AppJs, StringComparison.Ordinal);
+        Assert.Contains("renderServer(main, r.param, r.tab, opts)", AppJs, StringComparison.Ordinal);
 
         /* The name is decoded AFTER the split, so an encoded '/' inside a server name survives the tab segment
            being introduced — the one way this change could have broken existing links. */

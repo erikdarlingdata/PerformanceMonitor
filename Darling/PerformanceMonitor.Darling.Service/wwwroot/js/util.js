@@ -330,23 +330,43 @@ export function buildQuery(params) {
   return parts.length ? "?" + parts.join("&") : "";
 }
 
+/* In-flight read counter (#4191): every apiGet/readTool call counts itself while its fetch is outstanding, so
+   the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
+   before firing a whole new set of the same reads on top of it. apiGetFleet and apiSend are deliberately NOT
+   counted here — the fleet read is the one request every caller already shares regardless of render (#3895),
+   and a mutation is not a "page read" a poll tick should wait out. */
+let inFlightReads = 0;
+
+/** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
+export function hasInFlightReads() {
+  return inFlightReads > 0;
+}
+
 /**
- * GET a same-origin API path and classify the response into one of three kinds, mirroring the service's
- * three response shapes (DarlingWebEndpoints):
+ * GET a same-origin API path and classify the response into one of four kinds, mirroring the service's
+ * response shapes (DarlingWebEndpoints):
  *   { kind: "data",  data }                 — a data object/array (HTTP 200 JSON passthrough)
  *   { kind: "empty", status, message, ... } — the {status,message[,hints]} empty envelope (HTTP 200)
  *   { kind: "error", message, status }      — { "error": ... } (HTTP 400/500) or a transport failure
- * Auth is handled entirely server-side (loopback is tokenless; network mode sets the session cookie before
- * the SPA loads), so requests carry it automatically — nothing to do here.
+ *   { kind: "auth",  message, login }       — the session is gone (#4187); see classifyResponse
+ * `signal` (#4191) is an optional AbortSignal for a superseded render's reads — see panels.js's setPanelSignal
+ * and server.js's redrawPanels, which own creating and aborting it. A caller with no render to supersede (the
+ * sidebar, the view list) simply omits it, exactly as before.
  */
-export async function apiGet(path) {
-  let resp;
+export async function apiGet(path, signal) {
+  inFlightReads++;
   try {
-    resp = await fetch(path, { headers: { Accept: "application/json" } });
-  } catch (e) {
-    return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    let resp;
+    try {
+      resp = await fetch(path, { headers: { Accept: "application/json" }, signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") return { kind: "aborted" };
+      return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
+    }
+    return await classifyResponse(resp);
+  } finally {
+    inFlightReads--;
   }
-  return classifyResponse(resp);
 }
 
 /* The /api/fleet request every caller in flight at the same moment shares — see apiGetFleet. */
@@ -410,9 +430,35 @@ export async function apiSend(method, path, body) {
   return classifyResponse(resp);
 }
 
+/* Session-expired takeover (#4187). A module-level one-shot latch: the FIRST read that reports the session is
+   gone rewrites the whole shell into a sign-in prompt (app.js registers the one listener that does it) rather
+   than leaving every open panel to separately render its own "signed out" guess as an unrelated-looking error.
+   One-shot because the only way out is the sign-in link, which reloads the page — nothing here ever un-latches
+   it, and a page reload starts every module fresh anyway. */
+let sessionExpired = false;
+const sessionExpiredListeners = [];
+
+/** True once a read has reported the session is gone — see classifyResponse's 401 / non-JSON-200 arms. */
+export function isSessionExpired() {
+  return sessionExpired;
+}
+
+/** Register a callback for the FIRST detected session expiry. Fired at most once per page load. */
+export function onSessionExpired(fn) {
+  sessionExpiredListeners.push(fn);
+}
+
+function reportSessionExpired(message, login) {
+  if (sessionExpired) return;
+  sessionExpired = true;
+  for (const fn of sessionExpiredListeners) fn(message, login);
+}
+
 /**
- * Classify a completed Response into the same three-kind shape apiGet returns (shared by apiGet + apiSend):
- * a non-2xx -> "error", with the message read from an { "error": ... } body (the 500 arm and the bare-string
+ * Classify a completed Response into the same shape apiGet returns (shared by apiGet + apiGetFleet + apiSend):
+ * a 401 -> "auth" (#4187: the network-mode auth gate's answer to an /api/* call with no valid session — a
+ * service restart rotates the cookie signing key, so an open tab's every read starts failing this way); a
+ * non-2xx -> "error", with the message read from an { "error": ... } body (the 500 arm and the bare-string
  * 400 arm) or from the {status:"invalid", message} envelope (#3739: a REFUSAL — a parameter the tool cannot
  * honor, a server name that resolves to nothing — is the envelope itself as a 400 body on /api/read/*, exactly
  * as the mute-rule write routes have always answered invalid; its `message` is the sentence readErrorStrip and
@@ -420,8 +466,11 @@ export async function apiSend(method, path, body) {
  * envelope under 2xx -> "empty" for the four miss words and "error" for status "error" or "invalid" (#3653 Q11:
  * every tool's caught exception is that envelope on the MCP wire; the service maps error to a 500 and invalid to
  * a 400 before either reaches this page, so the 2xx arm below is the belt-and-braces for a body that arrived
- * unmapped — a failure or a refusal must never render as a quiet "nothing here" card); anything else
- * (including a 204/empty body -> data:null) -> "data".
+ * unmapped — a failure or a refusal must never render as a quiet "nothing here" card); a 200 whose body is NOT
+ * JSON -> also "auth" (#4187: before the server could tell an /api/* call apart from a page load, an expired
+ * session answered every /api/* call with the 200 HTML login form — this is that shape, kept as a second, belt-
+ * and-braces detector in case a future gate answers the same way again); anything else (including a 204/empty
+ * body -> data:null) -> "data".
  */
 async function classifyResponse(resp) {
   const raw = await resp.text();
@@ -432,6 +481,13 @@ async function classifyResponse(resp) {
     } catch {
       body = null;
     }
+  }
+
+  if (resp.status === 401) {
+    const message = body && typeof body.error === "string" ? body.error : "Session expired";
+    const login = body && typeof body.login === "string" ? body.login : "/";
+    reportSessionExpired(message, login);
+    return { kind: "auth", message, login };
   }
 
   const isEnvelope = body && !Array.isArray(body) && typeof body.status === "string" && typeof body.message === "string";
@@ -450,6 +506,12 @@ async function classifyResponse(resp) {
       return { kind: "error", message: body.message, status: resp.status };
     }
     return { kind: "empty", status: body.status, message: body.message, hints: body.hints || null, data: body };
+  }
+
+  if (resp.ok && raw && body === null) {
+    const message = "Session expired";
+    reportSessionExpired(message, "/");
+    return { kind: "auth", message, login: "/" };
   }
 
   return { kind: "data", data: body };
@@ -500,7 +562,7 @@ export function alertDeliveryState(a) {
   return ALERT_STATE_LABELS[a.notification_type] || null;
 }
 
-/** GET a read-only tool by its MCP name with query-string params. */
-export function readTool(tool, params) {
-  return apiGet("/api/read/" + tool + buildQuery(params));
+/** GET a read-only tool by its MCP name with query-string params. `signal` — see apiGet (#4191). */
+export function readTool(tool, params, signal) {
+  return apiGet("/api/read/" + tool + buildQuery(params), signal);
 }

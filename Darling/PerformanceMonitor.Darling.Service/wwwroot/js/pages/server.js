@@ -46,6 +46,7 @@
  */
 
 import { el, mount, apiGetFleet, bandClass, loadingStrip } from "../util.js";
+import { setPanelSignal } from "../panels.js";
 import { serverTabsFor, findServerTab, tabNote } from "./server-tabs.js";
 import { metricBands } from "./fleet.js";
 
@@ -76,8 +77,17 @@ let current = { server: null, tab: null };
  * paints one server's panels under the other's header and URL.
  *
  * A generation counter rather than an AbortController because the losing render must not cancel the shared
- * /api/fleet fetch out from under the winning one; the fetch is fine, it is only its RESULT that is stale. */
+ * /api/fleet fetch out from under the winning one; the fetch is fine, it is only its RESULT that is stale.
+ *
+ * This is deliberately separate from `panelAbort` below (#4191), which DOES cancel — it owns only the
+ * per-panel reads a redraw starts, never the shared fleet fetch this generation counter protects. */
 let renderGeneration = 0;
+
+/* The current panel batch's AbortController (#4191) — see redrawPanels(), which creates and aborts it. Module
+   state like renderGeneration and lastCard, for the same reason: redrawPanels can run from three places (a
+   fresh renderServer, the loadServerCard callback, and the range-select handler) and every one of them must
+   cancel the SAME previous batch, not just the one its own caller happens to remember. */
+let panelAbort = null;
 
 /* The last card seen for a server name, so a repeat render can choose its registry without a round trip. Keyed
    on the ROUTE's name (which may be either the server name or the display name — the same key loadServerCard
@@ -90,7 +100,14 @@ function rangeContext() {
   return { hours: opt.hours, label: opt.label };
 }
 
-export function renderServer(main, server, tabId) {
+/**
+ * @param {object} [opts] — `{ poll: true }` when this call is the 60s poll's own refresh (app.js's refresh(),
+ * threaded through route()), as opposed to a sub-tab click / deep link (hashchange) or the first paint. Only
+ * that case, and a server this page has no card for yet, re-fetch /api/fleet — see the comment at the call
+ * below (#4190).
+ */
+export function renderServer(main, server, tabId, opts) {
+  const isPoll = !!(opts && opts.poll === true);
   const generation = ++renderGeneration;
   current = { server, tab: null };
 
@@ -122,21 +139,28 @@ export function renderServer(main, server, tabId) {
     painted = paintTabs(tabsSlot, server, tabId, remembered.card);
   }
 
-  loadServerCard(server, (card, reason) => {
-    /* A newer render has started since this fetch went out — everything below writes module state or mounts
-       into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
-    if (generation !== renderGeneration) return;
+  /* /api/fleet is fetched again only to place a server this page has no card for yet, or on the poll's real
+     refresh — a plain sub-tab click (isPoll false) with a remembered card reuses it instead of re-downloading
+     the whole 66-81KB roll-up for one ~1.5KB card (#4190). The synchronous paint above already put that
+     reused card on screen, so skipping the fetch here changes nothing about what a tab click shows; it only
+     stops asking the store for an answer this page already has until the poll asks again. */
+  if (!remembered || isPoll) {
+    loadServerCard(server, (card, reason) => {
+      /* A newer render has started since this fetch went out — everything below writes module state or mounts
+         into nodes this render no longer owns, so the only correct thing to do with a stale answer is drop it. */
+      if (generation !== renderGeneration) return;
 
-    if (card) lastCard.set(server, { card, reason });
-    fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
+      if (card) lastCard.set(server, { card, reason });
+      fillServerHead(dot, badgeSlot, engineSlot, whySlot, card, reason);
 
-    /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
-       the two registries are module constants, so that comparison is exact. A null card never repaints over a
-       painted page: a fleet read that failed says nothing about which engine this server runs. */
-    if (!painted || (card && serverTabsFor(card) !== painted)) {
-      painted = paintTabs(tabsSlot, server, tabId, card);
-    }
-  });
+      /* Repaint only when there is nothing painted yet, or when the fresh card chooses a DIFFERENT registry —
+         the two registries are module constants, so that comparison is exact. A null card never repaints over a
+         painted page: a fleet read that failed says nothing about which engine this server runs. */
+      if (!painted || (card && serverTabsFor(card) !== painted)) {
+        painted = paintTabs(tabsSlot, server, tabId, card);
+      }
+    });
+  }
 }
 
 /** Put the tab bar, its note and its panels on the page for a card, and return the registry that card chose. */
@@ -152,6 +176,17 @@ function paintTabs(tabsSlot, server, tabId, card) {
 /** (Re)fill the panel grid for the current server + tab at the current range. No refetch of anything else. */
 function redrawPanels() {
   if (!gridNode || !current.tab || !current.server) return;
+
+  /* Every redraw replaces the whole panel grid — a fresh render (poll tick or sub-tab click), or the range
+     picker choosing a new window for the SAME tab — so it starts a whole new batch of panel reads and the
+     PREVIOUS batch's, if still pending, are now for nobody. #4191: aborting them here is what stopped the
+     Config tab's audit_config from running twice concurrently — the old batch is cancelled instead of left to
+     finish. setPanelSignal (panels.js) is how renderPanel picks this up without build() or table()/stat()/
+     line() threading a signal through every call — see its own comment. */
+  if (panelAbort) panelAbort.abort();
+  panelAbort = new AbortController();
+  setPanelSignal(panelAbort.signal);
+
   mount(gridNode, current.tab.build(current.server, rangeContext()));
 }
 

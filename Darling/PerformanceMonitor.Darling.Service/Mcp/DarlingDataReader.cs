@@ -2558,47 +2558,188 @@ internal static class DarlingDataReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new CollectionLogEntry(
-                reader.GetString(0),
-                reader.GetDateTime(1),
-                reader.IsDBNull(2) ? null : Convert.ToDouble(reader.GetValue(2)),
-                reader.IsDBNull(3) ? null : Convert.ToDouble(reader.GetValue(3)),
-                reader.IsDBNull(4) ? null : Convert.ToDouble(reader.GetValue(4)),
-                reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5)),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                /* NULL on every row written before V108, and on every run whose path emits no split -
-                   both genuinely "not recorded", which is why these stay nullable rather than defaulting
-                   to zero. A zero here would claim a measured instant open. */
-                reader.IsDBNull(8) ? null : Convert.ToDouble(reader.GetValue(8)),
-                reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? null : Convert.ToDouble(reader.GetValue(10)),
-                /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
-                   that emits no forensics (every per-database ENUMERATED collector - query_store, the
-                   Pg*Stats family - never sets the measured flag), or an abandon that fired before the
-                   counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
-                   a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
-                reader.IsDBNull(11) ? null : Convert.ToInt64(reader.GetValue(11)),
-                reader.IsDBNull(12) ? null : Convert.ToInt64(reader.GetValue(12)),
-                reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
-                reader.IsDBNull(14) ? null : Convert.ToInt32(reader.GetValue(14)),
-                reader.IsDBNull(15) ? null : Convert.ToDouble(reader.GetValue(15)),
-                /* V110 (#2860). NULL means the run performed no deferred fetch - which is every collector
-                   but the plan/text-fetching ones, and ~78% of even those runs, since a fetch only runs when
-                   the probe finds something missing. Read raw rather than pre-divided into ms-per-id: the
-                   rate is the interesting number (31.65 ms/id measured on production's cold plans against
-                   ~1.6 on #2806's hot ones), but there are three useful rates over these five figures and
-                   blessing one in the record would hide the others. The consumer divides. */
-                reader.IsDBNull(16) ? null : Convert.ToDouble(reader.GetValue(16)),
-                reader.IsDBNull(17) ? null : Convert.ToDouble(reader.GetValue(17)),
-                reader.IsDBNull(18) ? null : Convert.ToDouble(reader.GetValue(18)),
-                reader.IsDBNull(19) ? null : Convert.ToInt64(reader.GetValue(19)),
-                reader.IsDBNull(20) ? null : Convert.ToInt64(reader.GetValue(20)),
-                reader.IsDBNull(21) ? null : Convert.ToDouble(reader.GetValue(21)),
-                reader.IsDBNull(22) ? null : Convert.ToDouble(reader.GetValue(22)),
-                reader.IsDBNull(23) ? null : Convert.ToDouble(reader.GetValue(23)),
-                reader.IsDBNull(24) ? null : Convert.ToInt64(reader.GetValue(24)),
-                reader.IsDBNull(25) ? null : Convert.ToInt64(reader.GetValue(25))));
+            rows.Add(MapCollectionLogEntry(reader, 0));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Maps one <see cref="CollectionLogBody"/> / <see cref="CollectionLogFleetBody"/> row to a
+    /// <see cref="CollectionLogEntry"/>, starting at column <paramref name="i"/> — 0 for the per-server SELECT,
+    /// whose 26 columns start at the first ordinal, and 1 for the fleet-wide SELECT (#4199), which reads
+    /// <c>server_name</c> as its own leading column ahead of the same 26. Factored out of
+    /// <see cref="GetCollectionLogAsync"/> so the fleet form (<see cref="GetCollectionLogFleetAsync"/>) cannot
+    /// drift from the per-server column mapping by so much as one ordinal — the two SELECTs were kept
+    /// column-for-column identical after the leading name for exactly this reason.
+    /// </summary>
+    private static CollectionLogEntry MapCollectionLogEntry(NpgsqlDataReader reader, int i) =>
+        new(
+            reader.GetString(i),
+            reader.GetDateTime(i + 1),
+            reader.IsDBNull(i + 2) ? null : Convert.ToDouble(reader.GetValue(i + 2)),
+            reader.IsDBNull(i + 3) ? null : Convert.ToDouble(reader.GetValue(i + 3)),
+            reader.IsDBNull(i + 4) ? null : Convert.ToDouble(reader.GetValue(i + 4)),
+            reader.IsDBNull(i + 5) ? null : Convert.ToInt64(reader.GetValue(i + 5)),
+            reader.IsDBNull(i + 6) ? null : reader.GetString(i + 6),
+            reader.IsDBNull(i + 7) ? null : reader.GetString(i + 7),
+            /* NULL on every row written before V108, and on every run whose path emits no split -
+               both genuinely "not recorded", which is why these stay nullable rather than defaulting
+               to zero. A zero here would claim a measured instant open. */
+            reader.IsDBNull(i + 8) ? null : Convert.ToDouble(reader.GetValue(i + 8)),
+            reader.IsDBNull(i + 9) ? null : Convert.ToDouble(reader.GetValue(i + 9)),
+            reader.IsDBNull(i + 10) ? null : Convert.ToDouble(reader.GetValue(i + 10)),
+            /* V109 (#2864). NULL means NOT RECORDED and no more: a row written before the rung, a path
+               that emits no forensics (every per-database ENUMERATED collector - query_store, the
+               Pg*Stats family - never sets the measured flag), or an abandon that fired before the
+               counting reader was constructed. Do NOT read a NULL as 'old row'. DrainLastReadMs beside
+               a 0 DrainRowsRead does mean nothing arrived; that pairing is the one safe inference. */
+            reader.IsDBNull(i + 11) ? null : Convert.ToInt64(reader.GetValue(i + 11)),
+            reader.IsDBNull(i + 12) ? null : Convert.ToInt64(reader.GetValue(i + 12)),
+            reader.IsDBNull(i + 13) ? null : Convert.ToDouble(reader.GetValue(i + 13)),
+            reader.IsDBNull(i + 14) ? null : Convert.ToInt32(reader.GetValue(i + 14)),
+            reader.IsDBNull(i + 15) ? null : Convert.ToDouble(reader.GetValue(i + 15)),
+            /* V110 (#2860). NULL means the run performed no deferred fetch - which is every collector
+               but the plan/text-fetching ones, and ~78% of even those runs, since a fetch only runs when
+               the probe finds something missing. Read raw rather than pre-divided into ms-per-id: the
+               rate is the interesting number (31.65 ms/id measured on production's cold plans against
+               ~1.6 on #2806's hot ones), but there are three useful rates over these five figures and
+               blessing one in the record would hide the others. The consumer divides. */
+            reader.IsDBNull(i + 16) ? null : Convert.ToDouble(reader.GetValue(i + 16)),
+            reader.IsDBNull(i + 17) ? null : Convert.ToDouble(reader.GetValue(i + 17)),
+            reader.IsDBNull(i + 18) ? null : Convert.ToDouble(reader.GetValue(i + 18)),
+            reader.IsDBNull(i + 19) ? null : Convert.ToInt64(reader.GetValue(i + 19)),
+            reader.IsDBNull(i + 20) ? null : Convert.ToInt64(reader.GetValue(i + 20)),
+            reader.IsDBNull(i + 21) ? null : Convert.ToDouble(reader.GetValue(i + 21)),
+            reader.IsDBNull(i + 22) ? null : Convert.ToDouble(reader.GetValue(i + 22)),
+            reader.IsDBNull(i + 23) ? null : Convert.ToDouble(reader.GetValue(i + 23)),
+            reader.IsDBNull(i + 24) ? null : Convert.ToInt64(reader.GetValue(i + 24)),
+            reader.IsDBNull(i + 25) ? null : Convert.ToInt64(reader.GetValue(i + 25)));
+
+    /// <summary>One <see cref="CollectionLogEntry"/> plus which server it came from — the fleet-wide row shape
+    /// (#4199), needed only because <see cref="GetCollectionLogFleetAsync"/> merges runs across every enabled
+    /// server into one ranked page and the per-server record carries no server identity of its own.</summary>
+    public sealed record FleetCollectionLogEntry(string ServerName, CollectionLogEntry Entry);
+
+    /// <summary>
+    /// The FLEET-WIDE form of <see cref="CollectionLogBody"/> (#4199): the same per-run log, across EVERY
+    /// ENABLED server at once, each row carrying which server it came from. $1 window start, $2 window end
+    /// (naive UTC), $3 row cap, $4 collector name or NULL, $5 duration floor or NULL, $6 status or NULL.
+    ///
+    /// <para>Scoped to enabled servers by joining <c>servers</c> — the SAME population
+    /// <see cref="DarlingServerResolver"/> resolves a name against — rather than adding a predicate of its own,
+    /// so the two can never disagree about which servers are in scope. That join is also what excludes the
+    /// fleet-MAINTENANCE sentinel row (<c>server_id = 0</c>), which the registry deliberately never contains
+    /// (see <see cref="DarlingServerResolver.ResolveOrErrorWithFleetSentinelAsync"/>): a fleet-wide page of
+    /// ordinary collector runs is not that sentinel's maintenance run-records, and no extra predicate is needed
+    /// to keep the two apart.</para>
+    ///
+    /// <para>Column-for-column identical to <see cref="CollectionLogBody"/> after its own leading
+    /// <c>server_name</c>, so <see cref="MapCollectionLogEntry"/> reads both with one mapping.</para>
+    /// </summary>
+    private const string CollectionLogFleetBody = """
+        SELECT
+            cl.server_name,
+            cl.collector_name,
+            cl.collection_time,
+            cl.duration_ms,
+            cl.sql_duration_ms,
+            cl.duckdb_duration_ms,
+            cl.rows_collected,
+            cl.status,
+            cl.error_message,
+            cl.sql_open_ms,
+            cl.sql_drain_ms,
+            cl.watermark_ms,
+            cl.drain_rows_read,
+            cl.drain_bytes_read,
+            cl.drain_last_read_ms,
+            cl.target_session_id,
+            cl.sweep_peer_max_ms,
+            cl.plan_fetch_probe_ms,
+            cl.plan_fetch_target_ms,
+            cl.plan_fetch_write_ms,
+            cl.plan_fetch_ids_attempted,
+            cl.plan_fetch_probe_ids,
+            cl.text_fetch_probe_ms,
+            cl.text_fetch_target_ms,
+            cl.text_fetch_write_ms,
+            cl.text_fetch_ids_attempted,
+            cl.text_fetch_probe_ids
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        WHERE cl.collection_time >= $1
+        AND   cl.collection_time <= $2
+        AND   ($4::text IS NULL OR cl.collector_name = $4::text)
+        AND   ($5::double precision IS NULL OR cl.duration_ms >= $5::double precision)
+        AND   ($6::text IS NULL OR cl.status = UPPER($6::text))
+        """;
+
+    /// <summary>Fleet-wide newest-first — see <see cref="CollectionLogSql"/>, its per-server twin.</summary>
+    public const string CollectionLogFleetSql = CollectionLogFleetBody + """
+
+        ORDER BY cl.collection_time DESC, cl.duration_ms DESC NULLS LAST
+        LIMIT $3
+        """;
+
+    /// <summary>Fleet-wide slowest-first, when a duration floor is supplied — see
+    /// <see cref="CollectionLogSlowestFirstSql"/>, its per-server twin.</summary>
+    public const string CollectionLogFleetSlowestFirstSql = CollectionLogFleetBody + """
+
+        ORDER BY cl.duration_ms DESC NULLS LAST, cl.collection_time DESC
+        LIMIT $3
+        """;
+
+    /// <summary>Whether ANY enabled server has EVER recorded a collector run — the fleet-wide
+    /// <see cref="HasAnyCollectionLogSql"/>, used the same way: to tell a genuinely quiet fleet-wide window
+    /// from a fleet that has never once collected (every server newly added, or the service never started).
+    /// </summary>
+    public const string HasAnyCollectionLogFleetSql = """
+        SELECT 1
+        FROM v_collection_log cl
+        JOIN servers s ON s.server_id = cl.server_id AND s.is_enabled
+        LIMIT 1
+        """;
+
+    /// <summary>Runs <see cref="HasAnyCollectionLogFleetSql"/>.</summary>
+    public static async Task<bool> HasAnyCollectionLogFleetAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(HasAnyCollectionLogFleetSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    /// <summary>
+    /// Runs <see cref="CollectionLogFleetSql"/>, or <see cref="CollectionLogFleetSlowestFirstSql"/> when
+    /// <paramref name="minDurationMs"/> is supplied — the fleet-wide twin of <see cref="GetCollectionLogAsync"/>,
+    /// same filter and ordering rules, merged across every enabled server instead of scoped to one.
+    /// </summary>
+    public static async Task<List<FleetCollectionLogEntry>> GetCollectionLogFleetAsync(
+        NpgsqlDataSource postgres,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        int maxRows,
+        string? collectorName = null,
+        double? minDurationMs = null,
+        string? status = null,
+        CancellationToken cancellationToken = default)
+    {
+        var rows = new List<FleetCollectionLogEntry>();
+        await using var command = postgres.CreateCommand(
+            minDurationMs is null ? CollectionLogFleetSql : CollectionLogFleetSlowestFirstSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddTimestamp(command, windowStartUtc);
+        AddTimestamp(command, windowEndUtc);
+        AddInt(command, maxRows);
+        AddNullableText(command, string.IsNullOrWhiteSpace(collectorName) ? null : collectorName.Trim());
+        AddNullableDouble(command, minDurationMs);
+        AddNullableText(command, string.IsNullOrWhiteSpace(status) ? null : status.Trim());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var serverName = reader.GetString(0);
+            rows.Add(new FleetCollectionLogEntry(serverName, MapCollectionLogEntry(reader, 1)));
         }
 
         return rows;
