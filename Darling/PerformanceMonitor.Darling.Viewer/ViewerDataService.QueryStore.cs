@@ -889,9 +889,12 @@ public sealed partial class ViewerDataService
     /// measured in <see cref="TryGetQueryStoreSlicerDataFromTableAsync"/> on the slicer's OWN requested window
     /// (<c>endUtc - startUtc</c>), never on the 1-hour-widened start <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
     /// is called with there for clauses 2/3 and the clamp. One constant per read: this does not track
-    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/>.
+    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/>. Raised from 12 to 24 hours (lane B4t, rig-d4,
+    /// 15-day seed at a field store's rate, end-to-end through <see cref="GetQueryStoreSlicerDataAsync"/>): median
+    /// of 5 at the ruled 12-hour cell, table 815.8 ms (spread 756.3-883.2) against raw 595.3 ms (spread
+    /// 495.0-633.2) — the table was slower than raw there, so the ruling moves this threshold to 24 hours.
     /// </summary>
-    public static readonly TimeSpan QueryStoreSlicerMinWindow = TimeSpan.FromHours(12);
+    public static readonly TimeSpan QueryStoreSlicerMinWindow = TimeSpan.FromHours(24);
 
     /// <summary>
     /// The store schema version both <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) and
