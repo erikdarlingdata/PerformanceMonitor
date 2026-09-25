@@ -1495,6 +1495,23 @@ $do$";
     private static string RequireSuccessorOf(string legacyHourly)
         => SuccessorOf(legacyHourly) ?? throw new InvalidOperationException($"{legacyHourly} has no successor in {nameof(SupersededHourlyRollups)}.");
 
+    /// <summary>The legacy hourly that <paramref name="successor"/> supersedes, or <c>null</c> when
+    /// <paramref name="successor"/> is not a member of <see cref="SupersededHourlyRollups"/>.  Used by
+    /// <see cref="RetentionArmSafetySql"/> to generate stitched coverage SQL for frozen-legacy + successor
+    /// pairs — see that member's doc for the full rationale (#3653 high-fix, Option 4).</summary>
+    private static string? LegacyOf(string successor)
+    {
+        foreach (var (legacy, s, _) in SupersededHourlyRollups)
+        {
+            if (string.Equals(s, successor, StringComparison.Ordinal))
+            {
+                return legacy;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>The interval-honest successor DAILY that covers <paramref name="successorHourly"/> once the
     /// hourly-tier read routes past its own horizon (#3653, A6/LB's three successor dailies) — the coverage
     /// relation <see cref="RetentionPolicies"/> arms a successor hourly's own drop_chunks against, in place of
@@ -5971,6 +5988,18 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
+    /// The <c>WHERE</c> predicate the interval-honest successor hourlies bake into their CREATE — they exclude
+    /// first-pass rows where the collector had no previous sample to delta against and stored
+    /// <c>sample_interval_seconds = 0</c>. <see cref="RetentionArmSafetySql"/> applies the same predicate to
+    /// the <c>source_oldest</c> subquery for <c>query_stats</c> and <c>procedure_stats</c>, so a 0-interval row
+    /// that pre-dates every materialized bucket cannot hold the purge gate open indefinitely (#3653 high-fix).
+    ///
+    /// <para>A pin test in <c>IntervalHonestHourlyRollupTests</c> asserts this constant appears in each
+    /// successor's CREATE text, so a CREATE change that drops the predicate is caught automatically.</para>
+    /// </summary>
+    public const string IntervalHonestSourceFilter = "sample_interval_seconds IS DISTINCT FROM 0";
+
+    /// <summary>
     /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does EVERY tier below it already
     /// cover everything this relation holds? Emits the source's oldest row followed by one
     /// <c>min(bucket)</c> column per coverage relation, in <paramref name="coverageRelations"/> order.
@@ -5987,6 +6016,22 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>GREATEST</c> would have expressed it in one column and is exactly wrong here, because it SKIPS NULLs.
     /// An empty new rollup would vanish from the comparison and the gate would pass on the old rollup alone —
     /// which is the whole failure this exists to prevent.</para>
+    ///
+    /// <para><b>Stitched coverage for frozen-legacy + successor pairs (#3653 high-fix, Option 4).</b>
+    /// When a coverage relation is an interval-honest successor (a member of
+    /// <see cref="SupersededHourlyRollups"/>), the SQL for that coverage slot is
+    /// <c>COALESCE(LEAST(legacy.min, successor.min), legacy.min, successor.min)</c> rather than
+    /// <c>min(successor.bucket)</c> alone.  This lets an upgrading store whose successor is still empty
+    /// fall back to the frozen legacy's floor — the legacy was refreshing up to the freeze point and
+    /// covers all of raw's history, so the stitch is gap-free by construction (successor was started from
+    /// <see cref="HourlyRefreshStartOffset"/>, which overlaps the freeze). Once the successor accumulates
+    /// enough history to cover raw on its own, the legacy term becomes the minimum anyway and the result is
+    /// unchanged. Both empty → <c>NULL</c> → <c>Short</c> (correct: fresh install, no history yet).</para>
+    ///
+    /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
+    /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
+    /// first-pass rows the successors themselves never materialize — without this, a single 0-interval row
+    /// older than any successor bucket holds the gate open permanently even after the stitch fix.</para>
     /// </summary>
     public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
     {
@@ -5995,8 +6040,30 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(coverageRelations));
         }
 
-        var columns = coverageRelations.Select((c, i) => $"    (SELECT min(bucket) FROM collect.{c}) AS coverage_oldest_{i}");
-        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest,{Environment.NewLine}"
+        /* Source filter: the interval-honest successors for query_stats and procedure_stats bake
+           IntervalHonestSourceFilter into their CREATE. A 0-interval row in raw that pre-dates every
+           materialized bucket would hold the gate forever even with stitching, so we apply the same
+           filter to source_oldest. query_store_stats has no such filter in its hourly CREATE. */
+        var sourceWhere = relation is "query_stats" or "procedure_stats"
+            ? $"\nWHERE {IntervalHonestSourceFilter}"
+            : string.Empty;
+
+        /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
+           its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
+           floor. LegacyOf() returns null for any relation that is not in SupersededHourlyRollups
+           (dailies, query_store_stats, baseline aggregates), keeping those as simple min(bucket). */
+        var columns = coverageRelations.Select((c, i) =>
+        {
+            var legacy = LegacyOf(c);
+            var subquery = legacy is not null
+                ? $"(SELECT COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn){Environment.NewLine}"
+                + $"     FROM (SELECT min(bucket) AS mn FROM collect.{legacy}) l{Environment.NewLine}"
+                + $"     CROSS JOIN (SELECT min(bucket) AS mn FROM collect.{c}) s)"
+                : $"(SELECT min(bucket) FROM collect.{c})";
+            return $"    {subquery} AS coverage_oldest_{i}";
+        });
+
+        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}{sourceWhere}) AS source_oldest,{Environment.NewLine}"
             + string.Join("," + Environment.NewLine, columns);
     }
 

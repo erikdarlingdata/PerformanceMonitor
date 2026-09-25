@@ -536,6 +536,24 @@ public sealed class IntervalHonestHourlyRollupTests
             Viz = "line",
         };
 
+    /// <summary>
+    /// #3653 high-fix: <see cref="TimescaleSupport.IntervalHonestSourceFilter"/> is the WHERE predicate that
+    /// every interval-honest successor bakes into its CREATE SQL. The source_oldest subquery in
+    /// <see cref="TimescaleSupport.RetentionArmSafetySql"/> applies the same predicate for
+    /// <c>query_stats</c> and <c>procedure_stats</c>, so a 0-interval row cannot hold the gate open
+    /// permanently. This pin guards that the constant and each successor's CREATE text stay in agreement —
+    /// a change to one without the other is caught here before it reaches production.
+    /// </summary>
+    [Fact]
+    public void IntervalHonestSourceFilter_MatchesEverySuccessorsCreateText()
+    {
+        foreach (var (_, successor, _) in TimescaleSupport.SupersededHourlyRollups)
+        {
+            var successorText = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == successor).CreateSql;
+            Assert.Contains(TimescaleSupport.IntervalHonestSourceFilter, successorText, StringComparison.Ordinal);
+        }
+    }
+
     private static string ReadWorkerSource([CallerFilePath] string thisFile = "")
     {
         var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");

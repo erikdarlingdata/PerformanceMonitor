@@ -447,6 +447,93 @@ public sealed class FrozenRollupLiveTests
         }
     }
 
+    /// <summary>
+    /// #3653 high-fix (Option 4): on a store upgrading from the current release, the interval-honest successor
+    /// hourlies are empty on first start while the frozen legacy hourlies still hold years of history.
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must return <c>true</c> for such a store — the
+    /// stitch covers all of raw's range via the legacy floor, and once the successor has enough history the
+    /// legacy term becomes the minimum anyway.
+    ///
+    /// <para>Also covers the zero-interval source filter: a first-pass row in raw has
+    /// <c>sample_interval_seconds = 0</c>; the successors exclude those rows from their CREATE. A 0-interval
+    /// row older than any materialized bucket must not hold the gate open permanently.</para>
+    /// </summary>
+    [Fact]
+    public async Task FieldUpgrade_EmptySuccessors_LegacyFilled_ReportsRawPurgeCovered()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* 5 days of raw history, with a 0-interval (first-pass) row at day 0 to exercise the
+               source-oldest filter. The successors exclude these rows; without the filter the gate
+               would hold forever even after the stitch fix. */
+            await InsertQueryStatsAsync(connection, D0, "FU_ZERO", 0, 0, 0, ct);
+            await InsertProcedureStatsAsync(connection, D0, "fu_zero_proc", 0, 0, 0, ct);
+
+            for (var day = 1; day <= 5; day++)
+            {
+                var at = D0.AddDays(day);
+                await InsertQueryStatsAsync(connection, at, $"FU_QS{day}", 1000, 10, 3600, ct);
+                await InsertProcedureStatsAsync(connection, at, $"fu_ps{day}", 900, 9, 3600, ct);
+            }
+
+            /* Pre-freeze state: legacy hourlies refreshed to cover all of the interval-1 rows (days 1-5).
+               The 0-interval row at day 0 is NOT materialized by either legacy or successor (both filter
+               it out via their respective CREATE predicates or the source_oldest filter). */
+            var d6 = D0.AddDays(6);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, D0.AddDays(1), d6, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, D0.AddDays(1), d6, ct);
+
+            /* Successors are intentionally NOT refreshed — simulating an upgrading store where LC just
+               shipped and the successors are still empty. */
+            Assert.Equal(0L, await CountRowsAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, ct));
+            Assert.Equal(0L, await CountRowsAsync(connection, TimescaleSupport.QueryStatsDbIntervalHourlyView, ct));
+            Assert.Equal(0L, await CountRowsAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ct));
+
+            /* The stitched gate must report Covered: the legacy floor (days 1-5) covers raw's interval-1
+               oldest row (day 1), so there is no history a purge would destroy. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct));
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
     private static async Task InsertQueryStatsAsync(
         NpgsqlConnection connection, DateTime at, string hash, long workerUs, long executions, int intervalSeconds, CancellationToken ct)
     {
