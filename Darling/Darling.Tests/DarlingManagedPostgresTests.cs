@@ -2900,8 +2900,15 @@ public sealed class DarlingManagedPostgresTests
                 Assert.Equal("off", reading.BootValue);
                 Assert.Equal("on", reading.Setting);
                 Assert.Equal("configuration file", reading.Source);
+
+                /* #4215: EnsureConfAppended's v11 heal above still lands the setting directly in
+                   postgresql.conf (asserted above by marker + LastSettingValue), but EVERY service-owned
+                   start ALSO renders darling-managed.conf and includes it at the very end of postgresql.conf
+                   -- so THAT file, not the v11 heal line, is what pg_settings now reports as the source. The
+                   heal keeps the legacy file's own content correct for an operator reading it; it is no
+                   longer what wins live. */
                 Assert.Equal(
-                    Path.GetFullPath(confPath),
+                    Path.GetFullPath(Path.Combine(dataDirectory, ManagedConfFile.FileName)),
                     Path.GetFullPath(reading.SourceFile ?? string.Empty));
 
                 /* SIGHUP-context, which is what makes "the append before pg_ctl start is enough, and no

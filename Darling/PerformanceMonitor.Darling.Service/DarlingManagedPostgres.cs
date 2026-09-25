@@ -3259,6 +3259,19 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
+    /// Test-only seam (#4215, live-test lane A1c): when the CURRENT async flow sets this, <see
+    /// cref="WriteManagedConfFile"/> applies it to the freshly rendered text before hand-edit detection or
+    /// writing — so a live test can prove the rejected-value / last-good fallback path without depending on a
+    /// real bug to produce a bad render. <c>AsyncLocal</c>, not a plain static field: its value flows only with
+    /// the call stack that sets it (through every <c>await</c>), so a value one test's flow sets is invisible to
+    /// any other test's flow running concurrently on a different one — xunit parallelizes test classes by
+    /// default, and this class's own gated tests start real managed servers too. Internal, so only
+    /// <c>Darling.Tests</c> can reach it (<c>InternalsVisibleTo</c>) — nothing a config file sets ever touches
+    /// this; it is a delegate reference a unit test installs directly.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<string, string>?> TestOnlyRenderOverride = new();
+
+    /// <summary>
     /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or the
     /// render is already byte-identical to it, replaces <c>darling-managed.conf</c> (design step 1). Always
     /// ensures the <c>include</c> line is present in <c>postgresql.conf</c> (review L5 — there is no opt-out)
@@ -3271,6 +3284,11 @@ public sealed class DarlingManagedPostgres
         var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
         var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
         var rendered = ManagedConfFile.Render(inputs);
+        var renderOverride = TestOnlyRenderOverride.Value;
+        if (renderOverride is not null)
+        {
+            rendered = renderOverride(rendered);
+        }
 
         string? existingText = null;
         try
