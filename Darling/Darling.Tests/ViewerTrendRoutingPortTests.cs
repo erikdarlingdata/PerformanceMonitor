@@ -253,7 +253,9 @@ public sealed class ViewerTrendRoutingPortTests
 
         Assert.Contains("DurationTrendRouting.ResolveTier(", method, StringComparison.Ordinal);
         Assert.Contains("rollups.QueryGrainHourly", method, StringComparison.Ordinal);
-        Assert.Contains("ReadTrendPointsAsync(ExecutionCountTrendSql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 1, executionsOrdinal: null", method, StringComparison.Ordinal);
+        Assert.Contains("ReadBucketedDurationTrendAsync(", method, StringComparison.Ordinal);
+        Assert.Contains("ExecutionCountTrendSql, serverId, startUtc, endUtc, databaseNames,", method, StringComparison.Ordinal);
+        Assert.Contains("valueOrdinal: 1, executionsOrdinal: null, firstCollectionTimeOrdinal: 2, collectionCountOrdinal: 3", method, StringComparison.Ordinal);
         Assert.Contains("ReadTrendPointsAsync(QueryDurationTrendHourlySql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null", method, StringComparison.Ordinal);
 
         /* Ordinal 2 of the shared hourly text IS executions_per_second. */

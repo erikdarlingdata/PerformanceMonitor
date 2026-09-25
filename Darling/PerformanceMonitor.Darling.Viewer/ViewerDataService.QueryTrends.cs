@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -36,7 +37,7 @@ public sealed class QueryTrendPoint
 /// <c>window_truncated</c>) rather than plotting four days under an axis that says seven.
 /// </summary>
 /// <param name="Points">The plotted points, oldest first; a NULL-rate row is not among them (see the reader).</param>
-/// <param name="Tier">The tier <see cref="DurationTrendRouting.ResolveTier"/> picked: raw per-collection rows, or the hourly rollup.</param>
+/// <param name="Tier">The tier <see cref="DurationTrendRouting.ResolveTier"/> picked: raw (bucketed, #4234) or the hourly rollup.</param>
 /// <param name="EffectiveStartUtc">The first served point, or the requested start when nothing came back — <see cref="DurationTrendRouting.DescribeCoverage"/>.</param>
 /// <param name="Truncated">True when the series' head sits more than <see cref="DurationTrendRouting.TruncationSlack"/> after the requested start: the tier did not hold the window's head.</param>
 public sealed record QueryTrendSeries(List<QueryTrendPoint> Points, RetentionTier Tier, DateTime EffectiveStartUtc, bool Truncated)
@@ -110,17 +111,23 @@ public sealed partial class ViewerDataService
        routing.unserved_before since #2736) rides its own series type, QueryStoreTrendSeries. */
 
     /// <summary>
-    /// Query-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot —
-    /// <see cref="DurationTrendRouting.QueryDurationTrendRawSql"/> with the viewer's $4 database filter (#3653
-    /// A11). The denominator is the collection's STORED <c>sample_interval_seconds</c> (MAX over its rows;
-    /// 0 → NULL, so a restart pass is unrated and the reader skips it rather than plotting 0.00 ms/sec), and
-    /// the LAG over <c>collection_time</c> this read used to recompute stands in only for a pre-V128 collection
-    /// that never recorded one — the same three-state read <see cref="ProcedureDurationTrendSql"/> has carried
-    /// since V128; the builder's remarks state the rule once. A static readonly rather than a const because
-    /// the Storage side is a builder (one text with and one without the filter), as for the hourly twin below.
+    /// Query-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
+    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>query_stats</c> with the viewer's $4
+    /// database filter (#4234; #3653 A11 before it). Until #4234 this read was the per-collection builder's
+    /// output (<see cref="DurationTrendRouting.QueryDurationTrendRawSql"/>), and a 7-day chart could hold as
+    /// many rows as the window had collections — the issue's measured number for the sibling wait/perfmon
+    /// charts this same fix applied to. The per-collection CTE and its three-state interval (the collection's
+    /// STORED <c>sample_interval_seconds</c>, MAX over its rows, 0 → NULL so a restart pass is unrated, NULL →
+    /// the LAG over <c>collection_time</c> for a pre-V128 collection that never recorded one) are unchanged —
+    /// only the aggregation into buckets is new; the builder's remarks state the rate rule once. The reader
+    /// (<c>ReadBucketedDurationTrendAsync</c>) stamps a bucket at its own <c>first_collection_time</c>, not
+    /// <c>bucket_start</c>, when every bucket the call returned held exactly one collection — the PR #4304
+    /// pattern <see cref="ViewerDataService.WaitTrendsSql"/> established. A static readonly rather than a const
+    /// because the Storage side is a builder (one text with and one without the filter), as for the hourly
+    /// twin below.
     /// </summary>
     public static readonly string QueryDurationTrendSql =
-        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true);
+        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true);
 
     /// <summary>
     /// The hourly-tier twin of <see cref="QueryDurationTrendSql"/> (#3653): the SAME text the MCP reader's
@@ -134,10 +141,11 @@ public sealed partial class ViewerDataService
         DurationTrendRouting.QueryDurationTrendHourlySql(withDatabaseFilter: true);
 
     /// <summary>
-    /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per collection snapshot —
-    /// <see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/> with the viewer's $4 database filter,
-    /// by alias (#3653). Until then this was a hand-kept copy of the text the builder now produces; #3695
-    /// pinned the two line-equal before the alias replaced the copy, so the chart draws what it always did.
+    /// Procedure-stats duration trend: elapsed ms/sec + executions/sec per BUCKET —
+    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> over <c>procedure_stats</c> with the
+    /// viewer's $4 database filter (#4234). Until #4234 this read was the per-collection builder's output
+    /// (<see cref="DurationTrendRouting.ProcedureDurationTrendRawSql"/>, itself an alias since #3653); see
+    /// <see cref="QueryDurationTrendSql"/> for why the read is bucketed now and what stays the same.
     ///
     /// <para>#3540 (V128): the interval is the collection's STORED one where the rows have it — <c>MAX</c>
     /// over the collection's rows, because a plan first seen in an otherwise steady pass (a TOP (150)
@@ -150,7 +158,7 @@ public sealed partial class ViewerDataService
     /// stated once, on the builder; <see cref="QueryDurationTrendSql"/> reads it the same way.</para>
     /// </summary>
     public static readonly string ProcedureDurationTrendSql =
-        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true);
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true);
 
     /// <summary>The hourly-tier twin of <see cref="ProcedureDurationTrendSql"/> (#3653) over
     /// <c>procedure_stats_hourly</c> — <see cref="DurationTrendRouting.ProcedureDurationTrendHourlySql"/> with
@@ -282,14 +290,18 @@ public sealed partial class ViewerDataService
     public static readonly string QueryStoreDurationTrendRollupSql =
         QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true);
 
-    /// <summary>Execution-count trend: executions/sec per collection snapshot from query_stats — the
-    /// executions column of <see cref="QueryDurationTrendSql"/> on its own, so it reads the interval the same
-    /// way (#3653 A11): the collection's stored <c>sample_interval_seconds</c>, 0 → NULL (unrated, skipped),
-    /// and the LAG over <c>collection_time</c> only for a pre-V128 collection. The first collection of such a
-    /// stretch has a NULL rate, not 0 (#3541 A12), and the reader skips it. Kept as its own text rather than
-    /// reading the duration statement's second column (as the hourly route does) because the raw tier's
-    /// elapsed sum is a cost this chart does not need paid.</summary>
-    public const string ExecutionCountTrendSql = """
+    /// <summary>Execution-count trend: executions/sec per BUCKET from query_stats (#4234) — the executions
+    /// column of <see cref="QueryDurationTrendSql"/>'s bucketing pattern on its own, so it reads the interval
+    /// the same way (#3653 A11): the collection's stored <c>sample_interval_seconds</c>, 0 → NULL (unrated,
+    /// left out of the bucket's numerator and denominator), and the LAG over <c>collection_time</c> only for a
+    /// pre-V128 collection. Kept as its own text rather than reading the duration statement's second column (as
+    /// the hourly route does) because the raw tier's elapsed sum is a cost this chart does not need paid. Has
+    /// no shared builder (unlike its duration siblings) since it is the only raw trend that projects one rate;
+    /// <c>first_collection_time</c> and <c>collection_count</c> are stated here rather than factored out for a
+    /// builder of one caller. A static readonly rather than a const: the interpolated <see cref="TrendBucketSql.OriginSql"/>
+    /// reference is not a compile-time constant. $1 server_id, $2/$3 window (naive UTC), $4 database filter, $5
+    /// the bucket width in minutes.</summary>
+    public static readonly string ExecutionCountTrendSql = $"""
         WITH raw AS
         (
             SELECT
@@ -305,12 +317,24 @@ public sealed partial class ViewerDataService
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             GROUP BY collection_time
+        ),
+        rated AS
+        (
+            SELECT
+                collection_time,
+                CASE WHEN interval_seconds > 0 THEN total_executions END AS rated_executions,
+                CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+                CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+            FROM raw
         )
         SELECT
-            collection_time,
-            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
-        FROM raw
-        ORDER BY collection_time
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM rated
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -345,6 +369,9 @@ public sealed partial class ViewerDataService
     /// <paramref name="hourlyAvailable"/> picks the GRAIN's own availability flag off the probe: a store with
     /// the query rollup but not the procedure one (a failed ensure sweep, #1664's failure isolation) must
     /// route the procedure trend to raw, whatever the query grain is doing.
+    /// <para>#4234: the RAW arm is now BUCKETED (<see cref="ReadBucketedDurationTrendAsync"/>) — the hourly
+    /// arm needs no further bucketing, because a window routed to it is already bounded to one row per hour.
+    /// </para>
     /// </summary>
     private async Task<QueryTrendSeries> ReadRoutedDurationTrendAsync(
         string rawSql, string hourlySql, string hourlyView, string dailyView, Func<RollupAvailability, bool> hourlyAvailable,
@@ -355,21 +382,29 @@ public sealed partial class ViewerDataService
         var tier = DurationTrendRouting.ResolveTier(
             startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable(rollups), coverage.For(hourlyView, dailyView));
 
-        /* #3653 A6: the tier is decided over the LEGACY pair's coverage above (the deeper of the two on any
-           upgraded store); the hourly FROM-clause item is then RollupCoverage.StitchedRelationSql — either
-           "collect.<legacy> AS f" unchanged (byte-equal to hourlySql, which stays the MCP reader's pinned
-           constant a store without successors still runs), or the stitched form splicing in the successor
-           past its floor. BuildHourlyTrendSql already parameterises its FROM target, so the stitch's aliased
-           relation (bare "f", no schema prefix needed — the stitch already schema-qualifies both sides)
-           slots in exactly where the legacy/successor name used to. */
-        var hourlyFromClause = coverage.StitchedRelationSql(hourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
-        var points = await ReadDurationTrendAsync(
-            tier == RetentionTier.Raw
-                ? rawSql
-                : string.Equals(hourlyFromClause, $"collect.{hourlyView} AS f", StringComparison.Ordinal)
+        List<QueryTrendPoint> points;
+        if (tier == RetentionTier.Raw)
+        {
+            points = await ReadBucketedDurationTrendAsync(
+                rawSql, serverId, startUtc, endUtc, databaseNames,
+                valueOrdinal: 1, executionsOrdinal: 2, firstCollectionTimeOrdinal: 4, collectionCountOrdinal: 6, cancellationToken);
+        }
+        else
+        {
+            /* #3653 A6: the tier is decided over the LEGACY pair's coverage above (the deeper of the two on any
+               upgraded store); the hourly FROM-clause item is then RollupCoverage.StitchedRelationSql — either
+               "collect.<legacy> AS f" unchanged (byte-equal to hourlySql, which stays the MCP reader's pinned
+               constant a store without successors still runs), or the stitched form splicing in the successor
+               past its floor. BuildHourlyTrendSql already parameterises its FROM target, so the stitch's aliased
+               relation (bare "f", no schema prefix needed — the stitch already schema-qualifies both sides)
+               slots in exactly where the legacy/successor name used to. */
+            var hourlyFromClause = coverage.StitchedRelationSql(hourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+            points = await ReadDurationTrendAsync(
+                string.Equals(hourlyFromClause, $"collect.{hourlyView} AS f", StringComparison.Ordinal)
                     ? hourlySql
                     : DurationTrendRouting.BuildHourlyTrendSql(hourlyFromClause, withDatabaseFilter: true),
-            serverId, startUtc, endUtc, databaseNames, cancellationToken);
+                serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        }
         var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
         return new QueryTrendSeries(points, tier, effectiveStart, truncated);
     }
@@ -492,11 +527,79 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #4234: the RAW tier's bucketed reader for the three delta-based trends — the PR #4304 pattern
+    /// <see cref="GetWaitStatsTrendsByTypesAsync"/> established, ported from "one series per wait type" to
+    /// "one series per call". Computes the auto bucket width for the window against
+    /// <see cref="TrendBudget.Chart"/>'s per-series point budget, runs <paramref name="sql"/> (a
+    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/> statement, or <see cref="ExecutionCountTrendSql"/>,
+    /// which follows the same shape by hand), and buffers every row so it can decide ONE timestamp rule for the
+    /// whole series: a bucket is stamped at its own <c>first_collection_time</c> — its one physical collection's
+    /// raw time — only when EVERY bucket this call returned held exactly one collection (<paramref name="collectionCountOrdinal"/>
+    /// == 1 throughout); a single merged bucket anywhere keeps <c>bucket_start</c> for every point, so the chart
+    /// never mixes on-grid and off-grid timestamps in one series. A NULL value is a bucket with nothing rated
+    /// (#3541 A12 at the bucket level) and is skipped, matching <see cref="ReadTrendPointsAsync"/>.
+    /// </summary>
+    private async Task<List<QueryTrendPoint>> ReadBucketedDurationTrendAsync(
+        string sql, int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames,
+        int valueOrdinal, int? executionsOrdinal, int firstCollectionTimeOrdinal, int collectionCountOrdinal,
+        CancellationToken cancellationToken)
+    {
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Value, long ExecutionCount)>();
+        var everyBucketSingleton = true;
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        AddServerWindowParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+        command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = bucketMinutes });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            /* A NULL rate is a bucket with nothing rated in it (#3541 A12, at the bucket level since #4234's
+               bucketing): every collection the bucket held was unrated (a restart, or the window's first
+               pre-V128 collection with no LAG). Skipped, not read as 0 — a chart has nowhere to draw "unknown". */
+            if (reader.IsDBNull(valueOrdinal))
+            {
+                continue;
+            }
+
+            if (reader.GetInt64(collectionCountOrdinal) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.GetDateTime(firstCollectionTimeOrdinal),
+                Convert.ToDouble(reader.GetValue(valueOrdinal)),
+                executionsOrdinal is int executions && !reader.IsDBNull(executions)
+                    ? (long)Convert.ToDouble(reader.GetValue(executions))
+                    : 0));
+        }
+
+        var items = new List<QueryTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            items.Add(new QueryTrendPoint
+            {
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                Value = row.Value,
+                ExecutionCount = row.ExecutionCount,
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
     /// Execution-count trend over the window (single value column; no ExecutionCount), routed like its
-    /// duration sibling (#3653): raw <see cref="ExecutionCountTrendSql"/> for a window raw can serve; for an
-    /// older window the SAME <see cref="QueryDurationTrendHourlySql"/> statement the duration trend runs,
-    /// plotting its <c>executions_per_second</c> column — the two charts are one read's two columns drawn
-    /// apart, and on the hourly tier they literally are.
+    /// duration sibling (#3653): raw <see cref="ExecutionCountTrendSql"/> (BUCKETED, #4234) for a window raw
+    /// can serve; for an older window the SAME <see cref="QueryDurationTrendHourlySql"/> statement the duration
+    /// trend runs, plotting its <c>executions_per_second</c> column — the two charts are one read's two columns
+    /// drawn apart, and on the hourly tier they literally are.
     /// </summary>
     public async Task<QueryTrendSeries> GetExecutionCountTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
@@ -508,7 +611,9 @@ public sealed partial class ViewerDataService
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         var points = tier == RetentionTier.Raw
-            ? await ReadTrendPointsAsync(ExecutionCountTrendSql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 1, executionsOrdinal: null, cancellationToken)
+            ? await ReadBucketedDurationTrendAsync(
+                ExecutionCountTrendSql, serverId, startUtc, endUtc, databaseNames,
+                valueOrdinal: 1, executionsOrdinal: null, firstCollectionTimeOrdinal: 2, collectionCountOrdinal: 3, cancellationToken)
             : await ReadTrendPointsAsync(QueryDurationTrendHourlySql, serverId, startUtc, endUtc, databaseNames, valueOrdinal: 2, executionsOrdinal: null, cancellationToken);
         var (effectiveStart, truncated) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
         return new QueryTrendSeries(points, tier, effectiveStart, truncated);
