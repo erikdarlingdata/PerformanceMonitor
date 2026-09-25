@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using Xunit;
@@ -53,6 +54,9 @@ public sealed class McpServiceParameterDiSeatCensusTests
             /* McpSchemaCompat registers McpToolGuideCatalog itself (get_tool_guide's own seat), never through
                DarlingMcpHostService.cs's builder.Services calls — out of scope for this census. */
             .Where(t => t != typeof(McpToolGuideCatalog))
+            /* The SDK binds a CancellationToken parameter to the call's own cancellation (#4203), never from DI
+               and never as a client argument, so it has no seat to census. */
+            .Where(t => t != typeof(CancellationToken))
             .Select(t => (Nullable.GetUnderlyingType(t) ?? t).Name)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(n => n, StringComparer.Ordinal)

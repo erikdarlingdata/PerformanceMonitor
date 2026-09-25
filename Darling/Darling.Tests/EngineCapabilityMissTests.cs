@@ -313,10 +313,11 @@ public sealed class EngineCapabilityReadWiringTests
 
     private static readonly Regex ToolMark = new(@"McpServerTool\(Name = ""([a-z_0-9]+)""", RegexOptions.Compiled);
 
-    /* The last argument of a NotCollectedStatusAsync call: a quoted collector name, or a const that names
-       one. No argument in these calls contains a parenthesis, so the non-greedy [^)]* is safe. */
+    /* The collector argument of a NotCollectedStatusAsync call: a quoted collector name, or a const that names
+       one, optionally followed by the call's cancellation token (#4203) and nothing else. No argument in these
+       calls contains a parenthesis, so the non-greedy [^)]* is safe. */
     private static readonly Regex WiringCall = new(
-        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|([A-Za-z_][A-Za-z0-9_]*))\)",
+        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*(?:cancellationToken|ct|CancellationToken\.None))?\s*\)",
         RegexOptions.Compiled);
 
     private static readonly Regex CollectorConst = new(
