@@ -99,7 +99,12 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
-    private const int TotalCeilingBytes = 172_220;
+    /* #4198 (lane TJ, get_query_store_top): +136 bytes for the new full_text opt-in parameter (84 bytes of
+       description plus its JSON schema wrapper). The head is unchanged (its new sentence lives after
+       <<GUIDE>>, in the tail get_tool_guide serves, not the served head); the default query_text preview
+       dropped 2,000 chars -> 400, which took the default call from 48 KB (#4198's measurement) to under the
+       shared 32 KB budget and is not a served description either. */
+    private const int TotalCeilingBytes = 172_356;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

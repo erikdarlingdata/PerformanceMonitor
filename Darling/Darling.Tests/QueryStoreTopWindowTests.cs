@@ -103,7 +103,10 @@ public class QueryStoreTopWindowTests
     {
         var source = ToolSource;
 
-        var start = source.IndexOf("public static async Task<string> GetQueryStoreTop(", StringComparison.Ordinal);
+        /* #4198 split the MCP-facing method into a one-line wrapper (full_text default, no <c>async</c>) and
+           this internal previewLength overload, the same shape #3897's trend tools use for TrendBudget.Chart
+           — the wrapper has no body of its own, so the window-floor logic this file pins lives here. */
+        var start = source.IndexOf("internal static async Task<string> GetQueryStoreTop(", StringComparison.Ordinal);
         Assert.True(start > 0, "get_query_store_top's declaration moved — this pin needs re-anchoring");
 
         /* Bounded at the NEXT tool attribute, so the slice is one tool's body and cannot absorb a sibling's.

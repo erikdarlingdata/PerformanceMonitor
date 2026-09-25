@@ -91,7 +91,12 @@ public sealed class McpToolsListBudgetTests
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). Darling's twin grew by a different amount (+364): Darling's description also
        covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
-    private const int TotalCeilingBytes = 90_271;
+    /* #4198 (lane TJ, get_query_store_top): +125 bytes for the new full_text opt-in parameter (84 bytes of
+       description plus its JSON schema wrapper; Darling's twin grew by a different amount, +136, per its own
+       schema shape). The head is unchanged (the new sentence lives in the tail get_tool_guide serves).
+       Default query_text preview dropped 2,000 chars -> 400; not a served description, so it does not count
+       here. */
+    private const int TotalCeilingBytes = 90_396;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

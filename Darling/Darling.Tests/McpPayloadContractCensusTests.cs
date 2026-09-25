@@ -1529,8 +1529,8 @@ public sealed class McpPayloadContractCensusTests
     [
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
-            "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
+        ("query_text_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs"],
+            "the row's own query_text previewed at READ TIME to a QueryTextPreviewLength constant (150 chars on plan_correction, 400 on get_query_store_top -- each tool measured its own row width) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text and query_store_stats.query_text are not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview. get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
