@@ -212,9 +212,9 @@ public sealed class PerfmonCounterTypeRungTests
 
     /// <summary>
     /// Every Darling perfmon read selects the type: the two trend reads (MCP and viewer) with the one agreed-type
-    /// expression, byte-identical to each other and to Lite's two, and the latest-snapshot read with the row's
-    /// own. The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0 manufactured
-    /// in their place would be #3642's fabricated zero on a level that has no delta.
+    /// expression, byte-identical to each other and to every copy in Lite's trend reads, and the latest-snapshot read
+    /// with the row's own. The row types keep NULL as null — a gauge row stores no delta and no interval, and a 0
+    /// manufactured in their place would be #3642's fabricated zero on a level that has no delta.
     /// </summary>
     [Fact]
     public void EveryDarlingPerfmonRead_SelectsTheType_AndTheRowsKeepNullAsNull()
@@ -225,7 +225,9 @@ public sealed class PerfmonCounterTypeRungTests
         Assert.Contains(AgreedTypeExpression, viewerTrend, StringComparison.Ordinal);
 
         var lite = RepoFile.ReadRepoFile("Lite", "Services", "LocalDataService.Perfmon.cs");
-        Assert.Equal(2, Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)).Count);
+        /* Lite's single-counter read holds it once; its bucketed batched read (#4234) holds it twice, per collection
+           inside and per bucket outside, as both Darling twins do. */
+        Assert.Equal(3, Regex.Matches(lite, Regex.Escape(AgreedTypeExpression)).Count);
 
         var latest = DarlingDataReader.LatestPerfmonStatsSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("collection_time,\n    cntr_type\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);

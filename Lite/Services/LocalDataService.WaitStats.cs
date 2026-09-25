@@ -248,22 +248,6 @@ ORDER BY collection_time";
     }
 
     /// <summary>
-    /// Batched sibling of <see cref="GetWaitStatsTrendAsync"/>: fetches the per-second trend for
-    /// ALL selected wait types in ONE query (replacing an N+1 query-per-type loop), grouped by type.
-    /// The LAG window is partitioned by wait_type so each type's per-second rate is computed independently.
-    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (the ruling's own
-    /// wording, not the MCP convention of dividing one shared budget across every line a call draws), so the
-    /// pin is rows &lt;= budget * series count; <c>seriesCount</c> is therefore always 1 into
-    /// <see cref="TrendBuckets.AutoMinutes"/>. A bucket's rate is its summed wait over its summed rated
-    /// seconds (time-weighted, never an average of per-collection rates), and a bucket with no rated
-    /// collection is dropped (<c>HAVING</c>), same as the per-collection read always dropped that collection.
-    /// When EVERY bucket the whole call returned holds exactly one physical collection, each point is stamped
-    /// at its bucket's <c>first_collection_time</c> (that one collection's own raw time) instead of
-    /// <c>bucket_start</c>, a <c>time_bucket</c> grid line; a single merged bucket anywhere (any wait type)
-    /// keeps <c>bucket_start</c> throughout. Darling's twin is <c>ViewerDataService.WaitTrendsSql</c> /
-    /// <c>GetWaitStatsTrendsByTypesAsync</c> (#4234, PR #4304).</para>
-    /// </summary>
-    /// <summary>
     /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetWaitStatsTrendsByTypesAsync"/>
     /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>wait_type IN (...)</c>
     /// list so that list's <c>$4..</c> numbering does not shift) is checkable without a live DuckDB. Darling's
@@ -318,6 +302,22 @@ HAVING COUNT(rated_seconds) > 0
 ORDER BY wait_type, 2";
     }
 
+    /// <summary>
+    /// Batched sibling of <see cref="GetWaitStatsTrendAsync"/>: fetches the per-second trend for
+    /// ALL selected wait types in ONE query (replacing an N+1 query-per-type loop), grouped by type.
+    /// The LAG window is partitioned by wait_type so each type's per-second rate is computed independently.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (the ruling's own
+    /// wording, not the MCP convention of dividing one shared budget across every line a call draws), so the
+    /// pin is rows &lt;= budget * series count; <c>seriesCount</c> is therefore always 1 into
+    /// <see cref="TrendBuckets.AutoMinutes"/>. A bucket's rate is its summed wait over its summed rated
+    /// seconds (time-weighted, never an average of per-collection rates), and a bucket with no rated
+    /// collection is dropped (<c>HAVING</c>), same as the per-collection read always dropped that collection.
+    /// When EVERY bucket the whole call returned holds exactly one physical collection, each point is stamped
+    /// at its bucket's <c>first_collection_time</c> (that one collection's own raw time) instead of
+    /// <c>bucket_start</c>, a <c>time_bucket</c> grid line; a single merged bucket anywhere (any wait type)
+    /// keeps <c>bucket_start</c> throughout. Darling's twin is <c>ViewerDataService.WaitTrendsSql</c> /
+    /// <c>GetWaitStatsTrendsByTypesAsync</c> (#4234, PR #4304).</para>
+    /// </summary>
     public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(int serverId, List<string> waitTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
         using var _q = TimeQuery("GetWaitStatsTrendsByTypesAsync", "v_wait_stats trends batched by type, bucketed");
