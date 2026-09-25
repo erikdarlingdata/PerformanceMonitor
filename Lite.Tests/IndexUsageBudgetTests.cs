@@ -83,6 +83,8 @@ public sealed class IndexUsageBudgetTests : IClassFixture<SharedDuckDbFixture>, 
 
         var defaultJson = await McpObjectStatsTools.GetIndexUsage(_dataService, _serverManager, ServerName);
         var defaultBytes = Encoding.UTF8.GetByteCount(defaultJson);
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            $"get_index_usage, default args, {SeededRowCount} rows seeded: {defaultBytes:N0} bytes, budget={McpResponseBudget.DefaultBytes:N0} bytes.");
         Assert.True(defaultBytes <= McpResponseBudget.DefaultBytes,
             $"get_index_usage default call was {defaultBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
 
