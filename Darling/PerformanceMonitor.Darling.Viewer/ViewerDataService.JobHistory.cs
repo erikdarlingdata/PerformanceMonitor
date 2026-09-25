@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -106,10 +107,46 @@ public sealed partial class ViewerDataService
     public async Task<List<ViewerJobHistoryRow>> GetJobHistoryAsync(
         DateTime sinceUtc, int? serverId = null, int limit = 2000, CancellationToken cancellationToken = default)
     {
-        var serverFilter = serverId.HasValue ? "AND   jh.server_id = $2" : string.Empty;
-        var limitParam = serverId.HasValue ? "$3" : "$2";
+        var sql = BuildJobHistorySql(serverId.HasValue);
 
-        var sql = $@"
+        var rows = new List<ViewerJobHistoryRow>();
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
+        if (serverId.HasValue)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
+        }
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(sinceUtc) });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadJobHistoryRow(reader));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Builds <see cref="GetJobHistoryAsync"/>'s SQL text, split out so Darling.Tests can pin both parameter
+    /// shapes (fleet-wide and single-server) without a live Postgres. $1 window start (naive UTC); when
+    /// <paramref name="scopedToServer"/>, $2 server_id and the floor moves to $3, the limit to $4 — otherwise
+    /// the floor is $2 and the limit $3. The floor is the <see cref="EventWindowFloor"/> for $1:
+    /// <c>job_history</c> is a hypertable partitioned on <c>collection_time</c>, which the de-skewed
+    /// <c>run_datetime</c> window alone gives the planner nothing to exclude a chunk on (#4229). The
+    /// de-skewed run time is always ≤ <c>collection_time</c> (store UTC at collection, and a job's history row
+    /// is collected after the run it reports), so the floor cannot drop a qualifying row.
+    /// </summary>
+    internal static string BuildJobHistorySql(bool scopedToServer)
+    {
+        var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
+        var floorParam = scopedToServer ? "$3" : "$2";
+        var limitParam = scopedToServer ? "$4" : "$3";
+
+        return $@"
 WITH svr AS (
     SELECT DISTINCT ON (server_id)
         server_id,
@@ -144,6 +181,7 @@ base AS (
     LEFT JOIN svr ON svr.server_id = jh.server_id
     LEFT JOIN servers AS reg ON reg.server_id = jh.server_id
     WHERE jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) >= $1
+    AND   jh.collection_time >= {floorParam}
     {serverFilter}
 )
 SELECT
@@ -175,45 +213,30 @@ SELECT
 FROM base
 ORDER BY run_datetime_utc DESC, instance_id DESC
 LIMIT {limitParam}";
-
-        var rows = new List<ViewerJobHistoryRow>();
-
-        await using var command = _dataSource.CreateCommand(sql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified) });
-        if (serverId.HasValue)
-        {
-            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
-        }
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            rows.Add(new ViewerJobHistoryRow
-            {
-                ServerId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-                ServerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                InstanceId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                JobId = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                JobName = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                JobEnabled = !reader.IsDBNull(5) && reader.GetBoolean(5),
-                CategoryName = reader.IsDBNull(6) ? null : reader.GetString(6),
-                StepId = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-                StepName = reader.IsDBNull(8) ? null : reader.GetString(8),
-                RunStatus = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
-                RunStatusDesc = reader.IsDBNull(10) ? null : reader.GetString(10),
-                RunDateTimeUtc = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
-                RunDurationSeconds = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                RetriesAttempted = reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
-                Message = reader.IsDBNull(14) ? null : reader.GetString(14),
-                LastSuccessfulRunUtc = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
-                IsLongRunning = !reader.IsDBNull(16) && reader.GetBoolean(16),
-            });
-        }
-
-        return rows;
     }
+
+    /// <summary>Maps one row of <see cref="BuildJobHistorySql"/>'s result set.</summary>
+    private static ViewerJobHistoryRow ReadJobHistoryRow(NpgsqlDataReader reader) =>
+        new()
+        {
+            ServerId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+            ServerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            InstanceId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+            JobId = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            JobName = reader.IsDBNull(4) ? "" : reader.GetString(4),
+            JobEnabled = !reader.IsDBNull(5) && reader.GetBoolean(5),
+            CategoryName = reader.IsDBNull(6) ? null : reader.GetString(6),
+            StepId = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+            StepName = reader.IsDBNull(8) ? null : reader.GetString(8),
+            RunStatus = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+            RunStatusDesc = reader.IsDBNull(10) ? null : reader.GetString(10),
+            RunDateTimeUtc = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+            RunDurationSeconds = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
+            RetriesAttempted = reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
+            Message = reader.IsDBNull(14) ? null : reader.GetString(14),
+            LastSuccessfulRunUtc = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+            IsLongRunning = !reader.IsDBNull(16) && reader.GetBoolean(16),
+        };
 
     /// <summary>
     /// The latest SQL Agent status snapshot per server (issue #1433 Phase 2) — Running/Stopped, startup

@@ -2733,7 +2733,10 @@ internal static class DarlingDataReader
     /// <para>XE blocked-process reports are the primary source and the DMV snapshot is the fallback, and
     /// the fallback contributes ONLY when the XE source has no rows in the window at all. Mixing them
     /// would double-count the same incident from two captures, so it is a fallback and never a union.
-    /// $1 server_id, $2 start, $3 end (naive UTC).</para>
+    /// $1 server_id, $2 start, $3 end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for $2 — both
+    /// tables are hypertables partitioned on <c>collection_time</c>, which this event-time window alone
+    /// gives the planner nothing to exclude a chunk on (#4229); the floor lets it skip every chunk older
+    /// than the window, without being able to drop a row (an event is collected after it happens).</para>
     /// </summary>
     public const string BlockingDurationStatsSql = """
         WITH bpr AS (
@@ -2745,6 +2748,7 @@ internal static class DarlingDataReader
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
             FROM v_blocked_process_reports
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         ),
         dmv AS (
@@ -2756,6 +2760,7 @@ internal static class DarlingDataReader
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms
             FROM v_dmv_blocking_snapshots
             WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', event_time)
         )
         SELECT bucket, event_count, total_duration_ms, max_duration_ms, avg_duration_ms FROM bpr
@@ -2806,6 +2811,7 @@ internal static class DarlingDataReader
         AddInt(command, serverId);
         AddTimestamp(command, startUtc);
         AddTimestamp(command, endUtc);
+        AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
