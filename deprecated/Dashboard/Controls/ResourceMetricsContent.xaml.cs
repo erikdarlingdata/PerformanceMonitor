@@ -344,14 +344,21 @@ namespace PerformanceMonitorDashboard.Controls
 
         #region Server Trends Tab
 
-        private (DateTime From, DateTime To)? ComparisonRange { get; set; }
+        /// <summary>
+        /// The global Compare dropdown's selected index (0 = none). #4305: stored as the index, not a
+        /// pre-resolved (From, To) range -- RefreshServerTrendsAsync runs again on every auto-refresh /
+        /// tab-switch, not just when the dropdown changes, so a range resolved once at selection time would
+        /// go stale against "now" under a preset range. CorrelatedTimelineLanesControl.GetOverviewComparisonRange
+        /// re-derives it fresh, server-local, on each call, the same way Lite's RefreshOverviewAsync does.
+        /// </summary>
+        private int _comparisonSelectedIndex;
 
         /// <summary>
-        /// Sets the comparison range from the global Compare dropdown and refreshes Server Trends.
+        /// Sets the comparison selection from the global Compare dropdown and refreshes Server Trends.
         /// </summary>
-        public async Task SetComparisonRangeAsync((DateTime From, DateTime To)? range)
+        public async Task SetComparisonRangeAsync(int selectedIndex)
         {
-            ComparisonRange = range;
+            _comparisonSelectedIndex = selectedIndex;
             await RefreshServerTrendsAsync();
         }
 
@@ -360,7 +367,10 @@ namespace PerformanceMonitorDashboard.Controls
             if (_databaseService == null) return;
             try
             {
-                await CorrelatedLanes.RefreshAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate, ComparisonRange);
+                var comparisonRange = CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
+                    _comparisonSelectedIndex, _serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate,
+                    DateTime.UtcNow, ServerTimeHelper.UtcOffsetMinutes);
+                await CorrelatedLanes.RefreshAsync(_serverTrendsHoursBack, _serverTrendsFromDate, _serverTrendsToDate, comparisonRange);
             }
             catch (Exception ex)
             {
