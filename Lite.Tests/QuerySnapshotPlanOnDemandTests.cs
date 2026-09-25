@@ -206,6 +206,38 @@ public sealed class QuerySnapshotPlanOnDemandTests : IClassFixture<SharedDuckDbF
         Assert.Equal(row.LiveQueryPlan, await _dataService.ResolveSnapshotLivePlanAsync(_serverId, row));
     }
 
+    /* ───────────────────────── duplicate capture key: a NULL-plan row must not shadow the plan-bearing one ───────────────────────── */
+
+    /// <summary>
+    /// #4297. <c>v_query_snapshots</c> is the hot table UNION ALL the parquet archive, so one capture key
+    /// (<c>server_id, collection_time, session_id, request_id</c>) can match more than one row. Without a
+    /// presence guard, <c>LIMIT 1</c> can land on a matching row whose plan is NULL while a sibling matching
+    /// row carries the real one — <see cref="LocalDataService.GetSnapshotPlanTextAsync"/> would then report
+    /// "no plan available" for a row that has one.
+    ///
+    /// <para>The NULL-plan row is seeded FIRST, deliberately: a DuckDB table scan with no ORDER BY returns
+    /// rows in insertion order, so an unguarded query reaches this row before the plan-bearing one, making the
+    /// bug reproduce every run rather than by luck of scan order.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetSnapshotPlanTextAsync_DuplicateCaptureKey_NullPlanRowDoesNotShadowThePlanBearingRow(bool live)
+    {
+        var t = WholeSecondsNow();
+        var estimatedXml = "<ShowPlanXML><Estimated>dup-key</Estimated></ShowPlanXML>";
+        var liveXml = "<ShowPlanXML><Actual>dup-key</Actual></ShowPlanXML>";
+
+        // Row 1, seeded first: same capture key, no plan in either column.
+        await SeedSnapshotAsync(t, sessionId: 81, requestId: 0, queryPlan: null, liveQueryPlan: null);
+        // Row 2, seeded second, SAME capture key: carries both plans.
+        await SeedSnapshotAsync(t, sessionId: 81, requestId: 0, queryPlan: estimatedXml, liveQueryPlan: liveXml);
+
+        var fetched = await _dataService.GetSnapshotPlanTextAsync(_serverId, t, sessionId: 81, requestId: 0, live: live);
+
+        Assert.Equal(live ? liveXml : estimatedXml, fetched);
+    }
+
     /* ───────────────────────── before/after payload + timing, for the PR body ───────────────────────── */
 
     /// <summary>

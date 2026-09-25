@@ -318,8 +318,15 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
     /// carries no entry in <c>ArchiveViewDedupKeys</c>, so there is no QUALIFY dedup either), and DuckDB does
     /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
     /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
-    /// either — there is nothing left to order by beyond the WHERE match itself, so <c>LIMIT 1</c> alone is
-    /// the guard: on the freak duplicate this idiom exists for, it returns A matching row, not a chosen one.</para>
+    /// either — there is nothing left to order by beyond the WHERE match itself.</para>
+    ///
+    /// <para><c>AND {column} IS NOT NULL</c> (#4297) is that missing tie-break for the ONE thing that
+    /// matters: on a freak duplicate sharing this key, <c>LIMIT 1</c> alone can land on the row whose plan is
+    /// NULL while a sibling matching row carries the real one — silently reporting "no plan available" for a
+    /// row that has one. The guard drops the NULL-plan candidate first, so <c>LIMIT 1</c> only ever breaks a
+    /// tie among plan-bearing rows (the same captured plan either way). Mirrors Darling's
+    /// <c>QuerySnapshotEstimatedPlanSql</c> / <c>QuerySnapshotLivePlanSql</c>
+    /// (<c>ViewerDataService.QuerySnapshots.cs</c>), which guards this same read the same way.</para>
     /// </summary>
     public async Task<string?> GetSnapshotPlanTextAsync(int serverId, DateTime collectionTime, int sessionId, int requestId, bool live)
     {
@@ -334,6 +341,7 @@ WHERE server_id = $1
 AND   collection_time = $2
 AND   session_id = $3
 AND   COALESCE(request_id, 0) = $4
+AND   {column} IS NOT NULL
 LIMIT 1";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
