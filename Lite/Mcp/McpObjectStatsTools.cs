@@ -12,8 +12,14 @@ public sealed class McpObjectStatsTools
     /// <summary>Lite's default result cap for get_table_index_sizes (the tool takes no top parameter) — the same 100 Darling uses.</summary>
     private const int TableSizesTop = 100;
 
-    /// <summary>get_index_usage's default row cap — the same 200 Darling uses, now the caller's <c>limit</c> default rather than a hardcoded server-wide cap (#2636).</summary>
-    private const int IndexUsageTop = 200;
+    /// <summary>
+    /// get_index_usage's caller-optional <c>limit</c> DEFAULT — the same Darling uses (#2636 made it optional;
+    /// #4198 sizes what it falls back to). 200 rows measured 69,290 bytes at default arguments on a busy
+    /// production store, more than double <see cref="McpResponseBudget.DefaultBytes"/> at roughly 346
+    /// bytes/row; 75 rows leaves headroom under the budget even for wider index/table names than the
+    /// measuring store's. An explicit <c>limit</c> still gets what it asks for.
+    /// </summary>
+    private const int IndexUsageTop = 75;
 
     [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
     public static async Task<string> GetTableIndexSizes(
@@ -127,7 +133,7 @@ public sealed class McpObjectStatsTools
         ServerManager serverManager,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Limit to one database. Strongly recommended: without it, unused-first ordering can fill the whole result from one database.")] string? database_name = null,
-        [Description("Maximum rows to return. Default 200.")] int limit = IndexUsageTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = IndexUsageTop)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;

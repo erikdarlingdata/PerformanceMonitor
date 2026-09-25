@@ -31,9 +31,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpObjectStatsTools
 {
-    /// <summary>Lite's default result caps (the tools take no top parameter).</summary>
+    /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter).</summary>
     private const int TableSizesTop = 100;
-    private const int IndexUsageTop = 200;
+
+    /// <summary>
+    /// #4198: <c>get_index_usage</c>'s caller-optional <c>limit</c> DEFAULT (#2636 made it optional; this lane
+    /// sizes what it falls back to). 200 rows measured 69,290 bytes at default arguments on a busy production
+    /// store -- more than double <see cref="McpResponseBudget.DefaultBytes"/>, at roughly 346 bytes/row. 75
+    /// rows leaves headroom under the budget even for wider index/table names than the measuring store's. An
+    /// explicit <c>limit</c> still gets what it asks for, up to <see cref="McpHelpers.MaxTop"/>.
+    /// </summary>
+    private const int IndexUsageTop = 75;
+
     private const int ObjectLockingTop = 200;
 
     [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
@@ -146,7 +155,7 @@ public sealed class DarlingMcpObjectStatsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Limit to one database. Strongly recommended: without it, unused-first ordering can fill the whole result from one database.")] string? database_name = null,
-        [Description("Maximum rows to return. Default 200.")] int limit = IndexUsageTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = IndexUsageTop)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
