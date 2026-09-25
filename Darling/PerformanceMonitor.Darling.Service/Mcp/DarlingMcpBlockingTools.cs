@@ -44,14 +44,49 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpBlockingTools
 {
-    [McpServerTool(Name = "get_blocking"), Description("Blocked process report XE + DMV fallback events, newest first, window ends at as_of. not_collected wins if the engine can't run blocked_process_report; else empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: truncated true means raise limit or narrow the window, not widen hours_back. dedup_key scans the whole window before limit, up to a stated ceiling (rows_examined/scan_truncated); a no-match answer is still empty. wait_time_ms is milliseconds. Timestamps are UTC; last_tran/last_batch stamps are de-skewed for direct comparison to event_time.<<GUIDE>>Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback), NEWEST FIRST. Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, events_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. With dedup_key the read scans the window for the fingerprint BEFORE limit applies (so a matching incident is never lost to the cap), up to a stated scan ceiling: rows_examined is how many rows were fingerprinted and scan_truncated says whether the window held more than the scan could reach. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct. dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.")]
-    public static async Task<string> GetBlocking(
+    /// <summary>
+    /// #4198: get_blocking's default page is wide before either text column is counted — ~37 fields per row
+    /// (isolation levels, client app/host/login for both sides, six last-tran/last-batch stamps, a
+    /// dedup_key) — so 30 rows of even modest (sub-2000-char, i.e. never hitting the old truncation) SQL
+    /// text still measured 89,096 bytes, 2.7x the shared budget. Both levers move: the default row limit
+    /// halves (30 -> 15, the same proportion #4198's get_plan_corrections used), and blocked_sql_text /
+    /// blocking_sql_text preview to <see cref="SqlTextPreviewLength"/> (150, get_plan_corrections'
+    /// QueryTextPreviewLength value) rather than the old 2000, with <c>full_text</c> the opt-in back to the
+    /// whole text — the same shape <c>get_store_query_stats</c> already uses. A <c>dedup_key</c> call is
+    /// exempt (it already named one incident) and always gets the whole text, same as get_deadlock_detail.
+    /// </summary>
+    public const int DefaultLimit = 15;
+
+    /// <summary>See <see cref="DefaultLimit"/>'s doc comment.</summary>
+    private const int SqlTextPreviewLength = 150;
+
+    /// <summary>
+    /// The web viewer's <c>/api/read</c> mirror passes this instead (#4198): the OLD 2000-char cap, so the
+    /// page it renders does not change. It is not <c>full_text</c> (unbounded) because the web never showed
+    /// more than 2000 chars of either column before this lane, and passing true would grow the web's own
+    /// payload past what it has always been.
+    /// </summary>
+    public const int WebSqlTextPreviewLength = 2000;
+
+    [McpServerTool(Name = "get_blocking"), Description("Blocked process report XE + DMV fallback events, newest first, window ends at as_of. not_collected wins if the engine can't run blocked_process_report; empty means none in the window, or none collected in it. limit caps ROWS, not hours_back: raise limit or narrow the window, not widen hours_back. dedup_key scans the whole window before limit, up to a stated ceiling (rows_examined/scan_truncated); a no-match answer is still empty. wait_time_ms is milliseconds; last_tran/last_batch stamps are de-skewed to compare directly against event_time.<<GUIDE>>Gets blocking events captured by the blocked process report extended event (plus the always-on DMV blocking-snapshot fallback), NEWEST FIRST. Shows the blocked and blocking sessions, wait types, wait times, and query text for both. Use this first for a quick overview, then use get_blocked_process_xml for deep analysis of prolonged blocking. THE PAGE IS BOUNDED BY limit, NOT BY hours_back: hours_back is the window you ASKED for, events_returned is how many rows you GOT, truncated says the window held more than limit, and oldest_returned_event_time / newest_returned_event_time bound the page you are looking at. Because the page is a contiguous newest-first slice, oldest_returned_event_time IS how far back this read reached — on a server blocking steadily, a 24-hour request at the default limit is answered by the newest few minutes, and nothing in the rows themselves says so. When truncated is true, raise limit or narrow hours_back (or anchor as_of) before drawing a conclusion about the window; widening hours_back cannot help, because the cap is on rows, not time. With dedup_key the read scans the window for the fingerprint BEFORE limit applies (so a matching incident is never lost to the cap), up to a stated scan ceiling: rows_examined is how many rows were fingerprinted and scan_truncated says whether the window held more than the scan could reach. Every timestamp here is UTC: event_time already was, and the six blocked_/blocking_ last_tran/last_batch stamps are de-skewed from the monitored server's local clock by this read, so comparing them against event_time to see whether a transaction predates the block is direct. blocked_sql_text/blocking_sql_text are a preview by default (*_truncated marks the cut rows) — pass full_text for the whole text on every row; a dedup_key call always gets the whole text regardless of full_text. dedup_key: Optional alert fingerprint (the alert's Dedup Key). When supplied, returns only the incident with that key — paste it straight from an alert or ticket instead of scanning the window. The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit, up to the scan ceiling the payload reports as rows_examined / scan_truncated.")]
+    public static Task<string> GetBlocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description("Maximum rows to return, newest first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
+        [Description("Maximum rows to return, newest first. Default 15. This is what bounds the page — read truncated to know whether the window held more.")] int limit = DefaultLimit,
         [Description("Optional alert fingerprint (the alert's Dedup Key). The key is scoped to the server's display name and the incident's involved objects. The fingerprint scan runs over the window BEFORE limit.")] string? dedup_key = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Return each row's full blocked_sql_text/blocking_sql_text instead of a 150-character preview. Default false. A dedup_key call ignores this and always returns the full text.")] bool full_text = false,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null) =>
+        GetBlocking(postgres, server_name, hours_back, limit, dedup_key, full_text, as_of, SqlTextPreviewLength);
+
+    /// <summary>
+    /// get_blocking under an explicit <paramref name="sqlTextPreviewLength"/> (#4198): the MCP tool passes
+    /// its own default (or a dedup_key/full_text call passes through to the whole text below), the web
+    /// viewer's <c>/api/read</c> mirror passes <see cref="WebSqlTextPreviewLength"/> so its page does not
+    /// change.
+    /// </summary>
+    internal static async Task<string> GetBlocking(
+        NpgsqlDataSource postgres, string? server_name, int hours_back, int limit, string? dedup_key, bool full_text, string? as_of, int sqlTextPreviewLength)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveWithFingerprintNameAsync(postgres, server_name);
         if (error != null) return error;
@@ -123,6 +158,10 @@ public sealed class DarlingMcpBlockingTools
             var truncated = rows.Count > limit;
             var page = rows.Take(limit).ToList();
 
+            /* #4198: filtering (a dedup_key) already narrowed the page to one named incident, so that call
+               is exempt from the preview cut — see SqlTextPreviewLength's doc comment. */
+            var showFullText = full_text || filtering;
+
             var result = page.Select((r, i) => new
             {
                 event_time = r.EventTime?.ToString("o"),
@@ -143,13 +182,15 @@ public sealed class DarlingMcpBlockingTools
                 blocked_client_app = r.BlockedClientApp,
                 blocked_host_name = r.BlockedHostName,
                 blocked_login_name = r.BlockedLoginName,
-                blocked_sql_text = McpHelpers.Truncate(r.BlockedSqlText, 2000),
+                blocked_sql_text = showFullText ? r.BlockedSqlText : McpHelpers.Truncate(r.BlockedSqlText, sqlTextPreviewLength),
+                blocked_sql_text_truncated = !showFullText && r.BlockedSqlText != null && r.BlockedSqlText.Length > sqlTextPreviewLength,
                 blocking_status = r.BlockingStatus,
                 blocking_isolation_level = r.BlockingIsolationLevel,
                 blocking_client_app = r.BlockingClientApp,
                 blocking_host_name = r.BlockingHostName,
                 blocking_login_name = r.BlockingLoginName,
-                blocking_sql_text = McpHelpers.Truncate(r.BlockingSqlText, 2000),
+                blocking_sql_text = showFullText ? r.BlockingSqlText : McpHelpers.Truncate(r.BlockingSqlText, sqlTextPreviewLength),
+                blocking_sql_text_truncated = !showFullText && r.BlockingSqlText != null && r.BlockingSqlText.Length > sqlTextPreviewLength,
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
                 blocked_last_tran_started = r.BlockedLastTranStartedUtc?.ToString("o"),

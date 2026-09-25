@@ -5,9 +5,10 @@ param get_blocked_process_xml.hours_back 29
 param get_blocked_process_xml.limit 113
 param get_blocked_process_xml.server_name 28
 
-tool get_blocking 619
+tool get_blocking 576
 param get_blocking.as_of 167
 param get_blocking.dedup_key 191
+param get_blocking.full_text 172
 param get_blocking.hours_back 29
 param get_blocking.limit 133
 param get_blocking.server_name 28

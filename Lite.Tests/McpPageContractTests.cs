@@ -239,6 +239,93 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     }
 
     /// <summary>
+    /// #4198: blocked_sql_text/blocking_sql_text are the wide fields here — Darling's twin
+    /// (<c>DarlingMcpBlockingBudgetLiveTests</c>) measured 89,096 bytes at the old defaults on a real
+    /// production store. Plants 30 reports with both text fields near 700-870 characters (a realistic
+    /// blocked/blocking statement width, every other field populated) and asserts the default call
+    /// previews them under <see cref="McpResponseBudget.DefaultBytes"/>, and that <c>full_text: true</c>
+    /// opts back into the whole text.
+    /// </summary>
+    [Fact]
+    public async Task GetBlockedProcessReports_Default_StaysUnderResponseBudget_WithThirtyWideReports()
+    {
+        var now = WholeSecondsNow();
+        var blockedTexts = new string[30];
+        var blockingTexts = new string[30];
+        for (var i = 0; i < 30; i++)
+        {
+            blockedTexts[i] = BuildWideSqlText(700 + i * 6, "Orders");
+            blockingTexts[i] = BuildWideSqlText(700 + i * 5, "Posts");
+            await ExecAsync(@"
+INSERT INTO blocked_process_reports
+    (blocked_report_id, collection_time, server_id, server_name, event_time, database_name,
+     blocked_spid, blocked_ecid, blocking_spid, blocking_ecid, wait_time_ms, wait_resource, lock_mode,
+     blocked_status, blocked_isolation_level, blocked_log_used, blocked_transaction_count,
+     blocked_client_app, blocked_host_name, blocked_login_name, blocked_sql_text,
+     blocking_status, blocking_isolation_level, blocking_client_app, blocking_host_name, blocking_login_name, blocking_sql_text,
+     blocked_transaction_name, blocking_transaction_name,
+     blocked_last_tran_started, blocking_last_tran_started, blocked_last_batch_started, blocking_last_batch_started,
+     blocked_last_batch_completed, blocking_last_batch_completed, blocked_priority, blocking_priority,
+     contentious_object)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38)",
+                _nextId--, Naive(now.AddMinutes(-i)), _serverId, ServerName, Naive(now.AddMinutes(-i)), "Db",
+                50 + i, 0, 90 + i, 0, 8000L + i, "KEY: 6:72057594057000000 (deadbeefcafe)", "X",
+                "SUSPENDED", "READ COMMITTED", 256L, 1,
+                "MyApp.exe", "APPSRV01", "svc_app", blockedTexts[i],
+                "RUNNING", "READ COMMITTED", "MyApp.exe", "APPSRV02", "svc_app2", blockingTexts[i],
+                "user_transaction", "user_transaction",
+                Naive(now.AddMinutes(-i - 5)), Naive(now.AddMinutes(-i - 5)), Naive(now.AddMinutes(-i - 1)), Naive(now.AddMinutes(-i - 1)),
+                Naive(now.AddMinutes(-i)), Naive(now.AddMinutes(-i)), 7, 3,
+                "dbo.Orders");
+        }
+
+        var defaultJson = await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName);
+        var root = Parse(defaultJson);
+        AssertPage(root, "reports", "reports_returned", returned: 15, truncated: true);
+        Assert.All(root.GetProperty("reports").EnumerateArray(), r =>
+        {
+            Assert.True(r.GetProperty("blocked_sql_text_truncated").GetBoolean());
+            Assert.True(r.GetProperty("blocking_sql_text_truncated").GetBoolean());
+            Assert.True(r.GetProperty("blocked_sql_text").GetString()!.Length < 700);
+            Assert.True(r.GetProperty("blocking_sql_text").GetString()!.Length < 700);
+        });
+
+        var defaultBytes = System.Text.Encoding.UTF8.GetByteCount(defaultJson);
+        Assert.True(defaultBytes < McpResponseBudget.DefaultBytes,
+            $"get_blocked_process_reports's default call is {defaultBytes:N0} bytes over 30 planted ~700-870-char reports, at or over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+
+        var fullJson = await McpBlockingTools.GetBlockedProcessReports(_dataService, _serverManager, ServerName, 24, 30, full_text: true);
+        var fullRoot = Parse(fullJson);
+        AssertPage(fullRoot, "reports", "reports_returned", returned: 30, truncated: false);
+        var fullReports = fullRoot.GetProperty("reports").EnumerateArray().ToList();
+        for (var i = 0; i < 30; i++)
+        {
+            Assert.False(fullReports[i].GetProperty("blocked_sql_text_truncated").GetBoolean());
+            Assert.False(fullReports[i].GetProperty("blocking_sql_text_truncated").GetBoolean());
+            Assert.Equal(blockedTexts[i], fullReports[i].GetProperty("blocked_sql_text").GetString());
+            Assert.Equal(blockingTexts[i], fullReports[i].GetProperty("blocking_sql_text").GetString());
+        }
+    }
+
+    /// <summary>Builds a SQL statement string near <paramref name="approxLength"/> characters, ASCII only so its
+    /// length and its UTF-8 byte count stay equal (production blocked/blocking statement text is almost
+    /// entirely ASCII: object names, predicates, literals).</summary>
+    private static string BuildWideSqlText(int approxLength, string table)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"UPDATE dbo.{table} SET Status = 'Processing' WHERE ");
+        var i = 0;
+        while (sb.Length < approxLength)
+        {
+            sb.Append($"{table}Id = {i} OR ");
+            i++;
+        }
+
+        sb.Length = approxLength;
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// The hidden filter, stated and measured. Default read: dismissed rows are gone, the payload says so
     /// and says HOW MANY; <c>include_dismissed</c> brings them back with each row labelled. Truncation is
     /// then asserted over the FILTERED population, because that is what the page is drawn from.
