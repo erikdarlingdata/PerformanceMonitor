@@ -46,7 +46,7 @@ public sealed class QueryStoreIntervalLatestRungTests
         Assert.Equal("query-store-interval-latest", V143.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -84,13 +84,13 @@ public sealed class QueryStoreIntervalLatestRungTests
     }
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm: a missing top
-    /// arm maps a fully-migrated store one rung short, permanently, because <c>RequiredStoreSchemaVersion</c> is
-    /// <c>StorageVersion.SchemaVersion</c>. The viewer runs no analysis, so this banner is the rung's only viewer
-    /// effect.
+    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
+    /// returns 143 when read alone. V144 (#3953) is now above this rung, so ProbeOrdinal is no longer the last
+    /// parameter, mirroring how this file itself demoted <c>IndexObjectStatsServerTimeIndexRungTests</c> (V142)
+    /// when this rung landed.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
         Assert.Contains(
             "table_name = 'query_store_interval_latest_pending'",
@@ -98,28 +98,30 @@ public sealed class QueryStoreIntervalLatestRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasQueryStoreIntervalLatest", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        var behind = (object[])all.Clone();
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
+        /* In the source, this rung's arm sits between V144's (above) and V142's (below). */
         var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
+        var nextArm = viewer.IndexOf("if (hasQueryStoreIntervalWide)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V143 sentinel arm — a fully-migrated store would map one rung low");
         Assert.True(thisArm < previousArm, "the V143 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(nextArm >= 0 && nextArm < thisArm, "the V144 arm should sit above V143's arm");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
