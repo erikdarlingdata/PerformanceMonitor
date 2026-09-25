@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -199,8 +200,12 @@ public sealed partial class ViewerDataService
 
     /// <summary>
     /// #1591: how many DISTINCT collectors were permission-denied in the window — the badge count for the
-    /// Collection Health tab header. Lite's twin is
-    /// <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>.
+    /// Collection Health tab header. Lite's twin, <c>LocalDataService.GetPermissionDeniedCollectorCountAsync</c>,
+    /// still runs this shape directly (DuckDB has no rollup to route through). The Darling viewer's own
+    /// <see cref="GetPermissionDeniedCollectorCountAsync"/> no longer runs it: every server-tab refresh (auto
+    /// default 1 min, plus tab activation) used to issue this as its OWN raw <c>v_collection_log</c> scan per
+    /// open tab; it now filters the shared fleet-by-server rollup read instead (#4226), so this constant is
+    /// kept only as the documented raw shape the pins below hold it to.
     ///
     /// <para>Its own narrow COUNT rather than a reuse of <see cref="CollectionHealthSql"/>: that one is
     /// per-collector and only runs when its tab is selected, which is exactly why a permission problem stayed
@@ -270,16 +275,20 @@ public sealed partial class ViewerDataService
         return items;
     }
 
-    /// <summary>Runs <see cref="PermissionDeniedCollectorCountSql"/> over the same 7-day window the health grid uses.</summary>
+    /// <summary>
+    /// #1591's badge count, one server's slice of the same 7-day window the health grid uses — served from the
+    /// shared fleet-by-server rollup read (#4226) instead of its own raw <c>v_collection_log</c> scan. That read
+    /// already carries <see cref="CollectorHealthRow.PermissionDeniedCount"/> per (server, collector), so the
+    /// badge is a filter over rows already in memory (rollup-backed when usable, memoized for
+    /// <see cref="FleetHealthByServerMemoLifetime"/> — see <see cref="GetFleetCollectionHealthByServerAsync"/>)
+    /// rather than a fourth per-tick read of its own.
+    /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        await using var command = _dataSource.CreateCommand(PermissionDeniedCollectorCountSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-7), DateTimeKind.Unspecified) });
-
-        var scalar = await command.ExecuteScalarAsync(cancellationToken);
-        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
+        return byServer.TryGetValue(serverId, out var rows)
+            ? rows.Count(row => row.PermissionDeniedCount > 0)
+            : 0;
     }
 
     /// <summary>

@@ -14,12 +14,15 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4226: the Overview loader's per-server cards and the status bar's collector-health text must read the
-/// fleet-wide rollup-backed <see cref="ViewerDataService.GetFleetCollectionHealthByServerAsync"/>, not a raw
-/// <c>collection_log</c> scan per server (<c>ViewerDataService.GetCollectionHealthAsync</c>) or a second raw
-/// fleet scan (<c>ViewerDataService.GetFleetCollectionHealthAsync</c>) every 30 s tick. Source-text pins,
-/// deliberately: the regression this guards against COMPILES (both old reads still exist, for the Collection
-/// Health tab), so only reading the call sites catches a caller quietly routed back to raw.
+/// #4226: the Overview loader's per-server cards, the status bar's collector-health text, and the per-server
+/// tab's permission-denied badge must all read the fleet-wide rollup-backed
+/// <see cref="ViewerDataService.GetFleetCollectionHealthByServerAsync"/>, not a raw <c>collection_log</c> scan
+/// per server (<c>ViewerDataService.GetCollectionHealthAsync</c>), a second raw fleet scan
+/// (<c>ViewerDataService.GetFleetCollectionHealthAsync</c>) every 30 s tick, or the badge's own raw
+/// per-server-tab scan (<see cref="ViewerDataService.PermissionDeniedCollectorCountSql"/>) on every 1 min
+/// auto-refresh plus every tab activation. Source-text pins, deliberately: the regression this guards against
+/// COMPILES (the old reads still exist, for the Collection Health tab and for Lite's parity twin), so only
+/// reading the call sites catches a caller quietly routed back to raw.
 /// </summary>
 public sealed class OverviewCollectionHealthRollupRoutingTests
 {
@@ -51,6 +54,26 @@ public sealed class OverviewCollectionHealthRollupRoutingTests
         Assert.Contains("GetFleetCollectionHealthByServerAsync", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("GetCollectionHealthAsync(serverId.Value)", methodBody, StringComparison.Ordinal);
         Assert.DoesNotContain("GetFleetCollectionHealthAsync()", methodBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4226's second pass: the server-tab badge (<c>ViewerServerTab.UpdatePermissionDeniedBadgeAsync</c>) must
+    /// not issue <see cref="ViewerDataService.PermissionDeniedCollectorCountSql"/> itself — that scan is kept
+    /// only as the documented raw shape Lite's parity twin still runs and this pin still holds it to.
+    /// </summary>
+    [Fact]
+    public void TheServerTabBadge_ReadsTheFleetByServerRollup_NotItsOwnRawScan()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs");
+
+        var methodStart = source.IndexOf("public async Task<int> GetPermissionDeniedCollectorCountAsync", StringComparison.Ordinal);
+        Assert.True(methodStart >= 0, "GetPermissionDeniedCollectorCountAsync has moved or been renamed — update this pin's anchor.");
+
+        var methodEnd = source.IndexOf("\n    }", methodStart, StringComparison.Ordinal);
+        var methodBody = source.Substring(methodStart, methodEnd - methodStart);
+
+        Assert.Contains("GetFleetCollectionHealthByServerAsync", methodBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateCommand(PermissionDeniedCollectorCountSql", methodBody, StringComparison.Ordinal);
     }
 
     /// <summary>The new fleet-by-server raw statement is shaped for
