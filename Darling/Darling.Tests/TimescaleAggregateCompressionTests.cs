@@ -855,18 +855,28 @@ public sealed class TimescaleAggregateCompressionTests
     }
 
     /// <summary>
-    /// #3653 LC point 7: the drain's probe names exactly the three frozen legacy dailies, counts EVERY
-    /// uncompressed chunk (no <c>range_end</c>/age filter, unlike <see cref="TimescaleSupport.AggregateCompressionStateSql"/>'s
-    /// <c>eligible_under_*_rule</c> columns), and never the frozen HOURLIES, which never drain.
+    /// #3653 LC point 7 (Medium finding fix): the drain's probe names all six frozen rollups —
+    /// three legacy hourlies and three legacy dailies — counts EVERY uncompressed chunk (no
+    /// <c>range_end</c>/age filter, unlike <see cref="TimescaleSupport.AggregateCompressionStateSql"/>'s
+    /// <c>eligible_under_*_rule</c> columns), and removes the compression policy once a frozen
+    /// rollup holds nothing left to compress.
     /// </summary>
     [Fact]
-    public void FrozenDailyCompressionDrainStateSql_NamesExactlyTheThreeFrozenDailies_AndCountsEveryUncompressedChunk()
+    public void FrozenDailyCompressionDrainStateSql_NamesAllSixFrozenRollups_AndCountsEveryUncompressedChunk()
     {
         var sql = TimescaleSupport.FrozenDailyCompressionDrainStateSql;
 
+        /* All three frozen dailies must appear. */
         Assert.Contains($"'{TimescaleSupport.QueryStatsDailyView}'", sql, StringComparison.Ordinal);
         Assert.Contains($"'{TimescaleSupport.ProcedureStatsDailyView}'", sql, StringComparison.Ordinal);
         Assert.Contains($"'{TimescaleSupport.QueryStatsDbDailyView}'", sql, StringComparison.Ordinal);
+
+        /* All three frozen hourlies must also appear — existing stores had compression policies on all
+           six before the LC freeze, and all six need draining (#3653, Medium finding fix). */
+        Assert.Contains($"'{TimescaleSupport.QueryStatsHourlyView}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.ProcedureStatsHourlyView}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.QueryStatsDbHourlyView}'", sql, StringComparison.Ordinal);
+
         Assert.Contains("NOT c.is_compressed", sql, StringComparison.Ordinal);
 
         /* No age gate — every uncompressed chunk counts, not just the ones a tier's compress_after would
@@ -874,17 +884,52 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.DoesNotContain("range_end", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("eligible_under", sql, StringComparison.Ordinal);
 
-        /* Never a frozen HOURLY — those never drain; their chunks age out through retention instead. */
-        Assert.DoesNotContain($"'{TimescaleSupport.QueryStatsHourlyView}'", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain($"'{TimescaleSupport.ProcedureStatsHourlyView}'", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain($"'{TimescaleSupport.QueryStatsDbHourlyView}'", sql, StringComparison.Ordinal);
-
-        /* Exactly three — one per SupersededDailyRollups member (LegacyDaily), not one per the six-member
-           FrozenRollupAggregates, which also holds the three hourlies the probe must never touch. */
-        Assert.Equal(3, TimescaleSupport.SupersededDailyRollups.Length);
+        /* Exactly six — one per FrozenRollupAggregates member. */
+        Assert.Equal(6, TimescaleSupport.FrozenRollupAggregates.Length);
 
         var remove = TimescaleSupport.RemoveFrozenDailyCompressionPolicySql(TimescaleSupport.QueryStatsDailyView);
         Assert.Contains("remove_compression_policy('collect.query_stats_daily'", remove, StringComparison.Ordinal);
         Assert.Contains("if_exists => true", remove, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 LC (Medium finding fix): <see cref="TimescaleSupport.IsFrozenRollupAggregate"/> returns true
+    /// for all six frozen views — bare and <c>collect.</c>-qualified — and false for everything else.
+    /// The six frozen views are NOT in <see cref="TimescaleSupport.AggregateCompressionTargets"/>, which is
+    /// why <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/> needs the separate
+    /// <see cref="TimescaleSupport.IsFrozenRollupAggregate"/> guard: without it, they fall through and
+    /// get their compression schedule reset to the 1-hour raw cadence on every start.
+    /// </summary>
+    [Fact]
+    public void IsFrozenRollupAggregate_ReturnsTrueForAllSixFrozenViews_AndFalseForOthers()
+    {
+        foreach (var (_, view) in TimescaleSupport.FrozenRollupAggregates)
+        {
+            Assert.True(TimescaleSupport.IsFrozenRollupAggregate(view), $"bare: {view}");
+            Assert.True(TimescaleSupport.IsFrozenRollupAggregate("collect." + view), $"qualified: {view}");
+
+            /* Not an active compression target — the guard in ConvergeCompressionScheduleAsync is needed
+               precisely because they are absent from this list. */
+            Assert.False(TimescaleSupport.IsAggregateCompressionTarget(view), $"must not be a compression target: {view}");
+        }
+
+        /* Active aggregates and raw tables are not frozen. */
+        foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+        {
+            Assert.False(TimescaleSupport.IsFrozenRollupAggregate(view), view);
+        }
+
+        foreach (var table in TimescaleSupport.CompressionPhaseOrder)
+        {
+            Assert.False(TimescaleSupport.IsFrozenRollupAggregate(table), table);
+        }
+
+        Assert.False(TimescaleSupport.IsFrozenRollupAggregate(null));
+        Assert.False(TimescaleSupport.IsFrozenRollupAggregate(string.Empty));
+
+        /* The two predicates are disjoint: no view can be both active and frozen. */
+        Assert.Empty(
+            TimescaleSupport.FrozenRollupAggregates.Select(a => a.View)
+                .Intersect(TimescaleSupport.AggregateCompressionTargets.Select(t => t.View), StringComparer.Ordinal));
     }
 }
