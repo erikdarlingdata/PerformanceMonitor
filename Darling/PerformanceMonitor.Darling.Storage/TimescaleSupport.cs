@@ -1448,6 +1448,26 @@ $do$";
         (QueryStatsDbHourlyView,   QueryStatsDbIntervalHourlyView,   QueryStatsDbDailyView),
     };
 
+    /// <summary>
+    /// The daily rollups that will eventually be SUPERSEDED for the daily-tier read by an interval-honest
+    /// successor daily (#3653, A6): each legacy daily, its successor daily, and the successor HOURLY the
+    /// successor daily is hierarchical from. Registered here — by the lane that adds the three successor
+    /// dailies — but not yet consumed by any reader: LA's stitched reads and LC's freeze are what make this
+    /// list load-bearing for routing. Until then it is a forward-looking record of intent, matched by name to
+    /// <see cref="SupersededHourlyRollups"/>.
+    ///
+    /// <para>The successor dailies are excluded from aggregate compression
+    /// (<see cref="CompressionDeferredUntilFreeze"/>) until LC frees the three daily-compression-band slots
+    /// the legacy trio's eventual freeze makes available; the daily compression band is full at 23 members
+    /// today, and 23 + 3 would overflow it.</para>
+    /// </summary>
+    public static readonly (string LegacyDaily, string SuccessorDaily, string SuccessorHourly)[] SupersededDailyRollups =
+    {
+        (QueryStatsDailyView,     QueryStatsIntervalDailyView,     QueryStatsIntervalHourlyView),
+        (ProcedureStatsDailyView, ProcedureStatsIntervalDailyView, ProcedureStatsIntervalHourlyView),
+        (QueryStatsDbDailyView,   QueryStatsDbIntervalDailyView,   QueryStatsDbIntervalHourlyView),
+    };
+
     /// <summary>The interval-honest successor that supersedes <paramref name="legacyHourly"/> for the hourly-tier
     /// read, or <c>null</c> for an hourly rollup that was never superseded (the Query Store family, and the
     /// successors themselves).</summary>
@@ -1623,6 +1643,13 @@ $do$";
            gives — the same requirement the daily tier has, one level longer. */
         (CreateQueryStoreStatsIntervalDailySql,   QueryStoreStatsIntervalDailyView),
         (CreateQueryStoreStatsDayGrainDailySql,   QueryStoreStatsDayGrainDailyView),
+        /* The interval-honest successor DAILIES (#3653, A6), hierarchical from the interval-honest hourly
+           successors above (which must therefore precede these three) rather than from the legacy trio.
+           Appended, like their hourly successors: see SupersededDailyRollups. Excluded from aggregate
+           compression by CompressionDeferredUntilFreeze until LC frees the band's slots. */
+        (CreateQueryStatsIntervalDailySql,        QueryStatsIntervalDailyView),
+        (CreateProcedureStatsIntervalDailySql,     ProcedureStatsIntervalDailyView),
+        (CreateQueryStatsDbIntervalDailySql,       QueryStatsDbIntervalDailyView),
     };
 
     /// <summary>The query_stats hourly rollup as #1849-era stores built it — SUPERSEDED for the hourly-tier READ by
@@ -1653,6 +1680,20 @@ $do$";
     /// <summary><see cref="QueryStatsIntervalHourlyView"/>'s database-grain sibling — the successor of
     /// <see cref="QueryStatsDbHourlyView"/>, carrying the same I/O sums FinOps reads.</summary>
     public const string QueryStatsDbIntervalHourlyView = "query_stats_db_interval_hourly";
+
+    /// <summary>The INTERVAL-HONEST successor DAILY of <see cref="QueryStatsDailyView"/> (#3653, A6) —
+    /// hierarchical from <see cref="QueryStatsIntervalHourlyView"/>, not from the legacy hourly its sibling
+    /// reads. Named distinctly from <see cref="QueryStoreStatsIntervalDailyView"/> ("query_store_..." vs
+    /// "query_stats_...") — the two differ only in the "store_" segment, so tests must not confuse them.</summary>
+    public const string QueryStatsIntervalDailyView = "query_stats_interval_daily";
+
+    /// <summary><see cref="QueryStatsIntervalDailyView"/>'s procedure_stats sibling — the successor DAILY of
+    /// <see cref="ProcedureStatsDailyView"/>.</summary>
+    public const string ProcedureStatsIntervalDailyView = "procedure_stats_interval_daily";
+
+    /// <summary><see cref="QueryStatsIntervalDailyView"/>'s database-grain sibling — the successor DAILY of
+    /// <see cref="QueryStatsDbDailyView"/>.</summary>
+    public const string QueryStatsDbIntervalDailyView = "query_stats_db_interval_daily";
 
     /// <summary>The query_store_stats hourly continuous aggregate. Built now, ahead of any writable-Query-Store
     /// primary — on a read-only replica QS surfaces nothing new to harvest, so this sits empty until one is added,
@@ -2002,6 +2043,103 @@ SELECT
     max(last_execution_time_max) AS last_execution_time_max,
     sum(sample_count) AS sample_count
 FROM collect.query_stats_db_hourly
+GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /* ═══════════ the INTERVAL-HONEST successor DAILIES (#3653, A6) ═══════════
+
+       Hierarchical from the interval-honest hourly successors (#3653, Q12), NOT from the legacy trio their
+       daily siblings above read — that is the whole point: a daily sourced from the legacy would inherit its
+       restart-row contamination at the day grain exactly as the legacy dailies already do, and this trio
+       exists so the daily tier eventually stops inheriting it. Each carries its legacy sibling's columns
+       (SUM/MIN/MAX re-aggregate correctly across the coarser bucket, same as every other hierarchical daily
+       here) plus sum(sample_interval_seconds_sum), the successor hourly's own interval sum re-summed — a
+       hierarchical SUM of a SUM composes exactly, the same reasoning CreateQueryStatsIntervalHourlySql gives
+       for summing the per-collection interval into the hourly bucket.
+
+       WITH NO DATA: these start empty and are filled by --backfill-rollups (see
+       docs/runbooks/a6-successor-daily-backfill.md) or by their own refresh policy reaching forward from
+       creation. EXCLUDED from aggregate compression for now (see CompressionDeferredUntilFreeze) — the daily
+       compression band is full at 23 members, and freeing three slots for these is #3653 A6 lane LC's job,
+       not this one's. Registered in DailyAggregates, RollupViews and the availability probe so the ensure
+       sweep creates them, the backfill verb and coverage probe see them, and SupersededDailyRollups records
+       which legacy daily each will eventually replace. */
+
+    /// <summary>The INTERVAL-HONEST successor of <see cref="CreateQueryStatsDailySql"/> (#3653, A6) —
+    /// hierarchical from <see cref="CreateQueryStatsIntervalHourlySql"/>, not from the legacy
+    /// <see cref="QueryStatsHourlyView"/> its sibling reads. Same dims and re-aggregated columns as the
+    /// legacy daily, plus <c>sum(sample_interval_seconds_sum)</c> carried forward from the successor hourly.
+    /// <c>WITH NO DATA</c>; excluded from compression until the freeze (<see cref="CompressionDeferredUntilFreeze"/>).</summary>
+    public const string CreateQueryStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    query_hash,
+    sql_handle,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_interval_seconds_sum) AS sample_interval_seconds_sum,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, query_hash, sql_handle, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The INTERVAL-HONEST successor of <see cref="CreateProcedureStatsDailySql"/> (#3653, A6) —
+    /// <see cref="CreateQueryStatsIntervalDailySql"/>'s procedure_stats sibling, hierarchical from
+    /// <see cref="CreateProcedureStatsIntervalHourlySql"/>.</summary>
+    public const string CreateProcedureStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.procedure_stats_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    schema_name,
+    object_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    min(worker_time_min) AS worker_time_min,
+    max(worker_time_max) AS worker_time_max,
+    sum(elapsed_time_sum) AS elapsed_time_sum,
+    min(elapsed_time_min) AS elapsed_time_min,
+    max(elapsed_time_max) AS elapsed_time_max,
+    sum(execution_count_sum) AS execution_count_sum,
+    min(execution_count_min) AS execution_count_min,
+    max(execution_count_max) AS execution_count_max,
+    sum(sample_interval_seconds_sum) AS sample_interval_seconds_sum,
+    sum(sample_count) AS sample_count
+FROM collect.procedure_stats_interval_hourly
+GROUP BY server_id, server_name, database_name, schema_name, object_name, time_bucket('1 day', bucket)
+WITH NO DATA";
+
+    /// <summary>The INTERVAL-HONEST successor of <see cref="CreateQueryStatsDbDailySql"/> (#3653, A6) —
+    /// <see cref="CreateQueryStatsIntervalDailySql"/>'s database-grain sibling, hierarchical from
+    /// <see cref="CreateQueryStatsDbIntervalHourlySql"/>, carrying the same I/O sums FinOps reads.</summary>
+    public const string CreateQueryStatsDbIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_db_interval_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    server_id,
+    server_name,
+    database_name,
+    time_bucket('1 day', bucket) AS bucket,
+    sum(worker_time_sum) AS worker_time_sum,
+    sum(logical_reads_sum) AS logical_reads_sum,
+    sum(physical_reads_sum) AS physical_reads_sum,
+    sum(logical_writes_sum) AS logical_writes_sum,
+    sum(execution_count_sum) AS execution_count_sum,
+    max(last_execution_time_max) AS last_execution_time_max,
+    sum(sample_interval_seconds_sum) AS sample_interval_seconds_sum,
+    sum(sample_count) AS sample_count
+FROM collect.query_stats_db_interval_hourly
 GROUP BY server_id, server_name, database_name, time_bucket('1 day', bucket)
 WITH NO DATA";
 
@@ -6490,6 +6628,25 @@ AND   j.hypertable_name = '{relation}'";
     public const string AggregateCompressionSegmentBy = "server_id";
 
     /// <summary>
+    /// The three interval-honest successor DAILIES (#3653, A6), held OUT of
+    /// <see cref="AggregateCompressionTargets"/> so the daily compression band — full at 23 members — does not
+    /// overflow to 26. They are still created (registered in <see cref="DailyAggregates"/>), refreshed, and
+    /// backfillable; they simply carry no compression policy YET. #3653 A6 lane LC's freeze retires the legacy
+    /// trio's own daily-band membership, which is what frees the three slots this set holds these back for;
+    /// once that lands, LC removes this set (or these three names from it) and the ensure sweep enables their
+    /// compression on the next start, the same as any newly-registered aggregate.
+    ///
+    /// <para><b>MUST stay declared before <see cref="AggregateCompressionTargets"/></b>: static field
+    /// initializers run in declaration order, and that list reads this set.</para>
+    /// </summary>
+    public static readonly IReadOnlySet<string> CompressionDeferredUntilFreeze = new HashSet<string>(StringComparer.Ordinal)
+    {
+        QueryStatsIntervalDailyView,
+        ProcedureStatsIntervalDailyView,
+        QueryStatsDbIntervalDailyView,
+    };
+
+    /// <summary>
     /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
     /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
     /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
@@ -6502,10 +6659,12 @@ AND   j.hypertable_name = '{relation}'";
     /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
     /// order, and this one reads all three.</para>
     /// </summary>
+
     public static readonly IReadOnlyList<(string CreateSql, string View, bool Hourly)> AggregateCompressionTargets =
         HourlyAggregates.Select(a => (a.CreateSql, a.View, Hourly: true))
             .Concat(DailyAggregates.Select(a => (a.CreateSql, a.View, Hourly: false)))
             .Concat(BaselineAggregates.Select(a => (a.CreateSql, a.View, Hourly: true)))
+            .Where(a => !CompressionDeferredUntilFreeze.Contains(a.View))
             .ToArray();
 
     /// <summary>
@@ -7656,7 +7815,13 @@ ORDER BY i.indexname";
            the legacy relation for exactly that store, with no version gate. */
         $"to_regclass('collect.{QueryStatsIntervalHourlyView}') IS NOT NULL, " +
         $"to_regclass('collect.{ProcedureStatsIntervalHourlyView}') IS NOT NULL, " +
-        $"to_regclass('collect.{QueryStatsDbIntervalHourlyView}') IS NOT NULL";
+        $"to_regclass('collect.{QueryStatsDbIntervalHourlyView}') IS NOT NULL, " +
+        /* The interval-honest successor DAILIES (#3653, A6) — existence-is-the-probe once more: a store whose
+           service predates this build has none of them, and reads route to the legacy daily for exactly that
+           store, with no version gate. */
+        $"to_regclass('collect.{QueryStatsIntervalDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{ProcedureStatsIntervalDailyView}') IS NOT NULL, " +
+        $"to_regclass('collect.{QueryStatsDbIntervalDailyView}') IS NOT NULL";
 
     /// <summary>
     /// Detects which continuous-aggregate rollups exist in the store (<see cref="RollupProbeSql"/>). On a
@@ -7683,7 +7848,8 @@ ORDER BY i.indexname";
             reader.GetBoolean(4), reader.GetBoolean(5), reader.GetBoolean(6), reader.GetBoolean(7),
             reader.GetBoolean(8), reader.GetBoolean(9), reader.GetBoolean(10),
             reader.GetBoolean(11), reader.GetBoolean(12),
-            reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15));
+            reader.GetBoolean(13), reader.GetBoolean(14), reader.GetBoolean(15),
+            reader.GetBoolean(16), reader.GetBoolean(17), reader.GetBoolean(18));
     }
 
     /* ─────────────── rollup COVERAGE (the un-materialized-history guard, #1759) ─────────────── */
@@ -7760,6 +7926,15 @@ ORDER BY i.indexname";
         (QueryStatsIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
         (ProcedureStatsIntervalHourlyView, "procedure_stats", "procedure_stats", "collection_time", HourlyBucket),
         (QueryStatsDbIntervalHourlyView, "query_stats", "query_stats", "collection_time", HourlyBucket),
+
+        /* The interval-honest successor DAILIES (#3653, A6): hierarchical from the interval-honest hourly
+           successors just above, so RawTable is still the raw table two hops down and Source is the successor
+           HOURLY (not the legacy). Registering them here puts them on the --backfill-rollups plan
+           (RollupBackfill.Targets derives from this list, ordered after their hourly source by SourceDepth),
+           in the coverage probe, and under the eventual daily-tier routing. */
+        (QueryStatsIntervalDailyView, "query_stats", QueryStatsIntervalHourlyView, "bucket", DailyBucket),
+        (ProcedureStatsIntervalDailyView, "procedure_stats", ProcedureStatsIntervalHourlyView, "bucket", DailyBucket),
+        (QueryStatsDbIntervalDailyView, "query_stats", QueryStatsDbIntervalHourlyView, "bucket", DailyBucket),
     };
 
     /// <summary>The three raw tables the rollups roll up, in coverage-probe order (deduplicated
@@ -11031,7 +11206,8 @@ public readonly record struct RollupAvailability(
     bool ProcedureGrainHourly, bool ProcedureGrainDaily, bool QueryStoreGrainHourly, bool QueryStoreGrainDaily,
     bool QueryStoreIntervalHourly = false, bool QueryStoreCorrectedHourly = false, bool QueryStoreCorrectedDaily = false,
     bool QueryStoreIntervalDaily = false, bool QueryStoreDayGrainDaily = false,
-    bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false)
+    bool QueryGrainIntervalHourly = false, bool ProcedureGrainIntervalHourly = false, bool DbGrainIntervalHourly = false,
+    bool QueryGrainIntervalDaily = false, bool ProcedureGrainIntervalDaily = false, bool DbGrainIntervalDaily = false)
 {
     /// <summary>True when every rollup exists — the steady state on a TimescaleDB store, safe to cache
     /// permanently (a created continuous aggregate is never dropped outside the reshape sweep).</summary>
@@ -11040,19 +11216,25 @@ public readonly record struct RollupAvailability(
         && ProcedureGrainHourly && ProcedureGrainDaily && QueryStoreGrainHourly && QueryStoreGrainDaily
         && QueryStoreIntervalHourly && QueryStoreCorrectedHourly && QueryStoreCorrectedDaily
         && QueryStoreIntervalDaily && QueryStoreDayGrainDaily
-        && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly;
+        && QueryGrainIntervalHourly && ProcedureGrainIntervalHourly && DbGrainIntervalHourly
+        && QueryGrainIntervalDaily && ProcedureGrainIntervalDaily && DbGrainIntervalDaily;
 
     /// <summary>No rollups at all — the plain-PostgreSQL shape, and the safe fallback when a probe fails.</summary>
     public static RollupAvailability None => default;
 
     /// <summary>Every flag true — the fully-built TimescaleDB shape (and the test shorthand for it).</summary>
-    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
+    public static RollupAvailability All => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#3653 shape: every rollup a #1869-era service created, none of the interval-honest hourly
     /// successors (Q12) — a store whose service predates this build. Its hourly-tier reads must keep routing to
     /// the legacy trio, which is the degrade that lets the successors ship with no migration and no version
     /// gate; <see cref="RollupCoverage.HourlyRelationFor"/> answers the legacy name for exactly this shape.</summary>
     public static RollupAvailability WithoutIntervalHourlies => new(true, true, true, true, true, true, true, true, true, true, true, true, true);
+
+    /// <summary>The pre-#3653-A6 shape: every rollup up to and including the interval-honest hourly successors
+    /// (Q12), none of the interval-honest successor DAILIES (A6) — a store whose service predates this build.
+    /// The test shorthand for exactly this degrade.</summary>
+    public static RollupAvailability WithoutIntervalDailies => new(true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true);
 
     /// <summary>The pre-#1849 shape: every ORIGINAL rollup present, none of the corrected Query Store ones —
     /// i.e. a store whose service has not yet created them. The routing fallback's test shorthand.</summary>
@@ -11087,6 +11269,9 @@ public readonly record struct RollupAvailability(
         TimescaleSupport.QueryStatsIntervalHourlyView => QueryGrainIntervalHourly,
         TimescaleSupport.ProcedureStatsIntervalHourlyView => ProcedureGrainIntervalHourly,
         TimescaleSupport.QueryStatsDbIntervalHourlyView => DbGrainIntervalHourly,
+        TimescaleSupport.QueryStatsIntervalDailyView => QueryGrainIntervalDaily,
+        TimescaleSupport.ProcedureStatsIntervalDailyView => ProcedureGrainIntervalDaily,
+        TimescaleSupport.QueryStatsDbIntervalDailyView => DbGrainIntervalDaily,
         _ => false,
     };
 }
