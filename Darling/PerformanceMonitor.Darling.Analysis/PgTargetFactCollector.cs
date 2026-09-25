@@ -104,7 +104,7 @@ public sealed partial class PgTargetFactCollector : IFactCollector
         [CallerMemberName] string collectMethod = "",
         [CallerFilePath] string collectFile = "")
     {
-        context.RecordCollectionFailure(CollectionFailure.FamilyOfFile(collectFile), collectMethod, PgFactCollector.ClassifyOutcome(ex), PgFactCollector.DescribeFailureForPayload(ex));
+        context.RecordCollectionFailure(CollectionFailure.FamilyOfFile(collectFile), collectMethod, PgFactCollector.ClassifyOutcome(ex), ex);
 
         if (PgBaselineProvider.IsCommandTimeout(ex))
         {

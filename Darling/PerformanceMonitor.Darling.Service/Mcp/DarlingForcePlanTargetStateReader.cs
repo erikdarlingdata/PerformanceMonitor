@@ -231,7 +231,7 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
                only the type and (for a Postgres fault) the SQLSTATE. */
             logger?.LogWarning(ex, "The forcing and automatic-plan-correction state read failed for server {ServerId}.", serverId);
 
-            return (null, $"the forcing and automatic-plan-correction state read failed ({PgFactCollector.DescribeFailureForPayload(ex)}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
+            return (null, $"the forcing and automatic-plan-correction state read failed ({CollectionFailure.Describe(ex, CollectionFailureOutcome.Error)}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
         }
     }
 

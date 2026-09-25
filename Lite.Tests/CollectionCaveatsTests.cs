@@ -101,12 +101,37 @@ public sealed class CollectionCaveatsTests : IDisposable
         Assert.Equal("trace_flag", failure.Family);
         Assert.Equal("CollectTraceFlagFactsAsync", failure.Read);
         Assert.Equal(CollectionFailureOutcome.Error, failure.Outcome);
-        Assert.Contains("v_trace_flags", failure.Message, StringComparison.OrdinalIgnoreCase);
+        /* #4316 round 1 B1: the recorded message is CollectionFailure.Describe's fixed text, never the raw
+           DuckDB exception message — which for a dropped view names the relation. */
+        Assert.DoesNotContain("v_trace_flags", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("the log has the full error", failure.Message, StringComparison.Ordinal);
 
         /* The rest of the pass happened: the wait family read its benign wait over an observed window. */
         Assert.NotNull(context.Coverage);
         Assert.True(context.Coverage!.IsObserved);
         Assert.Contains(facts, f => f.Key == BenignWait);
+    }
+
+    /// <summary>
+    /// #4316 round 1 B1: the shared library's guarantee, exercised through Lite's own <c>AnalysisContext</c> —
+    /// no DuckDB needed, because <c>RecordCollectionFailure</c> takes the exception directly and Lite shares
+    /// <c>CollectionFailure.Describe</c> with Darling. A connection string or host name in the exception's
+    /// message must never reach the record Lite's own MCP tools serve.
+    /// </summary>
+    [Fact]
+    public void RecordedMessage_ForAFailingFamily_HoldsNoExceptionMessageText()
+    {
+        const string sentinel = "Host=db.internal.example;Username=svc_lite;Password=hunter2";
+
+        var context = new AnalysisContext { ServerId = _serverId, ServerName = "TestServer" };
+        context.RecordCollectionFailure(
+            "trace_flag", "CollectTraceFlagFactsAsync", CollectionFailureOutcome.Error,
+            new InvalidOperationException(sentinel));
+
+        var failure = Assert.Single(context.CollectionFailures);
+        Assert.DoesNotContain(sentinel, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Password", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(nameof(InvalidOperationException) + "; the log has the full error", failure.Message);
     }
 
     /// <summary>
@@ -158,7 +183,8 @@ public sealed class CollectionCaveatsTests : IDisposable
             Assert.Equal("trace_flag", entry.GetProperty("family").GetString());
             Assert.Equal("CollectTraceFlagFactsAsync", entry.GetProperty("read").GetString());
             Assert.Equal("error", entry.GetProperty("outcome").GetString());
-            Assert.Contains("v_trace_flags", entry.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
+            /* #4316 round 1 B1: never the raw exception message — see the same pin above. */
+            Assert.DoesNotContain("v_trace_flags", entry.GetProperty("message").GetString(), StringComparison.OrdinalIgnoreCase);
 
             /* The block is appended LAST, after every property the clean payload had. */
             var names = doc.RootElement.GetProperty("hints").EnumerateObject().Select(p => p.Name).ToArray();

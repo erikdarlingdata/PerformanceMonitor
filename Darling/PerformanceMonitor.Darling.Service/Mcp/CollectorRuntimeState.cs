@@ -127,6 +127,16 @@ public sealed class CollectorRuntimeState
     public static string FailureDetailFor(StartupStep step) => FailureDetailByStep[step];
 
     /// <summary>
+    /// The fixed <see cref="Snapshot.Detail"/> for the one ManagedStore stand-down that is not on an
+    /// exception path (#4316 round 1 B1): <c>postgres.managed = true</c> asked for the bundled runtime and
+    /// its DPAPI-protected credential on a host that can have neither. Published by
+    /// <see cref="PublishManagedStoreNeedsWindows"/>.
+    /// </summary>
+    public const string ManagedStoreNeedsWindowsDetail =
+        "postgres.managed = true requires Windows; set postgres.managed = false and point postgres.connectionString "
+        + "at your own PostgreSQL instead.";
+
+    /// <summary>
     /// A coherent published snapshot; null until the worker first publishes.
     /// </summary>
     /// <param name="Phase">Where the collector is relative to having started collecting.</param>
@@ -152,15 +162,42 @@ public sealed class CollectorRuntimeState
     private volatile Snapshot? _current;
 
     /// <summary>Publishes a classified-transient failure of <paramref name="step"/> that is being retried
-    /// (worker only; called from each retry arm alongside its warning line).</summary>
-    public void PublishRetrying(StartupStep step, string detail, int attempt, int attempts)
+    /// (worker only; called from each retry arm alongside its warning line). The detail is always
+    /// <see cref="FailureDetailFor"/> — an exception-path retry has no other text to publish, and (#4316
+    /// round 1 B1) there is no longer a <c>string</c> parameter here for a caller to put <c>ex.Message</c>
+    /// in instead.</summary>
+    public void PublishRetrying(StartupStep step, int attempt, int attempts)
         => _current = new Snapshot(
-            CollectorPhase.Retrying, step, FirstLineOf(detail), attempt, attempts, DateTime.UtcNow);
+            CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt, attempts, DateTime.UtcNow);
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
-    /// collection-blocking exit, before the <c>return</c> — after the critical line, so a throw here could
-    /// never cost the operator the log line).</summary>
-    public void PublishStopped(StartupStep step, string detail)
+    /// EXCEPTION-path collection-blocking exit, before the <c>return</c> — after the critical line, so a
+    /// throw here could never cost the operator the log line). The detail is always
+    /// <see cref="FailureDetailFor"/>; <see cref="PublishConfigurationProblems"/> and
+    /// <see cref="PublishManagedStoreNeedsWindows"/> are the two terminal stand-downs that are NOT exception
+    /// paths, and publish their own detail through the shared <see cref="PublishStoppedCore"/>.</summary>
+    public void PublishStopped(StartupStep step) => PublishStoppedCore(step, FailureDetailFor(step));
+
+    /// <summary>Publishes a terminal Configuration stand-down for a validated-but-rejected config (worker
+    /// only; #2953): every problem <c>DarlingConfig.Validate</c> found, joined with <c>"; "</c> — all of
+    /// them, not just the first, because <c>Validate</c> is all-fatal and a ping body naming only one of
+    /// several problems would send an operator to fix a config that still would not start. Sanitized and
+    /// length-capped exactly like every other <see cref="Snapshot.Detail"/>, by
+    /// <see cref="PublishStoppedCore"/>.</summary>
+    public void PublishConfigurationProblems(IReadOnlyList<string> problems)
+        => PublishStoppedCore(StartupStep.Configuration, string.Join("; ", problems));
+
+    /// <summary>Publishes the terminal ManagedStore stand-down for the one config combination that reaches
+    /// neither a retry nor an exception: <c>postgres.managed = true</c> on a non-Windows host (worker
+    /// only).</summary>
+    public void PublishManagedStoreNeedsWindows()
+        => PublishStoppedCore(StartupStep.ManagedStore, ManagedStoreNeedsWindowsDetail);
+
+    /// <summary>The shared body every terminal stand-down publishes through, whatever its detail's source —
+    /// an exception's fixed sentence (<see cref="PublishStopped"/>), the joined config problems
+    /// (<see cref="PublishConfigurationProblems"/>), or the not-Windows sentence
+    /// (<see cref="PublishManagedStoreNeedsWindows"/>).</summary>
+    private void PublishStoppedCore(StartupStep step, string detail)
     {
         _current = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
 

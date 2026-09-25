@@ -1284,16 +1284,14 @@ public sealed class DarlingWorker : BackgroundService
                     "or unreadable one does not and is not retried.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
-                var configRetryDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Configuration);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Configuration, configRetryDetail, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Configuration, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex)
             {
                 _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
-                var configStoppedDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Configuration);
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, configStoppedDetail);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
             }
         }
@@ -1314,9 +1312,9 @@ public sealed class DarlingWorker : BackgroundService
 
             /* #2953: every problem, joined, rather than the first — Validate is all-fatal and reports the whole
                set, so a ping body carrying one of several would send an operator to fix a config that still
-               does not start. */
-            _collectorState.PublishStopped(
-                CollectorRuntimeState.StartupStep.Configuration, string.Join("; ", problems));
+               does not start. PublishConfigurationProblems does the joining and the sanitizing/length cap
+               (#4316 round 1 B1): this is the one terminal stand-down whose detail is not a fixed sentence. */
+            _collectorState.PublishConfigurationProblems(problems);
             return;
         }
 
@@ -1379,10 +1377,7 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
-                _collectorState.PublishStopped(
-                    CollectorRuntimeState.StartupStep.ManagedStore,
-                    "postgres.managed = true requires Windows; set postgres.managed = false and point "
-                    + "postgres.connectionString at your own PostgreSQL instead.");
+                _collectorState.PublishManagedStoreNeedsWindows();
                 return;
             }
 
@@ -1431,16 +1426,14 @@ public sealed class DarlingWorker : BackgroundService
                         "not retried.",
                         ex.Message, attempt, StartupFailureTriage.Attempts,
                         (int)StartupFailureTriage.RetryDelay.TotalSeconds);
-                    var managedStoreRetryDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.ManagedStore);
                     _collectorState.PublishRetrying(
-                        CollectorRuntimeState.StartupStep.ManagedStore, managedStoreRetryDetail, attempt, StartupFailureTriage.Attempts);
+                        CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts);
                     await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
-                    var managedStoreStoppedDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.ManagedStore);
-                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore, managedStoreStoppedDetail);
+                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
                 }
             }
@@ -1809,9 +1802,8 @@ public sealed class DarlingWorker : BackgroundService
                     "and collection does not start.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
-                var storeRetryDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Store);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Store, storeRetryDetail, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1820,8 +1812,7 @@ public sealed class DarlingWorker : BackgroundService
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
-                var storeStoppedDetail = CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Store);
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store, storeStoppedDetail);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
                 return;
             }
         }

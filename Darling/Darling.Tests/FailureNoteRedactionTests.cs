@@ -12,7 +12,9 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
 namespace Darling.Tests;
@@ -22,52 +24,46 @@ namespace Darling.Tests;
 /// force-plan and fact-collector notes two analysis tools attach to their payload — used to carry
 /// <c>ex.Message</c> verbatim. An exception's message is not vetted for that audience: a connection string, a
 /// file path or a driver's inner-exception chain can all land in it. Every one of those sites now uses a fixed,
-/// non-message text instead, built by <see cref="PgFactCollector.DescribeFailureForPayload"/> for the two
-/// analysis notes and by <c>CollectorRuntimeState.FailureDetailFor</c> for ping. The full exception text still
-/// reaches the service log everywhere it did before, plus one site (the force-plan reader) that logged nothing
-/// at all and now does.
+/// non-message text instead, built by <see cref="CollectionFailure.Describe"/> for the collection-failure
+/// records and the two force-plan notes alike, and by <c>CollectorRuntimeState.FailureDetailFor</c> for ping.
+/// The full exception text still reaches the service log everywhere it did before, plus one site (the
+/// force-plan reader) that logged nothing at all and now does.
 ///
-/// <para>Pinned two ways: a unit test of the shared formatter, and a structural census per call site — over
-/// comment/string-stripped source, so a re-introduced <c>ex.Message</c> fails here rather than in a support
-/// ticket that pastes a ping response into a chat.</para>
+/// <para>Round 1 B1 retired <c>PgFactCollector.DescribeFailureForPayload</c>: <c>AnalysisContext.RecordCollectionFailure</c>
+/// now takes the <see cref="Exception"/> itself rather than a caller-built string (so a fact collector cannot
+/// pass <c>ex.Message</c> even by mistake — there is no string parameter left to compile against), and the one
+/// remaining string-building consumer, the two force-plan notes, share <see cref="CollectionFailure.Describe"/>
+/// with it instead of carrying their own copy of the same wording.</para>
+///
+/// <para>Pinned two ways: a unit test of the shared formatter, and a structural census over the two force-plan
+/// call sites — over comment/string-stripped source, so a re-introduced <c>ex.Message</c> fails here rather
+/// than in a support ticket that pastes a ping response into a chat.</para>
 /// </summary>
 public sealed class FailureNoteRedactionTests
 {
     // ── the formatter ────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void DescribeFailureForPayload_CarriesTypeAndSqlState_NeverTheMessage()
+    public void Describe_CarriesTypeAndSqlState_NeverTheMessage()
     {
-        const string sentinel = "sentinel-text-that-must-never-leave-the-service-log";
+        var pg = new PostgresException("role \"x\" does not exist", "ERROR", "ERROR", "42501");
+        var pgText = CollectionFailure.Describe(pg, CollectionFailureOutcome.Error);
+        Assert.Equal("PostgresException, SQLSTATE 42501; the log has the full error", pgText);
+        Assert.DoesNotContain("role", pgText, StringComparison.Ordinal);
 
-        var pg = new PostgresException(sentinel, "ERROR", "ERROR", "42P01");
-        var pgText = PgFactCollector.DescribeFailureForPayload(pg);
-        Assert.Contains("42P01", pgText, StringComparison.Ordinal);
-        Assert.Contains(nameof(PostgresException), pgText, StringComparison.Ordinal);
-        Assert.DoesNotContain(sentinel, pgText, StringComparison.Ordinal);
+        /* #4316 round 1 (L1): MissingSchema gets its own wording — the log has nothing for this arm at the
+           DEFAULT level (it logs at Debug, the expected pre-migration case), so the note says that rather
+           than pointing at an empty log. */
+        var missingSchema = new PostgresException("relation \"x\" does not exist", "ERROR", "ERROR", "42P01");
+        var missingSchemaText = CollectionFailure.Describe(missingSchema, CollectionFailureOutcome.MissingSchema);
+        Assert.Equal(
+            "PostgresException, SQLSTATE 42P01; a table or column the read needs is missing, logged only at Debug level",
+            missingSchemaText);
 
-        var plain = new InvalidOperationException(sentinel);
-        var plainText = PgFactCollector.DescribeFailureForPayload(plain);
-        Assert.Contains(nameof(InvalidOperationException), plainText, StringComparison.Ordinal);
-        Assert.DoesNotContain(sentinel, plainText, StringComparison.Ordinal);
-    }
-
-    // ── the two fact collectors ─────────────────────────────────────────────────────────
-
-    [Theory]
-    [InlineData("PgFactCollector.cs")]
-    [InlineData("PgTargetFactCollector.cs")]
-    public void TheFactCollector_RecordsTheFormattersTextNotExMessage(string file)
-    {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(
-            File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Analysis", file)));
-
-        var site = Regex.Match(code, @"context\.RecordCollectionFailure\(");
-        Assert.True(site.Success, $"expected exactly one context.RecordCollectionFailure(...) call in {file}");
-
-        var call = CSharpSourceWalker.ConstructionSpanFrom(code, site.Index);
-        Assert.DoesNotContain("ex.Message", call, StringComparison.Ordinal);
-        Assert.Contains("DescribeFailureForPayload(ex)", call, StringComparison.Ordinal);
+        var plain = new InvalidOperationException("Host=secret");
+        var plainText = CollectionFailure.Describe(plain, CollectionFailureOutcome.Error);
+        Assert.Equal("InvalidOperationException; the log has the full error", plainText);
+        Assert.DoesNotContain("secret", plainText, StringComparison.Ordinal);
     }
 
     // ── the force-plan target-state reader, and the bot's own copy of the same read ────
@@ -83,36 +79,38 @@ public sealed class FailureNoteRedactionTests
         /* No other ex.Message use exists anywhere in either file (confirmed by reading them) — comments are
            stripped above, so this catches the code, not a remark about the fix. PgPlanForceActionStore's own
            TryGetTargetStatesAsync (#4316 round 1, M1) is the bot's copy of the same read and used to carry the
-           same raw ex.Message the reader was fixed to drop. */
+           same raw ex.Message the reader was fixed to drop. Round 1 B1 moved both off their own
+           PgFactCollector.DescribeFailureForPayload copy onto the shared CollectionFailure.Describe, so the
+           two notes cannot drift into two different wordings. */
         Assert.DoesNotContain("ex.Message", code, StringComparison.Ordinal);
-        Assert.Contains("DescribeFailureForPayload(ex)", code, StringComparison.Ordinal);
+        Assert.Contains("CollectionFailure.Describe(ex, CollectionFailureOutcome.Error)", code, StringComparison.Ordinal);
 
         /* #4316: this failure logged nowhere before. It must now, at Warning, with the exception itself
            (not just its message) so the service log keeps the full text and stack. */
         Assert.Contains(".LogWarning(ex,", code, StringComparison.Ordinal);
     }
 
-    // ── DarlingWorker.cs' six collection-blocking startup publishes ────────────────────
+    // ── DarlingWorker.cs' collection-blocking startup publishes ────────────────────────
 
+    /// <summary>
+    /// #4316 round 1 B1: <c>PublishRetrying</c>/<c>PublishStopped</c> no longer take a detail parameter at
+    /// all — the reflection test in <c>CollectorRuntimeStateTests</c> pins that no public
+    /// <see cref="CollectorRuntimeState"/> <c>Publish*</c> method takes a <see cref="string"/>, so a caller
+    /// has no parameter left to put <c>ex.Message</c> into. That is a stronger guarantee than any grep census
+    /// here could give, which is why the census this test replaced is gone rather than updated. What is
+    /// still worth pinning here is that the FIXED sentences those methods build from actually read as fixed:
+    /// no stray <c>{</c> that would mean some template placeholder never got filled in and shipped as a
+    /// literal brace in a ping body.
+    /// </summary>
     [Fact]
-    public void NeitherPublishCall_InDarlingWorker_EverPassesExMessage()
+    public void EveryFixedFailureSentence_HoldsNoPlaceholder()
     {
-        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(Path.Combine(
-            RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")));
-
-        var sites = Regex.Matches(code, @"_collectorState\.(?:PublishRetrying|PublishStopped)\(").ToList();
-        Assert.True(sites.Count >= 6, $"expected at least the six collection-blocking startup publishes; found {sites.Count}");
-
-        foreach (Match site in sites)
+        foreach (CollectorRuntimeState.StartupStep step in Enum.GetValues(typeof(CollectorRuntimeState.StartupStep)))
         {
-            var span = CSharpSourceWalker.ConstructionSpanFrom(code, site.Index);
-            Assert.DoesNotContain("ex.Message", span, StringComparison.Ordinal);
+            Assert.DoesNotContain("{", CollectorRuntimeState.FailureDetailFor(step), StringComparison.Ordinal);
         }
 
-        /* The six collection-blocking sites source their Detail from CollectorRuntimeState.FailureDetailFor
-           instead — one call per site, so a count below six means one quietly went back to ex.Message and a
-           count above just means the helper gained a caller nobody reviewed for this. */
-        Assert.Equal(6, Regex.Matches(code, @"CollectorRuntimeState\.FailureDetailFor\(").Count);
+        Assert.DoesNotContain("{", CollectorRuntimeState.ManagedStoreNeedsWindowsDetail, StringComparison.Ordinal);
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

@@ -319,7 +319,7 @@ SELECT
                reason lands in collect.plan_force_actions.detail, which get_plan_force_actions will serve, so it
                carries only the type and SQLSTATE; the full exception goes to the service log once. */
             _logger?.LogWarning(ex, "The plan-force bot's forcing and automatic-plan-correction state read failed for server {ServerId}.", serverId);
-            return (null, $"the forcing and automatic-plan-correction state read failed ({PgFactCollector.DescribeFailureForPayload(ex)})");
+            return (null, $"the forcing and automatic-plan-correction state read failed ({CollectionFailure.Describe(ex, CollectionFailureOutcome.Error)})");
         }
     }
 
