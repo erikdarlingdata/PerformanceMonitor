@@ -89,7 +89,9 @@ public sealed class McpToolsListBudgetTests
        get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
        parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
        tools/list and so is not counted here. */
-    private const int TotalCeilingBytes = 171_637;
+    /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
+       +82 bytes net after trimming. */
+    private const int TotalCeilingBytes = 171_719;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
