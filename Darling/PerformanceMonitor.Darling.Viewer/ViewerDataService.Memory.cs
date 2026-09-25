@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -209,7 +210,11 @@ public sealed partial class ViewerDataService
     /// The Memory Pressure Events samples — Lite's <c>GetMemoryPressureEventsAsync</c> ported to Postgres:
     /// the RING_BUFFER_RESOURCE_MONITOR samples over the window, windowed on <c>sample_time</c> (the
     /// payload's own clock, not collection_time — the memory_pressure_events index keys on it). $1
-    /// server_id, $2 window start, $3 window end (naive UTC).
+    /// server_id, $2 window start, $3 window end (naive UTC). $4 is the <see cref="EventWindowFloor"/> for
+    /// $2 — <c>v_memory_pressure_events</c> is a hypertable partitioned on <c>collection_time</c>, which this
+    /// sample-time window alone gives the planner nothing to exclude a chunk on (#4229); the floor lets it
+    /// skip every chunk older than the window, without being able to drop a row (a sample is collected at
+    /// or after its own <c>sample_time</c>).
     /// </summary>
     public const string MemoryPressureEventsSql = """
         SELECT
@@ -221,6 +226,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   sample_time >= $2
         AND   sample_time <= $3
+        AND   collection_time >= $4
         ORDER BY sample_time
         """;
 
@@ -413,6 +419,7 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

@@ -11726,3 +11726,85 @@ public sealed class RollupCoverage
         return null;
     }
 }
+
+/// <summary>
+/// THE MATERIALIZATION WATERMARK (#4227): how far a <c>materialized_only</c> continuous aggregate has actually
+/// materialized, for a caller that must supplement it with raw for the UNMATERIALIZED TAIL — the one question
+/// <see cref="RollupCoverage"/> itself does not answer, since a floor (the OLDEST bucket) says nothing about the
+/// newest. Kept beside <see cref="RollupCoverage"/> rather than folded into it: the floor dictionary is probed
+/// once per <see cref="TimescaleSupport.DetectRollupCoverageAsync"/> cycle and cached for several minutes; the
+/// watermark moves every refresh, so a caller that needs it re-reads it fresh rather than trusting a coverage
+/// snapshot that may already be stale by the time the tail matters.
+///
+/// <para><b>Two reads, cheapest and most precise first.</b> <c>_timescaledb_functions.cagg_watermark</c> is the
+/// engine's own answer and needs no extra grant beyond the <c>viewer</c> role's existing <c>SELECT ON ALL TABLES
+/// IN SCHEMA collect</c> — measured directly on the rig AS the <c>viewer</c> role (#4227): EXECUTE on the
+/// function and SELECT on <c>_timescaledb_catalog.continuous_agg</c> are both PUBLIC by default, the same grant
+/// every real-time CAGG read already depends on to rewrite its own view. A read that throws anyway (an older
+/// TimescaleDB whose catalog shape differs) falls back to <c>max(bucket)</c> off the view itself — ordinary
+/// SELECT, already granted — plus one bucket width. That fallback is never LATER than the true watermark (a
+/// refresh only ever writes BELOW the threshold it then advances to), so a caller that reads raw from there
+/// onward never treats unmaterialized data as covered; it may occasionally re-read a bucket the aggregate
+/// already has, which is free for a boolean "any executions" check.</para>
+/// </summary>
+public static class RollupMaterializationWatermark
+{
+    /// <summary>The engine's own answer: the instant below which <paramref name="view"/> serves only
+    /// materialized buckets. NULL before the first refresh (#3973's finite-sentinel handling — the same guard
+    /// <c>DarlingFleetReader.CollectionHealthWatermarkSql</c> applies for the collection-health aggregate).</summary>
+    public static string WatermarkSql(string view) => @"
+SELECT CASE WHEN isfinite(w) AND w >= '2000-01-01'::timestamp THEN w END
+FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_functions.cagg_watermark(mat_hypertable_id)) AS w
+      FROM _timescaledb_catalog.continuous_agg
+      WHERE user_view_schema = 'collect'
+      AND   user_view_name = '" + view + @"') x";
+
+    /// <summary>The fallback: the newest bucket <paramref name="view"/> actually holds a row for. Ordinary
+    /// SELECT against the view itself, no catalog access. The caller adds one bucket width (this is the last
+    /// WRITTEN bucket, not the boundary above it).</summary>
+    public static string FallbackMaxBucketSql(string view) => $"SELECT max(bucket) FROM collect.{view}";
+
+    /// <summary>
+    /// Reads <paramref name="view"/>'s materialization watermark: the engine's own answer preferred, the
+    /// <c>max(bucket) + bucketWidth</c> fallback on any Postgres or cast failure. NULL means nothing has
+    /// materialized at all (or the relation is not a continuous aggregate here) — the caller's cue to skip the
+    /// rollup route entirely for this read and answer from raw alone, the same "no evidence, raw answers
+    /// everything" rule <see cref="RollupCoverage"/> already follows.
+    /// </summary>
+    public static async Task<DateTime?> GetAsync(
+        NpgsqlDataSource dataSource, string view, TimeSpan bucketWidth, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+        ArgumentException.ThrowIfNullOrWhiteSpace(view);
+
+        try
+        {
+            await using var probe = dataSource.CreateCommand(WatermarkSql(view));
+            probe.CommandTimeout = commandTimeoutSeconds;
+            if (await probe.ExecuteScalarAsync(cancellationToken) is DateTime w)
+            {
+                return w;
+            }
+        }
+        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
+        {
+            _ = ex;
+        }
+
+        try
+        {
+            await using var fallback = dataSource.CreateCommand(FallbackMaxBucketSql(view));
+            fallback.CommandTimeout = commandTimeoutSeconds;
+            if (await fallback.ExecuteScalarAsync(cancellationToken) is DateTime max)
+            {
+                return max + bucketWidth;
+            }
+        }
+        catch (Exception ex) when (ex is PostgresException or InvalidCastException)
+        {
+            _ = ex;
+        }
+
+        return null;
+    }
+}

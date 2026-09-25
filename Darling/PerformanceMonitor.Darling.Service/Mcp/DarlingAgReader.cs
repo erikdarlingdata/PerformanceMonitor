@@ -145,6 +145,30 @@ JOIN servers AS s
 WHERE ($1::integer IS NULL OR d.server_id = $1)
 ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
 
+    /// <summary>The nav-gate probe's query (#4189): the SAME (server, ag) groups <see cref="GetAgHealthAsync"/>
+    /// would build, counted server-side instead of assembled into rows. Only the replica grain — <see cref="Build"/>'s
+    /// group set is defined entirely by the replica rows (a database row whose group has no replica row is
+    /// dropped), so the database-grain table never changes this count and this query does not join it.
+    /// <c>UPPER(COALESCE(r.ag_name, ''))</c> mirrors <see cref="Key"/>'s case fold and its NULL-to-empty-string
+    /// mapping exactly, so this can never disagree with <c>AvailabilityGroupCount</c> for the same snapshot —
+    /// pinned by <c>DarlingAgReaderTests</c>. $1 an optional server_id filter — NULL means the whole fleet.</summary>
+    public const string AvailabilityGroupCountSql = @"
+SELECT COUNT(DISTINCT (r.server_id, UPPER(COALESCE(r.ag_name, ''))))
+FROM collect.ag_replica_states AS r
+JOIN
+(
+    SELECT server_id, MAX(collection_time) AS max_collection_time
+    FROM collect.ag_replica_states
+    WHERE ($1::integer IS NULL OR server_id = $1)
+    GROUP BY server_id
+) AS latest
+    ON r.server_id = latest.server_id
+    AND r.collection_time = latest.max_collection_time
+JOIN servers AS s
+    ON s.server_id = r.server_id
+    AND s.is_enabled
+WHERE ($1::integer IS NULL OR r.server_id = $1)";
+
     /* ─────────────────────────── the read ─────────────────────────── */
 
     /// <summary>
@@ -168,6 +192,25 @@ ORDER BY d.server_name, d.ag_name, d.database_name, d.replica_server_name";
             : await ReadDatabasesAsync(postgres, serverIdFilter, cancellationToken);
 
         return Build(replicas, databases, nowUtc ?? DateTime.UtcNow);
+    }
+
+    /// <summary>
+    /// The nav-gate probe (#4189): "how many availability groups does this scope have", without building a
+    /// single <see cref="AvailabilityGroupView"/> to answer it — no per-replica columns, no ORDER BY, no
+    /// database-grain read. One aggregate query (<see cref="AvailabilityGroupCountSql"/>) in place of the
+    /// topology read <see cref="GetAgHealthAsync"/> runs; that read's own <c>AvailabilityGroupCount</c> is
+    /// exactly this number for the same scope and instant.
+    /// </summary>
+    public static async Task<int> GetAvailabilityGroupCountAsync(
+        NpgsqlDataSource postgres,
+        int? serverIdFilter = null,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(AvailabilityGroupCountSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddServerFilter(command, serverIdFilter);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return Convert.ToInt32(result ?? 0L);
     }
 
     /// <summary>
@@ -707,4 +750,12 @@ public sealed class AgHealthResult
 
     [JsonPropertyName("worst_severity")] public HealthSeverity WorstSeverity { get; init; }
     [JsonPropertyName("availability_groups")] public IReadOnlyList<AvailabilityGroupView> AvailabilityGroups { get; init; } = Array.Empty<AvailabilityGroupView>();
+}
+
+/// <summary>The <c>/api/ag/count</c> body (#4189) — the one field <see cref="AgHealthResult.AvailabilityGroupCount"/>
+/// carries, under the same name, so <c>refreshAgNav</c> reads it without fetching the topology that field lives
+/// inside.</summary>
+public sealed class AvailabilityGroupCountResult
+{
+    [JsonPropertyName("availability_group_count")] public int AvailabilityGroupCount { get; init; }
 }
