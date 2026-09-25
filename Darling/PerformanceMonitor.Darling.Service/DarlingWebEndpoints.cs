@@ -1961,7 +1961,7 @@ public static class DarlingWebEndpoints
             ["get_memory_stats"] = R(CatData, "Server memory summary counters.", PServer()),
             ["get_perfmon_stats"] = R(CatData, "Perfmon counter values, filtered by counter/instance.", PServer(), PText("counter_name"), PText("instance_name")),
             ["get_query_heatmap"] = R(CatData, "Query counts per (time bin x log-magnitude bucket) - the viewer's Query Heatmap as a table.", PServer(), PHours(24), PText("metric"), PText("database_name"), PInt("bucket_minutes", 5), PLimit(500), PAsOf()),
-            ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PText("database_name"), PLimit(50), PAsOf()),
+            ["get_query_store_regressions"] = R(CatData, "Queries whose Query Store performance got WORSE vs their baseline.", PServer(), PHours(24), PText("database_name"), PLimit(50), PBool("full_text", true), PAsOf()),
             ["get_query_store_clutter"] = R(CatData, "The Query Store CLUTTER view: per database the collector's read cost (how often and by how much it was the slowest fan-out item), plan churn (plans per query, arrivals per day, one-shot plans) and the options row, each with raw numbers and a decomposed verdict; ONE per-server overhead block (non-sleep QDS_* wait deltas with the excluded sleep waits named, and the Query Store memory clerk). Replicas excluded by architecture with the reason on the row; query_capture_mode (ALL / AUTO / CUSTOM / NONE) carried with capture_mode_known beside it, null meaning a capture older than the V137 rung rather than NONE. window_truncated says the raw tier did not hold the whole window. Composed from collected rows - no new query against the server.", PServer(), PHours(24), PLimit(DarlingMcpQueryStoreClutterTools.DefaultLimit), PBool("include_fleet_median", false), PAsOf()),
             ["get_query_store_top"] = R(CatData, "Top Query Store queries in the window, optionally filtered by execution outcome or to one exact module before ranking; window_truncated says the raw tier did not hold the whole window (effective_hours_back how far it reached).", PServer(), PHours(24), PTop(20), PText("database_name"), PAsOf(), PText("execution_type"), PText("module_name")),
             ["get_long_query_completions"] = R(CatData, "Completed long-running queries captured by the XE trace.", PServer(), PHours(24), PLimit(30), PAsOf()),
@@ -2631,7 +2631,11 @@ public static class DarlingWebEndpoints
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),
+            /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
+               OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
+               though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
+               tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength),
             ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
@@ -2683,7 +2687,11 @@ public static class DarlingWebEndpoints
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name")),
             ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c)),
-            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), as_of: AsOf(c)),
+            /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
+               production store's default call under the shared response budget), but the web viewer has
+               always shown the whole query text. The row pins its OWN default to true so the MCP-side
+               budget cut does not silently shrink what the viewer renders. */
+            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c)),
             ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c)),
             ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name")),
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),

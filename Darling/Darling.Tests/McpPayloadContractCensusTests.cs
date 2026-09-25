@@ -1530,10 +1530,14 @@ public sealed class McpPayloadContractCensusTests
     [
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpSessionTools.cs"],
-            "#4198: query_text is previewed at read time by two tools: get_active_queries previews at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_plan_corrections previews at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
+            "#4198: query_text is previewed at read time by three tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
         ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
+        ("blocked_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_blocking/get_blocked_process_reports' blocked_sql_text previewed to SqlTextPreviewLength (150 chars) — the default row LIMIT also halved (30 -> 15), because the row's other ~37 fields, not this column alone, were most of the default page's weight; full_text or a dedup_key call (Darling only) gets the whole text"),
+        ("blocking_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_blocking/get_blocked_process_reports' blocking_sql_text, previewed the same way as blocked_sql_text_truncated"),
         ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
             "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
     ];
