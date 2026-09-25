@@ -2047,7 +2047,7 @@ public static class DarlingWebEndpoints
             ["get_database_sizes"] = R(CatObjects, "Per-database size breakdown.", PServer()),
             ["get_pvs_stats"] = R(CatObjects, "ADR persistent version store state per database, with an optional top-5 size trend.", PServer(), PInt("trend_hours_back", 0)),
             ["get_index_usage"] = R(CatObjects, "Index usage (seeks/scans/updates) per index. Unused-first, so pass database_name unless you want a server-wide sweep; the answer carries matching_index_count and truncated.", PServer(), PText("database_name"), PLimit(200)),
-            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer()),
+            ["get_object_locking"] = R(CatObjects, "Per-object locking/contention stats.", PServer(), PLimit(200)),
             ["get_table_index_sizes"] = R(CatObjects, "Per-table/index size breakdown.", PServer()),
 
             /* ── plan cache / scheduler (DarlingMcpPlanCacheSchedulerTools) ── */
@@ -2789,7 +2789,14 @@ public static class DarlingWebEndpoints
             ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c)),
             ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0)),
             ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), Str(c, "database_name"), Rows(c, "limit", 200)),
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c)),
+            /* #4258: limit defaults to 75 on the MCP signature now (was an uncapped-looking 200-row hard
+               fetch with no parameter at all), sized under the shared response budget. The web viewer has
+               always effectively received that old 200-row fetch (there was no smaller cap anywhere in the
+               path), so the row pins its OWN limit at 200 - the same value get_index_usage's row above pins
+               for the identical reason - rather than silently dropping to the new MCP default. 200 is well
+               under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
+               reclamped by either validation layer. */
+            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200)),
             ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c)),
 
             /* ── plan cache / scheduler ── */

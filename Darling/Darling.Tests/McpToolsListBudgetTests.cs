@@ -95,7 +95,7 @@ public sealed class McpToolsListBudgetTests
        a 200-row hard cap to 75, measured under McpResponseBudget.DefaultBytes on a seeded fixture). Merged
        with origin/dev's own #4192/#4195/#4193/#4217 bump above; the constant below is the measured total
        with both changes applied, not the two deltas added by hand. */
-    private const int TotalCeilingBytes = 171_637;
+    private const int TotalCeilingBytes = 171_797;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
