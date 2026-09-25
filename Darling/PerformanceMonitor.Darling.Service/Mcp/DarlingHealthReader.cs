@@ -380,16 +380,6 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         return overrides;
     }
 
-    /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
-    /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
-    ///
-    /// <para>#1661: routes to the same retention tier the viewer's calendar does. This matters beyond
-    /// correctness — the calendar and this MCP tool answer the same question, so if only one routed they would
-    /// report different query counts for the same day and there would be no way to tell which was right.</para>
-    ///
-    /// <para>#3541 A9: returns the rows AND the retention horizon they were judged against — see
-    /// <see cref="DailySummaryRangeReadResult"/> and the horizon note in the body.</para>
-    /// </summary>
     /// <summary>#4232: ONE cache for every store this reader serves — <c>get_daily_summary_range</c> shares it
     /// between the web viewer's <c>/api/read</c> mirror and MCP clients, because both paths call this same
     /// method. Keyed inside <see cref="DailySummaryRangeCache{TRow}"/> by (store, server, range, routed
@@ -405,6 +395,16 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// from product code -- only <c>Darling.Tests</c> can even see it (Service's own <c>InternalsVisibleTo</c>).</summary>
     internal static void ResetRangeCacheForTests() => RangeCache.Clear();
 
+    /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
+    /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
+    ///
+    /// <para>#1661: routes to the same retention tier the viewer's calendar does. This matters beyond
+    /// correctness — the calendar and this MCP tool answer the same question, so if only one routed they would
+    /// report different query counts for the same day and there would be no way to tell which was right.</para>
+    ///
+    /// <para>#3541 A9: returns the rows AND the retention horizon they were judged against — see
+    /// <see cref="DailySummaryRangeReadResult"/> and the horizon note in the body.</para>
+    /// </summary>
     public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
         DateTime? referenceUtc = null, bool asOfNow = true, CancellationToken cancellationToken = default)
