@@ -515,6 +515,11 @@ public partial class MainWindow : Window
 
         _statusTimer.Stop();
 
+        /* Close the sentinel connection (#4262) now that collection/archival can no longer run against
+           it — dispose is a write-lock acquire, and by this point nothing should still be holding a read
+           lock behind it. */
+        _databaseInitializer.Dispose();
+
         _closingCleanupDone = true;
 
         /* Re-close on the next dispatcher cycle, not synchronously here. If the awaits above all

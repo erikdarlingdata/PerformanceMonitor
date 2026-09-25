@@ -815,6 +815,12 @@ public partial class RemoteCollectorService
         try
         {
             var serverId = GetServerId(server);
+            /* Write lock (#4343): an UPDATE of one row can collide with another writer of that same row
+               (DuckDbInitializer's own rule), and with the sentinel live an unlocked connection can also
+               attach to an instance ResetDatabaseAsync is tearing down mid-reset. No timeout — this runs on
+               a background collection thread, not the UI thread, and the whole call is already caught and
+               logged as non-fatal below. */
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
 
@@ -846,6 +852,11 @@ WHERE server_id = $3";
         {
             var durationMs = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
 
+            /* Read lock (#4343): a plain append of a new row with a generated id cannot collide with
+               another writer (DuckDbInitializer's own rule), but this runs every collection cycle for
+               every collector, so with the sentinel live an unlocked connection can attach to an instance
+               ResetDatabaseAsync is tearing down mid-reset rather than merely reading stale data. */
+            using var readLock = _duckDb.AcquireReadLock();
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
 
@@ -1404,6 +1415,8 @@ WHERE server_id = $3";
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1446,6 +1459,8 @@ WHERE server_id = $3";
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1490,6 +1505,8 @@ WHERE server_id = $3";
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1525,6 +1542,8 @@ WHERE server_id = $3";
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1551,6 +1570,8 @@ WHERE server_id = $3";
     {
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1581,6 +1602,8 @@ WHERE server_id = $3";
         var state = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
+            // Read lock (#4343): a plain SELECT, cancelable since this method already carries the token.
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
@@ -1620,6 +1643,11 @@ WHERE server_id = $3";
 
         try
         {
+            /* Write lock (#4343): INSERT OR REPLACE is an upsert, which can collide with another writer of
+               the same key (DuckDbInitializer's own rule). No cancelable write-lock overload exists, so
+               this blocks like the class's other non-UI, best-effort writers — the whole call is already
+               caught and logged as non-fatal below. */
+            using var writeLock = _duckDb.AcquireWriteLock();
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             foreach (var entry in state)
