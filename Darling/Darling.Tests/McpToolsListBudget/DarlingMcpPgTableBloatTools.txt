@@ -1,0 +1,6 @@
+# DarlingMcpPgTableBloatTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_pg_table_bloat 605
+param get_pg_table_bloat.as_of 167
+param get_pg_table_bloat.hours_back 115
+param get_pg_table_bloat.limit 187
+param get_pg_table_bloat.server_name 28

@@ -197,8 +197,8 @@ public sealed class CollectionOutputBesideCostTests
         /* The precondition, named so a signature change reports itself rather than turning the assertions
            below into a vacuous pass over a list that no longer means what this test thinks. Six since
            #3754: the faulted-run count (a RUN-CLASS count, like the note count beside it) and the
-           event-collector bool, computed by the caller from the name on Classify's isOnLoad pattern
-           precisely so that this method still takes no string. */
+           event-collector bool, computed by the caller from the name on IsEventCollector's own name-list
+           pattern, precisely so that this method still takes no string. */
         Assert.Equal(6, parameters.Length);
 
         Assert.Equal(
@@ -228,7 +228,7 @@ public sealed class CollectionOutputBesideCostTests
     /// <summary>
     /// And the direction that equality cannot reach: <c>denied_since_last_success</c> must not have become a
     /// band input on the way to being consumed by the finding. Read off the TYPE with a count precondition,
-    /// so a tenth parameter — an output count, a denial flag, anything — fails here rather than passing
+    /// so a further parameter — an output count, a denial flag, anything — fails here rather than passing
     /// unnoticed while <see cref="CollectorHealthClassifier.DeniedSinceLastSuccess"/>'s doc comment still
     /// claims it never bands.
     /// </summary>
@@ -241,9 +241,11 @@ public sealed class CollectionOutputBesideCostTests
             .Select(p => p.Name!)
             .ToArray();
 
-        /* 10 since #3240 added extensionMissingCount — a run-class count like the two beside it, not an
-           output or denial-currency term, which is what this pin refuses. */
-        Assert.Equal(10, parameters.Length);
+        /* 10 after #3240 added extensionMissingCount — a run-class count like the two beside it, not an
+           output or denial-currency term, which is what this pin refuses; #4000 then removed isOnLoad
+           (an on-load collector is no longer a distinct input to the ladder, only a distinct CADENCE the
+           caller resolves before calling in), netting 9. */
+        Assert.Equal(9, parameters.Length);
         Assert.DoesNotContain(parameters, p => p.Contains("rows", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("output", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(parameters, p => p.Contains("denied", StringComparison.OrdinalIgnoreCase)
@@ -342,7 +344,10 @@ public sealed class CollectionOutputBesideCostTests
             var source = File.ReadAllText(Path.Combine(RepoRoot(), relative));
 
             Assert.Contains("what it BOUGHT", source, StringComparison.Ordinal);
-            Assert.Contains("that zero was CORRECT", source, StringComparison.Ordinal);
+            /* #3898: the pg_deadlocks anecdote that used to carry "that zero was CORRECT" moved to the
+               CHANGELOG (D4); the rule it taught - a zero can be the healthy reading - stays in the tail
+               right after it, so the pin re-points to that rule instead of the story. */
+            Assert.Contains("would fire on the healthy quiet install", source, StringComparison.Ordinal);
             Assert.Contains("deliberately NOT a band", source, StringComparison.Ordinal);
             Assert.Contains("needs a grant", source, StringComparison.Ordinal);
         }

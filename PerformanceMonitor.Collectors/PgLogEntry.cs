@@ -39,8 +39,8 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="ZoneText">The prefix's zone token as written — <c>log_timezone</c> rendered for THIS line.</param>
 /// <param name="OccurredAtUtc">The stamp, read as UTC. Kind is Utc.</param>
 /// <param name="Pid">The backend's <c>%p</c>.</param>
-/// <param name="PrefixRest">Whatever the prefix carried between the pid and the severity label — user@db
-/// under a <c>%u@%d</c> prefix, a query id under <c>%Q</c>, a SQLSTATE under <c>%e</c>. Best-effort
+/// <param name="PrefixRest">Whatever the prefix carried besides the stamp, the zone and the pid, before the pid and
+/// after it — user@db under a <c>%u@%d</c> prefix, a query id under <c>%Q</c>, a SQLSTATE under <c>%e</c>. Best-effort
 /// extraction from it lives on the assembler; the raw text is kept so a parser can ask for more.</param>
 /// <param name="Severity">PostgreSQL's own label: LOG, INFO, NOTICE, WARNING, ERROR, FATAL, PANIC (or a
 /// DEBUGn, which nothing stores).</param>
@@ -60,6 +60,14 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="DetailComplete">Whether the DETAIL is proven whole (#3996's review): another companion followed it
 /// in this entry and nothing cut into its lines. <see cref="PgLogTextRedactor.RedactDetail"/> trusts a deadlock
 /// report's later query heads after one that does not read to its end only then.</param>
+/// <param name="Location">The reporting function's own name — csvlog's <c>location</c> column (index 21 of 26,
+/// rendered <c>funcname, file:line</c>) or jsonlog's <c>func_name</c> key — filled only under
+/// <c>log_error_verbosity = verbose</c>, and null on every other verbosity and on the stderr transport, which
+/// carries no such field at all (#4058 item 2). A genuine deadlock report is written by PostgreSQL's own
+/// <c>DeadLockReport</c> and a genuine <c>auto_explain</c> capture by its own <c>explain_ExecutorEnd</c> —
+/// verified on a live 18 target — so a RAISE built to imitate either carries the reporting PL/pgSQL frame's own
+/// function, <c>exec_stmt_raise</c>, instead. LAST member, added rather than inserted, so every existing
+/// positional construction of this record stays source-compatible.</param>
 public readonly record struct PgLogEntry(
     string TimestampText,
     string ZoneText,
@@ -76,7 +84,8 @@ public readonly record struct PgLogEntry(
     string? DatabaseName,
     string? SqlState,
     string RawText,
-    bool DetailComplete = false)
+    bool DetailComplete = false,
+    string? Location = null)
 {
     /// <summary>
     /// PostgreSQL's severity labels ranked by SERIOUSNESS, which is the order a reader filtering on

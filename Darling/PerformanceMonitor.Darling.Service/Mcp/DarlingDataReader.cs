@@ -230,7 +230,7 @@ internal static class DarlingDataReader
     /// did not attribute the row (pre-2022, or a 2022 standalone).
     /// </summary>
     public sealed record QueryStoreRow(
-        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash,
+        string DatabaseName, long QueryId, long PlanId, string QueryHash, string QueryPlanHash, string ExecutionTypeDesc, string? ModuleName,
         long TotalExecutions, double AvgDurationMs, double AvgCpuTimeMs, double AvgLogicalReads,
         double AvgLogicalWrites, double AvgPhysicalReads, double AvgRowcount, DateTime? LastExecutionTime, string QueryText,
         string? ReplicaRole);
@@ -1330,7 +1330,8 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// Reads <see cref="QueryStoreWindowFloorSql"/>. Null when the window holds nothing at all, which the caller
-    /// reports as "nothing was read" rather than as an absence of activity.
+    /// reports as "nothing was read" rather than as an absence of activity. Deliberately unfiltered: the floor is
+    /// a property of the tier, so a database or module filter on the top read does not narrow it.
     /// </summary>
     public static async Task<DateTime?> GetQueryStoreWindowFloorAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc,
@@ -1348,11 +1349,13 @@ internal static class DarlingDataReader
     /// <summary>
     /// Top Query Store groups over the window — a focused projection of the viewer's
     /// <c>QueryStoreTopSql</c> (the columns Lite's get_query_store_top returns): group by
-    /// (database, query_id, plan_id, query_hash, replica_role), average the per-interval metrics, rank by total duration
-    /// (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending, over-fetch by 5 for the WAITFOR
-    /// trim, cap at top. The avg columns are bigint (per-interval averages) → double precision before the
-    /// AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view). $1 server_id, $2/$3 window
-    /// (naive UTC), $4 top.
+    /// (database, query_id, plan_id, query_hash, execution_type_desc, replica_role), average the per-interval
+    /// metrics, rank by total duration (<c>SUM(execution_count) * AVG(avg_duration_us)</c>) descending,
+    /// over-fetch by 5 for the WAITFOR trim, cap at top. The avg columns are bigint (per-interval averages) →
+    /// double precision before the AVG/scale. Reads the base <c>query_store_stats</c> table (no v_ view).
+    /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
+    /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
+    /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
     /// </summary>
     public const string QueryStoreTopSql = """
         WITH deduped AS (
@@ -1380,6 +1383,10 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* Filtered HERE, before the ROW_NUMBER, not after it: execution_type_desc is in the partition,
+               so dropping the other outcomes first cannot change which row wins any partition, and the window
+               sort then sees only the outcome asked for. */
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
         ranked AS (
             SELECT
@@ -1387,6 +1394,11 @@ internal static class DarlingDataReader
                 query_id,
                 plan_id,
                 query_hash,
+                /* A GROUP BY key, like replica_role below: Query Store keeps Regular, Aborted and Exception
+                   executions of one plan in separate runtime-stats rows, and averaging them together would
+                   blend a timeout's duration into the plan's normal cost. One row per outcome instead. */
+                execution_type_desc,
+                MAX(module_name) AS module_name,
                 /* A GROUP BY key, not MAX(): an AG's Query Store for secondary replicas (2022+) keeps ONE
                    shared store on the primary holding every replica's rows, so grouping without it would
                    average primary and secondary workload into a single blended row. No-op on a
@@ -1403,7 +1415,8 @@ internal static class DarlingDataReader
                 MAX(query_plan_hash) AS query_plan_hash
             FROM deduped
             WHERE rn = 1
-            GROUP BY database_name, query_id, plan_id, query_hash, replica_role
+            AND   ($7::text IS NULL OR module_name = $7)
+            GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role
             ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC
             LIMIT $4 + 5
         )
@@ -1413,6 +1426,8 @@ internal static class DarlingDataReader
             r.plan_id,
             r.query_hash,
             r.query_plan_hash,
+            r.execution_type_desc,
+            r.module_name,
             r.total_executions,
             r.avg_duration_ms,
             r.avg_cpu_time_ms,
@@ -1455,8 +1470,14 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        CancellationToken cancellationToken = default) =>
+        GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, moduleName: null, cancellationToken);
+
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
-        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
@@ -1464,6 +1485,8 @@ internal static class DarlingDataReader
         AddWindow(command, serverId, startUtc, endUtc);
         AddInt(command, top);
         AddNullableText(command, databaseName);
+        AddNullableText(command, executionType);
+        AddNullableText(command, moduleName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -1473,16 +1496,18 @@ internal static class DarlingDataReader
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
                 reader.IsDBNull(3) ? "" : reader.GetString(3),
                 reader.IsDBNull(4) ? "" : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.IsDBNull(6) ? 0 : reader.GetDouble(6),
-                reader.IsDBNull(7) ? 0 : reader.GetDouble(7),
+                reader.IsDBNull(5) ? "" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
                 reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
                 reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
                 reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? "" : reader.GetString(13),
-                reader.IsDBNull(14) ? null : reader.GetString(14)));
+                reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
+                reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
+                reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+                reader.IsDBNull(15) ? "" : reader.GetString(15),
+                reader.IsDBNull(16) ? null : reader.GetString(16)));
         }
 
         return rows;
@@ -3211,13 +3236,18 @@ internal sealed class CollectorHealth
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
-    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity.
-    /// Internal since #2296: the tool's sweep-pressure roll-up amortizes each collector's average
-    /// duration by this same cadence, so both readers of it share one resolution.</summary>
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so an
+    /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
+    /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
+    /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
+    /// shipped default, not the resolved per-server override, so all three surfaces stay in parity. Internal
+    /// since #2296: the tool's sweep-pressure roll-up amortizes each collector's average duration by this same
+    /// cadence, so both readers of it share one resolution.</summary>
     internal int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
+            : 0;
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
@@ -3234,7 +3264,7 @@ internal sealed class CollectorHealth
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and
            would return HEALTHY forever. */

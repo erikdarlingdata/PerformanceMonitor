@@ -477,32 +477,29 @@ public sealed class CollectionCaveatLedgerParityTests
         Assert.Equal(descriptions[0].Text, descriptions[1].Text);
     }
 
+    /// <summary>
+    /// #3898 Phase 2 (D5): the instructions' per-tool row that used to carry this clause is gone on both
+    /// SKUs — <c>get_collection_health</c>'s own description is now the only surface, and it already states
+    /// the clause without the mid-sentence splice this pin was written against (the defect where it landed
+    /// inside "come in two sizes and … the mean describes neither").
+    /// </summary>
     [Fact]
-    public void BothInstructionTables_CarryTheClauseOnTheirCollectionHealthRow()
+    public void BothDescriptions_CarryTheAnalysisCaveatsClause_WithoutASplice()
     {
         foreach (var (sku, path) in new[]
         {
-            ("Darling", new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs" }),
-            ("Lite", new[] { "Lite", "Mcp", "McpInstructions.cs" })
+            ("Darling", new[] { "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs" }),
+            ("Lite", new[] { "Lite", "Mcp", "McpHealthTools.cs" })
         })
         {
-            /* The RAW reader, with each line trimmed: every anchor here lives inside ONE table row, so
-               nothing this pin matches spans a line break and the LF reader would state a property it does
-               not have (the RepoFileAdoptionTests distinction). */
             var source = RepoFile.ReadRepoFile(path);
-            var row = source
-                .Split('\n')
-                .Select(l => l.Trim())
-                .SingleOrDefault(l => l.StartsWith("| `get_collection_health` |", StringComparison.Ordinal));
-            Assert.False(row is null, $"{sku}: the get_collection_health instruction row has moved");
+            var at = source.IndexOf("carries analysis_caveats", StringComparison.Ordinal);
+            Assert.True(at > 0, $"{sku}: get_collection_health's analysis_caveats clause has moved");
 
-            Assert.Contains("; carries analysis_caveats when a recent analysis pass could not read a fact family |", row!, StringComparison.Ordinal);
-            /* The clause is APPENDED to the row's prose, not spliced into the middle of a sentence — the
-               defect this pin was written against, where it landed inside "come in two sizes and … the mean
-               describes neither". */
-            Assert.DoesNotContain("and ; carries analysis_caveats", row!, StringComparison.Ordinal);
-            Assert.DoesNotContain("fact familyread", row!, StringComparison.Ordinal);
-            Assert.DoesNotContain("fact familythe", row!, StringComparison.Ordinal);
+            var clause = source.Substring(at, 200);
+            Assert.DoesNotContain("mean describes neitheranalysis_caveats", clause, StringComparison.Ordinal);
+            Assert.DoesNotContain("familyread", clause, StringComparison.Ordinal);
+            Assert.DoesNotContain("familythe", clause, StringComparison.Ordinal);
         }
     }
 

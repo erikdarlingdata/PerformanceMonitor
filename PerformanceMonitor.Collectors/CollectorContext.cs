@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -241,6 +242,61 @@ public sealed class CollectorContext
     /// install/09_collect_query_store.sql).
     /// </summary>
     public bool CapturePlanXml { get; init; }
+
+    /// <summary>
+    /// Whether this target has granted <c>pg_read_binary_file</c> (#4046 part 1c), resolved by the host
+    /// through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// the three collectors that read <see cref="PgServerLogTail"/>'s tail. False (the default, and what
+    /// every host that never sets this leaves it at) keeps today's <see cref="PgServerLogTail.TailCteSql"/>
+    /// route; true switches <c>BuildQuery</c> to <see cref="PgServerLogTail.TailCteBinarySql"/>. Settable
+    /// rather than init-only because the host resolves it on the connection it is about to hand the
+    /// definition, the same shape as <see cref="CurrentDatabaseName"/> and <see cref="Watermark"/>.
+    /// </summary>
+    public bool PgReadBinaryFileGranted { get; set; }
+
+    /// <summary>
+    /// Whether this target's <c>log_destination</c> includes <c>csvlog</c> (#4053 part a1b), resolved by the
+    /// host through <see cref="PgLogFormatCapability.IsCsvlogEnabledAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <c>pg_log_events</c> alone — the deadlock and plan-capture collectors never read this. False (the
+    /// default) keeps today's stderr route via <see cref="PgServerLogTail.TailCteSql"/>; true switches
+    /// <c>PgLogEventsCollector.BuildQuery</c> to the csvlog pair built on <see cref="PgServerLogTail.TailCsvCteSql"/>.
+    /// Settable rather than init-only for the same reason <see cref="PgReadBinaryFileGranted"/> is: the host
+    /// resolves it on the connection it is about to hand the definition.
+    /// </summary>
+    public bool PgLogUsesCsvlog { get; set; }
+
+    /// <summary>
+    /// Whether this target's <c>log_destination</c> includes <c>jsonlog</c> (#4053 part a2), resolved by the
+    /// host through <see cref="PgLogFormatCapability.IsJsonlogEnabledAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <c>pg_log_events</c> alone — the deadlock and plan-capture collectors never read this. False (the
+    /// default) leaves <see cref="PgLogUsesCsvlog"/> to decide between the csvlog and stderr routes; true
+    /// switches <c>PgLogEventsCollector.BuildQuery</c> to the jsonlog pair built on
+    /// <see cref="PgServerLogTail.TailJsonCteSql"/>/<see cref="PgServerLogTail.TailJsonCteBinarySql"/>, ahead of
+    /// both siblings — jsonlog wins when more than one is configured, for the reason
+    /// <see cref="PgLogFormatCapability"/>'s own remarks give. Settable rather than init-only for the same
+    /// reason <see cref="PgReadBinaryFileGranted"/> is: the host resolves it on the connection it is about to
+    /// hand the definition.
+    /// </summary>
+    public bool PgLogUsesJsonlog { get; set; }
+
+    /// <summary>
+    /// The <see cref="Encoding"/> to decode the binary route's bytes with (#4062) — the connected database's own
+    /// <c>server_encoding</c>, mapped by <see cref="PgServerEncoding.TryGet"/>. Set alongside
+    /// <see cref="PgReadBinaryFileGranted"/> in <c>DarlingCollectorRunner.ResolvePgReadBinaryFileGrantAsync</c>.
+    /// Null whenever <see cref="PgReadBinaryFileGranted"/> is false: a caller must never read the bytea as text
+    /// without checking the grant first, and a null encoding here is one more way that mistake fails loudly
+    /// instead of silently defaulting to UTF-8.
+    /// </summary>
+    public Encoding? PgLogEncoding { get; set; }
+
+    /// <summary>
+    /// The store's log-hash key (#4004): the secret the <c>pg_log_events</c> collector keys its two stored identities
+    /// with, <c>raw_line_hash</c> and <c>statement_fingerprint</c>. The host loads it once at start from outside the
+    /// store and hands the same instance to every run. Null means the host has none (Lite never collects PostgreSQL
+    /// logs; a Darling service whose key file could not be used refuses): the collector then refuses to run before it
+    /// touches the target, rather than hashing without a key.
+    /// </summary>
+    public PgLogHashKey? LogHashKey { get; init; }
 
     /// <summary>
     /// When true, the query_store payload leaves <c>query_sql_text</c> NULL and the host is responsible

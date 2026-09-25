@@ -50,8 +50,14 @@ jobs:
     # the suite when this reads `skipped`; a second list of paths there would be free to fall out
     # of agreement with the list here, and area lists falling out of agreement with what a guard
     # reads is the thing that job exists to stop.
+    #
+    # docs-fastpath is published the same way, from the classify step's OWN decision rather than a
+    # second copy of the docs allowlist: darling-tree-guards must not pay ~5 minutes running the whole
+    # suite on a docs-only change just because that change also left Darling.Tests `skipped` - the two
+    # skip reasons look identical from `outcome` alone, so the guards job needs to tell them apart.
     outputs:
       darling-tests: ${{ steps.darling-tests.outcome }}
+      docs-fastpath: ${{ steps.fastpath.outputs.engaged }}
 
     steps:
       - uses: actions/checkout@v7
@@ -127,18 +133,14 @@ jobs:
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
-              # #2489: LiteRuntimePrerequisiteDocsTests derives Lite's .NET runtime prerequisites
-              # from the BUILT runtimeconfig and from the publish shapes in this very file, then
-              # asserts these two READMEs say so - which artifact is self-contained, which needs two
-              # runtimes. Naming them here is not optional. Every area filter carves markdown out
-              # (dir/**/!(*.md)), and a docs-only PR additionally engages the fast path above, which
-              # skips .NET setup and restore outright - so without these two entries the guard could
-              # not run on a README-only change, i.e. on exactly the edit that would undo the fix.
-              # The cost is that a root-README edit now runs the Lite suite; that is the same trade
-              # the Darling entries below already take, and the alternative is a guard that quietly
-              # stops guarding.
-              - 'README.md'
-              - 'Lite/README.md'
+              # #2489, changed by Erik's 2026-09-24 ruling that docs-only changes skip CI:
+              # README.md and Lite/README.md used to sit here so LiteRuntimePrerequisiteDocsTests
+              # (which reads these two READMEs against the built runtimeconfig and this file's
+              # publish shapes) could still run on a README-only change. That guard now runs on
+              # every CODE pull request and in the nightly instead - both of which build Lite -
+              # so a README edit alone no longer has to pay the Lite suite to keep it exercised.
+              # A README-only PR takes the docs fast path below and does not build or test
+              # anything; the trade is deliberate and is Erik's call, not an oversight.
               # Same silently-stops-guarding reason as the darling filter's Lite entries below:
               # Lite.Tests/ThemeParityLiteDarlingTests.cs READS the Darling viewer's theme
               # dictionaries to assert the two apps' shared brush keys still resolve to the same
@@ -230,6 +232,10 @@ jobs:
               - 'CITATION.cff'
               - '.gitignore'
               - '.gitattributes'
+              # The exact root path, not '**/*.txt': Darling/Darling.Tests/McpToolsListBudget/*.txt
+              # (and Lite's copy) are test INPUTS, not documentation, and a bare extension glob
+              # would wave every budget-pin edit through the fast path unbuilt and untested.
+              - 'llms.txt'
               - 'docs/**/*.{md,svg,png,jpg,jpeg,gif}'
               - 'Screenshots/**/*.{md,svg,png,jpg,jpeg,gif}'
             # Catch-all COUNTER, not a boolean gate: the classify step below decides
@@ -247,20 +253,21 @@ jobs:
       # it off every path where a skipped restore would be a real loss:
       #   release  — the filter step does not even run there, and a release must always
       #              compile and publish from a cold, fully restored tree.
-      #   push     — dev/main pushes are the integration signal for what just merged, so
-      #              they restore unconditionally even for a docs-only commit. Cheap
-      #              insurance: this only forces the restore back on, it does not force
-      #              the per-product build/test steps, which stay path-gated as before.
-      #   merge_group — a queue run is the LAST validation before its result lands on dev,
-      #              so it takes the same always-restore path as a push.
       #   areas    — belt and suspenders: even when the counts say docs-only, any lit
       #              area filter vetoes the fast path, because an area=true with restore
       #              skipped would run `dotnet build --no-restore` against nothing. The
       #              two classifications are built from the same allowlist so they cannot
       #              disagree today; this guard is for the day someone edits one and not
       #              the other.
-      # Everything else (pull_request) is eligible, and engages only when EVERY changed
-      # file is on the documentation allowlist (all_count == docs_count).
+      # Everything else — including push and merge_group, per Erik's 2026-09-24 ruling —
+      # is eligible, and engages only when EVERY changed file is on the documentation
+      # allowlist (all_count == docs_count). push/merge_group used to force the restore
+      # back on unconditionally as "cheap insurance" against NuGet drift that a lock-file
+      # diff would not show; that insurance buys nothing on a docs-only commit specifically
+      # BECAUSE it is docs-only — no lock file, Directory.Packages.props, or global.json is
+      # among the changed files (all of those are `root`, which is off the docs allowlist
+      # and vetoes the fast path via the areas guard above), so nothing this restore
+      # validates could have moved since the push that last validated it.
       - name: Classify change for the docs fast path
         id: fastpath
         shell: bash
@@ -275,12 +282,6 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "engaged=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Full build::Release event - the docs fast path never applies to a release."
-            exit 0
-          fi
-
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo "engaged=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Full build::${{ github.event_name }} on '${{ github.ref_name }}' - integration runs always restore, even for a docs-only change."
             exit 0
           fi
 
@@ -971,22 +972,97 @@ jobs:
           & "$bin\createdb.exe" -h 127.0.0.1 -p 5541 -U darling darling
           if ($LASTEXITCODE -ne 0) { throw "createdb failed ($LASTEXITCODE)" }
 
+      # #4160: three more small throwaway clusters, one per log-format shape, so the
+      # csvlog/jsonlog/auto_explain live tests stop skipping in CI (their env vars were never set —
+      # every run "passed" without ever exercising the planted-input proofs #4053/#4058 added). No
+      # TimescaleDB jobs run on these targets, so the worker settings above (sized for the 5541
+      # store's hypertable count) would be needless headroom here; 8/16 is plenty.
+      #   5542 (csvlog): lights up PgLogEventsCsvlogLiveTests, PgDeadlocksCsvlogLiveTests,
+      #     PgRaiseShapedRecordsLiveTests (DARLING_TEST_PG_CSVLOG) and PgPlanCaptureCsvLiveTests,
+      #     which LOADs auto_explain per session on top of it (DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN).
+      #     deadlock_timeout is shortened so a two-session deadlock actually fires inside a test's
+      #     patience; log_min_messages is notice, not the tighter warning/error, because LOG ranks
+      #     ABOVE ERROR in Postgres's server-log severity order and a stricter filter would silently
+      #     drop the very deadlock/duration LOG rows these tests read.
+      #   5543 (jsonlog): PgLogEventsJsonlogLiveTests (DARLING_TEST_PG_JSONLOG) — it also asserts
+      #     that csvlog is OFF on this target, so this cluster must not preload csvlog as a sibling.
+      #   5544 (stderr,csvlog): PgPlanCaptureLiveTests (DARLING_TEST_PG_AUTOEXPLAIN) and
+      #     PgLogTailStderrSiblingLiveTests (DARLING_TEST_PG_CSVLOG_SIBLING) — both need stderr
+      #     present alongside csvlog, and the %Q-bearing log_line_prefix those tests parse.
+      - name: Initialize and start the log-format PostgreSQL clusters
+        if: steps.filter.outputs.darling == 'true'
+        shell: pwsh
+        run: |
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+
+          # clusterDataDir, not dataDir: CiClusterWorkerSizingTests' ConfAppend regex is keyed on the
+          # literal path "$dataDir\postgresql.conf" the 5541 cluster's step writes, and these clusters'
+          # own worker counts (8/16, not the hypertable-derived 74/85) would fail that guard as drift if
+          # this function reused the same variable name.
+          function Start-LogFormatCluster($clusterDataDir, $logFile, $port, $extraConfLines) {
+            & "$bin\initdb.exe" -D $clusterDataDir -U darling -A trust --encoding=UTF8
+            if ($LASTEXITCODE -ne 0) { throw "initdb failed for port $port ($LASTEXITCODE)" }
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "port = $port"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 8"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "max_worker_processes = 16"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "deadlock_timeout = '100ms'"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "compute_query_id = on"
+            Add-Content -Path "$clusterDataDir\postgresql.conf" -Value "log_min_messages = notice"
+            foreach ($line in $extraConfLines) { Add-Content -Path "$clusterDataDir\postgresql.conf" -Value $line }
+            & "$bin\pg_ctl.exe" -D $clusterDataDir -l $logFile -w start
+            if ($LASTEXITCODE -ne 0) { if (Test-Path $logFile) { Get-Content $logFile -Tail 50 }; throw "pg_ctl start failed for port $port ($LASTEXITCODE)" }
+            & "$bin\createdb.exe" -h 127.0.0.1 -p $port -U darling darling
+            if ($LASTEXITCODE -ne 0) { throw "createdb failed for port $port ($LASTEXITCODE)" }
+          }
+
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-csvlog" "$env:RUNNER_TEMP\darling-pg-csvlog.log" 5542 @(
+            "logging_collector = on",
+            "log_destination = 'csvlog'",
+            "log_timezone = 'UTC'"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-jsonlog" "$env:RUNNER_TEMP\darling-pg-jsonlog.log" 5543 @(
+            "logging_collector = on",
+            "log_destination = 'jsonlog'"
+          )
+          Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog" "$env:RUNNER_TEMP\darling-pg-stderrcsvlog.log" 5544 @(
+            "logging_collector = on",
+            "log_destination = 'stderr,csvlog'",
+            "log_line_prefix = '%m [%p] %Q '"
+          )
+
       # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
       # lights up the managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset — the one
       # live-SQL-Server E2E stays skipped (no SQL Server on the runner). Full suite (not a filtered
       # subset): the ungated ~3s overlap with the build job is negligible and a filter could hide a
       # test the way narrow filters have bitten before.
+      #
+      # #4160: DARLING_TEST_PG_CSVLOG/_CSVLOG_AUTOEXPLAIN point at the 5542 csvlog cluster,
+      # DARLING_TEST_PG_JSONLOG at the 5543 jsonlog cluster, and DARLING_TEST_PG_AUTOEXPLAIN/
+      # _CSVLOG_SIBLING at the 5544 stderr+csvlog cluster. DARLING_TEST_PG (5541) stays the store
+      # for the classes that read one target's log while writing to a separate store.
       - name: Run Darling PG tests
         if: steps.filter.outputs.darling == 'true'
         shell: pwsh
         env:
           DARLING_TEST_PG: "Host=127.0.0.1;Port=5541;Username=darling;Database=darling"
           DARLING_TEST_PGRUNTIME: ${{ github.workspace }}\Darling\artifacts\pg-runtime
+          DARLING_TEST_PG_CSVLOG: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          # csvlog-only from its first start, with log_timezone = 'UTC': PgLogTailStderrSiblingLiveTests' #4019 case.
+          DARLING_TEST_PG_CSVLOG_ONLY: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          DARLING_TEST_PG_JSONLOG: "Host=127.0.0.1;Port=5543;Username=darling;Database=darling"
+          DARLING_TEST_PG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
+          DARLING_TEST_PG_CSVLOG_SIBLING: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
         run: |
           $ErrorActionPreference = 'Stop'
-          $raw = dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json | Out-String
+          $lines = @(dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -list classes/json)
           if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
-          $classes = @($raw | ConvertFrom-Json)
+          # Only the runner's one-line JSON array is parsed: the dotnet CLI can print its own notice on stdout,
+          # and a line starting "W" after the array failed a shard's ConvertFrom-Json on 2026-09-23.
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+          $classes = @($json[0] | ConvertFrom-Json)
           if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
           $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -1000,13 +1076,25 @@ jobs:
           dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @shardArgs -trx TestResults/darling-pr-${{ matrix.shard }}.trx
           exit $LASTEXITCODE
 
+      # #4160: stop all four clusters (the 5541 store plus the three 5542/5543/5544 log-format
+      # clusters started above). Each stop is independent and best-effort: a cluster that never
+      # started (an earlier step threw) has no data dir to stop, and one shard's stop failing must
+      # not skip the others' cleanup.
       - name: Stop PostgreSQL
         if: always() && steps.filter.outputs.darling == 'true'
         shell: pwsh
         run: |
-          $bin     = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
-          $dataDir = "$env:RUNNER_TEMP\darling-pgdata"
-          if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+          $bin = "$env:GITHUB_WORKSPACE\Darling\artifacts\pg-runtime\pgsql\bin"
+          if (Test-Path "$bin\pg_ctl.exe") {
+            foreach ($dataDir in @(
+              "$env:RUNNER_TEMP\darling-pgdata",
+              "$env:RUNNER_TEMP\darling-pgdata-csvlog",
+              "$env:RUNNER_TEMP\darling-pgdata-jsonlog",
+              "$env:RUNNER_TEMP\darling-pgdata-stderrcsvlog"
+            )) {
+              if (Test-Path $dataDir) { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
+            }
+          }
           exit 0
 
       - name: Upload PG log and test results on failure
@@ -1017,6 +1105,9 @@ jobs:
           name: darling-pg-failure-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/darling-pg.log
+            ${{ runner.temp }}/darling-pg-csvlog.log
+            ${{ runner.temp }}/darling-pg-jsonlog.log
+            ${{ runner.temp }}/darling-pg-stderrcsvlog.log
             TestResults/
           if-no-files-found: ignore
 
@@ -1291,6 +1382,7 @@ jobs:
         shell: bash
         env:
           DARLING_TESTS: ${{ needs.build.outputs.darling-tests }}
+          DOCS_FASTPATH: ${{ needs.build.outputs.docs-fastpath }}
           WORKFLOW: ${{ steps.filter.outputs.workflow }}
         run: |
           set -euo pipefail
@@ -1298,6 +1390,9 @@ jobs:
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards skipped::Release event - the build job compiles and runs every suite unconditionally."
+          elif [ "${DOCS_FASTPATH:-}" = "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Whole-tree guards skipped::The build job took the docs fast path - every changed file is on the documentation allowlist, so there is no code change for the whole-tree guards to catch. They still run on the next code PR and in the nightly."
           elif [ "${DARLING_TESTS:-}" = "skipped" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "::notice title=Whole-tree guards running::The build job's path filters left Darling.Tests unrun, so the guards that read the whole repository run here."
@@ -1409,8 +1504,6 @@ jobs:
             lite_shard:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
-              - 'README.md'
-              - 'Lite/README.md'
               - 'Darling/PerformanceMonitor.Darling.Viewer/**/!(*.md)'
               - 'Darling/Darling.Tests/**/!(*.md)'
               - 'Darling/PerformanceMonitor.Darling.Service/**/!(*.md)'
@@ -1441,9 +1534,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $raw = dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json | Out-String
+          $lines = @(dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -list classes/json)
           if ($LASTEXITCODE -ne 0) { throw "class listing failed with exit code $LASTEXITCODE" }
-          $classes = @($raw | ConvertFrom-Json)
+          # Only the runner's one-line JSON array is parsed; see the Darling shard step (a CLI notice on stdout).
+          $json = @($lines | Where-Object { $_ -match '^\s*\[' })
+          if ($json.Count -ne 1) { throw "expected one JSON array line from the class listing, got $($json.Count): $($lines -join ' | ')" }
+          $classes = @($json[0] | ConvertFrom-Json)
           if ($classes.Count -eq 0) { throw 'the class listing returned no classes - the shard would silently run nothing' }
 
           $sha = [System.Security.Cryptography.SHA256]::Create()

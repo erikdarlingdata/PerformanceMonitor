@@ -107,30 +107,108 @@ public sealed class PgTargetDeadlockDrillDownTests
         Assert.DoesNotContain("DeSkew", code, StringComparison.Ordinal);
     }
 
+    /* ───────────────────────── stored findings (#4005) ───────────────────────── */
+
+    /// <summary>
+    /// #4005: a finding stored before the SQL in deadlock reports was normalized persisted its exemplar's victim
+    /// statement, graph and fingerprint raw, the fingerprint in its prose too, and a hash over the raw graph.
+    /// Every read of a stored finding brings it to the new rules: normalized, the prose's fingerprint replaced,
+    /// and the report named by timestamp and pid. A second pass changes nothing.
+    /// </summary>
+    [Fact]
+    public void AStoredFindingsExemplars_ReadBackNormalized_AndNameTheirReportByTimeAndPid()
+    {
+        const string rawStatement = "UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111";
+        const string rawGraph = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE accounts SET pin = '4721' WHERE card = 4111111111111111\nProcess 12: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559";
+        var rawHash = PgDeadlockLogParser.HashOf(rawGraph);
+        var lastSeen = new DateTime(2026, 9, 1, 12, 30, 15, 250);
+        var sentence = $"Exemplars: 1 report captured. The most frequent 2-participant shape involves ShareLock on transaction with the victim `{rawStatement}`, seen 1 time.";
+
+        var section = JsonSerializer.SerializeToElement(new
+        {
+            engine_counted = 1,
+            exemplars = new[]
+            {
+                new
+                {
+                    rank = 1,
+                    last_seen = lastSeen.ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                    deadlock_hash = rawHash,
+                    victim_pid = 11,
+                    victim_statement_fingerprint = rawStatement,
+                    victim_statement = rawStatement,
+                    graph_text = rawGraph,
+                },
+            },
+            note = sentence,
+        });
+        var finding = new AnalysisFinding
+        {
+            StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Deadlocks", "Investigate. " + sentence, "Fix the order.")),
+            DrillDown = new Dictionary<string, object> { [PgTargetDrillDownCollector.DeadlockExemplarsSection] = section },
+        };
+
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+        var once = (JsonSerializer.Serialize(finding.DrillDown), finding.StoryText);
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+        Assert.Equal(once, (JsonSerializer.Serialize(finding.DrillDown), finding.StoryText));
+
+        var exemplar = ((JsonElement)finding.DrillDown![PgTargetDrillDownCollector.DeadlockExemplarsSection]).GetProperty("exemplars")[0];
+        Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", exemplar.GetProperty("victim_statement").GetString());
+        Assert.Equal("UPDATE accounts SET pin = '?' WHERE card = ?", exemplar.GetProperty("victim_statement_fingerprint").GetString());
+        Assert.Equal(PgDeadlockLogParser.NormalizeGraph(rawGraph), exemplar.GetProperty("graph_text").GetString());
+        Assert.Equal(PgDeadlockLogParser.ReportIdentity(lastSeen, 11), exemplar.GetProperty("deadlock_hash").GetString());
+
+        var advice = FactAdvice.TryReadStoryText(finding.StoryText)!;
+        Assert.Contains("with the victim `UPDATE accounts SET pin = '?' WHERE card = ?`, seen 1 time.", advice.Investigation, StringComparison.Ordinal);
+
+        foreach (var text in new[] { once.Item1, finding.StoryText })
+        {
+            foreach (var secret in new[] { "4721", "9034", "4111111111111111", "5500005555555559", rawHash })
+                Assert.DoesNotContain(secret, text, StringComparison.Ordinal);
+        }
+
+        /* A finding this build wrote says so and is left as written: its statement, normalized and then cut to
+           the cap, can end inside a '?', which a second reading would withhold. */
+        var written = JsonSerializer.SerializeToElement(new
+        {
+            exemplars = new[] { new { deadlock_hash = "ABC", victim_statement = "UPDATE t SET a = '", victim_pid = 11 } },
+            sql_normalized = true,
+        });
+        var current = new AnalysisFinding
+        {
+            StoryText = "{}",
+            DrillDown = new Dictionary<string, object> { [PgTargetDrillDownCollector.DeadlockExemplarsSection] = written },
+        };
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(current);
+        Assert.Equal(written.GetRawText(), ((JsonElement)current.DrillDown![PgTargetDrillDownCollector.DeadlockExemplarsSection]).GetRawText());
+    }
+
     /* ───────────────────────── bounds ───────────────────────── */
 
     [Fact]
     public void BoundGraphText_CutsAtTheLineCap_ReportsTheTotal_AndFlagsEitherBound()
     {
-        Assert.Equal((null, 0, false), PgTargetDrillDownCollector.BoundGraphText(null, 0));
-        Assert.Equal(("", 0, false), PgTargetDrillDownCollector.BoundGraphText("", 0));
+        Assert.Equal((null, 0, false), PgTargetDrillDownCollector.BoundGraphText(null, readCut: false));
+        Assert.Equal(("", 0, false), PgTargetDrillDownCollector.BoundGraphText("", readCut: false));
 
         var four = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\r\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\r\nProcess 11: UPDATE a SET x = 1\r\nProcess 12: UPDATE b SET y = 2";
-        var (text, lines, truncated) = PgTargetDrillDownCollector.BoundGraphText(four, four.Length);
+        var (text, lines, truncated) = PgTargetDrillDownCollector.BoundGraphText(four, readCut: false);
         Assert.Equal(4, lines);
         Assert.False(truncated);
         Assert.Equal(four.Replace("\r\n", "\n", StringComparison.Ordinal), text);
 
         /* Thirty lines: cut to 24, total 30, flagged. */
         var thirty = string.Join('\n', Enumerable.Range(1, 30).Select(i => $"line {i}"));
-        var (cut, total, cutFlag) = PgTargetDrillDownCollector.BoundGraphText(thirty, thirty.Length);
+        var (cut, total, cutFlag) = PgTargetDrillDownCollector.BoundGraphText(thirty, readCut: false);
         Assert.Equal(30, total);
         Assert.True(cutFlag);
         Assert.Equal(24, cut!.Split('\n').Length);
         Assert.EndsWith("line 24", cut, StringComparison.Ordinal);
 
-        /* The READ cut it (untruncated length longer than what arrived): flagged even under the line cap. */
-        var (_, shortLines, readCut) = PgTargetDrillDownCollector.BoundGraphText("one\ntwo", 4000);
+        /* The READ cut it (untruncated length longer than what arrived, which the caller measures before it
+           normalizes the graph, #4005): flagged even under the line cap. */
+        var (_, shortLines, readCut) = PgTargetDrillDownCollector.BoundGraphText("one\ntwo", readCut: true);
         Assert.Equal(2, shortLines);
         Assert.True(readCut);
     }
@@ -288,9 +366,12 @@ public sealed class PgTargetDeadlockDrillDownTests
 
             const string modesA = "RowExclusiveLock, ShareLock";
             const string resourcesA = "relation orders, tuple orders";
-            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = $1 WHERE id = $2";
+            /* The later report of shape A as a build before #4005 stored it: a literal in the graph, and a hash
+               over that raw graph. The exemplar carries neither (#4005). */
+            var graphA = "Process 11 waits for ShareLock on transaction 900; blocked by process 12.\nProcess 12 waits for ShareLock on transaction 901; blocked by process 11.\nProcess 11: UPDATE orders SET status = $1 WHERE id = $2\nProcess 12: UPDATE orders SET status = 'held-4721' WHERE id = 7";
+            var rawHashA2 = PgDeadlockLogParser.HashOf(graphA);
             await PlantDeadlockAsync(connection, windowStart.AddMinutes(10), "hash-a1", 2, modesA, resourcesA, "UPDATE orders SET status = $1 WHERE id = $2", graphA, ct);
-            await PlantDeadlockAsync(connection, windowStart.AddMinutes(45), "hash-a2", 2, modesA, resourcesA, "UPDATE   orders\n SET status = $1 WHERE id = $2", graphA, ct);
+            await PlantDeadlockAsync(connection, windowStart.AddMinutes(45), rawHashA2, 2, modesA, resourcesA, "UPDATE   orders\n SET status = $1 WHERE id = $2", graphA, ct);
 
             /* Shape B: a three-way chain with a statement past the text cap and a graph past the line cap, stored
                twice under ONE hash (the overlapping tail re-read). */
@@ -319,6 +400,7 @@ public sealed class PgTargetDeadlockDrillDownTests
                 Assert.Equal(3, exemplars.GetProperty("reports_captured").GetInt32());
                 Assert.Equal(2, exemplars.GetProperty("distinct_shapes").GetInt32());
                 Assert.Equal(2, exemplars.GetProperty("exemplars_shown").GetInt32());
+                Assert.True(exemplars.GetProperty("sql_normalized").GetBoolean());
 
                 var shapes = exemplars.GetProperty("exemplars").EnumerateArray().ToList();
                 Assert.Equal(2, shapes.Count);
@@ -331,12 +413,14 @@ public sealed class PgTargetDeadlockDrillDownTests
                 Assert.Equal(resourcesA, a.GetProperty("resources").GetString());
                 Assert.Equal(2, a.GetProperty("reports").GetInt32());
                 Assert.Equal(2, a.GetProperty("rows_captured").GetInt32());
-                Assert.Equal("hash-a2", a.GetProperty("deadlock_hash").GetString());
+                Assert.Equal(PgDeadlockLogParser.ReportIdentity(windowStart.AddMinutes(45), 4242), a.GetProperty("deadlock_hash").GetString());
                 Assert.Equal("UPDATE orders SET status = $1 WHERE id = $2", a.GetProperty("victim_statement_fingerprint").GetString());
                 Assert.False(a.GetProperty("victim_statement_may_be_truncated").GetBoolean());
                 Assert.Equal(4, a.GetProperty("graph_text_lines_total").GetInt32());
                 Assert.False(a.GetProperty("graph_text_truncated").GetBoolean());
-                Assert.Equal(graphA, a.GetProperty("graph_text").GetString());
+                Assert.Equal(graphA.Replace("'held-4721' WHERE id = 7", "'?' WHERE id = ?", StringComparison.Ordinal), a.GetProperty("graph_text").GetString());
+                Assert.DoesNotContain(rawHashA2, analysis, StringComparison.Ordinal);
+                Assert.DoesNotContain("4721", analysis, StringComparison.Ordinal);
 
                 /* Shape B: one report seen twice; both bounds cut and both say so. */
                 var b = shapes[1];
@@ -369,6 +453,53 @@ public sealed class PgTargetDeadlockDrillDownTests
                     Assert.Contains("Exemplars: 4 reports captured", anomaly.GetProperty("advice").GetProperty("investigation").GetString(), StringComparison.Ordinal);
                 }
             }
+
+            /* #4005: a finding a build before #4005 stored (an anchored run like the one above persists nothing)
+               reads back through PgFindingStore, get_analysis_findings' read, normalized and naming its report by
+               timestamp and pid, never by the stored hash. */
+            var rawStatement = "UPDATE orders SET status = 'held-4721' WHERE id = 7";
+            var preFix = new AnalysisFinding
+            {
+                FindingId = CollectionIdGenerator.Next(),
+                AnalysisTime = DateTime.SpecifyKind(DateTime.UtcNow.AddMinutes(-1), DateTimeKind.Unspecified),
+                ServerId = ServerId,
+                ServerName = ServerName,
+                Severity = 0.6,
+                Confidence = 0.5,
+                Category = "database",
+                StoryPath = PgTargetFactKeys.DeadlockRate,
+                StoryPathHash = "4005-pre-fix-exemplar",
+                StoryText = FactAdvice.SerializeForStoryText(new AdviceBlock("Deadlocks", $"with the victim `{rawStatement}`", "Fix the order.")),
+                RootFactKey = PgTargetFactKeys.DeadlockRate,
+                FactCount = 1,
+                DrillDown = new Dictionary<string, object>
+                {
+                    [PgTargetDrillDownCollector.DeadlockExemplarsSection] = JsonSerializer.SerializeToElement(new
+                    {
+                        exemplars = new[]
+                        {
+                            new
+                            {
+                                last_seen = windowStart.AddMinutes(45).ToString("o", System.Globalization.CultureInfo.InvariantCulture),
+                                deadlock_hash = rawHashA2,
+                                victim_pid = 4242,
+                                victim_statement_fingerprint = rawStatement,
+                                victim_statement = rawStatement,
+                                graph_text = graphA,
+                            },
+                        },
+                    }),
+                },
+            };
+            await new PgFindingStore(postgres).InsertFindingsAsync(
+                [preFix],
+                new AnalysisContext { ServerId = ServerId, ServerName = ServerName, TimeRangeStart = windowStart, TimeRangeEnd = windowEnd, ServerUtcOffset = TimeSpan.Zero });
+
+            var stored = await DarlingMcpTools.GetAnalysisFindings(service, postgres, ServerName, 24, include_drilldown: true);
+            Assert.Contains("4005-pre-fix-exemplar", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain("4721", stored, StringComparison.Ordinal);
+            Assert.DoesNotContain(rawHashA2, stored, StringComparison.Ordinal);
+            Assert.Contains(PgDeadlockLogParser.ReportIdentity(windowStart.AddMinutes(45), 4242), stored, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

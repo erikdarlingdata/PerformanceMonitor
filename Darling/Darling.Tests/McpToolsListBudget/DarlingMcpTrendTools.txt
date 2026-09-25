@@ -1,0 +1,44 @@
+# DarlingMcpTrendTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_file_io_trend 585
+param get_file_io_trend.as_of 167
+param get_file_io_trend.bucket_minutes 55
+param get_file_io_trend.database_name 56
+param get_file_io_trend.hours_back 29
+param get_file_io_trend.server_name 28
+
+tool get_memory_trend 610
+param get_memory_trend.as_of 167
+param get_memory_trend.bucket_minutes 55
+param get_memory_trend.hours_back 29
+param get_memory_trend.server_name 28
+
+tool get_perfmon_trend 615
+param get_perfmon_trend.as_of 167
+param get_perfmon_trend.bucket_minutes 55
+param get_perfmon_trend.counter_name 50
+param get_perfmon_trend.hours_back 29
+param get_perfmon_trend.server_name 28
+
+tool get_procedure_duration_trend 445
+param get_procedure_duration_trend.as_of 167
+param get_procedure_duration_trend.bucket_minutes 55
+param get_procedure_duration_trend.hours_back 29
+param get_procedure_duration_trend.server_name 28
+
+tool get_query_duration_trend 614
+param get_query_duration_trend.as_of 167
+param get_query_duration_trend.bucket_minutes 55
+param get_query_duration_trend.hours_back 29
+param get_query_duration_trend.server_name 28
+
+tool get_query_store_duration_trend 616
+param get_query_store_duration_trend.as_of 167
+param get_query_store_duration_trend.hours_back 29
+param get_query_store_duration_trend.server_name 28
+
+tool get_query_trend 792
+param get_query_trend.as_of 167
+param get_query_trend.database_name 39
+param get_query_trend.hours_back 29
+param get_query_trend.query_hash 72
+param get_query_trend.server_name 28

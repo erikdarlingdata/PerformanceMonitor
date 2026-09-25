@@ -219,7 +219,9 @@ public static class PgMigrations
         new Migration(137, "qs-capture-mode-route-knob-toast-utilisation", V137Sql),
         new Migration(138, "pg-server-config-database-role-overrides", V138Sql),
         new Migration(139, "postmaster-start-time", V139Sql),
-        new Migration(140, "query-store-interval-latest", V140Sql),
+        new Migration(140, "checkpointer-timed-count", V140Sql),
+        new Migration(141, "collection-caveats", V141Sql),
+        new Migration(142, "query-store-interval-latest", V142Sql),
     };
 
     /// <summary>
@@ -1819,7 +1821,82 @@ ALTER TABLE collect.pg_write_stats
     ADD COLUMN IF NOT EXISTS postmaster_start_time timestamp;";
 
     /// <summary>
-    /// V140 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
+    /// V140 — <c>checkpoints_timed</c> on the store's own checkpointer row (#4037): the cumulative COUNT of
+    /// TIMED checkpoints, beside the write-ms/sync-ms/requested counters V137 already carries. Store
+    /// Checkpointer Pressure (#3783) and <c>get_store_metrics</c>' checkpointer block judged the interval's
+    /// SUMMED sync-phase milliseconds against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, a
+    /// PER-CHECKPOINT bar (the MCP read deadline), and the hourly interval covers about twelve timed
+    /// checkpoints on the default five-minute <c>checkpoint_timeout</c> — so a healthy store whose checkpoints
+    /// each sync in five to eight seconds summed past the bar every interval and never recovered, while the
+    /// actual per-checkpoint figure never approached it. Judging the AVERAGE (<c>SyncMs / (timed +
+    /// requested)</c>) needs the timed count on the row the sync-ms delta already comes from; nothing else in
+    /// the store carries it per-store (<c>pg_write_stats.num_timed</c>, V88, is the MONITORED-target series,
+    /// a different row for a different server).</para>
+    ///
+    /// <para><b>One column, same convention as V137/V139</b>: filled on the <c>object_kind = 'checkpointer'</c>
+    /// row only, NULL on every other kind. Nullable, no DEFAULT, no backfill — a row written before this rung
+    /// has no timed count, and the reader treats that NULL as unmeasured for the average arm rather than as
+    /// zero (a zero would read as "every checkpoint" and misjudge the row). <c>store_metrics</c> is a plain
+    /// table with no <c>v_</c> passthrough (V53), so this ALTER stands alone; appended last, matching V137's
+    /// and V139's columns, so a fresh V1 store and an upgraded one agree on column order for the same reason
+    /// those rungs did.</para>
+    /// </summary>
+    private const string V140Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row
+   only, NULL on every other kind by the table's per-kind convention. Nullable, no DEFAULT, no backfill: a
+   pre-rung row cannot know how many checkpoints were timed, and NULL is what the average-per-checkpoint rule
+   reads as unmeasured rather than zero. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS checkpoints_timed bigint;";
+
+    /// <summary>
+    /// V141 (#3691, part a1) — <c>collect.analysis_collection_caveats</c>: the CURRENT set of fact families an
+    /// analysis pass could not read, one row per (server, family), so a scheduled pass's caveats survive past
+    /// the in-process ledger <see cref="PerformanceMonitor.Analysis.CollectionCaveatLedger"/> already keeps —
+    /// that ledger is per-process and unread by anything outside the service that ran the pass, so the Viewer,
+    /// which is a separate process reading only the store, has never been able to say "this family has not
+    /// been read for N passes" at all. This table is what closes that gap: not a replacement for the ledger
+    /// (which stays in-memory by design, shared with Lite, and untouched here), but the store side <c>CollectionCaveatStore</c>
+    /// writes beside it, on the same pass, best-effort.
+    ///
+    /// <para><b>Current, not historical.</b> The table holds only the families a server is failing to read
+    /// RIGHT NOW: a family a pass reads successfully has its row deleted, not stamped closed, because the
+    /// pass already knows definitively which families it read and which it did not — there is no ambiguous
+    /// middle state to distinguish with a status column. Bounded by construction: at most (servers × distinct
+    /// families) rows, which on any fleet measured so far is a few hundred at most.</para>
+    ///
+    /// <para><b>Primary key <c>(server_id, family)</c>, no surrogate.</b> The upsert key IS the identity a
+    /// reader wants: one open caveat per server per family. <c>reason</c> keeps only the most recent failure's
+    /// classification (the payload spelling from <c>CollectionFailure.Label</c> — <c>timeout</c>, <c>cancelled</c>,
+    /// <c>missing_schema</c>, <c>error</c>); a family failing for two different reasons across passes is not a
+    /// fact this table tries to hold, because the ledger already holds the per-pass history for whoever wants
+    /// it and the Viewer's use is "is this family currently missing", not "how did it fail last Tuesday".</para>
+    ///
+    /// <para><b>Not a collector table.</b> Absent from <see cref="CollectorCatalog"/>, so <see cref="TimescaleSupport"/>'s
+    /// catalog-driven hypertable conversion and <c>DarlingRetention</c>'s catalog purge never reach it — the
+    /// <c>collect.oversized_plan_backlog</c> (V121) precedent exactly: it needs neither chunks nor compression
+    /// at this size, and its own prune (<c>CollectionCaveatStore.PruneAsync</c>, called beside the backlog's own
+    /// sweep-driven prune) is a simpler policy than retention's catalog-driven one because there is no sighting
+    /// cadence to reason about — a row not re-written this pass either was read (and is gone) or the server
+    /// stopped being analysed (and prune reaps it after 7 days).</para>
+    ///
+    /// <para>Granted through the <c>collect</c> schema's blanket <c>GRANT … ON ALL TABLES IN SCHEMA collect</c>
+    /// (the V54/V101 convention — no per-table GRANT here), which the service and viewer roles both already
+    /// hold, so the Viewer can SELECT it without a provisioning change.</para>
+    /// </summary>
+    private const string V141Sql = @"
+CREATE TABLE IF NOT EXISTS collect.analysis_collection_caveats
+(
+    server_id integer NOT NULL,
+    family text NOT NULL,
+    reason text NOT NULL,
+    first_seen_utc timestamp NOT NULL,
+    last_seen_utc timestamp NOT NULL,
+    CONSTRAINT pk_analysis_collection_caveats PRIMARY KEY (server_id, family)
+);";
+
+    /// <summary>
+    /// V142 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
     /// drill-down read one row per interval instead of deduplicating the whole raw <c>query_store_stats</c> slice on
     /// every pass. Three new tables, all engine-plain here (the <c>PgMigrations</c> rule); nothing on an existing
     /// table changes, and there is no backfill.
@@ -1844,7 +1921,7 @@ ALTER TABLE collect.pg_write_stats
     /// batch here, and raw still commits: raw ingestion never depends on this table. The next apply for the server
     /// replays the row, and a server with any pending row reads raw. Empty in steady state.</para>
     /// </summary>
-    private const string V140Sql = @"
+    private const string V142Sql = @"
 /* One row per Regular Query Store interval identity: the raw dedup's GROUP BY plus server_id. Types and nullability
    mirror query_store_stats exactly, so no row raw accepts can be refused here. fillfactor 50 keeps the open
    interval's refreshes HOT (measured, #3953). */

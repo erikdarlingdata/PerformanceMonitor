@@ -1,0 +1,11 @@
+# McpSessionTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_active_queries 616
+param get_active_queries.as_of 167
+param get_active_queries.blocking_only 134
+param get_active_queries.database_name 156
+param get_active_queries.hours_back 37
+param get_active_queries.limit 149
+param get_active_queries.server_name 28
+
+tool get_session_stats 391
+param get_session_stats.server_name 28

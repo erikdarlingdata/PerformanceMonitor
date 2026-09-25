@@ -187,9 +187,13 @@ public static class DarlingFileSecurity
     /// folder only — so the operator's Viewer can reach the admin/viewer credential files beside the
     /// data directory without that access flowing into the data-directory subtree.
     /// </summary>
-    public static void HardenDirectory(string path, bool allowInteractiveTraverse)
+    public static void HardenDirectory(string path, bool allowInteractiveTraverse) =>
+        new DirectoryInfo(path).SetAccessControl(HardenedDirectorySecurity(allowInteractiveTraverse));
+
+    /// <summary>The one ACL <see cref="HardenDirectory"/> and <see cref="HardenWithoutFollowingLinks"/> apply to a
+    /// directory.</summary>
+    private static DirectorySecurity HardenedDirectorySecurity(bool allowInteractiveTraverse)
     {
-        var info = new DirectoryInfo(path);
         var security = new DirectorySecurity();
 
         /* Protect the DACL (isProtected: true) and drop inherited ACEs (preserveInheritance: false):
@@ -214,8 +218,176 @@ public static class DarlingFileSecurity
                 AccessControlType.Allow));
         }
 
-        info.SetAccessControl(security);
+        return security;
     }
+
+    /// <summary>
+    /// <see cref="HardenFile"/> or <see cref="HardenDirectory"/>, applied through a handle to exactly the object at
+    /// <paramref name="path"/>, never through a junction or symbolic link (#4004 review, round 2). An ACL set by path
+    /// follows every link on it, so a link planted where the path runs would have an elevated caller rewrite whatever
+    /// it points at. The object is opened without following a link at its own name
+    /// (<c>FILE_FLAG_OPEN_REPARSE_POINT</c>) and kept open while it is checked and changed, so what is checked is what
+    /// is changed: it must not be a link itself, and its final path must be <paramref name="anchorDirectory"/>'s own
+    /// final path followed by the same names, which a link anywhere between the two would change.
+    ///
+    /// <para>A hard link passes both of those (#4004 review, round 3): it is not a reparse point, and the final path is
+    /// the name it was opened by. But the DACL belongs to the file, not the name, so hardening a planted
+    /// <c>darling.json.bak-x</c> hard-linked to someone else's file would rewrite that file's access. A file with more
+    /// than one name is refused.</para>
+    /// </summary>
+    /// <returns>Null once the ACL is applied; otherwise why it was not, and nothing was changed.</returns>
+    public static string? HardenWithoutFollowingLinks(string path, bool isDirectory, bool allowInteractive, string anchorDirectory)
+    {
+        var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(anchorDirectory));
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        if (!DarlingPathContainment.IsStrictlyBelow(anchor, full))
+        {
+            throw new ArgumentException($"{full} is not below {anchor}.", nameof(path));
+        }
+
+        string anchorFinal;
+        using (var anchorHandle = OpenForSecurity(anchor, followLink: true, access: FileReadAttributes))
+        {
+            anchorFinal = FinalPath(anchorHandle);
+        }
+
+        using var handle = OpenForSecurity(full, followLink: false, access: ReadControl | WriteDac | FileReadAttributes);
+        if ((File.GetAttributes(handle) & FileAttributes.ReparsePoint) != 0)
+        {
+            return $"{full} is a junction or symbolic link";
+        }
+
+        if (!GetFileInformationByHandle(handle, out var information))
+        {
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError(), $"{full} could not be checked for hard links");
+        }
+
+        if (information.NumberOfLinks > 1)
+        {
+            return $"{full} is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and its ACL is the same under every one of them";
+        }
+
+        /* Joined rather than concatenated: a volume root keeps its separator (C:\), and its final path can come back
+           without one (a SUBST drive's root is a folder on another volume). */
+        var relative = full[(Path.EndsInDirectorySeparator(anchor) ? anchor.Length : anchor.Length + 1)..];
+        var expected = Path.Join(anchorFinal, relative);
+        var actual = FinalPath(handle);
+        if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{full} resolves to {actual}, so a junction or symbolic link is on its path";
+        }
+
+        NativeObjectSecurity security = isDirectory ? HardenedDirectorySecurity(allowInteractive) : HardenedFileSecurity(allowInteractive);
+        var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+        var dacl = new byte[descriptor.DiscretionaryAcl!.BinaryLength];
+        descriptor.DiscretionaryAcl.GetBinaryForm(dacl, 0);
+        var pinned = System.Runtime.InteropServices.GCHandle.Alloc(dacl, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            var result = SetSecurityInfo(
+                handle, FileObject, DaclSecurityInformation | ProtectedDaclSecurityInformation,
+                IntPtr.Zero, IntPtr.Zero, pinned.AddrOfPinnedObject(), IntPtr.Zero);
+            if (result != 0)
+            {
+                throw new System.ComponentModel.Win32Exception((int)result);
+            }
+        }
+        finally
+        {
+            pinned.Free();
+        }
+
+        return null;
+    }
+
+    private const uint GenericRead = 0x80000000;
+    private const uint ReadControl = 0x00020000;
+    private const uint WriteDac = 0x00040000;
+    private const uint FileReadAttributes = 0x00000080;
+    private const uint FileFlagBackupSemantics = 0x02000000;
+    private const uint FileFlagOpenReparsePoint = 0x00200000;
+    private const int FileObject = 1;
+    private const uint DaclSecurityInformation = 0x00000004;
+    private const uint ProtectedDaclSecurityInformation = 0x80000000;
+
+    /// <summary>Opens a file or directory (backup semantics) for its security, sharing everything but delete, so it
+    /// cannot be renamed or removed while it is held.</summary>
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenForSecurity(string path, bool followLink, uint access)
+    {
+        var handle = CreateFileW(
+            path, access, FileShare.ReadWrite, IntPtr.Zero, FileMode.Open,
+            FileFlagBackupSemantics | (followLink ? 0 : FileFlagOpenReparsePoint), IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            throw new System.ComponentModel.Win32Exception(error, $"{path} could not be opened");
+        }
+
+        return handle;
+    }
+
+    /// <summary>The path the system resolves an open handle to, without the <c>\\?\</c> prefix.</summary>
+    private static string FinalPath(Microsoft.Win32.SafeHandles.SafeFileHandle handle)
+    {
+        var buffer = new char[1024];
+        var length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
+        if (length > buffer.Length)
+        {
+            buffer = new char[length];
+            length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Length, 0);
+        }
+
+        if (length == 0 || length > buffer.Length)
+        {
+            throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastPInvokeError());
+        }
+
+        var path = new string(buffer, 0, (int)length);
+        return path.StartsWith(@"\\?\UNC\", StringComparison.Ordinal) ? @"\\" + path[8..]
+            : path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..]
+            : path;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
+        string lpFileName, uint dwDesiredAccess, FileShare dwShareMode, IntPtr lpSecurityAttributes,
+        FileMode dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile, [System.Runtime.InteropServices.Out] char[] lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint SetSecurityInfo(
+        Microsoft.Win32.SafeHandles.SafeFileHandle handle, int objectType, uint securityInfo,
+        IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile, out ByHandleFileInformation lpFileInformation);
+
+    /// <summary><c>BY_HANDLE_FILE_INFORMATION</c>: each <c>FILETIME</c> as its two <c>DWORD</c> halves, so nothing
+    /// realigns the struct to 8 bytes.</summary>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow;
+        public uint CreationTimeHigh;
+        public uint LastAccessTimeLow;
+        public uint LastAccessTimeHigh;
+        public uint LastWriteTimeLow;
+        public uint LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
 
     /// <summary>
     /// Locks a file to SYSTEM + Administrators + the service account, dropping inherited access. When
@@ -273,6 +445,149 @@ public static class DarlingFileSecurity
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// The accounts beyond SYSTEM, Administrators and the service account that hold ANY Allow entry on
+    /// <paramref name="path"/>, as one line for a refusal, or null when there are none (#4028). An ALLOWLIST, where
+    /// <see cref="IsReadableByOrdinaryUsers"/> is a denylist of the three broad groups, which INTERACTIVE, Domain
+    /// Users or one named user all pass. For the log-hash key, which nothing but the service reads; the credential
+    /// files keep the denylist their existing DACLs were built against, so this cannot newly refuse an install's
+    /// credentials. Unlike the denylist, a DACL that cannot be read is reported, not passed: this is the check a key
+    /// is trusted on.
+    ///
+    /// <para>Any right counts, not only <see cref="FileSystemRights.ReadData"/> (#4044 review). An account holding
+    /// WriteData can put a key of its own in place, one any local user can DPAPI-protect, because the protection is
+    /// LocalMachine and the entropy is in the source; one holding ChangePermissions or TakeOwnership can grant itself
+    /// the read. The service writes only the three trusted entries, so any other is someone else's doing.</para>
+    /// </summary>
+    public static string? AccessBeyondTrusted(string path)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new FileInfo(path).GetAccessControl());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    private static string? AccessBeyondTrusted(FileSystemSecurity security)
+    {
+        var accounts = new List<string>();
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+        {
+            if (rule.AccessControlType != AccessControlType.Allow
+                || rule.IdentityReference is not SecurityIdentifier sid
+                || IsTrusted(sid))
+            {
+                continue;
+            }
+
+            string name;
+            try
+            {
+                name = sid.Translate(typeof(NTAccount)).Value;
+            }
+            catch (IdentityNotMappedException)
+            {
+                name = sid.Value;
+            }
+
+            if (!accounts.Contains(name))
+            {
+                accounts.Add(name);
+            }
+        }
+
+        return accounts.Count == 0 ? null : string.Join(", ", accounts);
+    }
+
+    private static bool IsTrusted(SecurityIdentifier sid) =>
+        sid.Equals(LocalSystem) || sid.Equals(Administrators) || sid.Equals(ServiceAccount);
+
+    /// <summary>
+    /// Opens <paramref name="path"/>, a file only the service reads, and judges it through that one handle (#4044
+    /// review): not a junction, symbolic link or directory, one name only, owned by SYSTEM, Administrators or the
+    /// service account, and no Allow entry for anyone else (<see cref="AccessBeyondTrusted(string)"/>). Checked by
+    /// path and then read by path, the check and the read could each find a different file: whoever can write the
+    /// directory can swap one in between. The handle shares read and nothing else, so while it is held the file
+    /// cannot be renamed, deleted, replaced or written, and what was judged is what the returned stream reads.
+    /// </summary>
+    /// <returns>The stream, unbuffered, at the start of the file; or null, with <paramref name="refusal"/> saying why
+    /// nothing may be read from the path.</returns>
+    public static FileStream? OpenForServiceOnlyRead(string path, out string? refusal)
+    {
+        var handle = CreateFileW(path, GenericRead, FileShare.Read, IntPtr.Zero, FileMode.Open, FileFlagOpenReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+            handle.Dispose();
+            refusal = $"it could not be opened for the service alone to read ({new System.ComponentModel.Win32Exception(error).Message})";
+            return null;
+        }
+
+        FileStream? stream = null;
+        var handedOver = false;
+        try
+        {
+            if ((File.GetAttributes(handle) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+            {
+                refusal = "it is a junction, a symbolic link or a directory";
+                return null;
+            }
+
+            if (!GetFileInformationByHandle(handle, out var information))
+            {
+                var error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                refusal = $"it could not be checked for hard links ({new System.ComponentModel.Win32Exception(error).Message})";
+                return null;
+            }
+
+            if (information.NumberOfLinks > 1)
+            {
+                refusal = $"it is a hard link: the file has {information.NumberOfLinks.ToString(System.Globalization.CultureInfo.InvariantCulture)} names, and whoever made another one reaches the same bytes";
+                return null;
+            }
+
+            stream = new FileStream(handle, FileAccess.Read, bufferSize: 0);
+            var security = stream.GetAccessControl();
+            if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !IsTrusted(owner))
+            {
+                refusal = "it is not owned by SYSTEM, Administrators or the service account";
+                return null;
+            }
+
+            if (AccessBeyondTrusted(security) is { } accounts)
+            {
+                refusal = $"accounts beyond SYSTEM, Administrators and the service account have access to it: {accounts}";
+                return null;
+            }
+
+            refusal = null;
+            handedOver = true;
+            return stream;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            refusal = $"it could not be checked through the open file ({ex.Message})";
+            return null;
+        }
+        finally
+        {
+            if (!handedOver)
+            {
+                if (stream is not null)
+                {
+                    stream.Dispose();
+                }
+                else
+                {
+                    handle.Dispose();
+                }
+            }
         }
     }
 
@@ -418,4 +733,23 @@ public static class DarlingFileSecurity
 
     private static void AddFile(FileSecurity security, SecurityIdentifier sid, FileSystemRights rights) =>
         security.AddAccessRule(new FileSystemAccessRule(sid, rights, AccessControlType.Allow));
+}
+
+/// <summary>Path containment for the file-security checks, on every platform (the class above is Windows-only).</summary>
+internal static class DarlingPathContainment
+{
+    /// <summary>
+    /// Whether <paramref name="path"/> is strictly below <paramref name="directory"/>, by full path, case-insensitively
+    /// (#4004 review, round 3). A volume root keeps its separator through
+    /// <see cref="Path.TrimEndingDirectorySeparator(string)"/> (<c>C:\</c>), so the prefix gains one only when it lacks
+    /// one: appending it regardless made <c>C:\\</c>, which nothing is below, and sent the targets of a config directory
+    /// at a volume root to the path-based harden, which follows a junction anywhere on the path.
+    /// </summary>
+    internal static bool IsStrictlyBelow(string directory, string path)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        var prefix = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+        return full.Length > prefix.Length && full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
 }

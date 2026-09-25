@@ -554,7 +554,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            so the hourly constants stay as the pinned legacy text and are no longer the routed read's argument. */
         Assert.Contains("QueryDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken", reader, StringComparison.Ordinal);
         Assert.Contains("ProcedureDurationTrendSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, cancellationToken", reader, StringComparison.Ordinal);
-        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyView)", reader, StringComparison.Ordinal);
+        // LA-4a routed the builder call off the stitched from-clause instead of the bare view name, so the pin
+        // follows the builder call site, not the old constant.
+        Assert.Contains("DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault)", reader, StringComparison.Ordinal);
     }
 
     private static string Lf(string s) => s.Replace("\r\n", "\n", StringComparison.Ordinal);

@@ -1,0 +1,54 @@
+# McpHealthParserTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_health_parser_cpu_tasks 452
+param get_health_parser_cpu_tasks.as_of 167
+param get_health_parser_cpu_tasks.hours_back 41
+param get_health_parser_cpu_tasks.limit 38
+param get_health_parser_cpu_tasks.server_name 28
+
+tool get_health_parser_io_issues 419
+param get_health_parser_io_issues.as_of 167
+param get_health_parser_io_issues.hours_back 41
+param get_health_parser_io_issues.limit 38
+param get_health_parser_io_issues.server_name 28
+
+tool get_health_parser_memory_broker 420
+param get_health_parser_memory_broker.as_of 167
+param get_health_parser_memory_broker.hours_back 41
+param get_health_parser_memory_broker.limit 38
+param get_health_parser_memory_broker.server_name 28
+
+tool get_health_parser_memory_conditions 442
+param get_health_parser_memory_conditions.as_of 167
+param get_health_parser_memory_conditions.hours_back 41
+param get_health_parser_memory_conditions.limit 38
+param get_health_parser_memory_conditions.server_name 28
+
+tool get_health_parser_memory_node_oom 360
+param get_health_parser_memory_node_oom.as_of 167
+param get_health_parser_memory_node_oom.hours_back 41
+param get_health_parser_memory_node_oom.limit 38
+param get_health_parser_memory_node_oom.server_name 28
+
+tool get_health_parser_scheduler_issues 446
+param get_health_parser_scheduler_issues.as_of 167
+param get_health_parser_scheduler_issues.hours_back 41
+param get_health_parser_scheduler_issues.limit 38
+param get_health_parser_scheduler_issues.server_name 28
+
+tool get_health_parser_severe_errors 480
+param get_health_parser_severe_errors.as_of 167
+param get_health_parser_severe_errors.hours_back 41
+param get_health_parser_severe_errors.limit 38
+param get_health_parser_severe_errors.server_name 28
+
+tool get_health_parser_significant_waits 615
+param get_health_parser_significant_waits.as_of 167
+param get_health_parser_significant_waits.hours_back 41
+param get_health_parser_significant_waits.limit 38
+param get_health_parser_significant_waits.server_name 28
+
+tool get_health_parser_system_health 393
+param get_health_parser_system_health.as_of 167
+param get_health_parser_system_health.hours_back 41
+param get_health_parser_system_health.limit 38
+param get_health_parser_system_health.server_name 28

@@ -1,0 +1,23 @@
+# DarlingMcpConfigHistoryTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_database_config_changes 464
+param get_database_config_changes.as_of 167
+param get_database_config_changes.hours_back 51
+param get_database_config_changes.server_name 28
+
+tool get_database_scoped_config 288
+param get_database_scoped_config.database_name 54
+param get_database_scoped_config.server_name 28
+
+tool get_query_store_health 615
+param get_query_store_health.database_name 54
+param get_query_store_health.server_name 28
+
+tool get_server_config_changes 405
+param get_server_config_changes.as_of 167
+param get_server_config_changes.hours_back 51
+param get_server_config_changes.server_name 28
+
+tool get_trace_flag_changes 335
+param get_trace_flag_changes.as_of 167
+param get_trace_flag_changes.hours_back 51
+param get_trace_flag_changes.server_name 28

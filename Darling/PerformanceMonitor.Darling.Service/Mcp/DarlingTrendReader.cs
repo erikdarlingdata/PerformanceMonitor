@@ -849,12 +849,32 @@ internal static class DarlingTrendReader
     /// </summary>
     public sealed record DurationTrendRoute(
         RetentionTier Tier, string RawTable, string HourlyView, bool HourlyAvailable, TierCoverage Coverage,
-        bool RawRetentionApplies, DateTime ResolvedAtUtc)
+        bool RawRetentionApplies, DateTime ResolvedAtUtc, string? HourlyFromClause = null,
+        string? ProbeHourlyView = null)
     {
         /// <summary>The payload's <c>source</c> word: <c>raw</c> or <c>hourly</c>, get_query_trend's vocabulary
         /// — <see cref="DurationTrendRouting.SourceWord"/>, the one spelling the viewer's chart title also
         /// leads with (#3653), so a user reading the chart and an agent reading the payload get one word.</summary>
         public string Source => DurationTrendRouting.SourceWord(Tier);
+
+        /// <summary>
+        /// The hourly FROM-clause item to splice into the bucketed and keyed builders (#3653 A6, decision 1):
+        /// <see cref="HourlyView"/> stays a bare NAME for probes/logs/messages, and this is the
+        /// <see cref="RollupCoverage.StitchedRelationSql"/> output — <c>collect.&lt;HourlyView&gt; AS h</c>
+        /// unchanged when there is no successor, or the stitched UNION ALL past the successor's floor.
+        /// Null on a route that never resolved a from-clause (a test-only route built by the record
+        /// constructor directly); callers fall back to <c>collect.{HourlyView} AS h</c>, the same text.
+        /// </summary>
+        public string HourlyFromClauseOrDefault => HourlyFromClause ?? $"collect.{HourlyView} AS h";
+
+        /// <summary>
+        /// The NAME <see cref="HasAnySampleOnRouteAsync"/> probes (#3653 A6, decision 4): the successor when
+        /// the stitch applies (the successor exists AND its floor is at or before the window's end — the
+        /// frozen legacy will empty over time, so probing it would eventually answer "never sampled" on a
+        /// store that is still being written to), otherwise <see cref="HourlyView"/> as today. Null on a
+        /// route built without resolving the stitch; callers fall back to <see cref="HourlyView"/>.
+        /// </summary>
+        public string ProbeHourlyViewOrDefault => ProbeHourlyView ?? HourlyView;
 
         /// <summary>The relation the read actually walks.</summary>
         public string Relation => Tier == RetentionTier.Raw ? RawTable : HourlyView;
@@ -887,32 +907,53 @@ internal static class DarlingTrendReader
     /// passes a fixed instant to pin the boundary.
     /// </summary>
     public static DurationTrendRoute ResolveQueryDurationTrendRoute(
-        DateTime startUtc, RollupAvailability rollups, RollupCoverage coverage, DateTime? nowUtc = null)
+        DateTime startUtc, RollupAvailability rollups, RollupCoverage coverage, DateTime? nowUtc = null,
+        DateTime? windowEndUtc = null)
         => ResolveDurationTrendRoute(
             "query_stats", TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView,
-            rollups.QueryGrainHourly, startUtc, nowUtc ?? DateTime.UtcNow, rollups, coverage);
+            rollups.QueryGrainHourly, startUtc, nowUtc ?? DateTime.UtcNow, rollups, coverage, windowEndUtc);
 
     /// <summary>The procedure-stats twin of <see cref="ResolveQueryDurationTrendRoute"/>.</summary>
     public static DurationTrendRoute ResolveProcedureDurationTrendRoute(
-        DateTime startUtc, RollupAvailability rollups, RollupCoverage coverage, DateTime? nowUtc = null)
+        DateTime startUtc, RollupAvailability rollups, RollupCoverage coverage, DateTime? nowUtc = null,
+        DateTime? windowEndUtc = null)
         => ResolveDurationTrendRoute(
             "procedure_stats", TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView,
-            rollups.ProcedureGrainHourly, startUtc, nowUtc ?? DateTime.UtcNow, rollups, coverage);
+            rollups.ProcedureGrainHourly, startUtc, nowUtc ?? DateTime.UtcNow, rollups, coverage, windowEndUtc);
 
     private static DurationTrendRoute ResolveDurationTrendRoute(
         string rawTable, string hourlyView, string dailyView, bool hourlyAvailable,
-        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage)
+        DateTime startUtc, DateTime nowUtc, RollupAvailability rollups, RollupCoverage coverage,
+        DateTime? windowEndUtc = null)
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
         var tierCoverage = coverage.For(hourlyView, dailyView);
+
+        /* #3653 A6, decision 4: the probe NAME is the successor when the stitch applies for THIS window — the
+           successor exists (a non-null floor implies existence: an absent or never-materialized successor
+           answers a null floor, see RollupCoverage.FloorOf) AND its floor is at or before the window's end.
+           windowEndUtc is OPTIONAL: a caller that has not resolved a window end (every pre-#3653-A6 caller)
+           leaves ProbeHourlyView null, so ProbeHourlyViewOrDefault falls back to the legacy — today's
+           behaviour, unchanged. */
+        var successor = TimescaleSupport.SuccessorOf(hourlyView);
+        var successorFloor = successor is null ? null : coverage.FloorOf(successor);
+        var probeHourlyView = windowEndUtc is DateTime end && successorFloor is DateTime floor && floor <= end
+            ? successor
+            : null;
+
         return new DurationTrendRoute(
             ResolveTier(startUtc, nowUtc, hourlyAvailable, tierCoverage),
             /* Tier over the legacy pair's coverage; relation by the supply rule (#3653, Q12) — see the record. */
-            rawTable, coverage.HourlyRelationFor(hourlyView, startUtc), hourlyAvailable, tierCoverage,
+            rawTable, coverage.HourlyRelationNameFor(hourlyView, startUtc), hourlyAvailable, tierCoverage,
             /* Grain-scoped, not rollups != None — see the record's remarks: the arming gate is per table. */
             RawRetentionApplies: hourlyAvailable,
-            ResolvedAtUtc: nowUtc);
+            ResolvedAtUtc: nowUtc,
+            /* #3653 A6: the FROM-clause item for the bucketed/keyed builders — decision 1 keeps HourlyView a
+               bare name for probes/logs, and this is StitchedRelationSql's splice-ready answer for the same
+               window the tier above was decided over. */
+            HourlyFromClause: coverage.StitchedRelationSql(hourlyView, "h", startUtc, RollupCoverage.StitchTier.Hourly),
+            ProbeHourlyView: probeHourlyView);
     }
 
     /// <summary>
@@ -1077,11 +1118,15 @@ internal static class DarlingTrendReader
            QueryDurationTrendHourlySql / ProcedureDurationTrendHourlySql constants: those are the builder over
            the LEGACY view, and the route may have resolved the interval-honest successor. Same builder, same
            shape — the constants stay as the pinned legacy text and as what a store without the successors
-           still runs. */
+           still runs.
+           #3653 A6: the builder's {hourlyView} slot is a FROM-clause site, not a name — decision 1 splices
+           route.HourlyFromClauseOrDefault (StitchedRelationSql's answer, "collect.<HourlyView> AS h" with no
+           successor, byte-identical to the pre-stitch text) rather than the bare route.HourlyView, which stays
+           reserved for probes and logs. */
         await using var command = postgres.CreateCommand(
             route.Tier == RetentionTier.Raw
                 ? rawSql
-                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyView));
+                : DurationTrendRouting.BuildBucketedHourlyTrendSql(route.HourlyFromClauseOrDefault));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
         DarlingMcpReadParameters.AddInt(command, bucketMinutes);
@@ -1463,6 +1508,10 @@ internal static class DarlingTrendReader
     /// Probed only when the route says the rollup exists, because the view is parse-time-resolved; the view
     /// name comes from <see cref="DurationTrendRoute.HourlyView"/>, which only ever carries a
     /// <see cref="TimescaleSupport"/> view constant.
+    /// <para>#3653 A6, decision 4: the NAME probed is <see cref="DurationTrendRoute.ProbeHourlyViewOrDefault"/>
+    /// — the successor when the stitch applies (it exists and its floor is at or before the window's end), else
+    /// the legacy, same as today. Probing the frozen legacy forever would eventually answer "never sampled" on
+    /// a store still being written to past the successor's floor.</para>
     /// </summary>
     public static async Task<bool> HasAnySampleOnRouteAsync(
         NpgsqlDataSource postgres, Task<bool> rawProbe, DurationTrendRoute route, int serverId,
@@ -1478,7 +1527,7 @@ internal static class DarlingTrendReader
 
         return route.HourlyAvailable
             && await HasAnySampleAsync(
-                postgres, $"SELECT 1 FROM {route.HourlyView} WHERE server_id = $1 LIMIT 1", serverId, cancellationToken);
+                postgres, $"SELECT 1 FROM {route.ProbeHourlyViewOrDefault} WHERE server_id = $1 LIMIT 1", serverId, cancellationToken);
     }
 
     /// <summary>

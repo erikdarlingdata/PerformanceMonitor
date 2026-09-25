@@ -403,6 +403,135 @@ public static class DailySummarySql
     }
 
     /// <summary>
+    /// THE STITCHED not-carried probe (#3653 A6, lane LA-3b2, decision 3): the same <see cref="QueriesCteForCagg"/>
+    /// CTE, but the rollup half AND the not-carried half each run TWICE — once against <paramref name="legacy"/>
+    /// restricted to <c>bucket &lt; F</c>, once against <paramref name="successor"/> restricted to
+    /// <c>bucket &gt;= F</c> — and every member is UNION ALL'd into one <c>queries</c> CTE, exactly the shape
+    /// decision 3 specifies: "run the existing probe TWICE, once per relation NAME, each restricted to its side
+    /// of F ... and UNION ALL the two results". <paramref name="successorFloor"/> is the stitch boundary
+    /// (<see cref="RollupCoverage.StitchFloor"/>) — the SAME F <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// would split the FROM clause at, so the probe's split agrees with the read's split by construction. The
+    /// ceiling used to gate the raw fallback is read per side, from each relation's own <c>max(bucket)</c>: the
+    /// legacy side's ceiling governs raw fallback for days below F, the successor side's for days at or above F.
+    /// Each side keeps its own not-carried source probe (the legacy's has no filter; the successor's carries
+    /// its restart-row exclusion, per <see cref="RangeSqlFor(RetentionTier, string)"/>'s own note) — a day's
+    /// hole is judged against whichever relation actually owns that day's bucket.
+    ///
+    /// <para>The split boundary used everywhere below is DAY-ALIGNED, not F itself: <c>boundaryDay</c> is the
+    /// first whole day at or after F (F unchanged if F already falls on a day start, else F's date plus one day
+    /// — the same rule the daily tier uses for its own F_d). F can land mid-day (production: the successor's
+    /// first bucket is whatever hour it started), and every member of this CTE partitions on the boundary DAY,
+    /// never on the hour: if the split ran at F's hour, the floor day would supply a row from EACH side
+    /// (legacy for its early hours, successor for its later ones) and the calendar would print that day twice
+    /// with split counts, since a COUNT(DISTINCT) computed separately on each half cannot be summed across
+    /// halves without double-counting hashes seen on both sides of the same day. Aligning to the day means the
+    /// legacy alone supplies every hour of the floor day (it is live and holds that day whole, before LC
+    /// freezes it), and the successor's first live day is the NEXT calendar day.</para>
+    /// </summary>
+    private static string QueriesCteForStitchedCagg(string legacy, string successor, DateTime successorFloor)
+    {
+        var legacyTarget = TimescaleSupport.MaterializationHoleTargets
+            .FirstOrDefault(t => string.Equals(t.View, legacy, StringComparison.Ordinal));
+        if (legacyTarget.View is null)
+        {
+            throw new ArgumentException(
+                $"'{legacy}' is not a registered continuous aggregate (TimescaleSupport.MaterializationHoleTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
+                nameof(legacy));
+        }
+
+        var successorTarget = TimescaleSupport.MaterializationHoleTargets
+            .FirstOrDefault(t => string.Equals(t.View, successor, StringComparison.Ordinal));
+        if (successorTarget.View is null)
+        {
+            throw new ArgumentException(
+                $"'{successor}' is not a registered continuous aggregate (TimescaleSupport.MaterializationHoleTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
+                nameof(successor));
+        }
+
+        var legacyFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(legacyTarget.CreateSql);
+        var legacySourceFilter = legacyFilter.Length == 0 ? string.Empty : $"\n          AND {legacyFilter}";
+        var successorFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(successorTarget.CreateSql);
+        var successorSourceFilter = successorFilter.Length == 0 ? string.Empty : $"\n          AND {successorFilter}";
+        var boundaryDay = successorFloor == successorFloor.Date ? successorFloor : successorFloor.Date.AddDays(1);
+        var boundary = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        return $"""
+        queries_ceiling_legacy AS (
+            SELECT date_trunc('day', max(bucket)) AS last_day
+            FROM collect.{legacy}
+            WHERE server_id = $1 AND bucket < {boundary}
+        ),
+        queries_ceiling_successor AS (
+            SELECT date_trunc('day', max(bucket)) AS last_day
+            FROM collect.{successor}
+            WHERE server_id = $1 AND bucket >= {boundary}
+        ),
+        queries AS (
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
+                FROM collect.{legacy}
+                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3 AND bucket < {boundary}
+            ) AS x
+            GROUP BY x.d
+            UNION ALL
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', bucket) AS d, query_hash
+                FROM collect.{successor}
+                WHERE server_id = $1 AND bucket >= $2 AND bucket < $3 AND bucket >= {boundary}
+            ) AS x
+            GROUP BY x.d
+            UNION ALL
+            SELECT x.d, COUNT(x.query_hash) AS c
+            FROM (
+                SELECT DISTINCT date_trunc('day', collection_time) AS d, query_hash
+                FROM v_query_stats
+                WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3
+                  AND collection_time >= COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), (SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
+            ) AS x
+            GROUP BY x.d
+            UNION ALL
+            SELECT b.d, NULL::bigint AS c
+            FROM (
+                SELECT g.d
+                FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS g(d)
+                WHERE g.d < $3
+                  AND g.d < {boundary}
+                  AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_legacy), $2)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM collect.{legacy} AS r
+                    WHERE r.server_id = $1 AND r.bucket >= g.d AND r.bucket < g.d + INTERVAL '1 day'
+                    OFFSET 0)
+                OFFSET 0
+            ) AS b
+            WHERE EXISTS (
+                SELECT 1 FROM collect.{legacyTarget.Source} AS s
+                WHERE s.server_id = $1 AND s.{legacyTarget.SourceTimeColumn} >= b.d AND s.{legacyTarget.SourceTimeColumn} < b.d + INTERVAL '1 day'{legacySourceFilter}
+                OFFSET 0)
+            UNION ALL
+            SELECT b.d, NULL::bigint AS c
+            FROM (
+                SELECT g.d
+                FROM generate_series(date_trunc('day', $2::timestamp), date_trunc('day', $3::timestamp), INTERVAL '1 day') AS g(d)
+                WHERE g.d < $3
+                  AND g.d >= {boundary}
+                  AND g.d < COALESCE((SELECT last_day + INTERVAL '1 day' FROM queries_ceiling_successor), $2)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM collect.{successor} AS r
+                    WHERE r.server_id = $1 AND r.bucket >= g.d AND r.bucket < g.d + INTERVAL '1 day'
+                    OFFSET 0)
+                OFFSET 0
+            ) AS b
+            WHERE EXISTS (
+                SELECT 1 FROM collect.{successorTarget.Source} AS s
+                WHERE s.server_id = $1 AND s.{successorTarget.SourceTimeColumn} >= b.d AND s.{successorTarget.SourceTimeColumn} < b.d + INTERVAL '1 day'{successorSourceFilter}
+                OFFSET 0)
+        ),
+        """;
+    }
+
+    /// <summary>
     /// #1661: the daily summary SQL for <paramref name="tier"/>. Raw returns the frozen constant untouched; a
     /// rollup tier swaps only the <c>queries</c> CTE. Throws if the swap finds nothing, so editing
     /// <see cref="RangeSql"/> without updating <see cref="QueriesCteRaw"/> fails loudly
@@ -416,10 +545,13 @@ public static class DailySummarySql
     /// <paramref name="hourlyRelation"/> is <c>query_stats_hourly</c> or its interval-honest successor
     /// <c>query_stats_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/> over the window's
     /// start. The successor carries the same <c>query_hash</c> and <c>bucket</c> the queries CTE reads, and
-    /// leaves out the restart row the legacy counted as a query seen that day. The daily tier is not
-    /// parameterised: the daily has no successor (it is hierarchical from the legacy hourly —
-    /// <see cref="TimescaleSupport.SupersededHourlyRollups"/>). The one-argument form keeps the legacy for
-    /// callers that have not probed, which is what every pre-#3653 pin reads.
+    /// leaves out the restart row the legacy counted as a query seen that day. This overload's OWN daily tier is
+    /// not parameterised — it always reads the legacy <c>query_stats_daily</c> unstitched, whatever
+    /// <paramref name="hourlyRelation"/> carries; the daily's own stitch lives in the three-argument overload
+    /// below, which does not call this one for that case at all — it builds its own queries CTE directly off
+    /// <see cref="QueriesCteForCagg"/>, so a successor-only daily keeps its own name instead of being downgraded
+    /// back to the legacy here. The one-argument form keeps the legacy for callers that have not probed, which
+    /// is what every pre-#3653 pin reads.
     ///
     /// <para>#3653 A6: the routed text differs between the legacy and the successor in the relation name AND in
     /// the not-carried probe's source filter — the successor's own <c>WHERE</c>, read off its CREATE — so the
@@ -447,6 +579,74 @@ public static class DailySummarySql
         {
             throw new InvalidOperationException(
                 "Daily-summary CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
+        }
+
+        return routed;
+    }
+
+    /// <summary>
+    /// #3653 A6, lane LA-3b2 (hourly) / lane LA-8 (daily): <see cref="RangeSqlFor(RetentionTier, string)"/>,
+    /// stitch-aware, on EITHER rollup tier. When <paramref name="coverage"/> reports a stitch boundary for the
+    /// tier's own legacy rollup over <paramref name="windowStartUtc"/> (<see cref="RollupCoverage.StitchFloor"/>
+    /// — F for hourly, F_d for daily), the not-carried probe runs TWICE, once per relation name split at that
+    /// boundary (decision 3, <see cref="QueriesCteForStitchedCagg"/>); with no boundary — no successor, an
+    /// empty one, or one that already covers the whole window — this is byte-identical to
+    /// <see cref="RangeSqlFor(RetentionTier, string)"/> over the legacy name, because <c>StitchFloor</c> answers
+    /// null in exactly the cases <see cref="RollupCoverage.StitchedRelationSql"/> would also answer legacy-only.
+    /// The daily tier's successor name comes off <see cref="TimescaleSupport.SupersededDailyRollups"/>, the same
+    /// registry <see cref="RollupCoverage.StitchedRelationSql"/> reads, rather than a second lookup that could
+    /// drift from it.
+    /// </summary>
+    public static string RangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
+    {
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        if (tier != RetentionTier.Hourly && tier != RetentionTier.Daily)
+        {
+            return RangeSqlFor(tier);
+        }
+
+        var stitchTier = tier == RetentionTier.Hourly ? RollupCoverage.StitchTier.Hourly : RollupCoverage.StitchTier.Daily;
+        var legacy = tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView;
+
+        var successorFloor = coverage.StitchFloor(legacy, stitchTier, windowStartUtc);
+        if (successorFloor is null)
+        {
+            /* #3653 A6, lane LA-6 (coordinator ruling on #4182): this branch already runs only when
+               StitchFloor answered null, which per StitchedRelationSql's own remarks means it would splice a
+               SINGLE relation — "collect.{legacy} AS f" (no successor, empty successor) or
+               "collect.{successor} AS f" (successor covers the whole window) — never a stitch. Reading the name
+               back off the builder's own splice (rather than re-deriving "which one won" here) keeps every SQL
+               splice on the one path (decision 1): this call and StitchedRelationSql agree by construction.
+               Built with QueriesCteForCagg directly (not the two-argument overload above, whose OWN daily
+               branch always names the legacy — it exists for callers with no coverage to probe a successor
+               with) so a successor-only daily answer is not silently downgraded back to the legacy. */
+            var singleSplice = coverage.StitchedRelationSql(legacy, "f", windowStartUtc, stitchTier);
+            var relationStart = "collect.".Length;
+            var relationEnd = singleSplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
+            var relationName = singleSplice[relationStart..relationEnd];
+
+            var singleRouted = RangeSql.Replace(
+                QueriesCteRaw, QueriesCteForCagg(relationName), StringComparison.Ordinal);
+            if (string.Equals(singleRouted, RangeSql, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Daily-summary CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
+            }
+
+            return singleRouted;
+        }
+
+        var successor = tier == RetentionTier.Hourly
+            ? TimescaleSupport.SuccessorOf(legacy)!
+            : TimescaleSupport.SupersededDailyRollups.First(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal)).SuccessorDaily;
+        var routed = RangeSql.Replace(
+            QueriesCteRaw, QueriesCteForStitchedCagg(legacy, successor, successorFloor.Value), StringComparison.Ordinal);
+
+        if (string.Equals(routed, RangeSql, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "Daily-summary stitched CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
         }
 
         return routed;

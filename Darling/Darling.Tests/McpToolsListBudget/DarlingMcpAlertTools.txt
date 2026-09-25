@@ -1,0 +1,45 @@
+# DarlingMcpAlertTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool create_mute_rule 528
+param create_mute_rule.database_pattern 89
+param create_mute_rule.expires_at 121
+param create_mute_rule.job_name_pattern 79
+param create_mute_rule.metric_name 110
+param create_mute_rule.query_text_pattern 83
+param create_mute_rule.reason 60
+param create_mute_rule.server_name 101
+param create_mute_rule.wait_type_pattern 86
+
+tool delete_mute_rule 332
+param delete_mute_rule.rule_id 76
+
+tool delete_notification_route 496
+param delete_notification_route.route_id 54
+
+tool get_alert_history 589
+param get_alert_history.as_of 167
+param get_alert_history.hours_back 29
+param get_alert_history.include_dismissed 114
+param get_alert_history.limit 133
+param get_alert_history.server_name 90
+
+tool get_alert_settings 607
+
+tool get_mute_rules 274
+param get_mute_rules.enabled_only 54
+
+tool get_notification_routes 502
+
+tool set_mute_rule_enabled 483
+param set_mute_rule_enabled.enabled 88
+param set_mute_rule_enabled.rule_id 87
+
+tool set_notification_route_enabled 512
+param set_notification_route_enabled.enabled 85
+param set_notification_route_enabled.route_id 65
+
+tool update_alert_settings 610
+param update_alert_settings.settings_json 199
+
+tool update_mute_rule 583
+param update_mute_rule.changes_json 196
+param update_mute_rule.rule_id 74

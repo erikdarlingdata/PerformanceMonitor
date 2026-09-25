@@ -943,7 +943,8 @@ public sealed class AlertReadFailureSurfaceTests
     };
 
     private const int WorkerCountedSites = 10;
-    private const int WorkerExemptSites = 9;
+    /* 10th since #4012: the deadlock re-mask pass's catch, beside the store-log re-mask's in the same sweep. */
+    private const int WorkerExemptSites = 10;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1016,6 +1017,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["so this hour's size rows are missing"] = "a metrics write sweep (#3923); no alert is judged on its result, and the store-log census and collector-cost flush the same tick still run on the connection this narrow catch deliberately leaves open",
         ["Store log capture failed"] = "a telemetry write sweep (#3021); no alert is judged on its result, and the capture gap it leaves is reported by get_store_log's own denominator",
         ["Store log: re-masking rows captured before this build failed"] = "a maintenance rewrite of stored store-log text (#3915); no alert is judged on it, it is idempotent and resumes next hour, and until it finishes the store-log reader masks every row on the way out",
+        ["PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed"] = "a maintenance rewrite of stored deadlock reports, deadlock-alert history and analysis findings (#4012); no alert is judged on it, it rewrites only rows still raw and resumes next hour (each stage counts and caps its own failures, #4012's review), and until it finishes every deadlock read normalizes the rows on the way out",
         ["Recently-failed-job check errored"] = "reads the monitored server's msdb on its own connection and timeout",
         ["Skipping recently-failed-job check"] = "the same msdb read, permission-denied arm; not a store read",
         ["Failed to check failed jobs"] = "the fetcher reads the monitored server's msdb; the block's only store op is a write both stores swallow",
@@ -1195,8 +1197,10 @@ public sealed class AlertReadFailureSurfaceTests
            the bootstrap read before the alert engine existed. 28th since #3923: the sizing pass's own narrow
            catch, mirroring the store-log capture's catch beside it - a metrics write sweep whose swallowed
            failure costs no alert, and whose whole point is to leave the store-log census and the
-           collector-cost flush below it running on the connection this catch keeps open. */
-        Assert.Equal(28, totalExempt);
+           collector-cost flush below it running on the connection this catch keeps open. 29th since #4012:
+           the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
+           deadlock read normalizing in the meantime. */
+        Assert.Equal(29, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
@@ -2441,14 +2445,15 @@ public sealed class AlertReadFailureSurfaceTests
         /* #3017 kept the collector band free of its output figures because a verdict keyed on them fired
            on the healthy quiet install. The same argument is stronger here: a band over blind alert reads
            would have to guess how many make alerting unhealthy, and on THIS surface a wrong guess fails by
-           saying nothing is wrong. Read off the type so a tenth parameter fails rather than being
+           saying nothing is wrong. Read off the type so a new parameter fails rather than being
            discovered later. */
         var classify = typeof(CollectorHealthClassifier)
             .GetMethod("Classify", BindingFlags.Public | BindingFlags.Static);
 
         Assert.NotNull(classify);
-        /* 10 since #3240 added extensionMissingCount — a run-class count, not an alert-read term. */
-        Assert.Equal(10, classify!.GetParameters().Length);
+        /* 10 since #3240 added extensionMissingCount (a run-class count, not an alert-read term); 9 since
+           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily. */
+        Assert.Equal(9, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",
             string.Join("|", classify.GetParameters().Select(p => p.Name)),

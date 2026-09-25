@@ -695,7 +695,20 @@ public sealed class PgTargetWriteTests
             Assert.Equal(0, wal.Metadata["baseline_low_quality"]);
             Assert.Equal(AnomalyThresholds.ModifiedZThreshold, wal.Metadata["fire_threshold"]);
             Assert.InRange(wal.Metadata["baseline_ratio"], 11.0, 13.0);
-            Assert.Equal(240, wal.Metadata["window_samples"]);
+            /* #3653 A8 option B: the fact reports the WORST TILE's own sample count, the target-local hour with the
+               largest deviation, not the whole 4-hour window's 240. The whole window's total rides in
+               window_samples_total (design's "worst tile" rule; #4172 commit ee858340f). */
+            var walTileStartTicks = (long)wal.Metadata["tile_start_ticks"];
+            var walTileStart = new DateTime(walTileStartTicks, DateTimeKind.Unspecified);
+            var walTileSamples = 0;
+            for (var minute = 0; minute <= 4 * 60; minute++)
+            {
+                var collectionTime = windowStart.AddMinutes(minute);
+                if (collectionTime >= walTileStart && collectionTime < walTileStart.AddHours(1))
+                    walTileSamples++;
+            }
+            Assert.Equal(walTileSamples, wal.Metadata["window_samples"]);
+            Assert.Equal(240.0, wal.Metadata["window_samples_total"]);
 
             /* ── THE EXIT CRITERION, through the real analyze_server, anchored at the planted window's end. */
             var service = new DarlingAnalysisService(postgres);

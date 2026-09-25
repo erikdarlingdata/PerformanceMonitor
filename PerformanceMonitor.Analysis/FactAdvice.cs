@@ -280,7 +280,7 @@ public static class FactAdvice
             "QUERY_SPILLS" => ComposeQuerySpills(factsByKey),
             // Simple wait-type blocks: each states its own wait totals, with a clean concept + fix.
             "RESOURCE_SEMAPHORE" or "RESOURCE_SEMAPHORE_QUERY_COMPILE" or "WRITELOG" or "HADR_SYNC_COMMIT"
-                or "LATCH_EX" or "LATCH_SH" or "PAGELATCH_UP" or "LCK_M_S" or "LCK_M_IS"
+                or "LATCH_EX" or "LATCH_SH" or "PAGELATCH_EX" or "PAGELATCH_UP" or "LCK_M_S" or "LCK_M_IS"
                 => ComposeWaitByKey(rootFactKey, factsByKey),
             // #3538 A9: schema-modification waits name the long-running job when RUNNING_JOBS fired — the
             // same window the SCH_M → RUNNING_JOBS graph edge folds the two cards into one incident.
@@ -1303,7 +1303,8 @@ public static class FactAdvice
     /// <summary>
     /// Per-key clean text for the simple wait-type blocks, routed through ComposeSimpleWait so each
     /// states its own wait totals. Bodies are tool-name-free and preserve the audited corrections
-    /// (LATCH_EX → OPTIMIZE_FOR_SEQUENTIAL_KEY, range locks → SERIALIZABLE only).
+    /// (range locks → SERIALIZABLE only; #4149 moved last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY OFF
+    /// LATCH_EX — that guidance belongs to PAGELATCH_EX, a page latch, not a non-buffer LATCH_EX).
     /// </summary>
     private static AdviceBlock ComposeWaitByKey(string key, IReadOnlyDictionary<string, Fact> facts) => key switch
     {
@@ -1325,14 +1326,24 @@ public static class FactAdvice
             "Commits are waiting on a synchronous availability-group secondary — HADR_SYNC_COMMIT",
             "HADR_SYNC_COMMIT is the time a committing transaction on the primary spends waiting for a synchronous-commit secondary to acknowledge that it has hardened the log block. It is the availability-group half of commit latency — the local log flush is WRITELOG — so on a synchronous AG every commit pays both. Sustained HADR_SYNC_COMMIT means the round trip to the secondary is slow: the secondary's own log write, the network between the replicas, or a secondary that is busy with redo or with readable-secondary queries and is slow to harden.",
             "Measure the replica side before touching the primary: the secondary's transaction-log write latency and its redo queue, and the network latency between the replicas. A secondary whose log sits on slower storage than the primary's, or in another region, sets the primary's commit latency — fix that, not the primary. Then review which databases actually need synchronous commit: it is a durability and failover-readiness POLICY (zero data loss on failover), and only the databases whose recovery-point objective requires it should carry it; the rest can be asynchronous by design, not as a performance shortcut. Do NOT switch a database from synchronous to asynchronous commit to make this wait disappear — that trades away the guarantee the setting exists for, and the decision belongs to whoever owns the recovery-point objective, not to a wait-stats finding."),
+        // #4149: LATCH_EX/LATCH_SH are NOT page latches — sys.dm_os_wait_stats documents LATCH_EX as
+        // excluding buffer and transaction-mark latches. The class decides the cause, so the first step
+        // is get_latch_stats, not tempdb or last-page-insert guesswork (that advice moved to
+        // PAGELATCH_EX/PAGELATCH_UP below, where the wait type actually implicates it).
         "LATCH_EX" => ComposeSimpleWait(facts, key, "Exclusive latch waits",
-            "Exclusive latch contention — often last-page insert hotspots (LATCH_EX)",
-            "LATCH_EX is contention on in-memory structures, not row locks. The most common cause is last-page insert contention: many sessions inserting into an index with an ever-increasing key (an identity or a datetime) all fight for the latch on the final page.",
-            "For last-page insert contention on SQL Server 2019 and later, enable OPTIMIZE_FOR_SEQUENTIAL_KEY on the hot index — it is purpose-built for exactly this. Otherwise spread the inserts across more pages (a hash or reversed key, or partitioning). Do NOT add a clustered index expecting it to fix this — a sequential clustered key is what CREATES the hotspot."),
+            "Exclusive latch contention on a non-buffer resource — LATCH_EX",
+            "LATCH_EX is contention on in-memory structures OTHER than buffer-pool pages or transaction-mark latches — sys.dm_os_wait_stats excludes both from this wait type. It is not last-page insert contention or tempdb allocation contention; those surface as PAGELATCH_EX and PAGELATCH_UP. Find the latch class first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth.",
+            "Get the latch class before acting — the fix depends entirely on which one is hot. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or address why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, fix file autogrowth (larger fixed increments, pre-size the file) so the file stops growing or shrinking under load. For LOG_MANAGER, address log growth directly — pre-size the log and fix whatever is generating excess log records."),
         "LATCH_SH" => ComposeSimpleWait(facts, key, "Shared latch waits",
-            "Shared latch contention — LATCH_SH",
-            "LATCH_SH is shared-latch contention on in-memory structures, and it frequently accompanies heavy parallelism or specific internal hotspots rather than user row contention.",
-            "Narrow it by the latch sub-type — common drivers are heavy concurrent reads of the same pages or parallelism overhead. Reducing unnecessary parallelism (cost threshold for parallelism, MAXDOP) often relieves the parallelism-driven cases."),
+            "Shared latch contention on a non-buffer resource — LATCH_SH",
+            "LATCH_SH is shared-latch contention on in-memory structures OTHER than buffer-pool pages — sys.dm_os_wait_stats excludes buffer latches from this wait type. It is not concurrent readers hitting the same hot page (that is a buffer-pool page latch, tracked separately); it frequently accompanies heavy parallelism or specific internal hotspots. Find the latch class first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth.",
+            "Get the latch class before acting — the fix depends entirely on which one is hot. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or address why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, fix file autogrowth. For LOG_MANAGER, address log growth directly."),
+        // #4149: last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY belongs here, not on LATCH_EX — the
+        // wait CREATE INDEX's own docs name for it is PAGELATCH_EX.
+        "PAGELATCH_EX" => ComposeSimpleWait(facts, key, "Exclusive page-latch waits",
+            "Exclusive page-latch contention — often last-page insert hotspots (PAGELATCH_EX)",
+            "PAGELATCH_EX is contention on in-memory buffer-pool pages, not row locks. The most common cause is last-page insert contention: many sessions inserting into an index with an ever-increasing key (an identity or a datetime) all fight for the latch on the final page.",
+            "For last-page insert contention on SQL Server 2019 and later, enable OPTIMIZE_FOR_SEQUENTIAL_KEY on the hot index — it is purpose-built for exactly this. Otherwise spread the inserts across more pages (a hash or reversed key, or partitioning). Do NOT add a clustered index expecting it to fix this — a sequential clustered key is what CREATES the hotspot."),
         "PAGELATCH_UP" => ComposeSimpleWait(facts, key, "Tempdb allocation page-latch waits",
             "Tempdb allocation contention — PFS/GAM/SGAM page latches (PAGELATCH_UP)",
             "PAGELATCH_UP is contention on tempdb's allocation bitmap pages (PFS/GAM/SGAM): sessions that rapidly create and drop temp tables, or spill sorts and hashes to tempdb, all latch the same small set of allocation pages in each data file. It is an in-memory latch — not disk I/O (that is PAGEIOLATCH) and not row locks — and it is the classic 'too few tempdb data files for the core count' signal.",
@@ -2802,21 +2813,35 @@ public static class FactAdvice
         // Latch contention
         // ─────────────────────────────────────────────────────────────────
 
+        // #4149: LATCH_EX excludes buffer and transaction-mark latches (sys.dm_os_wait_stats), so the
+        // headline and body no longer describe page latches or point straight at tempdb/last-page-insert
+        // — those are PAGELATCH_EX/PAGELATCH_UP's territory below. The class from get_latch_stats decides
+        // the cause.
         t["LATCH_EX"] = new AdviceBlock(
             Headline:
-                "Exclusive page-latch contention — in-memory contention on hot pages, often tempdb allocation or last-page insert hotspots",
+                "Exclusive latch contention on a non-buffer resource — the class decides the cause (LATCH_EX)",
             Investigation:
-                "Page latches are short-term synchronization on individual buffer-pool pages. EX latch waits usually mean parallel inserts into a heap or narrow index (every session contending for the same allocation page), tempdb allocation contention on GAM/SGAM/PFS pages (the `2:1:1` family of resource waits), or insert hotspots on tables with monotonically increasing keys. Co-elevated TEMPDB_USAGE, CXPACKET, or SOS_SCHEDULER_YIELD tells you which shape this is. Open the Latch Stats sub-tab under Resource Metrics for the per-latch-class breakdown over the window, and the TempDB tab to confirm or rule out the tempdb-allocation shape.",
+                "LATCH_EX is contention on in-memory structures OTHER than buffer-pool pages or transaction-mark latches — it is not last-page insert contention or tempdb allocation contention, which surface as PAGELATCH_EX and PAGELATCH_UP. Get the latch class with get_latch_stats first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth. Co-elevated CXPACKET or SOS_SCHEDULER_YIELD corroborates the parallelism shape.",
             Remediation:
-                "For tempdb allocation contention, confirm at least 4 tempdb data files of equal size (8 if cores >= 8) and that `MIXED_PAGE_ALLOCATION` is `OFF` (the default since 2016). For a last-page insert hotspot — an ever-increasing (IDENTITY / sequential) leading key on a B-tree, where every insert latches the same trailing page — the direct fix is `OPTIMIZE_FOR_SEQUENTIAL_KEY = ON` on that index (2019+); otherwise a non-sequential leading key, hash partitioning, or in-memory OLTP. Adding a clustered index on a sequential key CREATES this contention rather than relieving it, so that is not the fix. For parallel inserts contending on a heap's allocation pages (PFS/IAM), spread or partition the insert workload — a sequential clustered key will only move the contention to the index's last page.");
+                "Act on the class, not on the wait type. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or fix why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, pre-size the file and fix small autogrowth increments. For LOG_MANAGER, pre-size the transaction log and address whatever is generating excess log records.");
 
         t["LATCH_SH"] = new AdviceBlock(
             Headline:
-                "Shared page-latch contention — concurrent readers contending for the same hot pages",
+                "Shared latch contention on a non-buffer resource — the class decides the cause (LATCH_SH)",
             Investigation:
-                "Less common than EX, but shows up when many parallel readers hit the same small set of pages — root pages of busy indexes, single-page tables that everyone reads. Open the Latch Stats sub-tab under Resource Metrics for the breakdown by latch class. PAGE class points at the buffer pool; ACCESS_METHODS_HOBT_VIRTUAL_ROOT is the famously hot root-page latch on heavily-read indexes. CXPACKET co-elevation means parallel operations are amplifying the contention.",
+                "LATCH_SH is shared-latch contention on in-memory structures OTHER than buffer-pool pages — sys.dm_os_wait_stats excludes buffer latches from this wait type, so it is not concurrent readers thrashing a hot page. Get the latch class with get_latch_stats first: ACCESS_METHODS_DATASET_PARENT and ACCESS_METHODS_SCAN_RANGE_GENERATOR point at parallel scan coordination, FGCB_ADD_REMOVE points at file growth or shrink, and LOG_MANAGER points at log growth. CXPACKET co-elevation means parallel operations are amplifying the contention.",
             Remediation:
-                "Architectural problem, not a configuration one. If a single hot page is being thrashed by small lookups, partition the index so the hot data spans multiple pages, denormalize the lookup into a wider structure, or cache at the application layer. There's no `sp_configure` setting that fixes this — the schema or workload has to change. If the contention is on a queue-table or status-flag pattern that everyone polls, switching that hot pattern to a service broker queue or an event-driven design is usually the durable answer.");
+                "Act on the class, not on the wait type. For ACCESS_METHODS_DATASET_PARENT or ACCESS_METHODS_SCAN_RANGE_GENERATOR, reduce unnecessary parallelism (cost threshold for parallelism, MAXDOP) or fix why the optimizer is choosing wide parallel scans. For FGCB_ADD_REMOVE, pre-size the file and fix small autogrowth increments. For LOG_MANAGER, pre-size the transaction log and address whatever is generating excess log records.");
+
+        // #4149: last-page-insert / OPTIMIZE_FOR_SEQUENTIAL_KEY moved here from LATCH_EX — CREATE INDEX's
+        // own docs name PAGELATCH_EX as the wait type this guidance is for.
+        t["PAGELATCH_EX"] = new AdviceBlock(
+            Headline:
+                "Exclusive page-latch contention — in-memory contention on hot pages, often last-page insert hotspots",
+            Investigation:
+                "Page latches are short-term synchronization on individual buffer-pool pages. PAGELATCH_EX waits usually mean parallel inserts into a heap or narrow index (every session contending for the same allocation page), or insert hotspots on tables with monotonically increasing keys. Co-elevated CXPACKET or SOS_SCHEDULER_YIELD tells you which shape this is. Open the Latch Stats sub-tab under Resource Metrics for the per-latch-class breakdown over the window.",
+            Remediation:
+                "For a last-page insert hotspot — an ever-increasing (IDENTITY / sequential) leading key on a B-tree, where every insert latches the same trailing page — the direct fix is `OPTIMIZE_FOR_SEQUENTIAL_KEY = ON` on that index (2019+); otherwise a non-sequential leading key, hash partitioning, or in-memory OLTP. Adding a clustered index on a sequential key CREATES this contention rather than relieving it, so that is not the fix. For parallel inserts contending on a heap's allocation pages (PFS/IAM), spread or partition the insert workload — a sequential clustered key will only move the contention to the index's last page.");
 
         t["PAGELATCH_UP"] = new AdviceBlock(
             Headline:

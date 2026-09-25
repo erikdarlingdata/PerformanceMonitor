@@ -59,6 +59,29 @@ public sealed class PgLoggingCollectorOffTests
     }
 
     /// <summary>
+    /// #3997's sibling gap gets the identical treatment for the identical reason: logging_collector on, but
+    /// no stderr-format file left after the shared tail's csvlog/jsonlog exclusion. Fails on the pre-fix
+    /// shape — before this arm existed, PgNoStderrLogFileException fell through to the general handler and
+    /// recorded ERROR every cycle for a deliberate, legitimate logging configuration.
+    /// </summary>
+    [Fact]
+    public void Worker_Records_A_NoStderrLogFile_As_Permissions_Not_Error()
+    {
+        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+
+        var armIndex = source.IndexOf("catch (PgNoStderrLogFileException ex)", System.StringComparison.Ordinal);
+        Assert.True(armIndex >= 0, "The #3997 classification arm is gone — a csvlog/jsonlog-only target would fall to the general handler and record ERROR every cycle.");
+
+        var body = source[armIndex..];
+        var close = body.IndexOf("\n            return 0;", System.StringComparison.Ordinal);
+        body = close > 0 ? body[..close] : body;
+
+        Assert.Contains("\"PERMISSIONS\"", body, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("\"ERROR\"", body, System.StringComparison.Ordinal);
+        Assert.Contains("ex.Message", body, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The deadlock read asks the precondition question, and asks it in the only defensible order:
     /// capability first (a permanent engine gap outranks a fixable setting, #2511's lesson), then the
     /// collector's own recorded outcome, then the read's own miss. <c>get_pg_plans</c> already asks

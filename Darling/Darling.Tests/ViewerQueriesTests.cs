@@ -182,8 +182,10 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         /* replica_role is a grouping key: an AG's shared Query Store (2022+) would otherwise report
-           primary and secondary workload blended into one row. */
-        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, replica_role", sql, StringComparison.Ordinal);
+           primary and secondary workload blended into one row. execution_type_desc is one for the same
+           reason: Regular, Aborted and Exception executions of one plan are separate runtime-stats rows. */
+        Assert.Contains("GROUP BY database_name, query_id, plan_id, query_hash, execution_type_desc, replica_role", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("MAX(execution_type_desc)", sql, StringComparison.Ordinal);
         /* Rank by total duration = executions * avg duration, over-fetch 5, cap at top (Lite's shape). */
         Assert.Contains("ORDER BY SUM(execution_count) * AVG(CAST(avg_duration_us AS double precision)) DESC", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4 + 5", sql, StringComparison.Ordinal);

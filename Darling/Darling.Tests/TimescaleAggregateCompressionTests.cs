@@ -94,21 +94,28 @@ public sealed class TimescaleAggregateCompressionTests
     {
         var targets = TimescaleSupport.AggregateCompressionTargets;
 
+        /* #3653 A6: DailyAggregates grew from 7 to 10 (the three interval-honest successor dailies), but
+           they are held out of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane LC's
+           freeze frees the band's slots — so the compressed count stays 23, derived as 9 + 10 + 7 - 3. */
         Assert.Equal(23, targets.Count);
         Assert.Equal(9, TimescaleSupport.HourlyAggregates.Length);
-        Assert.Equal(7, TimescaleSupport.DailyAggregates.Length);
+        Assert.Equal(10, TimescaleSupport.DailyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
+        Assert.Equal(3, TimescaleSupport.CompressionDeferredUntilFreeze.Count);
         Assert.Equal(
-            TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length,
+            TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length
+                - TimescaleSupport.CompressionDeferredUntilFreeze.Count,
             targets.Count);
 
         Assert.Equal(targets.Count, targets.Select(t => t.View).Distinct(StringComparer.Ordinal).Count());
 
         /* Order and tier are the source lists', in order — the same order the ensure sweep creates in, so the
-           hour each aggregate takes on the band follows creation order and nothing else. */
+           hour each aggregate takes on the band follows creation order and nothing else — minus the deferred
+           daily successors, which never reach the band. */
         var expected = TimescaleSupport.HourlyAggregates.Select(a => (a.View, Hourly: true))
             .Concat(TimescaleSupport.DailyAggregates.Select(a => (a.View, Hourly: false)))
             .Concat(TimescaleSupport.BaselineAggregates.Select(a => (a.View, Hourly: true)))
+            .Where(t => !TimescaleSupport.CompressionDeferredUntilFreeze.Contains(t.View))
             .ToArray();
         Assert.Equal(expected, targets.Select(t => (t.View, t.Hourly)).ToArray());
 
@@ -543,8 +550,18 @@ public sealed class TimescaleAggregateCompressionTests
             await TimescaleSupport.ConvergeContinuousAggregateRefreshAsync(connection, null, ct);
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
-               targets (no compression band slot) — so the created count is the targets plus those. */
-            Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Count + TimescaleSupport.OffGridAggregates.Length, created);
+               targets (no compression band slot) — so the created count is the targets plus those.
+               #3653 A6 lane LB-2 (live-measured): the three interval-honest successor DAILIES are ALSO created by
+               this sweep but held OUT of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane
+               LC frees their band slots — so "created" is HourlyAggregates + DailyAggregates + BaselineAggregates
+               + OffGridAggregates (every registered aggregate), not AggregateCompressionTargets + OffGridAggregates
+               (only the ones with a compression policy). The two counts were equal before lane LB added a
+               registered-but-deferred daily tier; this assertion still read the old, now-coincidentally-wrong,
+               formula. */
+            Assert.Equal(
+                TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
+                    + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
+                created);
 
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
                every one reads ten raw chunks (hierarchical ones take their parent's, which is already ten). Read

@@ -1,0 +1,32 @@
+# DarlingMcpTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool analyze_server 617
+param analyze_server.as_of 167
+param analyze_server.hours_back 104
+param analyze_server.server_name 28
+
+tool audit_config 451
+param audit_config.server_name 28
+
+tool compare_analysis 611
+param compare_analysis.as_of 167
+param compare_analysis.baseline_hours_back 139
+param compare_analysis.hours_back 57
+param compare_analysis.server_name 28
+
+tool get_analysis_facts 585
+param get_analysis_facts.as_of 167
+param get_analysis_facts.hours_back 36
+param get_analysis_facts.min_severity 90
+param get_analysis_facts.server_name 28
+param get_analysis_facts.source 180
+
+tool get_analysis_findings 610
+param get_analysis_findings.as_of 167
+param get_analysis_findings.hours_back 49
+param get_analysis_findings.include_drilldown 122
+param get_analysis_findings.server_name 28
+
+tool mute_analysis_finding 597
+param mute_analysis_finding.reason 27
+param mute_analysis_finding.server_name 50
+param mute_analysis_finding.story_path_hash 45

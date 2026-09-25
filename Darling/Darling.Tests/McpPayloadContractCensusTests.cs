@@ -1720,7 +1720,9 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        ("DarlingMcpDataTools.cs", "initializer", 1),
+        /* Two: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer holds. */
+        ("DarlingMcpDataTools.cs", "initializer", 2),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
@@ -1945,7 +1947,7 @@ public sealed class McpPayloadContractCensusTests
         Assert.Contains(WindowFloorKey, clause, StringComparison.Ordinal);
         Assert.Contains("effective_start / effective_hours_back", clause, StringComparison.Ordinal);
         Assert.Contains("not a page cut", clause, StringComparison.Ordinal);
-        Assert.Contains("spelled truncated before #3653", clause, StringComparison.Ordinal);
+        Assert.Contains("formerly named truncated.", clause, StringComparison.Ordinal);
 
         /* And by reflection on the SKU this project can load: the Darling five really do publish the clause in
            the attribute an MCP client reads, ahead of the discontinuities sentence they end with. */
@@ -1957,7 +1959,14 @@ public sealed class McpPayloadContractCensusTests
         foreach (var (file, tool) in WindowFloorTools.Where(t => t.File.StartsWith("Darling", StringComparison.Ordinal)))
         {
             Assert.True(darling.TryGetValue(tool, out var description), $"{tool} ({file}) is not a Darling MCP tool");
+            /* #3898 D3/D4, re-pointed deliberately: the whole clause may span head and guide, because its
+               "formerly named truncated." WIRE CHANGE notice leaves the wire for the guide tail (D4). What
+               a caller needs to read the payload (the key, and that it is a retention floor, not a page cut)
+               is a guardrail and must be served in the head. Unconverted, the head is the whole description. */
             Assert.Contains(clause, description!, StringComparison.Ordinal);
+            var head = McpToolGuide.Split(description!).Head;
+            Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
+            Assert.Contains("not a page cut", head, StringComparison.Ordinal);
             Assert.DoesNotContain("read truncated", description!, StringComparison.Ordinal);
         }
     }

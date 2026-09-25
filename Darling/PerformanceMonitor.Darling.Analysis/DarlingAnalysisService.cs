@@ -17,6 +17,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -400,6 +401,20 @@ public sealed class DarlingAnalysisService
             CollectionCaveatLedger.Shared.Record(
                 context.ServerId, context.ServerName, DateTime.UtcNow,
                 context.CollectionFailures, context.CollectionFamilyCount);
+
+            /* #3691 part a1: the store side, so a separate Viewer process reading only the store learns what
+               only the in-process ledger above knew. Best-effort by construction (ApplyPassAsync never
+               throws), and awaited: a store failure is logged once at Warning and never fails or blocks the
+               pass, but the pass still finishes writing it before moving on, matching the ledger call above.
+               Only the failed families are named; "every other family this server had a row for" is read as
+               "read successfully" and cleared — see ApplyPassAsync for why there is no separate read list. */
+            var unreadFamilies = context.CollectionFailures
+                .GroupBy(f => f.Family, StringComparer.Ordinal)
+                .Select(g => new CollectionCaveatStore.UnreadFamily(g.Key, CollectionFailure.Label(g.Last().Outcome)))
+                .ToArray();
+
+            await CollectionCaveatStore.ApplyPassAsync(
+                _postgres, context.ServerId, unreadFamilies, DateTime.UtcNow, _logger, context.CancellationToken);
 
             if (context.CollectionFailures.Count > 0)
             {

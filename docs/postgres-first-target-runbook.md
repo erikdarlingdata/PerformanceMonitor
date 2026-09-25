@@ -100,7 +100,22 @@ database Darling connects to**, not in `postgres` for good measure:
 ```sql
 GRANT pg_read_server_files TO darling_monitor;
 GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling_monitor;
 ```
+
+The third grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
+`pg_read_file()` returns `text`, which PostgreSQL validates against the database encoding before this
+process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
+login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
+byte sits in the window, blinding all three collectors at once. `pg_read_binary_file()` returns `bytea`,
+which carries no such check, and the three collectors switch to it on their own once it is granted, with no
+restart and no config change: on the next cycle after a read that failed on such a byte, otherwise within an
+hour. That applies to a database whose encoding is UTF8 or SQL_ASCII. PostgreSQL checks SQL_ASCII text as
+UTF-8 on its way to the collector, so a SQL_ASCII database meets the same failure and gets the same fix. In any
+other encoding, the collectors stay on `pg_read_file()`, because the binary route decodes the log as UTF-8.
+LATIN1 accepts every byte except NUL, so a planted byte never fails its read. The EUC encodings and WIN1252 can
+still fail it, and the grant does not help there. The fault message says so, and
+[#4062](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4062) tracks a fix.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
 identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
@@ -360,7 +375,7 @@ All 28, from `CollectorScheduleDefaults` — the shared table both SKUs schedule
 | `pg_lock_stats` | 1 min | 1 min | 1 min (a sample, not a counter) |
 | `pg_wraparound_stats` | 5 min | 5 min | 5 min (levels) |
 | `pg_deadlocks` | 5 min | 5 min | the first deadlock reported — an event log, not a counter |
-| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes beside the fingerprint of the statement that spilled once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
+| `pg_log_events` | 5 min | 5 min | the first classified line — an event log; each family carries rows only while its `log_*` setting is on (#3601). A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602); an `autovacuum` event carries the run's duration, pages, tuples, buffers and WAL once `log_autovacuum_min_duration` is set, and `get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603) |
 | `pg_cpu_utilization` | 5 min | 5 min | 5 min (Performance Insights backfills the 1-minute points) |
 | `pg_autovacuum_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
 | `pg_table_bloat_stats` | 60 min | **60 min** | 2 h (growing/flat needs two) |
@@ -446,7 +461,7 @@ them; 35 `get_pg_*` tools in all, registered by the same service:
 | `get_pg_blocking` | blocking chains that were SAMPLED, with the root attributed |
 | `get_pg_lock_stats` | contended lock modes and relations over time, sampled from `pg_locks` |
 | `get_pg_deadlocks` | deadlocks parsed from the server log, one row per distinct deadlock |
-| `get_pg_deadlock_detail` | one deadlock in full: the complete wait graph and every participant's SQL |
+| `get_pg_deadlock_detail` | one deadlock in full: the complete wait graph and every participant's SQL, normalized |
 | `get_pg_log_events` | the server log, classified: errors (WARNING and worse), connections, lock waits, spills with their exact bytes per file (#3602), autovacuum / autoanalyze runs with their duration, pages, tuples, buffers and WAL (#3603), plus checkpoints recognised for later structure — messages as PostgreSQL wrote them with any SQL in them normalized, filtered by `family` and `min_severity`, the page saying what bounded it. The "check the error log" read (#3601) |
 | `get_pg_database_stats` | temp-file spills, cache hit ratio, deadlocks, commit/rollback split, and the window's peak connected backends per database (`peak_numbackends`, a level — `null` on a pre-V133 history, not 0) |
 | `get_pg_database_trend` | one database's spills, hit ratio, deadlocks and rollback share over time, in buckets sized to the window, each with its worst interval |

@@ -136,7 +136,9 @@ public sealed class IntervalHonestHourlyRollupTests
 
         Assert.False(RollupAvailability.WithoutIntervalHourlies.AllPresent);
         Assert.True(RollupAvailability.All.AllPresent);
-        Assert.Equal(16, TimescaleSupport.RollupViews.Length);
+        /* 16 through #3653 Q12, +3 for the A6 successor DAILIES this lane registers
+           (query_stats_interval_daily, procedure_stats_interval_daily, query_stats_db_interval_daily). */
+        Assert.Equal(19, TimescaleSupport.RollupViews.Length);
     }
 
     /// <summary>
@@ -619,8 +621,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)", connection);
         /* The upgraded-store shape, made on the same store: re-create the successor empty (WITH NO DATA) so
            the legacy is the deeper supply — the rule sends a window reaching into the hour to the legacy and a
            window past it to the successor. */
+        /* #3653 A6 lane LB-6: dropping the hourly successor CASCADEs onto query_stats_interval_daily too —
+           it is hierarchical FROM the hourly (CreateQueryStatsIntervalDailySql), so a CAGG's own dependency
+           takes its child down with it. The product's ensure sweep always recreates every registered
+           aggregate on the next start (EnsureContinuousAggregatesAsync runs the whole registry, not just
+           the changed one), so the fixture must do the same here or the coverage probe below throws 42P01
+           on a relation THIS test just destroyed and never rebuilt — a test-setup gap, not a product one. */
         await ExecuteAsync(connection, TimescaleSupport.DropRetiredBaselineRelationSql(TimescaleSupport.QueryStatsIntervalHourlyView), ct);
         await ExecuteAsync(connection, TimescaleSupport.CreateQueryStatsIntervalHourlySql, ct);
+        await ExecuteAsync(connection, TimescaleSupport.CreateQueryStatsIntervalDailySql, ct);
         var upgraded = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
         Assert.Null(upgraded.FloorOf(TimescaleSupport.QueryStatsIntervalHourlyView));
         Assert.Equal(TimescaleSupport.QueryStatsHourlyView, upgraded.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, hour));

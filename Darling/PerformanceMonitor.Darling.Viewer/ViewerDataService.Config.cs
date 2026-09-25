@@ -78,11 +78,28 @@ public sealed partial class ViewerDataService
         ORDER BY database_name
         """;
 
+    /// <summary>
+    /// #3999: anchored on the trace_flags collector's newest SUCCESSFUL run, not the newest row. A capture
+    /// that finds every flag off writes ZERO rows (<c>DBCC TRACESTATUS(-1)</c> only lists flags that are ON),
+    /// so a plain <c>capture_time = MAX(capture_time)</c> falls back to an older capture that still had a
+    /// flag on. The second <c>AND</c> decides on the ROW COUNT of the newest SUCCESS this collector logged
+    /// in <c>v_collection_log</c>: every capture writes the full list of flags that are on, so 0 rows means
+    /// every flag was off and the read reports none. Not on timestamps: the service stamps collection_log at
+    /// a run's END, after its capture rows, so "newest success is newer than the newest capture" holds after
+    /// every ordinary run and would hide every enabled flag. No SUCCESS row, or a NULL count, keeps the
+    /// pre-fix reading. <c>DarlingCurrentConfigReader.TraceFlagsSql</c> and Lite's twin carry the same test.
+    /// </summary>
     public const string TraceFlagsSql = """
         SELECT trace_flag, status, is_global, is_session
         FROM v_trace_flags
         WHERE server_id = $1
         AND   capture_time = (SELECT MAX(capture_time) FROM v_trace_flags WHERE server_id = $1)
+        AND   COALESCE(
+                  (SELECT rows_collected FROM v_collection_log
+                   WHERE server_id = $1 AND collector_name = 'trace_flags' AND status = 'SUCCESS'
+                   ORDER BY collection_time DESC NULLS LAST
+                   LIMIT 1),
+                  1) > 0
         ORDER BY trace_flag
         """;
 

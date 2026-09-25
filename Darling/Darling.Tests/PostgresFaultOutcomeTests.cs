@@ -34,6 +34,11 @@ public class PostgresFaultOutcomeTests
     /* A collector that does NOT opt into the lock-timeout yield, so 55P03 stays an error for it. */
     private const string PlainCollector = "pg_wait_stats";
 
+    /* The runtime the planted-byte sentence reads. Its storage name is never cached by any test, so the
+       sentence takes its UTF8 branch here whatever the statics collection is doing in parallel. */
+    private static readonly ServerRuntime FaultRuntime =
+        PgReadBinaryFileCapabilityTests.Runtime("fault-outcome-tests", connectedDatabase: "appdb");
+
     /* The 42P01 the companion arm is written for, spelled once because #3830's pins assert whole
        sentences and the message is the first clause of every one of them. */
     private const string CompanionMissingMessage = "relation \"public.pg_stat_statements_info\" does not exist";
@@ -99,6 +104,12 @@ public class PostgresFaultOutcomeTests
 
         /* And it must not repeat the sentence this fixes. */
         Assert.DoesNotContain("covers every collector", explanation, StringComparison.Ordinal);
+
+        /* #4046: whoever is granting pg_read_file for the first time is told to grant the binary twin in
+           the same breath, so a fresh setup never has to discover the 22021 byte the hard way. */
+        Assert.Contains(
+            "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -174,6 +185,110 @@ public class PostgresFaultOutcomeTests
 
         Assert.Equal("ERROR", status);
         Assert.Contains("could not open file", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4046 part 1c (#4051 review M1): a 22021 on a log-tail reader gets no PostgresFaultOutcome arm. It
+    /// declines with ERROR, so the general handler records it and the blinding counts as an error there.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    [InlineData("pg_log_events")]
+    public void ALogReader22021KeepsErrorForTheGeneralHandler(string collectorName)
+    {
+        var (status, _) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, "appdb");
+
+        Assert.Equal("ERROR", status);
+    }
+
+    /// <summary>
+    /// The sentence the general handler records for that 22021: the SQLSTATE, the mechanism (pg_read_file
+    /// validates text against the database encoding before this process sees a row), and the exact grant that
+    /// switches the collector to the binary route on its own.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    [InlineData("pg_log_events")]
+    public void ALogReader22021NamesThePlantedByteAndTheBinaryGrant(string collectorName)
+    {
+        var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), collectorName, FaultRuntime);
+
+        Assert.NotNull(explanation);
+        Assert.Contains("22021", explanation, StringComparison.Ordinal);
+        Assert.Contains("not valid UTF-8", explanation, StringComparison.Ordinal);
+        Assert.Contains("#4046", explanation, StringComparison.Ordinal);
+        Assert.Contains(
+            "EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4051 round-2 review, L-1 (#4062 changed the sentence's own reasoning, not this pin): a 22P05 is a
+    /// WIN1252 byte with no UTF-8 equivalent, on a database whose encoding this collector does not map. The
+    /// sentence says that the grant does not help there, with no issue reference in the served text.
+    /// </summary>
+    [Fact]
+    public void ALogReader22P05SaysTheGrantDoesNotHelp()
+    {
+        var explanation = DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22P05", "character with byte sequence 0x81 in encoding WIN1252 has no equivalent in encoding UTF8"),
+            "pg_log_events", FaultRuntime);
+
+        Assert.NotNull(explanation);
+        Assert.Contains("22P05", explanation, StringComparison.Ordinal);
+        Assert.Contains("does not help", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("#4062", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Grant EXECUTE", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The sentence must not widen: a 22021 on a collector that is not one of the three log-tail readers, any
+    /// other SQLSTATE on one that is, and a fault that is not a PostgresException all keep the general
+    /// handler's own message.
+    /// </summary>
+    [Fact]
+    public void TheUndecodableByteSentenceIsForALogReadersPlantedByteFaultsOnly()
+    {
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector, FaultRuntime));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            Pg("58P01", "could not open file"), "pg_log_events", FaultRuntime));
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(
+            new InvalidOperationException("not a server fault"), "pg_log_events", FaultRuntime));
+    }
+
+    /// <summary>
+    /// #4051 review L3: a 22021 proven to come from a write to the STORE is not about the target's log, so it
+    /// keeps the general handler's own message (#3111's rule).
+    /// </summary>
+    [Fact]
+    public void AStoreWrites22021KeepsTheGeneralMessage()
+    {
+        var fault = Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0x00");
+        CollectorFaultCopyPhase.Stamp(fault, StoreCopyPhase.Data);
+
+        Assert.Null(DarlingWorker.LogTailUndecodableByteExplanation(fault, "pg_log_events", FaultRuntime));
+    }
+
+    /// <summary>
+    /// The arm must not widen: a 22021 on any collector that is not one of the three log-tail readers has no
+    /// listing-then-reading shape to explain it, and stays on the loud default exactly as the classifier's
+    /// Unclassified answer intends — the same discipline <see cref="AMissingFileOnAnyOtherCollectorStaysLoud"/>
+    /// pins for 58P01.
+    /// </summary>
+    [Fact]
+    public void A22021OnAnyOtherCollectorStaysLoud()
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("22021", "invalid byte sequence for encoding \"UTF8\": 0xff"), PlainCollector);
+
+        Assert.Equal("ERROR", status);
+        Assert.Contains("invalid byte sequence", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_binary_file", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -992,8 +1107,9 @@ public class PostgresFaultOutcomeTests
         var worker = ReadSource(Path.Combine(
             "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
 
-        /* Exactly two fault arms name a database, and both read it through the helper. */
-        Assert.Equal(2, Regex.Matches(
+        /* Three call sites name a database, and all three read it through the helper: the two fault arms, and
+           the planted-byte sentence that the general arm records for a log-tail read (#4046, #4051). */
+        Assert.Equal(3, Regex.Matches(
             worker, @"CollectorFaultDatabase\.For\(ex, runtime\.ConnectedDatabase\)").Count);
 
         /* And neither passes the runtime's field straight into a fault message. These are the two

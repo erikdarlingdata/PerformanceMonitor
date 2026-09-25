@@ -109,7 +109,7 @@ public sealed class PgLogEventMetricsParserTests
         + P + "[4102] STATEMENT:  SELECT o.id, o.note FROM orders AS o\n"
         + "\tWHERE o.customer_id = 1007 AND o.note <> 'gift for O''Brien' ORDER BY o.created_at\n";
 
-    private static List<PgLogEvent> Classify(string text) => PgLogEventClassifier.Default.Classify(text);
+    private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
 
     /* ---- autovacuum ---------------------------------------------------------------------------------- */
 
@@ -589,7 +589,9 @@ public sealed class PgLogEventMetricsRungTests
     public void TheRunbookAndTheReadme_NameBothFamilies()
     {
         var runbook = RepoFile.ReadRepoFile("docs", "postgres-first-target-runbook.md");
-        Assert.Contains("exact bytes beside the fingerprint of the statement that spilled once `log_temp_files` is on (#3602)", runbook, StringComparison.Ordinal);
+        /* #4004: no tool or viewer returns a statement fingerprint, so the runbook no longer promises one beside the bytes. */
+        Assert.Contains("A `temp_file` event carries the spill's exact bytes once `log_temp_files` is on (#3602)", runbook, StringComparison.Ordinal);
+        Assert.DoesNotContain("fingerprint of the statement that spilled", runbook, StringComparison.Ordinal);
         Assert.Contains("`get_pg_autovacuum_health` shows them per table as `recent_runs` (#3603)", runbook, StringComparison.Ordinal);
         Assert.Contains("| `get_pg_autovacuum_health` | tables ranked by how far past their **own** trigger threshold, each with `recent_runs`", runbook, StringComparison.Ordinal);
 
@@ -652,7 +654,7 @@ public sealed class PgLogEventMetricsLivePostgresTests
             var fixture = string.Concat(
                 Fixture("Vacuum18"), Fixture("Analyze18"), Fixture("Vacuum16"), Fixture("Spills"), Fixture("WraparoundVacuum"))
                 .Replace("2026-09-18 03:07:12.345", stamp, StringComparison.Ordinal);
-            var events = PgLogEventClassifier.Default.Classify(fixture);
+            var events = new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(fixture);
             Assert.Equal(6, events.Count);
             await WriteAsync(postgres, events, ct);
 
@@ -737,6 +739,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         writer.Importer = importer;
         var context = new CollectorContext
         {
+            LogHashKey = TestLogHashKeys.Fixed,
             ServerId = ServerId, ServerName = ServerName, CollectionTime = collectionTime,
             Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
         };

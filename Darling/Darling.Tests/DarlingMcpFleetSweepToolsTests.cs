@@ -98,40 +98,58 @@ public sealed class DarlingMcpFleetSweepToolsTests
     /// <summary>
     /// The description is this tool's real interface — the spec's non-goals split makes
     /// <c>get_sweep_reports</c> the narration substrate an agent reads, so the two field contracts must be
-    /// IN the description rather than in a document the agent never sees: a sweep taken under master-off
-    /// means DELIVERY WAS OFF (the mute header's meaning), with the ledger present-and-empty vs absent
-    /// distinction stated; and <c>instruments_alive: false</c> means the sweep could not prove its own
-    /// data sources — quiet is not clean, an empty window on such a sweep is unreadable, not healthy.
+    /// readable without a second call: a sweep taken under master-off means DELIVERY WAS OFF (the mute header's
+    /// meaning), with the ledger present-and-empty vs absent distinction stated; and
+    /// <c>instruments_alive: false</c> means the sweep could not prove its own data sources — quiet is not
+    /// clean, an empty window on such a sweep is unreadable, not healthy.
+    ///
+    /// <para>#3898: re-pointed deliberately. The short guardrail claims (the two ALL-CAPS labels, the two field
+    /// names, and the would_have_paged/ABSENT contract) are guardrail facts and must survive in the served HEAD,
+    /// at most 620 characters. The fuller original phrasing (the exact "muted, and nothing would have paged"
+    /// wording, the fleet_sweep knob's home, and the "at most one daily rollup" channel note) did not fit that
+    /// budget and moved verbatim to the TAIL, which <c>get_tool_guide</c> serves and which #3898's dropped-sentence
+    /// check (<c>dropcheck.py</c>) confirms still carries it.</para>
     /// </summary>
     [Fact]
     public void Description_CarriesTheMuteSemantics_AndTheQuietIsNotCleanBlock()
     {
-        var description = ToolMethods().Single()
-            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+        var served = McpToolGuideTests.Served("get_sweep_reports");
 
-        Assert.Contains("DELIVERY WAS OFF", description, StringComparison.Ordinal);
-        Assert.Contains("would_have_paged", description, StringComparison.Ordinal);
-        Assert.Contains("muted, and nothing would have paged", description, StringComparison.Ordinal);
-        Assert.Contains("ABSENT on an alerts-on sweep", description, StringComparison.Ordinal);
-        Assert.Contains("QUIET IS NOT CLEAN", description, StringComparison.Ordinal);
-        Assert.Contains("instruments_alive", description, StringComparison.Ordinal);
-        Assert.Contains("instrument_liveness", description, StringComparison.Ordinal);
+        Assert.Contains("MUTE SEMANTICS", served.Served, StringComparison.Ordinal);
+        Assert.Contains("DELIVERY WAS OFF", served.Served, StringComparison.Ordinal);
+        Assert.Contains("would_have_paged", served.Served, StringComparison.Ordinal);
+        Assert.Contains("ABSENT on an alerts-on sweep", served.Served, StringComparison.Ordinal);
+        Assert.Contains("QUIET IS NOT CLEAN", served.Served, StringComparison.Ordinal);
+        Assert.Contains("instruments_alive", served.Served, StringComparison.Ordinal);
+        Assert.Contains("instrument_liveness", served.Served, StringComparison.Ordinal);
+
+        Assert.NotNull(served.Tail);
+        Assert.Contains("muted, and nothing would have paged", served.Tail!, StringComparison.Ordinal);
         /* The knob's home is named, so an agent that wants the cadence goes to the settings read. */
-        Assert.Contains("fleet_sweep", description, StringComparison.Ordinal);
+        Assert.Contains("fleet_sweep", served.Tail!, StringComparison.Ordinal);
+        /* #3898 Phase 2: the instructions' cross-server paragraph carried this cadence fact; once that
+           paragraph was cut, the description became the only place an agent could learn it. Now in the tail. */
+        Assert.Contains("at most one daily rollup", served.Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>#3487's output side, stated where an agent reads: every sweep id the payload carries
     /// rides as a JSON string — the input half of #2548's rule was always described, and the output
     /// half now closes the loop, so a quoted id reads as the contract rather than a quirk. The
-    /// emission itself is pinned in <c>FleetSweepWebFeedTests</c> on the shared builders.</summary>
+    /// emission itself is pinned in <c>FleetSweepWebFeedTests</c> on the shared builders.
+    ///
+    /// <para>#3898: re-pointed to the tail. The head states the STRING claim tersely ("pass sweep_id (a
+    /// STRING) for one sweep"); the exact original sentences pinned here did not fit the 620-character head and
+    /// moved verbatim to the tail.</para>
+    /// </summary>
     [Fact]
     public void Description_StatesTheIds_AreEmittedAsStrings()
     {
-        var description = ToolMethods().Single()
-            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+        var served = McpToolGuideTests.Served("get_sweep_reports");
 
-        Assert.Contains("spelled as a JSON string", description, StringComparison.Ordinal);
-        Assert.Contains("pass one back verbatim", description, StringComparison.Ordinal);
+        Assert.Contains("STRING", served.Served, StringComparison.Ordinal);
+        Assert.NotNull(served.Tail);
+        Assert.Contains("spelled as a JSON string", served.Tail!, StringComparison.Ordinal);
+        Assert.Contains("pass one back verbatim", served.Tail!, StringComparison.Ordinal);
     }
 
     /* ---------------- refusals, before the store is ever touched ---------------- */
@@ -240,18 +258,9 @@ public sealed class DarlingMcpFleetSweepToolsTests
             source, StringComparison.Ordinal);
     }
 
-    /// <summary>The house rule every tool suite applies: the instructions an MCP client plans against
-    /// must carry the tool — and for this one, the same two field contracts the description carries,
-    /// because the instructions' cross-server section is where an agent first meets the sweep.</summary>
-    [Fact]
-    public void TheInstructions_CarryTheTool_AndItsFieldContracts()
-    {
-        var text = DarlingMcpInstructions.Text;
-        Assert.Contains("get_sweep_reports", text, StringComparison.Ordinal);
-        Assert.Contains("MUTE SEMANTICS", text, StringComparison.Ordinal);
-        Assert.Contains("QUIET IS NOT CLEAN", text, StringComparison.Ordinal);
-        Assert.Contains("bounded at ONE daily rollup", text, StringComparison.Ordinal);
-    }
+    /* #3898 Phase 2 (D5): the instructions' duplicate cross-server paragraph naming this tool and its field
+       contracts is gone — Description_CarriesTheMuteSemantics_AndTheQuietIsNotCleanBlock above is now the
+       only pin on them, the tool's own description being the sole surface left to carry them. */
 
     /* ---------------- advertised MCP schema ---------------- */
 

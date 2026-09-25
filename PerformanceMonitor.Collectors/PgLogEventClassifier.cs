@@ -59,14 +59,24 @@ public sealed class PgLogEventClassifier
         new PgRecognisedFamilyParser(),
     };
 
-    /// <summary>The classifier every transport uses. One instance, no state: the parsers are pure.</summary>
-    public static PgLogEventClassifier Default { get; } = new(DefaultParsers);
-
     private readonly IReadOnlyList<IPgLogFamilyParser> _parsers;
+    private readonly PgLogHashKey _key;
 
-    public PgLogEventClassifier(IReadOnlyList<IPgLogFamilyParser> parsers)
+    /// <summary>
+    /// The classifier every transport uses: <see cref="DefaultParsers"/>, stamping each event's identities under
+    /// <paramref name="key"/>, the store's log-hash key (#4004). There is deliberately no keyless instance: a
+    /// classifier that could hash without the store's key is the unkeyed oracle #4004 removed.
+    /// </summary>
+    public PgLogEventClassifier(PgLogHashKey key)
+        : this(DefaultParsers, key)
+    {
+    }
+
+    /// <summary>A classifier over <paramref name="parsers"/>, in order, stamping under <paramref name="key"/>.</summary>
+    public PgLogEventClassifier(IReadOnlyList<IPgLogFamilyParser> parsers, PgLogHashKey key)
     {
         _parsers = parsers ?? throw new ArgumentNullException(nameof(parsers));
+        _key = key ?? throw new ArgumentNullException(nameof(key));
     }
 
     /// <summary>The parsers this classifier consults, in order.</summary>
@@ -80,6 +90,17 @@ public sealed class PgLogEventClassifier
     /// returned and the caller records the refusal (#2993).</exception>
     public List<PgLogEvent> Classify(string? logBody)
         => Classify(PgLogEntryAssembler.Assemble(logBody));
+
+    /// <summary>
+    /// <see cref="Classify(string?)"/> for a caller that read the target's <c>log_timezone</c> with the text (#4046):
+    /// under a setting that renders UTC, a line in another zone is skipped and counted in
+    /// <paramref name="foreignZoneLines"/> rather than refusing the read. See
+    /// <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>.
+    /// </summary>
+    /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: the
+    /// log is stamped in a non-UTC zone (#2993).</exception>
+    public List<PgLogEvent> Classify(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
+        => Classify(PgLogEntryAssembler.Assemble(logBody, logTimezoneIsUtc, out foreignZoneLines));
 
     /// <summary>The walk itself, over entries already assembled — for a transport that assembled them for another consumer too.</summary>
     public List<PgLogEvent> Classify(IReadOnlyList<PgLogEntry> entries)
@@ -97,7 +118,9 @@ public sealed class PgLogEventClassifier
             {
                 if (parser.TryParse(entry, out var logEvent))
                 {
-                    events.Add(logEvent);
+                    /* #4004: the identities are keyed here, the one step every claimed entry passes through, so no
+                       parser needs the key and no event leaves without them. */
+                    events.Add(_key.Stamp(logEvent, entry));
                     break;
                 }
             }

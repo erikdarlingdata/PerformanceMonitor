@@ -1,0 +1,65 @@
+# McpQueryTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_procedure_duration_trend 445
+param get_procedure_duration_trend.as_of 167
+param get_procedure_duration_trend.bucket_minutes 55
+param get_procedure_duration_trend.hours_back 29
+param get_procedure_duration_trend.server_name 28
+
+tool get_query_duration_trend 614
+param get_query_duration_trend.as_of 167
+param get_query_duration_trend.bucket_minutes 55
+param get_query_duration_trend.hours_back 29
+param get_query_duration_trend.server_name 28
+
+tool get_query_heatmap 799
+param get_query_heatmap.as_of 167
+param get_query_heatmap.bucket_minutes 160
+param get_query_heatmap.database_name 46
+param get_query_heatmap.hours_back 43
+param get_query_heatmap.limit 195
+param get_query_heatmap.metric 123
+param get_query_heatmap.server_name 28
+
+tool get_query_store_duration_trend 616
+param get_query_store_duration_trend.as_of 167
+param get_query_store_duration_trend.hours_back 29
+param get_query_store_duration_trend.server_name 28
+
+tool get_query_store_regressions 616
+param get_query_store_regressions.as_of 167
+param get_query_store_regressions.database_name 46
+param get_query_store_regressions.hours_back 110
+param get_query_store_regressions.limit 86
+param get_query_store_regressions.server_name 28
+
+tool get_query_store_top 422
+param get_query_store_top.as_of 167
+param get_query_store_top.database_name 30
+param get_query_store_top.execution_type 72
+param get_query_store_top.hours_back 29
+param get_query_store_top.module_name 186
+param get_query_store_top.server_name 28
+param get_query_store_top.top 34
+
+tool get_query_trend 792
+param get_query_trend.as_of 167
+param get_query_trend.database_name 39
+param get_query_trend.hours_back 29
+param get_query_trend.query_hash 72
+param get_query_trend.server_name 28
+
+tool get_top_procedures_by_cpu 406
+param get_top_procedures_by_cpu.as_of 167
+param get_top_procedures_by_cpu.database_name 30
+param get_top_procedures_by_cpu.hours_back 29
+param get_top_procedures_by_cpu.server_name 28
+param get_top_procedures_by_cpu.top 37
+
+tool get_top_queries_by_cpu 474
+param get_top_queries_by_cpu.as_of 167
+param get_top_queries_by_cpu.database_name 30
+param get_top_queries_by_cpu.hours_back 29
+param get_top_queries_by_cpu.min_dop 132
+param get_top_queries_by_cpu.parallel_only 160
+param get_top_queries_by_cpu.server_name 28
+param get_top_queries_by_cpu.top 34

@@ -1,0 +1,5 @@
+# DarlingMcpPgWraparoundTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_pg_wraparound_risk 792
+param get_pg_wraparound_risk.as_of 167
+param get_pg_wraparound_risk.hours_back 70
+param get_pg_wraparound_risk.server_name 28

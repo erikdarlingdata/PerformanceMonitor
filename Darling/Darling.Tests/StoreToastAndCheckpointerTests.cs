@@ -64,18 +64,20 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal(17, StoreSelfMetrics.CheckpointerViewMajorVersion);
 
         var modern = StoreSelfMetrics.CheckpointerInsertSql;
-        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time)", modern, StringComparison.Ordinal);
+        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)", modern, StringComparison.Ordinal);
         Assert.Contains("FROM pg_stat_checkpointer AS c", modern, StringComparison.Ordinal);
         Assert.Contains("round(c.write_time)::bigint", modern, StringComparison.Ordinal);
         Assert.Contains("round(c.sync_time)::bigint", modern, StringComparison.Ordinal);
         Assert.Contains("c.num_requested", modern, StringComparison.Ordinal);
+        Assert.Contains("c.num_timed", modern, StringComparison.Ordinal);
 
         var legacy = StoreSelfMetrics.CheckpointerBgwriterInsertSql;
-        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time)", legacy, StringComparison.Ordinal);
+        Assert.Contains("(metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)", legacy, StringComparison.Ordinal);
         Assert.Contains("FROM pg_stat_bgwriter AS b", legacy, StringComparison.Ordinal);
         Assert.Contains("round(b.checkpoint_write_time)::bigint", legacy, StringComparison.Ordinal);
         Assert.Contains("round(b.checkpoint_sync_time)::bigint", legacy, StringComparison.Ordinal);
         Assert.Contains("b.checkpoints_req", legacy, StringComparison.Ordinal);
+        Assert.Contains("b.checkpoints_timed", legacy, StringComparison.Ordinal);
 
         foreach (var sql in new[] { modern, legacy })
         {
@@ -84,7 +86,7 @@ public sealed class StoreToastAndCheckpointerTests
             Assert.Contains($"'{StoreSelfMetrics.CheckpointerObjectKind}'", sql, StringComparison.Ordinal);
             /* #3955: which postmaster produced the counters, as naive UTC — never a bare cast, which renders in the
                session's zone — on both majors, because checkpoints_req counts the shutdown checkpoint too. */
-            Assert.Contains("pg_postmaster_start_time() AT TIME ZONE 'UTC'\nFROM", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+            Assert.Contains("pg_postmaster_start_time() AT TIME ZONE 'UTC',", sql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
             Assert.DoesNotContain("pg_postmaster_start_time()::", sql, StringComparison.Ordinal);
             /* No subtraction anywhere: the row is the counter, the READ is the difference. */
             Assert.DoesNotContain(" - ", sql, StringComparison.Ordinal);
@@ -183,10 +185,18 @@ public sealed class StoreToastAndCheckpointerTests
     [Fact]
     public void TheLatestAndDailyReads_ProjectTheToastPairTrailing_AndNeverTheCheckpointerCounters()
     {
+        /* #3934 restructured StoreMetricsLatestSql into a recursive-CTE skip-scan, so its trailing three
+           columns sit in a nested LATERAL's SELECT list (indented under its own parens) rather than at the
+           flat top level StoreMetricsDailySql still has; the trailing-pair-before-FROM shape is checked
+           against each read's own indentation instead of one shared literal. */
+        var dailyNormalised = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes\nFROM collect.store_metrics", dailyNormalised, StringComparison.Ordinal);
+
+        var latestNormalised = DarlingStoreMetricsReader.StoreMetricsLatestSql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("        total_failures,\n        toast_bytes,\n        toast_live_bytes\n    FROM collect.store_metrics", latestNormalised, StringComparison.Ordinal);
+
         foreach (var sql in new[] { DarlingStoreMetricsReader.StoreMetricsLatestSql, DarlingStoreMetricsReader.StoreMetricsDailySql })
         {
-            var normalised = sql.Replace("\r\n", "\n", StringComparison.Ordinal);
-            Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes\nFROM collect.store_metrics", normalised, StringComparison.Ordinal);
             foreach (var counter in new[] { "checkpoint_write_ms", "checkpoint_sync_ms", "checkpoints_requested" })
             {
                 Assert.DoesNotContain(counter, sql, StringComparison.Ordinal);
@@ -202,8 +212,9 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.DoesNotContain("reader.IsDBNull(15)", source, StringComparison.Ordinal);
 
         var pair = DarlingStoreMetricsReader.CheckpointerPairSql.Replace("\r\n", "\n", StringComparison.Ordinal);
-        /* #3955: the postmaster start time rides the pair, so the differencer can tell a restart-spanning interval. */
-        Assert.Contains("    metric_time,\n    checkpoint_write_ms,\n    checkpoint_sync_ms,\n    checkpoints_requested,\n    postmaster_start_time\nFROM collect.store_metrics", pair, StringComparison.Ordinal);
+        /* #3955: the postmaster start time rides the pair, so the differencer can tell a restart-spanning interval.
+           #4037: the timed-checkpoint count rides beside it, so the differencer can judge the per-checkpoint average. */
+        Assert.Contains("    metric_time,\n    checkpoint_write_ms,\n    checkpoint_sync_ms,\n    checkpoints_requested,\n    postmaster_start_time,\n    checkpoints_timed\nFROM collect.store_metrics", pair, StringComparison.Ordinal);
         Assert.Contains($"WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'", pair, StringComparison.Ordinal);
         Assert.Contains("AND   checkpoint_write_ms IS NOT NULL", pair, StringComparison.Ordinal);
         /* The cap is BOUND, the LargestUnenumeratedSql shape: a literal terminal LIMIT is what the page census
@@ -220,7 +231,7 @@ public sealed class StoreToastAndCheckpointerTests
            rung's history attached. */
         var readerWithSql = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingStoreMetricsReader.cs");
         var readerCode = Regex.Replace(Regex.Replace(readerWithSql, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline), @"^\s*//.*$", string.Empty, RegexOptions.Multiline);
-        foreach (var column in new[] { "toast_bytes", "toast_live_bytes", "checkpoint_write_ms", "checkpoint_sync_ms", "checkpoints_requested", "postmaster_start_time" })
+        foreach (var column in new[] { "toast_bytes", "toast_live_bytes", "checkpoint_write_ms", "checkpoint_sync_ms", "checkpoints_requested", "postmaster_start_time", "checkpoints_timed" })
         {
             Assert.Contains(column, readerCode, StringComparison.Ordinal);
         }
@@ -228,6 +239,8 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("StoreSelfMetrics.CheckpointerObjectKind", readerCode, StringComparison.Ordinal);
         /* And the fifth ordinal is read, nullable: a row written before V139 has no postmaster start. */
         Assert.Contains("reader.IsDBNull(4) ? null : reader.GetDateTime(4)", readerCode, StringComparison.Ordinal);
+        /* And the sixth ordinal is read, nullable: a row written before V140 has no timed count (#4037). */
+        Assert.Contains("reader.IsDBNull(5) ? null : reader.GetInt64(5)", readerCode, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -378,17 +391,20 @@ public sealed class StoreToastAndCheckpointerTests
             DarlingStoreMetricsReader.CheckpointerReading.From(new(t0, 5_000, 30_000, 7), new(t0, 4_000, 30_000, 7)).Status);
     }
 
+    /* #4037: the bar is judged against the PER-CHECKPOINT average (SyncMs / (timed + requested)), not the summed
+       sync milliseconds — timed and requested vary per case so the average lands where the old sum-based cases
+       intended. */
     [Theory]
-    [InlineData(10_001L, 0L, true)]
-    [InlineData(10_000L, 0L, false)]
-    [InlineData(0L, 1L, true)]
-    [InlineData(9_999L, 0L, false)]
-    [InlineData(25_200L, 1L, true)]
-    public void CheckpointerPressure_IsSyncOverTheBarOrAnyRequestedCheckpoint(long syncMs, long requested, bool expected)
+    [InlineData(10_001L, 0L, 1L, true)]   // 1 checkpoint, average 10,001ms: over the bar
+    [InlineData(10_000L, 0L, 1L, false)]  // 1 checkpoint, average exactly 10,000ms: not OVER the bar
+    [InlineData(0L, 1L, 0L, true)]        // any requested checkpoint fires regardless of sync
+    [InlineData(9_999L, 0L, 1L, false)]   // 1 checkpoint, average 9,999ms: under the bar
+    [InlineData(25_200L, 1L, 0L, true)]   // requested fires; the average would too (25,200ms / 1)
+    public void CheckpointerPressure_IsSyncOverTheBarOrAnyRequestedCheckpoint(long syncMs, long requested, long timed, bool expected)
     {
         var t0 = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
         var reading = DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t0.AddHours(1), 1_000, 100_000 + syncMs, 3 + requested), new(t0, 0, 100_000, 3));
+            new(t0.AddHours(1), 1_000, 100_000 + syncMs, 3 + requested, Timed: 5 + timed), new(t0, 0, 100_000, 3, Timed: 5));
         Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
         Assert.Equal(expected, reading.IsPressure);
         Assert.Equal(10_000, DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
@@ -556,21 +572,37 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("pg_stat_reset_shared('checkpointer')", reset, StringComparison.Ordinal);
         Assert.Contains("no delta is stated", reset, StringComparison.Ordinal);
 
-        var quiet = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 3_000, 5), new(t0, 1_000, 1_000, 5)));
-        Assert.Contains("spent 2.0s in its sync (fsync) phase and 1.0s in its write phase, and 0 checkpoint(s) were REQUESTED", quiet, StringComparison.Ordinal);
-        Assert.Contains("Both under the lines the self-alert judges (sync over 10s in an interval, or any requested checkpoint).", quiet, StringComparison.Ordinal);
+        /* Healthy per-checkpoint: 12 checkpoints, 84s summed sync -> 7s average, under the 10s bar; the old sum
+           rule would have judged 84s against the same bar and misfired (#4037). */
+        var quiet = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5, Timed: 12), new(t0, 1_000, 1_000, 5, Timed: 0)));
+        Assert.Contains("12 checkpoint(s), spending", quiet, StringComparison.Ordinal);
+        Assert.Contains("an average of 7.0s of sync per checkpoint", quiet, StringComparison.Ordinal);
+        Assert.Contains("0 checkpoint(s) were REQUESTED", quiet, StringComparison.Ordinal);
+        Assert.Contains("Both under the lines the self-alert judges (average sync over 10s PER CHECKPOINT, or any requested checkpoint).", quiet, StringComparison.Ordinal);
         Assert.DoesNotContain("#3802", quiet, StringComparison.Ordinal);
 
-        var storm = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 26_200, 5), new(t0, 1_000, 1_000, 5)));
-        Assert.Contains("25.2s in its sync (fsync) phase", storm, StringComparison.Ordinal);
+        /* Real pressure: 2 checkpoints, 30s summed -> 15s average, over the bar. */
+        var storm = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 31_000, 5, Timed: 2), new(t0, 1_000, 1_000, 5, Timed: 0)));
+        Assert.Contains("an average of 15.0s of sync per checkpoint", storm, StringComparison.Ordinal);
         Assert.Contains("CHECKPOINTER PRESSURE", storm, StringComparison.Ordinal);
+        Assert.Contains("a per-checkpoint sync average past 10s", storm, StringComparison.Ordinal);
         Assert.Contains("25.2 s and 14.0 s sync phases", storm, StringComparison.Ordinal);
-        Assert.Contains("#3802", storm, StringComparison.Ordinal);
-        Assert.Contains("#3745", storm, StringComparison.Ordinal);
-        Assert.Contains("v12 postgresql.conf block", storm, StringComparison.Ordinal);
 
-        var forced = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 3_000, 6), new(t0, 1_000, 1_000, 5)));
+        /* Requested arm: low sync average, but one requested checkpoint still fires. */
+        var forced = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 3_000, 6, Timed: 5), new(t0, 1_000, 1_000, 5, Timed: 0)));
         Assert.Contains("a requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size allows", forced, StringComparison.Ordinal);
+
+        /* Zero checkpoints in the interval: no average to state, unmeasured, not judged either way. */
+        var idle = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 1_000, 1_000, 5, Timed: 0), new(t0, 1_000, 1_000, 5, Timed: 0)));
+        Assert.DoesNotContain("average of", idle, StringComparison.Ordinal);
+        Assert.False(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 1_000, 1_000, 5, Timed: 0), new(t0, 1_000, 1_000, 5, Timed: 0)).IsPressure);
+
+        /* Pre-rung pair: null timed on both sides -> unmeasured average arm, no pressure from the sum. */
+        var preRung = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5), new(t0, 1_000, 1_000, 5)));
+        Assert.Contains("an unmeasured number of checkpoints (a row before V140 has no timed count)", preRung, StringComparison.Ordinal);
+        Assert.DoesNotContain("average of", preRung, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHECKPOINTER PRESSURE", preRung, StringComparison.Ordinal);
+        Assert.False(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 85_000, 5), new(t0, 1_000, 1_000, 5)).IsPressure);
     }
 
     /* ---- the tool -------------------------------------------------------------------------------------- */
@@ -634,11 +666,15 @@ public sealed class StoreToastAndCheckpointerTests
             .GetCustomAttribute<DescriptionAttribute>()!.Description;
         foreach (var phrase in new[]
         {
-            "TOAST UTILISATION (V137, #3783)",
+            /* #3898: TOAST UTILISATION and CHECKPOINTER used to cite their own issue number, (V137, #3783); D4
+               takes the issue tag off the wire (the schema-version fact, V137, stays load-bearing and is kept).
+               The two motivating anecdotes below the block headers - the 40%/154GB TOAST measurement and the
+               25.2s/14.0s checkpoint sync-phase incident - are D4 "story of why" removals too: each one's RULE
+               (the VACUUM/free-space behavior; the sync_ms/requested self-alert gate) stays in the description,
+               only the specific past incident's numbers are gone. See the #3898 PR body's D4 section. */
+            "TOAST UTILISATION (V137)",
             "they live in its TOAST file, and pg_total_relation_size says how big that file is and nothing about how FULL it is",
             "ordinary VACUUM returns to the table and never to the operating system",
-            "~40 % utilisation (154 GB holding ~61 GB of live chunks)",
-            "~93 GB of slack",
             "toast_utilisation_pct is toast_live_bytes / toast_bytes (one decimal)",
             "pg_freespacemap extension, which the bundled store image ships and does not install",
             "NOTHING is computed from total_bytes or a tuple share",
@@ -646,11 +682,10 @@ public sealed class StoreToastAndCheckpointerTests
             "ACCESS EXCLUSIVE lock",
             "This tool never reclaims anything by itself.",
             "Hypertable, aggregate, table and catch-all objects carry the four TOAST fields as null",
-            "CHECKPOINTER (V137, #3783)",
+            "CHECKPOINTER (V137)",
             "interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence)",
             "Reset (a counter went backwards",
-            "sync phases of 25.2 s and 14.0 s",
-            "WAL sizing (#3802) and refresh slicing (#3745)",
+            "WAL sizing and refresh slicing",
             "The checkpointer row is never an object row",
         })
         {
@@ -851,8 +886,8 @@ public sealed class StoreToastAndCheckpointerTests
         var h = new Harness();
         var e = h.Build();
 
-        /* The production shape: 25.2 s of sync in an hour, no forced checkpoint. */
-        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0), Ct);
+        /* 1 checkpoint, 25.2 s average sync, no forced checkpoint. */
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
         Assert.Null(fired.Severity);
@@ -860,25 +895,33 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal("checkpointer", fired.ServerKey);
         Assert.Equal(25_200, fired.NumericCurrentValue);
         Assert.Equal(10_000, fired.NumericThresholdValue);
-        Assert.Equal("sync 25.2s in 60.0 min", fired.CurrentValue);
-        Assert.Equal("sync > 10s or any requested checkpoint", fired.ThresholdValue);
-        Assert.Contains("#3802", fired.ShortMessage!, StringComparison.Ordinal);
-        Assert.Contains("#3745", fired.ShortMessage!, StringComparison.Ordinal);
-        Assert.Contains("25.2 s and 14.0 s sync", fired.DetailText!, StringComparison.Ordinal);
-        Assert.Contains("v12 postgresql.conf block", fired.DetailText!, StringComparison.Ordinal);
+        Assert.Equal("average sync 25.2s per checkpoint over 1 checkpoint(s) in 60.0 min", fired.CurrentValue);
+        Assert.Equal("average sync > 10s per checkpoint, or any requested checkpoint", fired.ThresholdValue);
+        Assert.Contains("25.2 s and 14.0 s sync phases", fired.DetailText!, StringComparison.Ordinal);
 
-        /* The other arm alone: one WAL-forced checkpoint with a short sync. */
+        /* The other arm alone: one WAL-forced checkpoint with a short average sync. */
         var forced = new Harness();
-        await forced.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 1), Ct);
+        await forced.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 1, timed: 1), Ct);
         var forcedFire = Assert.Single(forced.Deliverer.Outcomes);
-        Assert.Equal("1 WAL-forced checkpoint(s) in 60.0 min", forcedFire.CurrentValue);
+        Assert.Contains("1 WAL-forced checkpoint(s)", forcedFire.CurrentValue, StringComparison.Ordinal);
         Assert.Contains("more WAL between checkpoints than max_wal_size allows", forcedFire.DetailText!, StringComparison.Ordinal);
 
         /* Exactly the bar, no forced checkpoint: quiet. */
         var quiet = new Harness();
-        await quiet.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 10_000, requested: 0), Ct);
+        await quiet.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 10_000, requested: 0, timed: 1), Ct);
         Assert.Empty(quiet.Deliverer.Outcomes);
         Assert.Empty(quiet.History.Records);
+
+        /* Healthy store: 12 checkpoints, 84s summed sync -> 7s average, no pressure (the #4037 headline case). */
+        var healthy = new Harness();
+        await healthy.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 84_000 - 2_500, requested: 0, timed: 12), Ct);
+        Assert.Empty(healthy.Deliverer.Outcomes);
+        Assert.Empty(healthy.History.Records);
+
+        /* Real pressure: 2 checkpoints, 15s average. */
+        var pressure = new Harness();
+        await pressure.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 30_000 - 2_500, requested: 0, timed: 2), Ct);
+        Assert.Single(pressure.Deliverer.Outcomes);
     }
 
     [Fact]
@@ -931,7 +974,7 @@ public sealed class StoreToastAndCheckpointerTests
         await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 1_200, requested: 0), Ct);
         var recovered = Assert.Single(h.History.Records);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
-        Assert.Contains("sync phase 1.2s and 0 requested checkpoint(s)", recovered.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("average sync per checkpoint and 0 requested checkpoint(s)", recovered.DetailText!, StringComparison.Ordinal);
         Assert.StartsWith(DarlingSelfAlertEvaluator.StoreServerLabel + ": ", recovered.DetailText!, StringComparison.Ordinal);
 
         /* Quiet stays quiet. */
@@ -967,10 +1010,10 @@ public sealed class StoreToastAndCheckpointerTests
     public async Task CheckpointerPressure_TheSameCountersWithoutARestart_StillFireAsBefore()
     {
         var h = new Harness();
-        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 2, restarted: false), Ct);
+        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 2, restarted: false, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
-        Assert.Equal("2 WAL-forced checkpoint(s) in 60.0 min", fired.CurrentValue);
+        Assert.Contains("2 WAL-forced checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("RESTARTED", fired.DetailText!, StringComparison.Ordinal);
     }
@@ -994,9 +1037,10 @@ public sealed class StoreToastAndCheckpointerTests
     public async Task CheckpointerPressure_TheSameSlowSyncWithoutARestart_StillFires()
     {
         var h = new Harness();
-        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: false), Ct);
+        await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: false, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
-        Assert.Equal("sync 25.2s and 1 WAL-forced checkpoint(s) in 60.0 min", fired.CurrentValue);
+        Assert.Contains("average sync", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 WAL-forced checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -1079,7 +1123,7 @@ public sealed class StoreToastAndCheckpointerTests
     /// stamps both with one postmaster; both of those are Observed. True stamps them with two, the newer started
     /// half an hour into the interval, which is Restarted.
     /// </summary>
-    private static DarlingStoreMetricsReader.CheckpointerReading Interval(long syncMs, long requested, bool? restarted = null)
+    private static DarlingStoreMetricsReader.CheckpointerReading Interval(long syncMs, long requested, bool? restarted = null, long timed = 1)
     {
         var t0 = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
         var longAgo = t0.AddDays(-20);
@@ -1092,7 +1136,7 @@ public sealed class StoreToastAndCheckpointerTests
         };
 
         var reading = DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t0.AddHours(1), 10_000 + 2_500, 500_000 + syncMs, 40 + requested, newestStart), new(t0, 10_000, 500_000, 40, previousStart));
+            new(t0.AddHours(1), 10_000 + 2_500, 500_000 + syncMs, 40 + requested, newestStart, Timed: 100 + timed), new(t0, 10_000, 500_000, 40, previousStart, Timed: 100));
         Assert.Equal(
             restarted is true ? DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted : DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed,
             reading.Status);

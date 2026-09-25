@@ -63,30 +63,95 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingStoreMetricsReader
 {
-    /// <summary>Latest snapshot per object — DISTINCT ON takes each (kind, name)'s newest row. No
-    /// parameters: the newest row per object is wanted regardless of window. The two trailing TOAST columns
-    /// (V137, #3783) are non-NULL on <c>dimension</c> rows only; the checkpointer's three are deliberately
-    /// NOT projected here — they are cumulative counters that mean nothing on one row, and
-    /// <see cref="CheckpointerPairSql"/> reads the two rows a difference needs.</summary>
+    /// <summary>
+    /// Latest snapshot per object — each (kind, name)'s newest row. No parameters: the newest row per object
+    /// is wanted regardless of window. The two trailing TOAST columns (V137, #3783) are non-NULL on
+    /// <c>dimension</c> rows only; the checkpointer's three are deliberately NOT projected here — they are
+    /// cumulative counters that mean nothing on one row, and <see cref="CheckpointerPairSql"/> reads the two
+    /// rows a difference needs.
+    ///
+    /// <para><b>#3934: a skip-scan over <c>idx_store_metrics_kind_name_time</c>
+    /// (<c>PgTableTuning.Statements</c>), not <c>DISTINCT ON</c> over the whole table.</b> The table keeps
+    /// 400 days of hourly sweeps at ~250 objects/sweep, and the only index used to be <c>idx_store_metrics_time
+    /// (metric_time)</c> alone — nothing to satisfy <c>ORDER BY object_kind, object_name, metric_time DESC</c>,
+    /// so <c>DISTINCT ON</c> sorted every retained row: 7,772 ms and an external merge spilling ~180 MB at full
+    /// retention on a CI-sized rig (2.4M rows), 225 ms on DARLING01 today (83,355 rows) — a cost that is a
+    /// function of store AGE, not fleet size, and arrives gradually. The recursive CTE below is the standard
+    /// PostgreSQL "loose index scan": <c>objects</c> walks the DISTINCT (kind, name) pairs by repeatedly asking
+    /// the index for the next pair strictly greater than the last (a handful of index descents for ~250
+    /// objects, never a scan of the data), and the outer <c>LATERAL</c> asks the SAME index for that pair's
+    /// newest row (<c>ORDER BY metric_time DESC LIMIT 1</c>, one descent each). Both queries the index can
+    /// answer directly — the composite's three columns are exactly the ORDER BY this read has always had.
+    /// Measured on the same seed: 7,772 ms to 15 ms, identical 251 rows.</para>
+    ///
+    /// <para><b>Why an index rather than a migration.</b> Results-invariant — every existing row already
+    /// carries these three columns, so there is no backfill and no version to gate the Viewer's connect-time
+    /// schema check on. Erik's ruling on the issue: this is exactly what the store-object convergence
+    /// registry's Tuning stage exists for (#3817), which already creates the composer's covering indexes
+    /// idempotently at every start and hourly, on every store shape (#3913).</para>
+    /// </summary>
     public const string StoreMetricsLatestSql = @"
-SELECT DISTINCT ON (object_kind, object_name)
-    object_kind,
-    object_name,
-    metric_time,
-    total_bytes,
-    compressed_before_bytes,
-    compressed_after_bytes,
-    chunk_count,
-    row_count,
-    enabled_server_count,
-    last_run_duration_ms,
-    schedule_interval_ms,
-    total_runs,
-    total_failures,
-    toast_bytes,
-    toast_live_bytes
-FROM collect.store_metrics
-ORDER BY object_kind, object_name, metric_time DESC";
+WITH RECURSIVE objects AS (
+    (
+        SELECT object_kind, object_name
+        FROM collect.store_metrics
+        ORDER BY object_kind, object_name
+        LIMIT 1
+    )
+    UNION ALL
+    SELECT next_object.object_kind, next_object.object_name
+    FROM objects
+    CROSS JOIN LATERAL
+    (
+        SELECT object_kind, object_name
+        FROM collect.store_metrics
+        WHERE (object_kind, object_name) > (objects.object_kind, objects.object_name)
+        ORDER BY object_kind, object_name
+        LIMIT 1
+    ) AS next_object
+)
+SELECT
+    latest.object_kind,
+    latest.object_name,
+    latest.metric_time,
+    latest.total_bytes,
+    latest.compressed_before_bytes,
+    latest.compressed_after_bytes,
+    latest.chunk_count,
+    latest.row_count,
+    latest.enabled_server_count,
+    latest.last_run_duration_ms,
+    latest.schedule_interval_ms,
+    latest.total_runs,
+    latest.total_failures,
+    latest.toast_bytes,
+    latest.toast_live_bytes
+FROM objects
+CROSS JOIN LATERAL
+(
+    SELECT
+        object_kind,
+        object_name,
+        metric_time,
+        total_bytes,
+        compressed_before_bytes,
+        compressed_after_bytes,
+        chunk_count,
+        row_count,
+        enabled_server_count,
+        last_run_duration_ms,
+        schedule_interval_ms,
+        total_runs,
+        total_failures,
+        toast_bytes,
+        toast_live_bytes
+    FROM collect.store_metrics
+    WHERE object_kind = objects.object_kind
+    AND   object_name = objects.object_name
+    ORDER BY metric_time DESC
+    LIMIT 1
+) AS latest
+ORDER BY latest.object_kind, latest.object_name";
 
     /// <summary>The daily series — the LAST sample of each object per day (DISTINCT ON over the day
     /// bucket, newest first within it), so each day contributes one settled point per object rather than
@@ -1312,7 +1377,8 @@ SELECT
     checkpoint_write_ms,
     checkpoint_sync_ms,
     checkpoints_requested,
-    postmaster_start_time
+    postmaster_start_time,
+    checkpoints_timed
 FROM collect.store_metrics
 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
 AND   checkpoint_write_ms IS NOT NULL
@@ -1326,7 +1392,10 @@ LIMIT $1";
     /// <summary>One checkpointer row as stored: the sweep's stamp (naive UTC), the three cumulative counters as
     /// the server reported them at that instant, and (V139, #3955) the <c>pg_postmaster_start_time()</c> of the
     /// postmaster that reported them, naive UTC, null on a row written before the rung.</summary>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null);
+    /// <param name="Timed">(V140, #4037) The cumulative COUNT of TIMED checkpoints as the server reported it,
+    /// null on a row written before the rung. <see cref="CheckpointerReading.From"/> reads a null on either
+    /// sample as no evidence for the average-per-checkpoint arm, never as zero.</param>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
@@ -1390,6 +1459,10 @@ LIMIT $1";
     /// when there is no interval to span (Absent, NoPrevious) and on every Observed one.</param>
     /// <param name="PostmasterStartTime">When the postmaster that produced the newest row started, UTC; null when the
     /// newest row predates V139 or there is no row.</param>
+    /// <param name="Timed">(V140, #4037) TIMED checkpoints inside the interval. Null when either sample predates
+    /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
+    /// from sync alone, never falling back to the old summed-sync rule.</param>
+    /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1402,7 +1475,9 @@ LIMIT $1";
         long? CumulativeSyncMs,
         long? CumulativeRequested,
         bool PostmasterRestarted = false,
-        DateTime? PostmasterStartTime = null)
+        DateTime? PostmasterStartTime = null,
+        long? Timed = null,
+        long? CumulativeTimed = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1435,19 +1510,25 @@ LIMIT $1";
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.NoPrevious, observedAt, null, null, null, null, null,
                     newest.WriteMs, newest.SyncMs, newest.Requested,
-                    PostmasterRestarted: false, PostmasterStartTime: startedAt);
+                    PostmasterRestarted: false, PostmasterStartTime: startedAt,
+                    Timed: null, CumulativeTimed: newest.Timed);
             }
 
             var previousAt = DateTime.SpecifyKind(previous.MetricTime, DateTimeKind.Utc);
             var span = (observedAt - previousAt).TotalSeconds;
             var restarted = PostmasterRestart.Spans(previous.MetricTime, previous.PostmasterStartTime, newest.PostmasterStartTime);
 
-            if (newest.WriteMs < previous.WriteMs || newest.SyncMs < previous.SyncMs || newest.Requested < previous.Requested || span <= 0)
+            /* Timed goes backwards only when both samples carry it; a null on either side is "no evidence",
+               never treated as a fall from something to nothing (#4037). */
+            var timedReset = newest.Timed is long nt && previous.Timed is long pt && nt < pt;
+
+            if (newest.WriteMs < previous.WriteMs || newest.SyncMs < previous.SyncMs || newest.Requested < previous.Requested || timedReset || span <= 0)
             {
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.Reset, observedAt, previousAt, null, null, null, null,
                     newest.WriteMs, newest.SyncMs, newest.Requested,
-                    restarted, startedAt);
+                    restarted, startedAt,
+                    Timed: null, CumulativeTimed: newest.Timed);
             }
 
             /* #3955: the shutdown checkpoint is one more requested checkpoint and its own write and sync phases,
@@ -1458,8 +1539,16 @@ LIMIT $1";
                 return new CheckpointerReading(
                     CheckpointerDeltaStatus.Restarted, observedAt, previousAt, null, null, null, null,
                     newest.WriteMs, newest.SyncMs, newest.Requested,
-                    PostmasterRestarted: true, PostmasterStartTime: startedAt);
+                    PostmasterRestarted: true, PostmasterStartTime: startedAt,
+                    Timed: null, CumulativeTimed: newest.Timed);
             }
+
+            /* (V140, #4037) Timed only when BOTH samples carry it; one row from before the rung leaves the
+               average-per-checkpoint arm with no denominator for this interval, stated as null rather than
+               guessed at from the requested count alone. */
+            long? timedDelta = newest.Timed is long newestTimed && previous.Timed is long previousTimed
+                ? newestTimed - previousTimed
+                : null;
 
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
@@ -1467,19 +1556,39 @@ LIMIT $1";
                 newest.SyncMs - previous.SyncMs,
                 newest.Requested - previous.Requested,
                 newest.WriteMs, newest.SyncMs, newest.Requested,
-                PostmasterRestarted: false, PostmasterStartTime: startedAt);
+                PostmasterRestarted: false, PostmasterStartTime: startedAt,
+                Timed: timedDelta, CumulativeTimed: newest.Timed);
         }
 
+        /// <summary>(V140, #4037) Checkpoints inside the interval, timed plus requested — the average arm's
+        /// denominator. Null when <see cref="Timed"/> is null (a pre-rung sample on either side of the pair).</summary>
+        public long? CheckpointCount => Timed is long timed ? timed + (Requested ?? 0) : null;
+
+        /// <summary>(V140, #4037) <see cref="SyncMs"/> divided by <see cref="CheckpointCount"/> — the figure the
+        /// self-alert and the MCP block judge against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>,
+        /// in place of the interval's summed sync milliseconds. Null when there is no checkpoint count to divide
+        /// by, or the interval held zero checkpoints (nothing to average).</summary>
+        public double? AverageSyncMsPerCheckpoint =>
+            CheckpointCount is long count && count > 0 && SyncMs is long sync ? (double)sync / count : null;
+
         /// <summary>
-        /// The self-alert's condition (#3783), judged on an Observed interval only: the sync phase held more
-        /// than <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> inside the interval, OR at least one
-        /// checkpoint was WAL-forced. False on every other status — an unmeasured interval is not a finding,
-        /// and that includes one that spans a postmaster restart (#3955).
+        /// The self-alert's condition (#3783, judged per-checkpoint average since #4037), on an Observed
+        /// interval only: the AVERAGE sync milliseconds per checkpoint in the interval
+        /// (<see cref="AverageSyncMsPerCheckpoint"/> = SyncMs / (timed + requested)) held more than
+        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was WAL-forced.
+        /// The old rule judged the interval's SUMMED sync milliseconds against the same bar, which is a
+        /// PER-CHECKPOINT bar (the MCP read deadline) — an hourly interval covers about twelve timed checkpoints
+        /// on the default five-minute checkpoint_timeout, so a healthy store whose checkpoints synced five to
+        /// eight seconds each summed past the bar every interval and never recovered. A pre-V140 row leaves
+        /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
+        /// back to the old sum, and the requested arm still fires on any WAL-forced checkpoint. Zero checkpoints
+        /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
+        /// finding, and that includes one that spans a postmaster restart (#3955).
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
-            && ((SyncMs is long sync && sync > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
-                || (Requested is long requested && requested > 0));
+            && ((Requested is long requested && requested > 0)
+                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
     }
 
     /// <summary>
@@ -1502,7 +1611,8 @@ LIMIT $1";
         {
             var sample = new CheckpointerSample(
                 reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetDateTime(4));
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.IsDBNull(5) ? null : reader.GetInt64(5));
             if (newest is null)
             {
                 newest = sample;
@@ -1522,11 +1632,55 @@ LIMIT $1";
     /// not a rate).</summary>
     public sealed record DailyGrowthPoint(DateTime Day, long DeltaBytes, double? PerServerBytes);
 
+    /// <summary>
+    /// The index <see cref="StoreMetricsLatestSql"/>'s skip-scan walks (#3934), created by the Tuning stage
+    /// (<c>PgTableTuning</c>), not by a migration.
+    /// </summary>
+    public const string StoreMetricsLatestIndexName = "idx_store_metrics_kind_name_time";
+
+    /// <summary>Whether that index exists: <c>to_regclass</c>, a catalog lookup with no table scan.</summary>
+    public const string StoreMetricsLatestIndexProbeSql =
+        "SELECT pg_catalog.to_regclass('collect." + StoreMetricsLatestIndexName + "') IS NOT NULL";
+
+    /// <summary>
+    /// The pre-#3934 read, kept for a store that does not have <see cref="StoreMetricsLatestIndexName"/> yet:
+    /// the Tuning stage has not run since the upgrade, or could not create it. Without the index, every step of
+    /// the skip-scan re-reads the table, so its cost grows with objects times rows. CI measured it past the
+    /// 30-second MCP read deadline on a production-shaped seed where this form's single sort answers. The
+    /// answers are identical either way; only the plan differs.
+    /// </summary>
+    public const string StoreMetricsLatestWithoutIndexSql = @"
+SELECT DISTINCT ON (object_kind, object_name)
+    object_kind,
+    object_name,
+    metric_time,
+    total_bytes,
+    compressed_before_bytes,
+    compressed_after_bytes,
+    chunk_count,
+    row_count,
+    enabled_server_count,
+    last_run_duration_ms,
+    schedule_interval_ms,
+    total_runs,
+    total_failures,
+    toast_bytes,
+    toast_live_bytes
+FROM collect.store_metrics
+ORDER BY object_kind, object_name, metric_time DESC";
+
     public static async Task<List<StoreMetricRow>> GetLatestAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
+        bool indexed;
+        await using (var probe = postgres.CreateCommand(StoreMetricsLatestIndexProbeSql))
+        {
+            probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            indexed = await probe.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
         var rows = new List<StoreMetricRow>();
-        await using var command = postgres.CreateCommand(StoreMetricsLatestSql);
+        await using var command = postgres.CreateCommand(indexed ? StoreMetricsLatestSql : StoreMetricsLatestWithoutIndexSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);

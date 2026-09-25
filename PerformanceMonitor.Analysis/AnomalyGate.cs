@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Analysis;
@@ -148,6 +150,12 @@ public static class AnomalyGate
     /// quantities and the parameter order (baseline frame first, then the two window statistics) keeps
     /// them apart at every call site. <c>Sigma</c> is the peak's; <c>MeanSigma</c> the window mean's.
     /// </summary>
+    /// <param name="window">#3653 A8 slice 1: the analysis window's length (<c>context.TimeRangeEnd -
+    /// context.TimeRangeStart</c>). <c>null</c> (the default) keeps today's behaviour exactly — the peak clause
+    /// judges against <paramref name="deviationThreshold"/> unchanged. When supplied, the PEAK clause alone is
+    /// judged against the Šidák-corrected <c>AnomalyThresholds.NAwarePeakCutoff(deviationThreshold, window)</c>
+    /// instead — a no-op at the 4-hour reference window or shorter (class remarks). The mean clause and the
+    /// magnitude floor are unaffected either way.</param>
     public static ZDecision EvaluateZScore(
         double mean,
         double effectiveStdDev,
@@ -158,9 +166,10 @@ public static class AnomalyGate
         double magnitudeFloor,
         double absoluteFallbackBar,
         double sigmaCap,
-        bool isZeroHistory = false)
+        bool isZeroHistory = false,
+        TimeSpan? window = null)
         => Decide(mean, effectiveStdDev, isTrustworthy, peak, windowMean,
-            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, isZeroHistory);
+            deviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, isZeroHistory, window);
 
     /// <summary>
     /// #1743: the robust-first gate on the window PEAK alone — the pre-#3653 verdict, kept
@@ -200,6 +209,10 @@ public static class AnomalyGate
     /// classical pair gate at <paramref name="classicalDeviationThreshold"/>. The trust/fallback rule
     /// per statistic is the class remarks'. <c>Sigma</c> is the peak's; <c>MeanSigma</c> the mean's.
     /// </summary>
+    /// <param name="window">#3653 A8 slice 1: see the classical pair overload's remarks — <c>null</c> keeps
+    /// today's behaviour; supplied, it Šidák-corrects the peak clause only, on whichever frame
+    /// (<paramref name="modifiedZThreshold"/> or <paramref name="classicalDeviationThreshold"/>) the bucket
+    /// actually degrades to.</param>
     public static ZDecision EvaluateZScore(
         BaselineBucket baseline,
         double peak,
@@ -208,10 +221,129 @@ public static class AnomalyGate
         double modifiedZThreshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        TimeSpan? window = null)
         => DecideRobustFirst(baseline, peak, windowMean,
-            classicalDeviationThreshold, modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap);
+            classicalDeviationThreshold, modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, window);
 
+    /// <summary>
+    /// #3653 A8 option B (lane L1a): one tile's verdict from <see cref="EvaluateTiles"/>, plus enough of the tile
+    /// and the bucket it was scored against for the caller to build a finding (design §1's <c>tile_local_hour</c>,
+    /// <c>tile_day_of_week</c>, <c>tile_start_ticks</c>, and the worst tile's peak/mean/baseline).
+    /// </summary>
+    /// <param name="Decision">The worst tile's own <see cref="ZDecision"/> — <c>Sigma</c> is that tile's peak
+    /// deviation, <c>ThresholdUsed</c> is the k_W actually applied to it.</param>
+    /// <param name="Tile">The worst tile itself — its <c>LocalHour</c> is <c>tile_local_hour</c>/<c>tile_day_of_week</c>'s
+    /// source and its <c>Peak</c>/<c>Mean</c> are what the finding reports in place of the whole-window statistics.</param>
+    /// <param name="Bucket">The baseline bucket the worst tile was scored against — its tier and quality feed
+    /// <c>AddBaselineContext</c> exactly as the whole-window bucket does today.</param>
+    /// <param name="TilesScored">How many tiles cleared <c>minTileSamples</c> and had a non-empty bucket —
+    /// <c>tiles_scored</c>.</param>
+    /// <param name="TilesFired">How many of the scored tiles had <c>Decision.Fire</c> true — <c>tiles_fired</c>. 0
+    /// when the verdict's own <c>Decision.Fire</c> is false.</param>
+    public readonly record struct TileVerdict(ZDecision Decision, WindowTile Tile, BaselineBucket Bucket, int TilesScored, int TilesFired);
+
+    /// <summary>
+    /// #3653 A8 option B (lane L1a): scores every tile in <paramref name="tiles"/> against its own (hour, dow)
+    /// bucket in <paramref name="map"/> and returns the window's verdict — the per-hour-tile gate the design's §1
+    /// and §3 describe. Fires when ≥ 1 tile fires (the worst firing tile, largest <c>Sigma</c>, ties to the later
+    /// <c>LocalHour</c>); when every scored tile is judged and none fires, still returns a verdict with
+    /// <c>Decision.Fire = false</c>, the highest-<c>Sigma</c> scored tile, and <c>TilesFired = 0</c> — the caller
+    /// gets a display verdict even on a quiet pass. Returns <c>null</c> only when NO tile could be scored at all
+    /// (every tile under <paramref name="minTileSamples"/>, or every selected bucket empty): the design's
+    /// never-blind rule — the caller falls back to the whole-window <see cref="EvaluateZScore(BaselineBucket,
+    /// double,double,double,double,double,double,TimeSpan?)"/>/<c>EvaluateZScore</c> pair against the start bucket
+    /// rather than going silent.
+    /// <para>Each tile is decided through <see cref="DecideRobustFirst"/> with <c>correctMean: true</c> (design §3:
+    /// "through a private flag on the existing internal decision path; don't copy <c>Decide</c>"), so the tile's
+    /// mean clause is judged against the SAME Šidák-raised k_W as its peak clause — the trust, untrustworthy and
+    /// zero-history paths inside <c>Decide</c> are otherwise untouched per tile.</para>
+    /// </summary>
+    /// <param name="tiles">One entry per target-local hour the window's SQL grouped by (design §1); a tile below
+    /// <paramref name="minTileSamples"/> is skipped before its bucket is even looked up.</param>
+    /// <param name="map">The precomputed (hour, dow) baseline map for this window (lane L1b's provider accessor) —
+    /// each tile is looked up independently through <see cref="BaselineBucketMap.For"/>, so each can land on a
+    /// different tier with its own trust/zero-history state.</param>
+    /// <param name="window">The analysis window's length, fed to <c>AnomalyThresholds.NAwarePeakCutoff</c> exactly
+    /// as the whole-window pair overload's own <c>window</c> parameter is — the same k_W applies to every tile's
+    /// peak AND mean clause (design §1: the tile cutoff is anchored at the 4-hour reference, not at 1 tile-hour).</param>
+    /// <param name="minTileSamples">The design §1 minimum-samples edge rule; defaults to
+    /// <see cref="AnomalyThresholds.MinTileSamples"/>.</param>
+    public static TileVerdict? EvaluateTiles(
+        IReadOnlyList<WindowTile> tiles,
+        BaselineBucketMap map,
+        double classicalDeviationThreshold,
+        double modifiedZThreshold,
+        double magnitudeFloor,
+        double absoluteFallbackBar,
+        double sigmaCap,
+        TimeSpan window,
+        int minTileSamples = AnomalyThresholds.MinTileSamples)
+    {
+        var scored = new List<(ZDecision Decision, WindowTile Tile, BaselineBucket Bucket)>(tiles.Count);
+
+        foreach (var tile in tiles)
+        {
+            // Design §1's minimum-samples edge rule: a tile under the floor is a partial first/last hour or a
+            // restart gap, not scored at all — skipped before its bucket is even looked up.
+            if (tile.Samples < minTileSamples)
+                continue;
+
+            var bucket = map.For(tile.LocalHour.Hour, (int)tile.LocalHour.DayOfWeek);
+            // Design §1's missing-bucket rule: SelectBucket's own empty sentinel (SampleCount == 0) means this
+            // tile's hour has no history at all yet — skipped, not scored against nothing.
+            if (bucket.SampleCount == 0)
+                continue;
+
+            // #3653 A8 option B (lane L1d): the lone-spike guard. The pair gate's mean clause is judged on the
+            // tile's mean WITHOUT its own peak sample (`gateMean`), so a single hot sample can never lift the
+            // clause it is itself supposed to be corroborated by. Without this, a tile of n samples with one hot
+            // sample lifts the reported mean by (peak - mean)/n, and at a coarse cadence (small n) that lift alone
+            // clears the mean threshold — the lone-spike case the pair gate exists to catch (#3724), reappearing
+            // through the tile's own arithmetic (design ruling: Lite's OneHotSampleInAQuietWindow regression, 4
+            // samples/hour, one at 90 among 10s, tile mean 30, now firing). `gateMean` is passed ALONGSIDE
+            // `tile.Mean` as `windowMean`: the reported MeanSigma and every detector's avg_*/mean_deviation_sigma
+            // metadata still reflect the tile's FULL mean (see `Decide`'s remarks); only the mean clause's pass/
+            // fail comparison is judged on the rest-mean.
+            var gateMean = tile.Samples > 1
+                ? (tile.Mean * tile.Samples - tile.Peak) / (tile.Samples - 1)
+                : tile.Mean;
+
+            var decision = DecideRobustFirst(
+                bucket, tile.Peak, tile.Mean,
+                classicalDeviationThreshold, modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap,
+                window, correctMean: true, gateMean: gateMean);
+
+            scored.Add((decision, tile, bucket));
+        }
+
+        // Design §1's never-blind rule: no tile scored at all → null, caller falls back to EvaluateZScore.
+        if (scored.Count == 0)
+            return null;
+
+        var firing = scored.Where(s => s.Decision.Fire).ToList();
+        var tilesFired = firing.Count;
+        // ≥ 1 tile fires → the worst tile is the firing one with the largest Sigma, ties to the later LocalHour;
+        // nothing fires → the highest-Sigma tile among every tile that was scored (still reported, Fire stays
+        // false because that tile's own Decision.Fire is false).
+        var candidates = tilesFired > 0 ? firing : scored;
+        var worst = candidates
+            .OrderByDescending(s => s.Decision.Sigma)
+            .ThenByDescending(s => s.Tile.LocalHour)
+            .First();
+
+        return new TileVerdict(worst.Decision, worst.Tile, worst.Bucket, scored.Count, tilesFired);
+    }
+
+    /// <param name="correctMean">#3653 A8 option B (lane L1a): when true, the TRUSTWORTHY path's mean clause
+    /// judges against the SAME Šidák-raised <c>peakThreshold</c> as the peak clause, instead of the uncorrected
+    /// <paramref name="classicalDeviationThreshold"/>/<paramref name="modifiedZThreshold"/> the whole-window pair
+    /// gate uses (design §1: "tile mode corrects the mean too" — H tile means are H chances under the null in the
+    /// fully autocorrelated worst case, exactly the peak's own N-aware argument). Default false keeps every
+    /// existing caller (the whole-window pair overloads) byte-identical. The untrustworthy and zero-history paths
+    /// are unaffected either way — neither compares the mean against a Šidák-corrected threshold at all (see
+    /// <see cref="Decide"/>'s own remarks), which is what "the trust, untrustworthy and zero-history paths stay
+    /// exactly as Decide has them" (design §3) means in practice.</param>
     private static ZDecision DecideRobustFirst(
         BaselineBucket baseline,
         double peak,
@@ -220,14 +352,17 @@ public static class AnomalyGate
         double modifiedZThreshold,
         double magnitudeFloor,
         double absoluteFallbackBar,
-        double sigmaCap)
+        double sigmaCap,
+        TimeSpan? window = null,
+        bool correctMean = false,
+        double? gateMean = null)
     {
         var robustSigma = baseline.EffectiveRobustSigma;
         if (robustSigma <= 0)
         {
             return Decide(
                 baseline.Mean, baseline.EffectiveStdDev, baseline.IsTrustworthy, peak, windowMean,
-                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory);
+                classicalDeviationThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window, correctMean, gateMean);
         }
 
         /* A zero-history bucket cannot reach here: IsZeroHistory requires Mad <= 0, which is EffectiveRobustSigma
@@ -235,7 +370,7 @@ public static class AnomalyGate
            does have). The flag is threaded anyway so the two calls read the same and neither can silently drop it. */
         return Decide(
             baseline.Median, robustSigma, baseline.IsTrustworthy, peak, windowMean,
-            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory);
+            modifiedZThreshold, magnitudeFloor, absoluteFallbackBar, sigmaCap, baseline.IsZeroHistory, window, correctMean, gateMean);
     }
 
     /// <summary>
@@ -256,8 +391,17 @@ public static class AnomalyGate
         double magnitudeFloor,
         double absoluteFallbackBar,
         double sigmaCap,
-        bool isZeroHistory = false)
+        bool isZeroHistory = false,
+        TimeSpan? window = null,
+        bool correctMean = false,
+        double? gateMean = null)
     {
+        // #3653 A8 slice 1: the Sidák-corrected peak cutoff, applied to the PEAK clause only (the mean clause
+        // below keeps judging against `threshold` unchanged — it is already sample-count-neutral, see the
+        // AnomalyThresholds.NAwarePeakCutoff and class remarks). `window` null, or at/under the 4-hour reference
+        // window, returns `threshold` itself — byte-identical to the pre-#3653/pre-A8 verdict.
+        var peakThreshold = window is { } w ? AnomalyThresholds.NAwarePeakCutoff(threshold, w) : threshold;
+
         /* #3691 lane 41: the ZERO-HISTORY arm, ONE `if` at the very top, so every verdict for every other
            baseline shape is structurally untouched — nothing runs before this test, nothing below it changed.
 
@@ -314,10 +458,21 @@ public static class AnomalyGate
             // dispersion > 0 is guaranteed when trustworthy (IsTrustworthy requires EffectiveStdDev > 0;
             // the robust frame arrives here only when EffectiveRobustSigma > 0).
             var peakDeviation = (peak - center) / dispersion;
-            var peakClears = peakDeviation >= threshold && peak >= magnitudeFloor;
-            // #3653: the mean's deviation clears the SAME cutoff; the floor stays on the peak (class remarks).
-            var meanClears = windowMean is null || (windowMean.Value - center) / dispersion >= threshold;
-            return new ZDecision(peakClears && meanClears, Math.Min(peakDeviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: threshold, MeanSigma: meanSigma);
+            // #3653 A8 slice 1: the peak clears the (possibly N-aware-raised) peakThreshold; the floor is
+            // unchanged. ThresholdUsed carries peakThreshold, not threshold, so fire_threshold reports what was
+            // actually applied to the peak (class remarks; the scorer anchors its severity ramp here).
+            var peakClears = peakDeviation >= peakThreshold && peak >= magnitudeFloor;
+            // #3653: the mean's deviation clears the SAME (un-corrected) cutoff; the floor stays on the peak.
+            // #3653 A8 option B (lane L1a): `correctMean` raises that bar to the SAME peakThreshold the peak
+            // clause was just judged against — tile mode's own correction (design §1); every whole-window caller
+            // leaves it false and keeps `threshold` exactly as before.
+            var meanThreshold = correctMean ? peakThreshold : threshold;
+            // #3653 A8 option B (lane L1d): the lone-spike guard. The clause's pass/fail comparison uses
+            // `gateMean ?? windowMean` — in tile mode the caller supplies the tile's mean WITHOUT its own peak
+            // sample, so a single hot sample cannot corroborate itself. MeanSigma above stays computed from the
+            // FULL `windowMean`, so the reported mean and its deviation are unaffected.
+            var meanClears = windowMean is null || ((gateMean ?? windowMean.Value) - center) / dispersion >= meanThreshold;
+            return new ZDecision(peakClears && meanClears, Math.Min(peakDeviation, sigmaCap), LowQualityBaseline: false, FallbackExceedance: 0.0, ThresholdUsed: peakThreshold, MeanSigma: meanSigma);
         }
 
         // Untrustworthy baseline → absolute-threshold fallback (NOT silence). The exceedance (>= 1.0 on a
@@ -325,7 +480,8 @@ public static class AnomalyGate
         // #3653: the mean clears the magnitude FLOOR (the lower, "not trivial" bar — class remarks); the
         // exceedance stays the peak's, since that is what the scorer grades and the finding reports.
         var peakClearsBar = peak >= absoluteFallbackBar;
-        var meanClearsFloor = windowMean is null || windowMean.Value >= magnitudeFloor;
+        // #3653 A8 option B (lane L1d): the same lone-spike guard on the untrustworthy path's floor comparison.
+        var meanClearsFloor = windowMean is null || (gateMean ?? windowMean.Value) >= magnitudeFloor;
         return new ZDecision(
             peakClearsBar && meanClearsFloor,
             peakSigma,

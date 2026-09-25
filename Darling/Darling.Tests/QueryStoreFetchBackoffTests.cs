@@ -15,7 +15,7 @@ namespace Darling.Tests;
 /// Pins for the query_store fetch backoff (#2776). The defect these guard against: a fetch whose STORE
 /// write timed out kept its whole carry-over set and re-attempted the identical width next cycle, so a
 /// database re-paid full plan-XML decompression on the target every cycle forever. Measured on
-/// prod-pos-use1-monitor-01 over 14.9h: 125 plan-fetch failures, 16 text-fetch failures, and
+/// The use1 monitoring host over 14.9h: 125 plan-fetch failures, 16 text-fetch failures, and
 /// "candidate cap clamped to 512" 2,965 times — a missing set pinned at maximum that never drained.
 ///
 /// <para>The two failure modes worth testing FOR, because either would be worse than no backoff at all:

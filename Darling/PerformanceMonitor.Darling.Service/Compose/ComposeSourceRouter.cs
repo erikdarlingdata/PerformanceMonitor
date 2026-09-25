@@ -31,7 +31,7 @@ public enum ComposeSourceTier
 /// carries no relation (the compiler keeps its existing <c>SourceTable</c> + prefix-time-column path); a CAGG tier
 /// names the rollup view, whose time column is always the <c>bucket</c> the CAGG produced.
 /// </summary>
-public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
+public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null)
 {
     /// <summary>The raw route — the compiler's unchanged behaviour.</summary>
     public static readonly ComposeRoute Raw = new(ComposeSourceTier.Raw, null);
@@ -40,6 +40,10 @@ public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation)
 
     /// <summary>Every CAGG's time dimension is the <c>time_bucket(...) AS bucket</c> column.</summary>
     public const string CaggTimeColumn = "bucket";
+
+    /// <summary>The compiler's fact-table alias every CAGG <see cref="CaggFromClause"/> is built with (#3653
+    /// A6): <c>f</c>, matching <c>ComposeCompiler.FactAlias</c>.</summary>
+    public const string FactAlias = "f";
 }
 
 /// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
@@ -331,13 +335,31 @@ public static class ComposeSourceRouter
            into the window as the legacy does, the legacy otherwise. Same dimensions, same column names on both,
            so the compiled SQL and ComposeCaggValueMapper are identical either way — the #1849 arrangement, one
            relation name swapped. The Query Store family has no successor here and comes back unchanged. The
-           daily tier is untouched: the dailies are hierarchical from the LEGACY hourly and have no successor of
-           their own yet (TimescaleSupport.SupersededHourlyRollups states why). */
+           daily tier's RELATION is chosen the same way as the hourly's, below (#3653 A6): CaggRelation is still
+           the by-name answer for probes/logs/registry lookups, and CaggFromClause may stitch the legacy daily to
+           its own interval-honest successor daily at F_d — the tier CHOICE itself stays on the legacy pair
+           (coverage.For above), only the RELATION within the chosen tier can be a stitch. */
         return tier switch
         {
             RetentionTier.Raw => (ComposeRoute.Raw, null),
-            RetentionTier.Hourly => (new ComposeRoute(ComposeSourceTier.Hourly, coverage.HourlyRelationFor(hourlyView, windowStartUtc)), tierCoverage.HourlyFloorUtc),
-            _ => (new ComposeRoute(ComposeSourceTier.Daily, dailyView!), tierCoverage.DailyFloorUtc),
+            /* #3653 A6: CaggRelation stays the by-NAME answer (probes/logs/registry lookups); CaggFromClause is
+               the FROM-clause item the compiler actually splices in, which may stitch the legacy hourly to its
+               interval-honest successor. With no successor this is byte-identical to
+               "collect.<hourlyView> AS f" — the same text the old CaggRelation-only path produced once the
+               compiler appended " AS f" itself. */
+            RetentionTier.Hourly => (new ComposeRoute(
+                ComposeSourceTier.Hourly,
+                coverage.HourlyRelationNameFor(hourlyView, windowStartUtc),
+                coverage.StitchedRelationSql(hourlyView, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Hourly)),
+                tierCoverage.HourlyFloorUtc),
+            /* #3653 A6: same shape as the hourly arm above, but StitchTier.Daily — the successor daily's own
+               floor and its successor hourly's ceiling-of-day decide F_d (RollupCoverage.StitchedRelationSql).
+               With no successor daily this is byte-identical to "collect.<dailyView> AS f", same as today. */
+            _ => (new ComposeRoute(
+                ComposeSourceTier.Daily,
+                dailyView!,
+                coverage.StitchedRelationSql(dailyView!, ComposeRoute.FactAlias, windowStartUtc, RollupCoverage.StitchTier.Daily)),
+                tierCoverage.DailyFloorUtc),
         };
     }
 }

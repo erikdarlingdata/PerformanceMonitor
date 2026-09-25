@@ -620,16 +620,16 @@ internal static class ToolRecommendations
             new("get_query_trend", "Confirm the regression timing and that the new plan is consistently worse"),
             new("get_query_store_top", "Pull the full Query Store entry including plan_id and forced-plan history before considering a force")
         ],
+        // #4149: bug fix on a frozen file — LATCH_EX/LATCH_SH are non-buffer latches, and get_tempdb_trend
+        // was pointed at tempdb allocation contention, which is PAGELATCH_UP's territory, not these.
         ["LATCH_EX"] =
         [
-            new("get_latch_stats", "Check latch contention by class (ACCESS_METHODS_DATASET_PARENT / FGCB_ADD_REMOVE point at TempDB allocation contention)"),
-            new("get_tempdb_trend", "Check TempDB for allocation contention"),
+            new("get_latch_stats", "Check latch contention by class"),
             new("get_wait_trend", "Track the latch contention trend", new() { ["wait_type"] = "LATCH_EX" })
         ],
         ["LATCH_SH"] =
         [
             new("get_latch_stats", "Check latch contention by class"),
-            new("get_tempdb_trend", "Check TempDB for allocation contention"),
             new("get_wait_trend", "Track the latch contention trend", new() { ["wait_type"] = "LATCH_SH" })
         ],
         ["DB_CONFIG"] =

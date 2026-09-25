@@ -414,6 +414,27 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
 
+    /* When each server's failed log_timezone read last logged at Warning (#4051 round-2 review, L-2). See
+       LogTimezoneReadFailureLevel. In memory on purpose: a restart that warns once more is the right answer. */
+    private readonly ConcurrentDictionary<int, DateTime> _logTimezoneReadWarnedUtc = new();
+
+    /* #4053 part c1: the same throttle as _logTimezoneReadWarnedUtc, for TryReadPgLogUsesCsvlogAsync's own
+       probe — its own dictionary because a target can fail one read and not the other (they run on separate
+       throwaway connections), and LogTimezoneReadFailureLevel already takes the dictionary as a parameter
+       for exactly this reuse (see LogTimezoneReadFailureLevelTests). */
+    private readonly ConcurrentDictionary<int, DateTime> _pgLogUsesCsvlogReadWarnedUtc = new();
+
+    /* #4053 review round 1 (item 5): the last good pgLogUsesCsvlog verdict this runner has seen for a
+       server, kept so a probe failure can return IT rather than false. False is not a neutral fallback
+       here the way it is for a target this route has never successfully read: on a target the route was
+       already reading csvlog for, a transient connection or probe failure flipping the verdict to false
+       would make the ingestor read the STDERR file instead, from that file's own (stale or absent) marker,
+       and re-emit rows the csvlog route already stored under different text — the very duplication
+       CommitResume's discipline exists to avoid. Runner-local and in-memory for the same reason every other
+       per-server cache on this type is: a restart simply re-probes from nothing, which is the existing
+       first-contact behaviour, not a regression. */
+    private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
+
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
     public DateTime? LastQueryStoreItemFailureUtc(int serverId)
@@ -635,7 +656,7 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
@@ -654,7 +675,16 @@ public sealed class DarlingCollectorRunner
         /* Null provider = no scope for any collector = every database the server enumerates, which is
            what Lite's twin and every pre-#3477 test constructs. */
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
+        /* #4004: the store's log-hash key, loaded once by the worker at start and shared by every run that hashes log
+           text (pg_log_events on both transports). Null = none could be used: those runs refuse, with the reason. */
+        _logHashKey = logHashKey;
     }
+
+    private readonly PgLogHashKey? _logHashKey;
+
+    /// <summary>The store's log-hash key this runner was given (#4004), null when the service could not load one. The
+    /// hourly deadlock re-mask reads it here (#4012's review), the one instance every log-hashing run shares.</summary>
+    internal PgLogHashKey? LogHashKey => _logHashKey;
 
     /* One ingestor for the process, so the resume marker survives between cycles - it is per-file and
        in-memory by design (#2538), and a fresh instance every cycle would silently re-read the same tail
@@ -675,6 +705,83 @@ public sealed class DarlingCollectorRunner
     private RdsCpuIngestor? _rdsCpu;
 
     /// <summary>
+    /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
+    /// when the run's definition recorded <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/> (#4046), so the
+    /// row that carries the count also says what it counts and names the issue; otherwise <paramref name="result"/>
+    /// unchanged. Host note, not the composed <see cref="CollectorRunResult.Note"/>, which would lose the count.
+    /// </summary>
+    internal static CollectorRunResult WithForeignZoneLinesNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgServerLogTail.ForeignZoneLinesMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgServerLogTail.ForeignZoneLinesNote) }
+            : result;
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgPlanCaptureCollector.ForgedCaptureNote"/> merged into its host
+    /// note when the run's definition recorded <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>
+    /// (#4058 L1), following the exact pattern <see cref="WithForeignZoneLinesNote"/> sets above; otherwise
+    /// <paramref name="result"/> unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithForgedCaptureNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgPlanCaptureCollector.ForgedCaptureMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgPlanCaptureCollector.ForgedCaptureNote) }
+            : result;
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgDeadlocksCollector.RaiseShapedDeadlocksSkippedNote"/> merged
+    /// into its host note when the run's definition recorded
+    /// <see cref="PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement"/> (#4058 item 1), following the
+    /// exact pattern <see cref="WithForgedCaptureNote"/> sets above; otherwise <paramref name="result"/> unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithRaiseShapedDeadlocksSkippedNote(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        return result.Measurements.Any(m =>
+                string.Equals(m.Label, PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, StringComparison.Ordinal) && m.Value > 0)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgDeadlocksCollector.RaiseShapedDeadlocksSkippedNote) }
+            : result;
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> with <see cref="PgReadBinaryFileAdvisory.Sentence"/> merged into its host
+    /// note when <paramref name="server"/> is still on the text route AND has not been noted inside
+    /// <see cref="PgReadBinaryFileAdvisory.NoteInterval"/> (#4046); otherwise <paramref name="result"/>
+    /// unchanged. The caller (<c>DarlingWorker.RunOneAsync</c>) gates this to <c>pg_log_events</c> only, so a
+    /// target gets one note a day rather than whichever of the three log-tail collectors happens to run and
+    /// win the gate. Reads <see cref="PgReadBinaryFileCapability"/>'s cache rather than probing again — the
+    /// server-scoped path already resolved it for this exact target this cycle, for every collector that
+    /// reads <see cref="PgServerLogTail"/>. A managed target was never entered into that cache at all (it reaches
+    /// its log through the RDS API, never through <see cref="PgReadBinaryFileCapability.IsGrantedAsync"/>), so
+    /// <c>TryGetCachedVerdict</c> answers false for it and this never fires there. It answers false for a
+    /// database that is neither UTF8 nor SQL_ASCII too, where the grant would change nothing (#4051 review L4).
+    /// It takes the <see cref="ServerRuntime"/> rather than a key, like the other two cache helpers, so all three
+    /// key the cache the same way (#4051 round-2 review).
+    /// </summary>
+    internal static CollectorRunResult WithReadBinaryFileAdvisoryNote(CollectorRunResult result, ServerRuntime server)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(server);
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+
+        return PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted)
+            && !granted
+            && PgReadBinaryFileAdvisory.ShouldNote(targetKey)
+            ? result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, PgReadBinaryFileAdvisory.Sentence) }
+            : result;
+    }
+
+    /// <summary>
     /// Plan capture for Aurora and RDS, where the log is only reachable through the AWS API (#2538).
     ///
     /// <para>Reported as a normal <see cref="CollectorRunResult"/> so the cycle accounts for it exactly like
@@ -689,17 +796,25 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4053 part c3: the same target-configuration read IngestRdsDeadlocksAsync and IngestRdsLogEventsAsync
+           make, for the same reason — this ingestor reaches the log through the AWS API, not SQL, so it
+           carries no target connection of its own to probe with. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsPlans.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        var measurements = MeasurementsFor(server, foreignZoneLines: 0, outcome.CsvRecordsDiscarded,
+            outcome.ForgedCaptures);
 
         /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
            filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
            different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
     }
 
@@ -717,15 +832,154 @@ public sealed class DarlingCollectorRunner
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
+           effect with no reconnect and #3604-style connect-time caching would miss that. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
+        /* #4053 part c2: the same target-configuration read IngestRdsLogEventsAsync makes, for the same
+           reason — this ingestor reaches the log through the AWS API, not SQL, so it carries no target
+           connection of its own to probe with. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
+
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsDeadlocks.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(
+            server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's own read of <c>log_timezone</c>, over a throwaway connection to
+    /// the target — the RDS ingestors reach the log through the AWS API, not SQL, so they carry no target
+    /// connection of their own. False (today's refusal on a foreign-zone line) when the setting cannot be
+    /// read, matching the self-hosted route's NULL-column fallback in <see cref="PgServerLogTail.LogTimezoneIsUtc"/>.
+    /// </summary>
+    private async Task<bool> TryReadLogTimezoneIsUtcAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            var isUtc = await ReadLogTimezoneIsUtcAsync(connection, cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _logTimezoneReadWarnedUtc.TryRemove(server.ServerId, out _);
+            return isUtc;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Warning, not Debug: a read that fails every cycle turns part 1b off for this target, and at Debug
+               that went unseen while every call failed (#4051 review H1). At most once an hour per server,
+               though, with Debug in between (#4051 round-2 review, L-2). */
+            _logger?.Log(LogTimezoneReadFailureLevel(_logTimezoneReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
+                "Could not read log_timezone for '{Server}' (#4046 part 1b) — a foreign-zone "
+                + "line this cycle is refused as before.", server.Config.DisplayName);
+            return false;
+        }
+    }
+
+    /// <summary>How long a server's failed <c>log_timezone</c> reads stay at Debug after one logs at Warning.</summary>
+    internal static readonly TimeSpan LogTimezoneReadWarningInterval = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// #4051 round-2 review, L-2: the level for a failed <c>log_timezone</c> read on <paramref name="serverId"/>.
+    /// Warning for the first failure, and again once <see cref="LogTimezoneReadWarningInterval"/> has passed since
+    /// the last Warning. Debug in between. A read that fails every cycle stays visible, without a stack trace on
+    /// every cycle (576 a day per managed target). The Warning is recorded on the same call that returns it.
+    /// </summary>
+    internal static LogLevel LogTimezoneReadFailureLevel(
+        ConcurrentDictionary<int, DateTime> warnedUtc, int serverId, DateTime nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(warnedUtc);
+
+        if (warnedUtc.TryGetValue(serverId, out var last) && nowUtc - last < LogTimezoneReadWarningInterval)
+        {
+            return LogLevel.Debug;
+        }
+
+        warnedUtc[serverId] = nowUtc;
+        return LogLevel.Warning;
+    }
+
+    /// <summary>
+    /// #4046 part 1b: the managed route's <c>log_timezone</c> read as a whole statement.
+    /// <see cref="PgServerLogTail.LogTimezoneSql"/> is an expression the self-hosted readers select beside the
+    /// tail, so on its own it needs the SELECT. Without it every call failed with 42601 and part 1b never took
+    /// effect on an RDS or Aurora target (#4051 review H1).
+    /// </summary>
+    internal const string LogTimezoneReadSql = "SELECT " + PgServerLogTail.LogTimezoneSql;
+
+    /// <summary>
+    /// Whether the target's <c>log_timezone</c> renders UTC, read on <paramref name="connection"/>, which must
+    /// already be open. Its own method so a live test can run the exact statement the managed route sends.
+    /// </summary>
+    internal static async Task<bool> ReadLogTimezoneIsUtcAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        using var command = connection.CreateCommand();
+        command.CommandTimeout = 10;
+        command.CommandText = LogTimezoneReadSql;
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is string setting && PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting);
+    }
+
+    /// <summary>#4046 part 1b: the managed route's foreign-zone count, on a throwaway context so the RDS ingest
+    /// path can report it the same way <see cref="PgServerLogTail.MeasureForeignZoneLines"/> does for the
+    /// self-hosted collectors.</summary>
+    private IReadOnlyList<CollectorMeasurement> MeasurementsFor(
+        ServerRuntime server, int foreignZoneLines, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
+        int raiseShapedSkipped = 0)
+    {
+        if (foreignZoneLines <= 0 && csvRecordsDiscarded <= 0 && forgedCaptures <= 0 && raiseShapedSkipped <= 0)
+        {
+            return CollectorContext.NoMeasurements;
+        }
+
+        var context = new CollectorContext
+        {
+            ServerId = server.ServerId,
+            ServerName = server.StorageName,
+            CollectionTime = DateTime.UtcNow,
+            Deltas = _deltas,
+        };
+        PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+        /* #4053 part c1: the csvlog route's own discard count, same measurement label the self-hosted
+           PgLogEventsCollector.ReadAsync records for its own csvlog route (CsvRecordsDiscardedMeasurement),
+           reported only when > 0, following that method's exact pattern. */
+        if (csvRecordsDiscarded > 0)
+        {
+            context.Measure(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, csvRecordsDiscarded);
+        }
+
+        /* #4053 part c3: the RDS plan ingestor's own forged-capture count, same measurement label the
+           self-hosted PgPlanCaptureCollector.ReadCsvAsync/ReadAsync record for their own forged skips
+           (ForgedCaptureMeasurement), reported only when > 0. DarlingWorker's WithForgedCaptureNote reads
+           this label off any collector's measurements, so this alone is what attaches the sentence to the
+           managed route's row. */
+        if (forgedCaptures > 0)
+        {
+            context.Measure(PgPlanCaptureCollector.ForgedCaptureMeasurement, forgedCaptures);
+        }
+
+        /* #4058 item 1: the RDS deadlock ingestor's own RAISE-shaped skip count, same measurement label the
+           self-hosted PgDeadlocksCollector.ReadCsvRow records for its own csvlog route
+           (RaiseShapedDeadlocksSkippedMeasurement), reported only when > 0. */
+        if (raiseShapedSkipped > 0)
+        {
+            context.Measure(PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement, raiseShapedSkipped);
+        }
+
+        return context.Measurements;
     }
 
     /// <summary>
@@ -738,19 +992,91 @@ public sealed class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsLogEventsAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
-        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logger: _logger);
+        /* #4004: no key, no hashing - the same refusal the pg_read_file route's BuildQuery makes. */
+        var logHashKey = _logHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
+        _rdsLogEvents ??= new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger);
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
+           the target fresh each cycle rather than caching it at connect. */
+        var logTimezoneIsUtc = await TryReadLogTimezoneIsUtcAsync(server, cancellationToken);
+
+        /* #4053 part c1: the same target-configuration read the self-hosted pg_read_file route makes through
+           ResolvePgReadBinaryFileGrantAsync, on the managed route's own throwaway connection for the same reason
+           TryReadLogTimezoneIsUtcAsync above needs one — this ingestor reaches the log through the AWS API, not
+           SQL, so it carries no target connection of its own to probe with. Cached the same hour by
+           PgLogFormatCapability itself, keyed the same way as the binary-file grant (ReadBinaryFileCacheKey), so
+           this is a cache hit on every cycle but the first and the one after a switch. */
+        var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
         var started = Stopwatch.GetTimestamp();
 
         var outcome = await _rdsLogEvents.IngestAsync(
-            server.ServerId, server.StorageName, host, cancellationToken);
+            server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, cancellationToken);
 
         var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded);
+
+        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
+    }
+
+    /// <summary>
+    /// #4053 part c1: whether this target's <c>log_destination</c> includes <c>csvlog</c>, read the same way
+    /// <see cref="TryReadLogTimezoneIsUtcAsync"/> reads <c>log_timezone</c> — over a throwaway connection, since
+    /// the RDS ingestors carry none of their own.
+    ///
+    /// <para>#4053 review round 1 (item 5): on a probe failure, this returns the LAST GOOD verdict this
+    /// runner saw for the server (<see cref="_lastPgLogUsesCsvlogVerdict"/>), not a hardcoded false. False
+    /// used to be the fallback unconditionally, which is right for a target this runner has never read
+    /// successfully — today's stderr route, unchanged — but wrong for one it already knows is on csvlog:
+    /// flipping that verdict on a transient connection blip would make the ingestor read the stderr file
+    /// from ITS OWN marker and re-store rows the csvlog route already committed under different text. The
+    /// throttled Warning-then-Debug logging (#4051 round-2 review, L-2) is unchanged: a target whose probe
+    /// fails every cycle still logs once loudly and then quietly, on its own <see cref="_pgLogUsesCsvlogReadWarnedUtc"/>
+    /// throttle.</para>
+    /// </summary>
+    private async Task<bool> TryReadPgLogUsesCsvlogAsync(ServerRuntime server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = TargetProviders.For(server.Target);
+            await using var connection = provider.CreateConnection(server.ConnectionString);
+            await connection.OpenAsync(cancellationToken);
+            var usesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                connection, ReadBinaryFileCacheKey(server), cancellationToken);
+
+            /* A read that works again resets the throttle below, so the next failure warns at once. */
+            _pgLogUsesCsvlogReadWarnedUtc.TryRemove(server.ServerId, out _);
+
+            /* #4053 review round 1 (item 5): recorded on every SUCCESSFUL probe, so the catch below always
+               has this cycle's predecessor to fall back to — not just the last time the probe happened to
+               fail. */
+            _lastPgLogUsesCsvlogVerdict[server.ServerId] = usesCsvlog;
+            return usesCsvlog;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Log(LogTimezoneReadFailureLevel(_pgLogUsesCsvlogReadWarnedUtc, server.ServerId, DateTime.UtcNow), ex,
+                "Could not read log_destination for '{Server}' (#4053 part c1) — every RDS csvlog-aware "
+                + "route reads the {Fallback} file this cycle, its last known-good verdict.", server.Config.DisplayName,
+                _lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var lastGood) && lastGood ? "csv" : "stderr");
+
+            /* #4053 review round 1 (item 5): the last good verdict this runner saw for this server, not a
+               hardcoded false. A connection or probe failure flipping a known-csvlog target to false would
+               make the ingestor read the stderr file from ITS marker instead, re-storing rows the csvlog
+               route already committed under different text. A target this runner has never successfully
+               probed has no last-good verdict to fall back to, so false (today's stderr route, unchanged) is
+               still the answer for first contact — the one case this dictionary cannot help with, because
+               there is nothing yet to remember. */
+            if (_lastPgLogUsesCsvlogVerdict.TryGetValue(server.ServerId, out var fallback))
+            {
+                return fallback;
+            }
+            return false;
+        }
     }
 
     /// <summary>
@@ -914,6 +1240,104 @@ public sealed class DarlingCollectorRunner
             "  [{Server}] {Collector} [{Database}] {Outcome} after sql:{SqlMs}ms = connect:{ConnectMs}ms + open:{OpenMs}ms + drain:{DrainMs}ms + other:{OtherMs}ms (nothing stored)",
             displayName, collectorName, databaseName, outcome, databaseSqlMs,
             phases.ConnectMs, phases.OpenMs, phases.DrainMs, phases.OtherMs);
+    }
+
+    /// <summary>
+    /// The three collectors that open <see cref="PgServerLogTail.TailCteSql"/> (#4046 part 1c) — the set
+    /// eligible for the <see cref="PgReadBinaryFileCapability"/> check and the binary route, and the same
+    /// set <c>ReadsServerLogWithPgReadFile</c> in <c>DarlingWorker</c> names for the fault message, kept as
+    /// its own copy here rather than shared across the two classes' current visibility boundary.
+    /// </summary>
+    private static bool ReadsPgServerLogTail(string collectorName) =>
+        collectorName is "pg_log_events" or "pg_deadlocks" or "pg_plan_capture";
+
+    /// <summary>
+    /// #4046 part 1c: sets <see cref="CollectorContext.PgReadBinaryFileGranted"/> for a PostgreSQL log-tail
+    /// collector from <see cref="PgReadBinaryFileCapability"/> (its own hourly cache), and leaves every other
+    /// collector on the default text route with no round trip. Its own method so the gate is testable; the
+    /// server-scoped path that calls it needs a live target.
+    /// </summary>
+    internal static async ValueTask ResolvePgReadBinaryFileGrantAsync(
+        CollectorContext context,
+        string collectorName,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        if (server.Target.Engine == CollectorTargetEngine.PostgreSql && ReadsPgServerLogTail(collectorName))
+        {
+            var targetKey = ReadBinaryFileCacheKey(server);
+            context.PgReadBinaryFileGranted = await PgReadBinaryFileCapability.IsGrantedAsync(
+                targetConnection, targetKey, cancellationToken);
+
+            /* #4062: the binary route decodes in the connected database's own server_encoding, never a
+               default, so PgLogEncoding is only ever set alongside a true grant — see the property's own
+               remarks on CollectorContext. */
+            context.PgLogEncoding = context.PgReadBinaryFileGranted
+                && PgReadBinaryFileCapability.TryGetCachedEncoding(targetKey, out var encoding)
+                    ? encoding
+                    : null;
+        }
+
+        /* #4053 parts a1b, b1 and b2: the collectors in RoutedCollectors read the csvlog tail once this is on (each
+           collector's own change is in its collector file). Checked on the same
+           connection, before BuildQuery decides which tail this collector opens with, the same shape as the
+           grant check just above. RoutedCollectors (#4053 review L1 round 2) is the single source for this
+           set, shared with the invalidation arms in DarlingWorker, so the probe and the drop can never
+           disagree about which collectors this cache answers for. */
+        if (server.Target.Engine == CollectorTargetEngine.PostgreSql
+            && PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+        {
+            /* #4053 part a2: one probe answers both flags (PgLogFormatCapability's own cache), so asking
+               for jsonlog right after csvlog on a cache miss still costs one round trip, not two. */
+            context.PgLogUsesCsvlog = await PgLogFormatCapability.IsCsvlogEnabledAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+            context.PgLogUsesJsonlog = await PgLogFormatCapability.IsJsonlogEnabledAsync(
+                targetConnection, ReadBinaryFileCacheKey(server), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The one place <see cref="PgReadBinaryFileCapability"/>'s cache key comes from (#4051 round-2 review). The
+    /// helper that fills the cache, the one that reads it for the advisory note, and the one that drops a stale
+    /// verdict all take the <see cref="ServerRuntime"/> and key through here. None of them can drift to a
+    /// different key and leave an invalidation that never hits.
+    /// </summary>
+    internal static string ReadBinaryFileCacheKey(ServerRuntime server) => server.StorageName;
+
+    /// <summary>
+    /// #4046 part 1c (#4051 review L1): drops <paramref name="targetKey"/>'s cached
+    /// <see cref="PgReadBinaryFileCapability"/> verdict when a log-tail collector's fault says it is stale, so the
+    /// next cycle re-checks instead of waiting out the hour.
+    /// <list type="bullet">
+    /// <item>A 22021 is the text route meeting a planted byte, and its message tells the operator to grant
+    /// pg_read_binary_file. A grant made in answer should take effect on the next cycle.</item>
+    /// <item>A 42501 while the verdict says granted means the grant was revoked, or the login changed, since the
+    /// check. Every binary-route read would fail until the hour ran out.</item>
+    /// </list>
+    /// A 42501 on the text route leaves the verdict alone, so a target that never granted pg_read_file is not
+    /// re-probed every cycle. A 22021 on a database whose encoding the binary route does not serve leaves it
+    /// alone too, since no grant changes that answer. A proven write to the STORE leaves it alone (#4051 round-2
+    /// review), because that fault says nothing about the target's log. The checks run cheapest first and
+    /// allocate nothing for a fault that is not a <see cref="PostgresException"/>, because the general handler
+    /// that calls this is also the OutOfMemoryException landing pad.
+    /// </summary>
+    internal static void ForgetStaleReadBinaryFileVerdict(string collectorName, Exception ex, ServerRuntime server)
+    {
+        if (ex is not PostgresException pg
+            || !ReadsPgServerLogTail(collectorName)
+            || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+
+        if ((pg.SqlState == "22021" && !PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(targetKey))
+            || (pg.SqlState == "42501" && PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted) && granted))
+        {
+            PgReadBinaryFileCapability.Invalidate(targetKey);
+        }
     }
 
     public async Task<CollectorRunResult> RunAsync<TRow>(
@@ -1128,6 +1552,7 @@ public sealed class DarlingCollectorRunner
             ServerName = server.StorageName,
             CollectionTime = collectionTime,
             Deltas = _deltas,
+            LogHashKey = _logHashKey,
             Target = server.Target,
             Watermark = watermark,
             WatermarkFromUtcColumn = watermarkFromUtcColumn,
@@ -2263,6 +2688,14 @@ public sealed class DarlingCollectorRunner
                    query_stats) could occupy a monitored server for minutes — the exact profile we must never
                    present. Null budget = itemToken IS cancellationToken and this block is byte-for-byte what
                    it was. */
+                /* #4046 part 1c: resolved on the connection that is about to run the query, BEFORE
+                   BuildQuery decides which of the two tail routes to send — a target's grant can arrive
+                   with no reconnect, so this is checked (through its own hourly cache) independently of
+                   how long the connection has been open, rather than folded into the connect-time facts on
+                   CollectorTargetInfo that live for the connection's whole life. */
+                await ResolvePgReadBinaryFileGrantAsync(
+                    context, definition.Name, targetConnection, server, cancellationToken);
+
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
                 List<TRow> rows;
@@ -3081,6 +3514,7 @@ public sealed class DarlingCollectorRunner
             ServerName = server.StorageName,
             CollectionTime = DateTime.UtcNow,
             Deltas = _deltas,
+            LogHashKey = _logHashKey,
             Target = server.Target,
             Watermark = null,
             NumericWatermark = null,

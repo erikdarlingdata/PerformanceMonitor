@@ -11,6 +11,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -402,6 +403,97 @@ public sealed class ViewerConfigurationLivePostgresTests
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "trace_flags", TraceFlagsServerId, cleanupCt));
         }
+    }
+
+    /// <summary>
+    /// #3999: the display reads answer for the collector's newest SUCCESSFUL run. A capture that finds every
+    /// flag off writes ZERO rows to <c>trace_flags</c> (<c>DBCC TRACESTATUS(-1)</c> only ever lists flags that
+    /// are ON), so the newest ROW can outlive the state it describes: before this fix the reads fell back to a
+    /// stale ON row days after every flag was turned off.
+    ///
+    /// <para>Seeded in the order the service really writes. A run's capture rows first, then its
+    /// collection_log row, stamped when the run ENDS (<c>DarlingObservability.LogCollectionAsync</c> uses
+    /// UtcNow at log time), so an ordinary run's SUCCESS is always a few seconds NEWER than its own capture.
+    /// The first version of this fix compared those two timestamps and hid every enabled flag after every
+    /// ordinary run; step 1 is the pin for that. Both readers are asserted: the viewer grid and the MCP
+    /// reader carry the same SQL.</para>
+    /// </summary>
+    [Fact]
+    public async Task TraceFlags_AnswerForTheNewestSuccessfulRun_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live trace-flags anchor test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "trace_flags", TraceFlagsServerId, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "collection_log", TraceFlagsServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+
+        async Task<int[]> BothReadersAsync()
+        {
+            var viewerFlags = (await viewer.GetLatestTraceFlagsAsync(TraceFlagsServerId)).Select(r => r.TraceFlag).ToArray();
+            var mcpFlags = (await DarlingCurrentConfigReader.GetLatestTraceFlagsAsync(postgres, TraceFlagsServerId, TestContext.Current.CancellationToken))
+                .Rows.Select(r => r.TraceFlag).ToArray();
+            Assert.Equal(viewerFlags, mcpFlags);
+            return viewerFlags;
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            var day1 = TruncateToSeconds(DateTime.UtcNow.AddDays(-3));
+
+            /* 1. An ordinary run: 1117 on, captured, then logged SUCCESS 3 s later with its one row. */
+            await InsertTraceFlagAsync(connection, day1, 1117, status: true, isGlobal: true, isSession: false);
+            await InsertCollectionLogSuccessAsync(connection, day1.AddSeconds(3), rowsCollected: 1);
+            Assert.Equal(new[] { 1117 }, await BothReadersAsync());
+
+            /* 2. The next day every flag is off: a SUCCESS that wrote nothing. The stale 1117 row must not read. */
+            await InsertCollectionLogSuccessAsync(connection, day1.AddDays(1).AddSeconds(3), rowsCollected: 0);
+            Assert.Empty(await BothReadersAsync());
+
+            /* 3. A run that failed after that proves nothing about the flags, so the answer stays "none". */
+            await InsertCollectionLogAsync(connection, day1.AddDays(1).AddHours(1), "ERROR", rowsCollected: 0);
+            Assert.Empty(await BothReadersAsync());
+
+            /* 4. The day after, 4199 is on: a new capture with its own SUCCESS reads again, and only 4199. */
+            var day3 = day1.AddDays(2);
+            await InsertTraceFlagAsync(connection, day3, 4199, status: true, isGlobal: true, isSession: false);
+            await InsertCollectionLogSuccessAsync(connection, day3.AddSeconds(3), rowsCollected: 1);
+            Assert.Equal(new[] { 4199 }, await BothReadersAsync());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await DeleteRowsAsync(cleanup, "trace_flags", TraceFlagsServerId, cleanupCt);
+                await DeleteRowsAsync(cleanup, "collection_log", TraceFlagsServerId, cleanupCt);
+            });
+        }
+    }
+
+    private static Task InsertCollectionLogSuccessAsync(NpgsqlConnection connection, DateTime collectionTimeUtc, int rowsCollected) =>
+        InsertCollectionLogAsync(connection, collectionTimeUtc, "SUCCESS", rowsCollected);
+
+    private static async Task InsertCollectionLogAsync(NpgsqlConnection connection, DateTime collectionTimeUtc, string status, int rowsCollected)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, status, rows_collected) " +
+            "VALUES ($1, $2, $3, 'trace_flags', $4, $5, $6)", connection);
+        command.Parameters.AddWithValue(CollectionIdGenerator.Next());
+        command.Parameters.AddWithValue(TraceFlagsServerId);
+        command.Parameters.AddWithValue("viewer-trace-flags-e2e");
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(status);
+        command.Parameters.AddWithValue(rowsCollected);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
     private static async Task InsertServerConfigAsync(

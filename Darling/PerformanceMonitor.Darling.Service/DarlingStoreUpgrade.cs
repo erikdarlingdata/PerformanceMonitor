@@ -997,12 +997,7 @@ internal sealed class DarlingStoreUpgrade
 
         try
         {
-            if (Directory.Exists(previousRoot))
-            {
-                Directory.Delete(previousRoot, recursive: true);
-            }
-
-            Directory.CreateDirectory(previousRoot);
+            EmptyDirectory(previousRoot);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1033,7 +1028,7 @@ internal sealed class DarlingStoreUpgrade
             _logger.LogWarning(
                 "Could not rescue the current runtime to {Previous} ({Message}) — something is holding it open. The store starts on its existing runtime and the update is retried on the next start.",
                 previousPgsql, ex.Message);
-            TryDeleteDirectory(previousRoot);
+            TryEmptyDirectory(previousRoot);
             return new RuntimeAdvance(false, null, zipHash);
         }
 
@@ -1064,7 +1059,7 @@ internal sealed class DarlingStoreUpgrade
 
             Directory.Move(previousPgsql, pgsqlDirectory);
             TryDeleteDirectory(failedExtract);
-            TryDeleteDirectory(previousRoot);
+            TryEmptyDirectory(previousRoot);
             throw;
         }
 
@@ -1188,7 +1183,7 @@ internal sealed class DarlingStoreUpgrade
         }
 
         TryDeleteDirectory(failedRuntime);
-        TryDeleteDirectory(previousRoot);
+        TryEmptyDirectory(previousRoot);
 
         /* Record the failing package so the next start does not run the same doomed upgrade again, and
            drop the stamp so the runtime on disk is not claimed to be the shipped one. #3927: this is
@@ -2277,6 +2272,65 @@ internal sealed class DarlingStoreUpgrade
             {
                 Directory.Delete(path, recursive: true);
             }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* Best effort — the caller logs the consequence that matters. */
+        }
+    }
+
+    /// <summary>
+    /// Empties <paramref name="path"/> — deletes every child file and subfolder, recursively — without
+    /// deleting the folder itself, and creates it only if it is missing. #4052: the install root is narrowed
+    /// to Read &amp; Execute for the service account, which keeps Modify on <c>pg-runtime\</c> and
+    /// <c>pg-runtime-prev\</c> themselves but not on the root above them — so a delete-then-recreate of
+    /// <c>pg-runtime-prev</c> can delete (Modify on the folder covers that) and then fail to recreate (no
+    /// rights on the root to add a new child there). Emptying in place needs no right on the root at all.
+    /// </summary>
+    /// <exception cref="UnauthorizedAccessException">
+    /// The folder does not exist and cannot be created — the installer or upgrade script must be re-run to
+    /// pre-create it under the now-narrowed root.
+    /// </exception>
+    internal static void EmptyDirectory(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+            {
+                if (Directory.Exists(entry))
+                {
+                    Directory.Delete(entry, recursive: true);
+                }
+                else
+                {
+                    File.Delete(entry);
+                }
+            }
+
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(path);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new UnauthorizedAccessException(
+                $"{path} does not exist and this service account cannot create it under the narrowed install root. Re-run the installer or upgrade script to pre-create it.",
+                ex);
+        }
+    }
+
+    /// <summary>
+    /// Best-effort <see cref="EmptyDirectory"/> — never throws, matching <see cref="TryDeleteDirectory"/>'s
+    /// contract for the cleanup call sites that only log a warning on failure.
+    /// </summary>
+    internal static void TryEmptyDirectory(string path)
+    {
+        try
+        {
+            EmptyDirectory(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

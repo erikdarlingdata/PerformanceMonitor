@@ -291,7 +291,7 @@ public class DarlingHttpRefusalLogTests
 
         /* And an ordinary hostname survives unchanged, or the line stops being useful. */
         Assert.Equal("darling.example.com", DarlingHttpRefusalLog.Sanitize("darling.example.com"));
-        Assert.Equal("10.197.53.214:5152", DarlingHttpRefusalLog.Sanitize("10.197.53.214:5152"));
+        Assert.Equal("10.0.0.26:5152", DarlingHttpRefusalLog.Sanitize("10.0.0.26:5152"));
     }
 
     /// <summary>Every gate is named the way an operator would have to name it to fix it — the CIDR gate

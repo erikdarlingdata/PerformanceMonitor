@@ -33,8 +33,8 @@ namespace Darling.Tests;
 /// has a <c>v_</c> view), no Lite twin (Lite stores neither table).
 ///
 /// <para>This file carried the "I am the top rung" claims that moved off <see cref="PgServerConfigScopeRungTests"/>
-/// (V138) when this rung landed, and handed them on to <see cref="QueryStoreIntervalLatestRungTests"/> (V140, #3953)
-/// when that one did. What stays is everything true of this rung wherever it sits.</para>
+/// (V138) when this rung landed, and handed them on to <see cref="CheckpointsTimedRungTests"/> (V140, #4037) when
+/// that one did. What stays is everything true of this rung wherever it sits.</para>
 ///
 /// <para>The rule the column exists for is <see cref="PostmasterRestart"/>, pinned where each reader lives: the
 /// store's own interval and self-alert in <see cref="StoreToastAndCheckpointerTests"/>, the monitored-target fact, the
@@ -47,9 +47,9 @@ public sealed class PostmasterStartTimeRungTests
     private const int RungVersion = 139;
     private const int PreviousVersion = 138;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V140 (#3953, the
-    /// Query Store interval table) appended its own — so this is a position within the signature rather than its
-    /// end.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V140 (#4037, the
+    /// timed-checkpoint count) appended its own — so this is a position within the signature rather than its end,
+    /// the handoff <see cref="PgServerConfigScopeRungTests"/> made to this file one rung ago.</summary>
     private const int ProbeOrdinal = 114;
 
     private const string Column = "postmaster_start_time";
@@ -165,7 +165,7 @@ public sealed class PostmasterStartTimeRungTests
     /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
     /// returns 139. The probe asks the question, the caller reads the answer, the map has the parameter — a
     /// sentinel present at only some of them shifts every LATER ordinal onto the wrong column. The top-arm half of
-    /// this claim moved to <see cref="QueryStoreIntervalLatestRungTests"/> (V140) with the top. The gate is
+    /// this claim moved to <see cref="CheckpointsTimedRungTests"/> (V140, #4037) with the top. The gate is
     /// load-bearing here: the write-side panel's shared reader names the column.
     /// </summary>
     [Fact]
@@ -177,10 +177,10 @@ public sealed class PostmasterStartTimeRungTests
         Assert.Contains(Column, DarlingPgWriteStatsReader.PgWriteStatsSql, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
-        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         /* The "nothing past me" half of this claim moved to V140's test with the top ordinal; what stays is
            that this rung's sentinel is read at its OWN ordinal, which is what keeps every later one on the
            right column. */
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
         Assert.Contains("hasPostmasterStartTime", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
@@ -192,9 +192,6 @@ public sealed class PostmasterStartTimeRungTests
            NEWEST sentinel, which stopped being true the moment V140 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasPostmasterStartTime", method.GetParameters()[ProbeOrdinal].Name);
-
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
 
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
         Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
@@ -269,9 +266,9 @@ public sealed class PostmasterStartTimeLivePostgresTests
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS postmaster_start_time");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.pg_write_stats DROP COLUMN IF EXISTS postmaster_start_time");
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 139");
-            /* Every rung from this one up, not literally one: V140 (#3953) landed above it, and its three tables
-               are re-created by the same climb (IF NOT EXISTS, so the store keeps them). */
-            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= 139), await PgMigrations.MigrateAsync(connection, ct));
+            /* Every rung from 139 up re-applies (V140-V142 are idempotent: ADD COLUMN IF NOT EXISTS or CREATE
+               TABLE/INDEX IF NOT EXISTS), so the count is the distance to the top rung, not 1. */
+            Assert.Equal(StorageVersion.SchemaVersion - 138, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));
 
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))

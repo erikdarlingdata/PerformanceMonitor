@@ -1,0 +1,35 @@
+# McpHealthTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_blocking_stats 381
+param get_blocking_stats.as_of 167
+param get_blocking_stats.hours_back 191
+param get_blocking_stats.server_name 28
+
+tool get_collection_health 583
+param get_collection_health.server_name 28
+
+tool get_collection_log 606
+param get_collection_log.as_of 167
+param get_collection_log.collector_name 149
+param get_collection_log.hours_back 191
+param get_collection_log.limit 120
+param get_collection_log.min_duration_ms 191
+param get_collection_log.server_name 28
+param get_collection_log.status 195
+
+tool get_current_waits_trend 443
+param get_current_waits_trend.as_of 167
+param get_current_waits_trend.database_name 73
+param get_current_waits_trend.hours_back 190
+param get_current_waits_trend.server_name 28
+
+tool get_daily_summary 617
+param get_daily_summary.server_name 28
+param get_daily_summary.summary_date 155
+
+tool get_daily_summary_range 608
+param get_daily_summary_range.as_of 166
+param get_daily_summary_range.days_back 84
+param get_daily_summary_range.server_name 28
+
+tool get_server_summary 648
+param get_server_summary.server_name 71

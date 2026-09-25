@@ -142,7 +142,7 @@ public sealed class SharedBaselineCacheTests
         Assert.Contains("new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache)", mcp, StringComparison.Ordinal);
 
         var web = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
-        Assert.Contains("DarlingWebEndpoints.MapAll(_app, postgres, _collectorState, _logger, _baselineCache);", web, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache);", web, StringComparison.Ordinal);
         var endpoints = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains("new DarlingAnalysisService(postgres, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
 
@@ -486,8 +486,11 @@ internal static class CommandCapture
 {
     /// <summary>A baseline COMPUTE: every bucket statement keys on the target's local clock through the one shared
     /// spelling (<see cref="BaselineLocalClock.LocalCollectionTimeSql"/>, which <c>LocalClockBucketKeyTests</c> holds
-    /// every arm to), and nothing else the pass runs does.</summary>
-    internal static bool IsBaselineRead(string sql) => sql.Contains(BaselineLocalClock.LocalCollectionTimeSql, StringComparison.Ordinal);
+    /// every arm to), and nothing else the pass runs does, except B's tiled window reads (#3653), which key their
+    /// tiles through WindowTiles.LocalHourSql and are excluded by name.</summary>
+    internal static bool IsBaselineRead(string sql) =>
+        sql.Contains(BaselineLocalClock.LocalCollectionTimeSql, StringComparison.Ordinal)
+        && !sql.Contains(WindowTiles.LocalHourSql, StringComparison.Ordinal);
 
     internal static async Task<(T Result, int BaselineReads)> CountBaselineReadsAsync<T>(Func<Task<T>> body)
     {

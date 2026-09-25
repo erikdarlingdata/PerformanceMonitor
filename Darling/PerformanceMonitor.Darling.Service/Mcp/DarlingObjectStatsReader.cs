@@ -315,7 +315,11 @@ internal static class DarlingObjectStatsReader
         AND   ($2::text IS NULL OR database_name = $2::text)
         ORDER BY
             CASE WHEN COALESCE(user_seeks, 0) + COALESCE(user_scans, 0) + COALESCE(user_lookups, 0) = 0 THEN 0 ELSE 1 END,
-            reserved_mb DESC
+            reserved_mb DESC NULLS LAST,
+            database_name,
+            schema_name,
+            table_name,
+            index_name NULLS LAST
         LIMIT $3
         """;
 

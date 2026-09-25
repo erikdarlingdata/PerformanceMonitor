@@ -549,6 +549,25 @@ public class CollectorMeasurementSeamTests
                 JobHistoryCollector.IdentityRegressionsMeasurement,
                 JobHistoryCollector.IdentityWatermarkMeasurement,
                 JobHistoryCollector.IdentityTargetRowMeasurement,
+                /* #4046: log lines a pg_read_file reader skipped because the target's UTC log_timezone did not
+                   write them. Measured through PgServerLogTail on behalf of pg_log_events and pg_deadlocks, which
+                   is why the const lives in PgServerLogTail.cs beside its one .Measure( call. */
+                PgServerLogTail.ForeignZoneLinesMeasurement,
+                /* #4058 item 3: plan captures whose query id or duration failed the guarded casts. A real auto_explain
+                   line never does, so each one is a forgery, skipped rather than stored under query id 0. Measured by
+                   plan capture's own ReadAsync, which is why the const lives in PgPlanCaptureCollector.cs. */
+                PgPlanCaptureCollector.ForgedCaptureMeasurement,
+                /* #4053 part a1b: csvlog records the parser discarded during resync or for a bad shape. Measured by
+                   pg_log_events' own ReadAsync on the csvlog route, which is why the const lives in
+                   PgLogEventsCollector.cs. */
+                PgLogEventsCollector.CsvRecordsDiscardedMeasurement,
+                /* #4053 part a2: jsonlog records the parser discarded (a cut head, or a bad shape). Measured by
+                   pg_log_events' own ReadAsync on the jsonlog route, which is why the const lives in
+                   PgLogEventsCollector.cs. */
+                PgLogEventsCollector.JsonRecordsDiscardedMeasurement,
+                /* #4058: deadlock-shaped records that IsRaiseShaped caught before FromEntry ever ran. Measured
+                   by pg_deadlocks' own ReadAsync, which is why the const lives in PgDeadlocksCollector.cs. */
+                PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

@@ -437,9 +437,10 @@ public sealed class DarlingPeerDisclosureTests
             $"the coverage section must sit between the read-only preamble and the tool census (read-only {readOnly}, coverage {coverage}, census {census})");
 
         /* Inserting a section must not drop any of the body — the census sentence a cross-app test parses
-           (Lite.Tests/CrossAppMcpToolInventoryPinTests) lives in it, as does every tool table. */
+           (Lite.Tests/CrossAppMcpToolInventoryPinTests) lives in it, and the workflow section (#3898 Phase 2
+           trimmed the old tool tables, not the body's tail) still ends the text. */
         Assert.Contains("are unique to Darling", text, StringComparison.Ordinal);
-        Assert.EndsWith("mute a finding pattern the operator has accepted", text.TrimEnd(), StringComparison.Ordinal);
+        Assert.EndsWith("`mute_analysis_finding` to silence an accepted pattern.", text.TrimEnd(), StringComparison.Ordinal);
     }
 
     [Fact]

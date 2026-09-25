@@ -139,9 +139,10 @@ public sealed class DarlingMcpToolsTests
 
     /// <summary>
     /// #3541 A14: the mute verb's description promises the disclosure the payload now carries — on Darling in
-    /// the same words as Lite (its twin pin is <c>McpMuteReportsWhatItMatchedTests</c>), and the instruction
-    /// table row agrees. The live round-trip below is what proves the numbers; this is what a caller reads
-    /// before deciding to trust them.
+    /// the same words as Lite (its twin pin is <c>McpMuteReportsWhatItMatchedTests</c>). #3898 Phase 2 (D5)
+    /// retired the instruction table row that used to duplicate this; the description is now the only surface.
+    /// The live round-trip below is what proves the numbers; this is what a caller reads before deciding to
+    /// trust them.
     /// </summary>
     [Fact]
     public void MuteAnalysisFinding_Description_NamesRegistered_MatchedNow_AndTheUnmatchedStatus()
@@ -156,12 +157,6 @@ public sealed class DarlingMcpToolsTests
         {
             Assert.Contains(token, description, StringComparison.Ordinal);
         }
-
-        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `mute_analysis_finding` |", StringComparison.Ordinal));
-        Assert.Contains("`matched_now`", row, StringComparison.Ordinal);
-        Assert.Contains("`muted_unmatched`", row, StringComparison.Ordinal);
-        Assert.Contains("`already_muted`", row, StringComparison.Ordinal);
-        Assert.Contains("`story_path`", row, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -169,26 +164,25 @@ public sealed class DarlingMcpToolsTests
     /// value-banded rows with <c>band_source</c> / <c>delta_sigma</c>, the rules in <c>band_rules</c>,
     /// physical-cause <c>families</c>, <c>plan_cache_churn</c>, <c>coverage_caveat</c> — and says what "worse" does
     /// NOT mean (one window against one window is not an experiment). Same words as Lite (its twin pin is
-    /// <c>CompareAnalysisDispersionTests</c>; the shared sentences are in <c>McpMissMessageParityPinTests</c>), and
-    /// the instruction table row agrees. The banding arithmetic is pinned on the shared
-    /// <c>ComparisonBanding</c> in Lite.Tests; this is what a caller reads before trusting a verdict.
+    /// <c>CompareAnalysisDispersionTests</c>; the shared sentences are in <c>McpMissMessageParityPinTests</c>).
+    /// #3898 Phase 2 (D5) retired the instruction table row that used to duplicate this; the description is
+    /// now the only surface. The banding arithmetic is pinned on the shared <c>ComparisonBanding</c> in
+    /// Lite.Tests; this is what a caller reads before trusting a verdict.
     /// </summary>
     [Fact]
     public void CompareAnalysis_Description_SaysWhatWorseMeans_AndWhatItDoesNot()
     {
-        var method = typeof(DarlingMcpTools).GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "compare_analysis");
-        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        foreach (var token in new[] { "delta_sigma", "band_source", "band_rules", "families", "plan_cache_churn", "coverage_caveat", "N=1 vs N=1", "cannot show that a change CAUSED anything" })
+        /* #3898: tools/list serves the head and get_tool_guide serves the tail. The five tokens a caller needs before
+           trusting a verdict are pinned to the head; the other three to the tail, where the original text lives. */
+        var served = McpToolGuideTests.Served("compare_analysis");
+        foreach (var token in new[] { "band_source", "band_rules", "plan_cache_churn", "coverage_caveat", "N=1 vs N=1" })
         {
-            Assert.Contains(token, description, StringComparison.Ordinal);
+            Assert.Contains(token, served.Served, StringComparison.Ordinal);
         }
 
-        var row = DarlingMcpInstructions.Text.Split('\n').Single(l => l.Contains("| `compare_analysis` |", StringComparison.Ordinal));
-        foreach (var token in new[] { "`band_source`", "`families`", "`plan_cache_churn`", "N=1 vs N=1" })
+        foreach (var token in new[] { "delta_sigma", "families", "cannot show that a change CAUSED anything" })
         {
-            Assert.Contains(token, row, StringComparison.Ordinal);
+            Assert.Contains(token, served.Tail!, StringComparison.Ordinal);
         }
 
         /* The tool's ComparePeriodsAsync seam returns the dispersion the banding needs — a 5-tuple whose

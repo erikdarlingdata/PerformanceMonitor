@@ -214,6 +214,61 @@ public sealed partial class ViewerDataService
         AND   status = 'PERMISSIONS'
         """;
 
+    /// <summary>
+    /// #3691 part a2: <c>collect.analysis_collection_caveats</c> (V141, part a1) — the data families the
+    /// scheduled analysis pass could not read on this server, as of its most recent run. $1 server_id.
+    /// </summary>
+    public const string CollectionCaveatsSql = """
+        SELECT family, reason, first_seen_utc, last_seen_utc
+        FROM collect.analysis_collection_caveats
+        WHERE server_id = $1
+        ORDER BY family
+        """;
+
+    /// <summary>
+    /// Reads <see cref="CollectionCaveatsSql"/> for one server — gated on the same connect-time schema probe
+    /// every other rung-dependent Viewer read uses (<see cref="GetStoreSchemaVersionAsync"/>), because V141
+    /// is the newest rung and a store behind it has no <c>collect.analysis_collection_caveats</c> table at
+    /// all. Returns an empty list both below V141 and on any read failure, rather than letting a lagging
+    /// store's missing-relation error (42P01) reach the Collection Health tab: this section is purely
+    /// informational, so a store that can't answer reads the same as a store with nothing to report.
+    /// </summary>
+    public async Task<List<CollectionCaveatRow>> GetCollectionCaveatsAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        var items = new List<CollectionCaveatRow>();
+
+        var storeVersion = await GetStoreSchemaVersionAsync(cancellationToken);
+        if (storeVersion is not int version || version < 141)
+        {
+            return items;
+        }
+
+        try
+        {
+            await using var command = _dataSource.CreateCommand(CollectionCaveatsSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                items.Add(new CollectionCaveatRow
+                {
+                    Family = reader.GetString(0),
+                    Reason = reader.GetString(1),
+                    FirstSeenUtc = reader.GetDateTime(2),
+                    LastSeenUtc = reader.GetDateTime(3),
+                });
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new List<CollectionCaveatRow>();
+        }
+
+        return items;
+    }
+
     /// <summary>Runs <see cref="PermissionDeniedCollectorCountSql"/> over the same 7-day window the health grid uses.</summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId, CancellationToken cancellationToken = default)
     {
@@ -664,12 +719,18 @@ public class CollectorHealthRow
         ? (DateTime.UtcNow - LastRunTime.Value).TotalHours
         : HoursSinceLastSuccess;
 
-    /// <summary>The collector's default cadence from the shared <see cref="CollectorScheduleDefaults"/>
-    /// (0 for an on-load or unknown collector — both fall to the floor thresholds). The banding uses the
+    /// <summary>The collector's cadence, routed through <c>EffectiveRecurringIntervalMinutes</c> (#4000) so an
+    /// on-load collector's catalog 0 reads as the daily recapture interval, which is what lets
+    /// <see cref="CollectorHealthClassifier.Classify"/> band it on the SAME ladder as any other. A name the
+    /// catalog doesn't know keeps 0 and the classifier's floor thresholds, as before #4000: resolving it to
+    /// daily too would leave a collector that went dark HEALTHY for a day and a half. The banding uses the
     /// shipped default, not any per-install override: the viewer has no cheap per-collector effective
-    /// frequency at the row level, and using the same default across all three surfaces keeps them in parity.</summary>
+    /// frequency at the row level, and using the same default across all three surfaces keeps them in
+    /// parity.</summary>
     private int FrequencyMinutes =>
-        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule) ? schedule.FrequencyMinutes : 0;
+        CollectorScheduleDefaults.All.TryGetValue(CollectorName, out var schedule)
+            ? CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes)
+            : 0;
 
     /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
@@ -680,7 +741,7 @@ public class CollectorHealthRow
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
             TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
-            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, CollectorHealthClassifier.IsOnLoadCollector(CollectorName)),
+            HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes),
         RegressedFromProductive);
 
     public string AvgDurationFormatted => AvgDurationMs < 1000
@@ -708,4 +769,20 @@ public class CollectorHealthRow
     /// </summary>
     public string NoteFormatted =>
         CollectorHealthClassifier.FormatCollectionNote(LastNote, NoteCount, TotalRuns, CollectorName, TargetHasUserDatabases);
+}
+
+/// <summary>
+/// One row of <see cref="ViewerDataService.CollectionCaveatsSql"/> (#3691 part a2) — a data family the
+/// analysis pass currently cannot read on this server, and why. Feeds the Collection Health tab's
+/// "Analysis could not read these data families" section.
+/// </summary>
+public class CollectionCaveatRow
+{
+    public string Family { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+
+    public string FirstSeenFormatted => ViewerTimeHelper.ForDisplay(FirstSeenUtc).ToString("g");
+    public string LastSeenFormatted => ViewerTimeHelper.ForDisplay(LastSeenUtc).ToString("g");
 }

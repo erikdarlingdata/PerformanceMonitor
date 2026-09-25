@@ -52,15 +52,18 @@ public sealed partial class ViewerDataService
     /// The same CTE over the per-database rollup. This is the ONE reader that needs
     /// <c>query_stats_db_hourly</c>: it sums the I/O columns, which the query-grain aggregate does not carry.
     /// The rollup already applies the same <c>delta_worker_time IS NOT NULL</c> filter, so it is dropped here.
+    /// <paramref name="relationSql"/> is the FROM-clause item (#3653 A6): either <c>collect.&lt;relation&gt; AS f</c>
+    /// unchanged, or <see cref="RollupCoverage.StitchedRelationSql"/>'s stitched form when a successor applies —
+    /// either way the alias is <c>f</c>, so the rest of the CTE reads through it unqualified exactly as before.
     /// </summary>
-    private static string WorkloadCteForCagg(string relation) => $"""
+    private static string WorkloadCteForCagg(string relationSql) => $"""
         database_name,
         SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
         SUM(logical_reads_sum) AS logical_reads,
         SUM(physical_reads_sum) AS physical_reads,
         SUM(logical_writes_sum) AS logical_writes,
         SUM(execution_count_sum) AS execution_count
-    FROM collect.{relation}
+    FROM {relationSql}
     WHERE server_id = $1
     AND   bucket >= $2
     GROUP BY database_name
@@ -81,12 +84,13 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// The same CTE over the QUERY-grain rollup — these two need only CPU and executions, both of which
     /// <c>query_stats_hourly</c> already carries, so they route without the per-database aggregate.
+    /// <paramref name="relationSql"/> is the FROM-clause item (#3653 A6) — see <see cref="WorkloadCteForCagg"/>.
     /// </summary>
-    private static string ConsumerCteForCagg(string relation) => $"""
+    private static string ConsumerCteForCagg(string relationSql) => $"""
         database_name,
         SUM(worker_time_sum) / 1000.0 AS cpu_time_ms,
         SUM(execution_count_sum) AS execution_count
-    FROM collect.{relation}
+    FROM {relationSql}
     WHERE server_id = $1
     AND   bucket >= $2
     GROUP BY database_name
@@ -105,54 +109,69 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched. The
-    /// one-argument form reads the legacy hourly; the callers below pass the relation they resolved (#3653).</summary>
+    /// one-argument form reads the legacy relation for that tier, unstitched (<see cref="RollupCoverage.Unknown"/>
+    /// carries <see cref="RollupAvailability.None"/>, so <see cref="RollupCoverage.StitchedRelationSql"/> names
+    /// the legacy alone — the same bytes as before #3653 A6 routed this through the builder); the callers below
+    /// pass the coverage/window they resolved so a successor can be stitched in instead.</summary>
     public static string DatabaseResourceUsageSqlFor(RetentionTier tier) =>
-        DatabaseResourceUsageSqlFor(tier, TimescaleSupport.QueryStatsDbHourlyView);
+        DatabaseResourceUsageSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
     /// <summary>
-    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the HOURLY relation the caller resolved
-    /// (#3653, Q12): <c>query_stats_db_hourly</c> or its interval-honest successor
-    /// <c>query_stats_db_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/>. Same column
-    /// names on both, so the CTE text differs in the relation and nothing else; the daily is not parameterised
-    /// because it has no successor (<see cref="TimescaleSupport.SupersededHourlyRollups"/>).
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the relation <paramref name="coverage"/>
+    /// resolves for <paramref name="windowStartUtc"/> (#3653 A6): <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// stitches the legacy <c>query_stats_db_hourly</c>/<c>query_stats_db_daily</c> to its interval-honest
+    /// successor at the successor's floor (F for hourly, F_d for daily), or names the legacy alone where there is
+    /// no successor — the SAME single-relation text the one-argument overload builds, with an <c>AS f</c> alias
+    /// the stitch needs (harmless: neither CTE qualifies a column, so the alias changes no result). The tier
+    /// CHOICE stays on the legacy pair; only the relation within the chosen tier can stitch.
     /// </summary>
-    public static string DatabaseResourceUsageSqlFor(RetentionTier tier, string hourlyRelation) =>
+    public static string DatabaseResourceUsageSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
             ? DatabaseResourceUsageSql
             : RouteOrThrow(
                 DatabaseResourceUsageSql,
                 WorkloadCteRaw,
-                WorkloadCteForCagg(tier == RetentionTier.Hourly ? hourlyRelation : TimescaleSupport.QueryStatsDbDailyView),
+                WorkloadCteForCagg(tier == RetentionTier.Hourly
+                    ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "database resource usage");
 
-    /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy hourly.</summary>
+    /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy relation for that tier,
+    /// unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> for why routing this through the
+    /// stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
     public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
-        TopResourceConsumersByTotalSqlFor(tier, TimescaleSupport.QueryStatsHourlyView);
+        TopResourceConsumersByTotalSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
-    /// <summary>Top consumers (by total) over the hourly relation the caller resolved (#3653, Q12) — see
-    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, string)"/>.</summary>
-    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier, string hourlyRelation) =>
+    /// <summary>Top consumers (by total) over the stitched relation (#3653 A6) — see
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
+    public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
             ? TopResourceConsumersByTotalSql
             : RouteOrThrow(
                 TopResourceConsumersByTotalSql,
                 ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly ? hourlyRelation : TimescaleSupport.QueryStatsDailyView),
+                ConsumerCteForCagg(tier == RetentionTier.Hourly
+                    ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "top consumers by total");
 
-    /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy hourly.</summary>
+    /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy relation for that tier,
+    /// unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> for why routing this through the
+    /// stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
     public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
-        TopResourceConsumersByAvgSqlFor(tier, TimescaleSupport.QueryStatsHourlyView);
+        TopResourceConsumersByAvgSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
-    /// <summary>Top consumers (by average) over the hourly relation the caller resolved (#3653, Q12) — see
-    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, string)"/>.</summary>
-    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier, string hourlyRelation) =>
+    /// <summary>Top consumers (by average) over the stitched relation (#3653 A6) — see
+    /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
+    public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc) =>
         tier == RetentionTier.Raw
             ? TopResourceConsumersByAvgSql
             : RouteOrThrow(
                 TopResourceConsumersByAvgSql,
                 ConsumerCteRaw,
-                ConsumerCteForCagg(tier == RetentionTier.Hourly ? hourlyRelation : TimescaleSupport.QueryStatsDailyView),
+                ConsumerCteForCagg(tier == RetentionTier.Hourly
+                    ? coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly)
+                    : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "top consumers by average");
 
     public const string DatabaseResourceUsageSql = @"
@@ -228,7 +247,7 @@ ORDER BY c.cpu_time_ms DESC";
             coverage.For(TimescaleSupport.QueryStatsDbHourlyView, TimescaleSupport.QueryStatsDbDailyView));
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
-        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsDbHourlyView, cutoff)));
+        await using var command = _dataSource.CreateCommand(DatabaseResourceUsageSqlFor(tier, coverage, cutoff));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
@@ -389,7 +408,7 @@ LIMIT $3";
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, cutoff)));
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByTotalSqlFor(tier, coverage, cutoff));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });
@@ -457,7 +476,7 @@ LIMIT $3";
             coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
 
         /* #3653 (Q12): tier over the legacy pair above; the hourly relation by the supply rule. */
-        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, cutoff)));
+        await using var command = _dataSource.CreateCommand(TopResourceConsumersByAvgSqlFor(tier, coverage, cutoff));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified) });

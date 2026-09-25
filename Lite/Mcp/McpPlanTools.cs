@@ -13,9 +13,13 @@ namespace PerformanceMonitorLite.Mcp;
 public sealed class McpPlanTools
 {
     [McpServerTool(Name = "analyze_query_plan"), Description(
-        "Analyzes an execution plan from the plan cache by query_hash. " +
-        "Use after get_top_queries_by_cpu to understand why a query is expensive. " +
-        "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
+        "Analyzes query_hash's latest plan. No plan: not_collected if the engine can't collect query_stats, else unavailable. " +
+        "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
+        "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
+        "actual_* are null, not 0, without runtime stats. " +
+        "<<GUIDE>> " +
+        "Analyzes an execution plan from the plan cache by query_hash. Use after get_top_queries_by_cpu to understand why a query is expensive. Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static async Task<string> AnalyzeQueryPlan(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -43,6 +47,11 @@ public sealed class McpPlanTools
     }
 
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
+        "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected if the engine can't collect procedure_stats, else unavailable. " +
+        "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat (regression risk for other plans, write cost); " +
+        "parameters; memory_grant; top_operators by operators_ranked_by, with operators_returned / total_operators / truncated. " +
+        "<<GUIDE>> " +
         "Analyzes an execution plan from procedure stats by plan_handle. " +
         "Use after get_top_procedures_by_cpu to understand why a procedure is expensive. " +
         "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
@@ -120,6 +129,13 @@ public sealed class McpPlanTools
     }
 
     [McpServerTool(Name = "analyze_plan_xml"), Description(
+        "Analyzes raw showplan XML you provide (not a stored plan). Per statement: warnings; missing_indexes " +
+        "labelled impact_basis, with create_statement — the optimizer's suggested CREATE INDEX for this statement: " +
+        "corroboration for a statement already measured slow, never a diagnosis; every row carries the fixed caveat: " +
+        "regression risk for other plans and write cost, so test it; parameters; memory_grant; top_operators, ranked " +
+        "by operators_ranked_by, with operators_returned / total_operators / truncated. Malformed or non-plan XML " +
+        "doesn't error: statement_count 0. Blank plan_xml is refused. " +
+        "<<GUIDE>> " +
         "Analyzes raw showplan XML directly. Use when you have plan XML from any source " +
         "(clipboard, file, another tool). " +
         "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]

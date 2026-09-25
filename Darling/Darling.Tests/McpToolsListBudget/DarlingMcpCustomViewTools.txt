@@ -1,0 +1,28 @@
+# DarlingMcpCustomViewTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool create_custom_view 331
+param create_custom_view.definition 149
+param create_custom_view.description 36
+param create_custom_view.name 60
+
+tool delete_custom_view 158
+param delete_custom_view.view_id 54
+
+tool describe_custom_view_catalog 514
+
+tool get_custom_view 271
+param get_custom_view.view_id 61
+
+tool list_custom_views 313
+
+tool run_custom_view_panel 612
+param run_custom_view_panel.spec 103
+
+tool update_custom_view 785
+param update_custom_view.definition 87
+param update_custom_view.description 111
+param update_custom_view.name 43
+param update_custom_view.version 116
+param update_custom_view.view_id 54
+
+tool validate_custom_view 561
+param validate_custom_view.definition 53

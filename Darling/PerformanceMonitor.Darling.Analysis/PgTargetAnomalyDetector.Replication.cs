@@ -33,10 +33,13 @@ WITH per_collection AS (
     AND   replay_bytes_behind IS NOT NULL
     GROUP BY collection_time
 )
-SELECT MAX(replay_bytes) AS peak_replay_bytes,
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(replay_bytes) AS peak_replay_bytes,
        AVG(replay_bytes) AS avg_replay_bytes,
        COUNT(*)          AS sample_count
-FROM per_collection";
+FROM per_collection
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>
     /// <c>ANOMALY_PG_REPLICATION_LAG</c>: the window's peak worst-standby replay gap (bytes, from
@@ -62,29 +65,74 @@ FROM per_collection";
     {
         try
         {
-            var baseline = await _baselineProvider.GetBaselineAsync(
-                context.ServerId, MetricNames.PgReplayLagBytes, context.TimeRangeStart, context.CancellationToken);
-            if (baseline.SampleCount == 0) return;
+            /* #3653 A8 option B: per-hour tiles against the tile's own (hour, dow) bucket, never-blind fallback to
+               today's window-peak path when no tile scores. */
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgReplayLagBytes, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
-            using var cmd = WindowCommand(ReplayLagWindowSql, connection, context);
-            using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-            if (!await reader.ReadAsync(context.CancellationToken)) return;
+            var tiles = new List<WindowTile>();
+            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            using (var cmd = WindowCommand(ReplayLagWindowSql, connection, context))
+            {
+                /* #3653 A8 option B: the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds $4..$6 from the
+                   ANALYSIS window's clock — WindowCommand only binds $1..$3. */
+                cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+                cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
 
-            var peakBytes = reader.IsDBNull(0) ? 0.0 : Convert.ToDouble(reader.GetValue(0));
-            var avgBytes = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1));
-            var windowSamples = reader.IsDBNull(2) ? 0L : Convert.ToInt64(reader.GetValue(2));
-            if (windowSamples == 0) return;
+                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await reader.ReadAsync(context.CancellationToken))
+                    tiles.Add(WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 3));
+            }
 
-            var decision = AnomalyGate.EvaluateZScore(
-                baseline, peakBytes,
+            var whole = WindowTiles.WholeWindow(tiles);
+            if (whole.Samples == 0) return;
+
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            var tv = AnomalyGate.EvaluateTiles(
+                tiles, map,
                 DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgReplayLagBytes),
-                PgTargetScorer.PgReplayLagBytesFloor, PgTargetScorer.PgReplayLagBytesFallback, SigmaDisplayCap);
-            if (!decision.Fire) return;
+                PgTargetScorer.PgReplayLagBytesFloor, PgTargetScorer.PgReplayLagBytesFallback, SigmaDisplayCap,
+                window);
+
+            AnomalyGate.ZDecision decision;
+            BaselineBucket baseline;
+            double peakBytes;
+            double avgBytes;
+            long windowSamples;
+
+            if (tv is null)
+            {
+                baseline = await _baselineProvider.GetBaselineAsync(
+                    context.ServerId, MetricNames.PgReplayLagBytes, context.TimeRangeStart, context.CancellationToken);
+                if (baseline.SampleCount == 0) return;
+
+                decision = AnomalyGate.EvaluateZScore(
+                    baseline, whole.Peak, whole.Mean,
+                    DefaultDeviationThreshold, ModifiedZThresholdFor(MetricNames.PgReplayLagBytes),
+                    PgTargetScorer.PgReplayLagBytesFloor, PgTargetScorer.PgReplayLagBytesFallback, SigmaDisplayCap,
+                    window: window);
+                if (!decision.Fire) return;
+
+                peakBytes = whole.Peak;
+                avgBytes = whole.Mean;
+                windowSamples = whole.Samples;
+            }
+            else
+            {
+                decision = tv.Value.Decision;
+                baseline = tv.Value.Bucket;
+                peakBytes = tv.Value.Tile.Peak;
+                avgBytes = tv.Value.Tile.Mean;
+                windowSamples = tv.Value.Tile.Samples;
+                if (!decision.Fire) return;
+            }
 
             var metadata = ZScoreMetadata(baseline, decision, windowSamples);
             metadata["peak_replay_bytes"] = peakBytes;
             metadata["avg_replay_bytes"] = avgBytes;
+            if (tv is { } verdict)
+                WindowTiles.AddTileMetadata(metadata, verdict, tiles, map.WindowClock);
 
             anomalies.Add(new Fact
             {

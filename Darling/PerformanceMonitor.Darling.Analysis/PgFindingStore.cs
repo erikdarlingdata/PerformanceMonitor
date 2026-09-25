@@ -1010,7 +1010,7 @@ ORDER BY local_bucket, story_path_hash";
     /// </summary>
     private static AnalysisFinding ReadFinding(NpgsqlDataReader reader)
     {
-        return new AnalysisFinding
+        var finding = new AnalysisFinding
         {
             FindingId = reader.GetInt64(0),
             AnalysisTime = AsUtc(reader.GetDateTime(1)),
@@ -1038,6 +1038,11 @@ ORDER BY local_bucket, story_path_hash";
                "no drill-down" inside the serializer, mirroring the action's discipline. */
             DrillDown = reader.IsDBNull(20) ? null : DrillDownSerializer.Deserialize(reader.GetString(20))
         };
+
+        /* #4005: a deadlock exemplar stored before its SQL was normalized comes back normalized, and names its
+           report by timestamp and pid rather than by a hash that may be over the raw graph. */
+        PgTargetDrillDownCollector.NormalizeStoredDeadlockExemplars(finding);
+        return finding;
     }
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>

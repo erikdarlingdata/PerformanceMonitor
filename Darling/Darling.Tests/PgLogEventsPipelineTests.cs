@@ -89,7 +89,7 @@ public sealed class PgLogEventsPipelineTests
         + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
         + "2026-09-18 03:07:12.345 UTC [1549] 322048460535975151HINT:  See server log for query details.\n";
 
-    private static List<PgLogEvent> Classify(string text) => PgLogEventClassifier.Default.Classify(text);
+    private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
 
     /* ---- assembly ------------------------------------------------------------------------------------ */
 
@@ -119,6 +119,21 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains(P + "[4102] STATEMENT:  UPDATE orders", lockWait.RawText, StringComparison.Ordinal);
     }
 
+    /// <summary>#4047 review: %r's port is never a SQLSTATE, under IPv4 or IPv6, while an %e beside it still is.</summary>
+    [Fact]
+    public void APortInPercentR_IsNotReadAsASqlState_ButAnPercentEBesideItIs()
+    {
+        var entries = PgLogEntryAssembler.Assemble(
+            "2026-09-18 03:07:12 UTC:fe80::1(53100):app_rw@app_db:[4102]:LOG:  connection authorized: user=app_rw database=app_db\n"
+            + "2026-09-18 03:07:12 UTC:192.0.2.10(57014):app_rw@app_db:[4103]:28P01:FATAL:  password authentication failed for user \"app_rw\"\n");
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(4102, entries[0].Pid);
+        Assert.Null(entries[0].SqlState);
+        Assert.Equal(4103, entries[1].Pid);
+        Assert.Equal("28P01", entries[1].SqlState);
+    }
+
     [Fact]
     public void TheAssembler_ReadsBothPrefixFamilies_AndLiftsUserDatabaseAndSqlStateFromThePrefix()
     {
@@ -129,6 +144,8 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(4102, managed[0].Pid);
         Assert.Equal(new DateTime(2026, 9, 18, 3, 7, 12, DateTimeKind.Utc), managed[0].OccurredAtUtc);
         Assert.StartsWith("SELECT count(*)", managed[0].Statement, StringComparison.Ordinal);
+        /* %r renders `host(port)`: the port 52345 is not a SQLSTATE, and this prefix carries no %e (#4047 review). */
+        Assert.Null(managed[0].SqlState);
         /* A background process renders `@` alone under %u@%d: neither half is a name. */
         Assert.Null(managed[1].UserName);
         Assert.Null(managed[1].DatabaseName);
@@ -336,7 +353,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var parsers = PgLogEventClassifier.DefaultParsers.ToList();
         parsers.Insert(parsers.Count - 1, new StandInCheckpointParser());
-        var classifier = new PgLogEventClassifier(parsers);
+        var classifier = new PgLogEventClassifier(parsers, TestLogHashKeys.Fixed);
 
         var events = classifier.Classify(SelfHostedLog);
         var checkpoints = events.Where(e => e.Family == PgLogFamilies.Checkpoint).ToList();
@@ -407,10 +424,10 @@ public sealed class PgLogEventsPipelineTests
 
         /* Same shape, different values, one fingerprint; and the fingerprint is over the REDACTED text, so
            the raw literal is not even hashed. */
-        var a = PgLogTextRedactor.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT * FROM t WHERE id = 1 AND name = 'a'"));
-        var b = PgLogTextRedactor.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT  *  FROM t\nWHERE id = 999 AND name = 'zzz'"));
+        var a = TestLogHashKeys.Fixed.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT * FROM t WHERE id = 1 AND name = 'a'"));
+        var b = TestLogHashKeys.Fixed.Fingerprint(PgLogTextRedactor.RedactStatement("SELECT  *  FROM t\nWHERE id = 999 AND name = 'zzz'"));
         Assert.Equal(a, b);
-        Assert.Null(PgLogTextRedactor.Fingerprint(null));
+        Assert.Null(TestLogHashKeys.Fixed.Fingerprint(null));
 
         /* The two regexes are the plan parser's own instances, not copies: the field is internal and this
            type reads it. A second spelling is the drift the scope note forbids. */
@@ -1118,6 +1135,101 @@ public sealed class PgLogEventsPipelineTests
         Assert.All(events, e => Assert.DoesNotContain("Leak4006", e.Message + e.Detail + e.Context, StringComparison.Ordinal));
     }
 
+    /* #4041: '%m %u@%d [%p] ', fields between the zone and the pid. */
+    private const string C = "2026-09-18 03:07:12.345 UTC ";
+
+    /// <summary>
+    /// #4041: under a prefix with fields between the zone and the pid every line was dropped, because the space
+    /// family wanted the bracket right after the zone. The user and database sit BEFORE the pid now, and are still
+    /// lifted from the prefix.
+    /// </summary>
+    [Fact]
+    public void ACustomPrefixWithFieldsBeforeThePid_ReadsItsEntries_AndLiftsUserAndDatabase()
+    {
+        var log =
+            C + "app_rw@app_db [4800] ERROR:  duplicate key value violates unique constraint \"customers_email_key\"\n"
+            + C + "app_rw@app_db [4800] DETAIL:  Key (email)=(someone@example.com) already exists.\n"
+            + C + "app_rw@app_db [4800] STATEMENT:  INSERT INTO customers (email) VALUES ('someone@example.com')\n"
+            + C + "@ [2999] LOG:  checkpoint starting: time\n"
+            + C + "app_rw@app_db [4801] FATAL:  password authentication failed for user \"app_rw\"\n";
+
+        var entries = PgLogEntryAssembler.Assemble(log);
+        Assert.Equal([4800, 2999, 4801], entries.Select(e => e.Pid));
+        Assert.Equal(["ERROR", "LOG", "FATAL"], entries.Select(e => e.Severity));
+        Assert.Equal("app_rw", entries[0].UserName);
+        Assert.Equal("app_db", entries[0].DatabaseName);
+        Assert.Equal("UTC", entries[0].ZoneText);
+        Assert.Equal("Key (email)=(someone@example.com) already exists.", entries[0].Detail);
+        Assert.StartsWith("INSERT INTO customers", entries[0].Statement, StringComparison.Ordinal);
+        Assert.Equal(new DateTime(2026, 9, 18, 3, 7, 12, 345, DateTimeKind.Utc), entries[0].OccurredAtUtc);
+
+        /* A background process renders `@` alone: neither half is a name. */
+        Assert.Null(entries[1].UserName);
+        Assert.Null(entries[1].DatabaseName);
+
+        /* And the stored events: the user-visible half of the fix. */
+        var events = Classify(log);
+        Assert.Contains(events, e => e.Family == PgLogFamilies.Error && e.Pid == 4800 && e.UserName == "app_rw" && e.DatabaseName == "app_db");
+        Assert.Contains(events, e => e.Pid == 4801 && e.Severity == "FATAL");
+
+        /* The zone is still read, and still refused whole when it is not UTC. */
+        var refusal = Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgLogEntryAssembler.Assemble(log.Replace(" UTC ", " EST ", StringComparison.Ordinal)));
+        Assert.Equal("EST", refusal.ObservedZone);
+
+        /* A numeric zone with a colon reads through the managed family, up to that colon: same verdicts. */
+        Assert.Equal(3, PgLogEntryAssembler.Assemble(log.Replace(" UTC ", " +00:00 ", StringComparison.Ordinal)).Count);
+        Assert.Equal("-03", Assert.Throws<PgLogTimezoneUnsupportedException>(
+            () => PgLogEntryAssembler.Assemble(log.Replace(" UTC ", " -03:30 ", StringComparison.Ordinal))).ObservedZone);
+    }
+
+    /// <summary>
+    /// #4041, the new gap's rules. It stops at the first bracket, so a forged <c>[pid] LABEL:  </c> behind the
+    /// line's real bracket is never reached, even when the line's own label is one this reader does not know. And
+    /// it holds to #3996's label boundaries, so on a line with no bracket before its label it cannot cross the
+    /// label (English, unpadded, or after a non-ASCII letter) to a bracket inside the text.
+    /// </summary>
+    [Fact]
+    public void UnderACustomPrefix_ABracketOrLabelInsideTheText_OpensNothing()
+    {
+        var events = Classify(
+            C + "app_rw@app_db [4810] ERROR:  x\n"
+            + C + "app_rw@app_db [4810] STATEMENT:  SELECT 'a [1] ERROR:  Leak4041a'\n"
+            + C + "app_rw@app_db [4811] SENTENCIA:  SELECT 'b [2] ERROR:  Leak4041b'\n"
+            + C + "app_rw@app_db [4812] FEHLER:  c [3] FATAL:  Leak4041c\n"
+            + C + "app_rw@app_db LOG:  statement: SELECT 'd [4] ERROR:  Leak4041d'\n"
+            + C + "app_rw@app_db SORGU: e [5] ERROR:  Leak4041e\n"
+            + C + "app_rw@app_db 쿼리:f [6] ERROR:  Leak4041f\n"
+            + C + "app_rw@app_db ANWEISUNG:  g [7] ERROR:  Leak4041g\n"
+            + C + "app_rw@app_db SQL:h [8] ERROR:  Leak4041h\n");
+        var only = Assert.Single(events);
+        Assert.Equal(4810, only.Pid);
+        Assert.Equal("x", only.Message);
+        Assert.DoesNotContain("Leak4041", only.Message + only.Detail + only.Context, StringComparison.Ordinal);
+
+        /* A real bracket followed by a forged one binds the real one, and the forged header stays text. */
+        var bound = Assert.Single(PgLogEntryAssembler.Assemble(C + "app_rw@app_db [4813] ERROR:  real [9] FATAL:  forged\n"));
+        Assert.Equal(4813, bound.Pid);
+        Assert.Equal("ERROR", bound.Severity);
+        Assert.Equal("real [9] FATAL:  forged", bound.Message);
+    }
+
+    /// <summary>
+    /// #4041: the new alternative's zone is colon-free and it is tried after the managed family, so a managed line
+    /// whose database name holds a space is read exactly as before. With a zone that could hold colons, tried first,
+    /// it ran the zone to that space (<c>UTC:192.0.2.10(52345):app_rw@my</c>) and the zone check refused every read
+    /// of the target.
+    /// </summary>
+    [Fact]
+    public void AManagedLineWithASpaceBeforeItsPid_IsStillReadByTheManagedFamily()
+    {
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(
+            "2026-09-18 03:07:12 UTC:192.0.2.10(52345):app_rw@my db:[4102]:ERROR:  canceling statement due to user request\n"));
+        Assert.Equal("UTC", entry.ZoneText);
+        Assert.Equal(4102, entry.Pid);
+        Assert.Equal("ERROR", entry.Severity);
+    }
+
     /// <summary>
     /// #3996's round-2 review (3): each deadlock query's buffer was sized to the whole DETAIL, so a 63 KB report of
     /// 880 waiters allocated 107 MB a call, and a CONTEXT's frames were each sized to the 64 KB field cap, 125 MB a
@@ -1198,15 +1310,39 @@ public sealed class PgLogEventsPipelineTests
     /// <summary>
     /// Extracting the tailer left the two siblings' SHIPPED SQL byte-for-byte what it was: pinned against
     /// the text as it stood at the parent commit, reconstructed from the inline constants.
+    ///
+    /// <para><b>The plan side is no longer that "before" text (#4008).</b> The unanchored
+    /// <c>regexp_matches</c> let a statement's own author forge a plan block inside their own SQL, which
+    /// PostgreSQL then echoed back verbatim in the <c>STATEMENT:</c> companion after a syntax error — so
+    /// <c>plansBefore</c> now pins the FIXED pattern (a required timestamp, anchored to a genuine line start
+    /// with the <c>'n'</c> flag) rather than the vulnerable one. The deadlock and log-events SQL are
+    /// untouched by that issue and still pin what this test always pinned.</para>
     /// </summary>
     [Fact]
     public void TheTailerExtraction_LeftBothSiblingsSqlByteIdentical()
     {
-        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
+        const string tail = "\nWITH newest AS (\n    SELECT name, size\n    FROM pg_catalog.pg_ls_logdir()\n    WHERE pg_catalog.current_setting('logging_collector') = 'on'\n      AND name !~* '\\.(csv|json)$'\n      AND 'stderr' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ','))\n    ORDER BY modification DESC\n    LIMIT 1\n),\ntail AS (\n    SELECT pg_catalog.pg_read_file(\n               pg_catalog.current_setting('log_directory') || '/' || n.name,\n               greatest(n.size - 4194304, 0),\n               4194304) AS body\n    FROM newest AS n\n)";
 
-        const string plansBefore = tail + "\nSELECT\n    (m[1])::bigint                                   AS query_id,\n    (m[2])::double precision                         AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'g') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 2000";
+        /* Both siblings, #3997: logging_collector = off (the original marker) and logging_collector = on
+           with no stderr-format file left after the newest CTE's own exclusion, which since #4019 also leaves
+           newest empty whenever log_destination lacks stderr (the new one). The two
+           WHERE clauses cannot both be true — one needs the setting off, the other needs it on — which is
+           the mutual-exclusion PgServerLogTail's own remarks argue for. The regexp itself is #4016's fixed
+           pattern (merged from dev after this branch started), not #3997's own change — the extra
+           [^ [\n]+ [^[\n]*  before the pid bracket tolerates a prefix token #4016 found real logs carry
+           there; this pin follows dev's text rather than restating the old one. #4058 item 3 then replaced the
+           two bare casts with the ordered CASE guard, so a forged out-of-range number is nulled instead of
+           failing the whole read; this pin carries that text too. */
+        const string plansBefore = tail + "\nSELECT\n    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL\n         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,\n    CASE WHEN m[2] !~ '^[0-9]{1,15}(\\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ [\\n]+ [^[\\n]*\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 2000";
 
-        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS occurred_at_text,\n    m[2]    AS log_zone_text,\n    m[3]    AS victim_pid_text,\n    m[4]    AS detail_body\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d\\.\\d+) ([^ \\n]+) \\[(\\d+)\\][^\\n]*ERROR:  deadlock detected\\s*\\n[^\\n]*DETAIL:  ((?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off', NULL, NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nLIMIT 500";
+        /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
+           candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
+           read. The tailer it opens with is still the shared one, byte for byte. Its prefix clause changed on
+           purpose in #4041: PgDeadlockLogParser's own, so the fraction is optional, fields may sit between the
+           zone and the pid, and the managed family is there beside the space one. And in #4046: every row carries
+           the target's log_timezone as a second column, read in the same statement, and the marker arms carry
+           NULL there. */
+        const string deadlocksBefore = tail + "\nSELECT\n    m[1]    AS report_text,\n    pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? (?:[^ \\n]+ (?:(?!:  )[^[\\n])*\\[\\d+\\]|[^ :\\n]+:[^[\\n]*\\[\\d+\\])(?:(?!:  )[^\\n])*ERROR:  deadlock detected\\s*\\n(?:(?!:  )[^\\n])*DETAIL:  (?:[^\\n]*\\n)(?:\\t[^\\n]*\\n)*(?:(?![^\\n]*ERROR:  deadlock detected)\\d{4}-\\d\\d-\\d\\d [^\\n]*\\n)?)',\n         'gn') AS m\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 500";
 
         /* Line endings normalised on both sides: the repo's `text=auto eol=crlf` checks the sources out as
            CRLF on Windows and this pin's literals are LF, and a verbatim string carries whatever its file
@@ -1217,12 +1353,305 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(plansBefore, Lf(PgPlanCaptureCollector.Instance.BuildQuery(context).Text));
         Assert.Equal(deadlocksBefore, Lf(PgDeadlocksCollector.Instance.BuildQuery(context).Text));
 
-        /* And the third reader opens with the same tailer and returns the body whole. */
+        /* And the third reader opens with the same tailer and returns the body whole, with the target's
+           log_timezone beside it since #4046 (NULL on the marker arms). */
         var events = Lf(PgLogEventsCollector.Instance.BuildQuery(context).Text);
-        Assert.StartsWith(tail, events, StringComparison.Ordinal);
-        Assert.Contains("SELECT tail.body AS log_body", events, StringComparison.Ordinal);
+        Assert.Equal(
+            tail + "\nSELECT tail.body AS log_body,\n       pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)",
+            events);
         Assert.Contains("'" + PgLoggingCollectorOffException.Marker + "'", events, StringComparison.Ordinal);
+        Assert.Contains("'" + PgNoStderrLogFileException.Marker + "'", events, StringComparison.Ordinal);
         Assert.Equal(tail, Lf(PgServerLogTail.TailCteSql));
+    }
+
+    /// <summary>
+    /// #4058 L3: a unit pin of both binary-route amplification guards. The first lane's <c>position(...
+    /// IN ...)</c> syntax error broke every binary-route read and only a live test caught it, because CI
+    /// does not run the gated live classes. This pins the correct form beside the existing byte pin above,
+    /// on every commit.
+    /// </summary>
+    [Fact]
+    public void TheBinaryRouteGuards_UseTheCorrectPositionSyntax_NotTheOldInForm()
+    {
+        var binaryContext = TestContext();
+        binaryContext.PgReadBinaryFileGranted = true;
+
+        var planBinarySql = PgPlanCaptureCollector.Instance.BuildQuery(binaryContext).Text;
+        var deadlockBinarySql = PgDeadlocksCollector.Instance.BuildQuery(binaryContext).Text;
+
+        Assert.Contains("WHERE pg_catalog.position(tail.body, 'LOG:  duration: '::bytea) > 0", planBinarySql, StringComparison.Ordinal);
+        Assert.Contains("WHERE pg_catalog.position(tail.body, 'ERROR:  deadlock detected'::bytea) > 0", deadlockBinarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("position('", planBinarySql, StringComparison.Ordinal);
+        Assert.DoesNotContain("position('", deadlockBinarySql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a1b: the stderr statements are byte-unchanged when context.PgLogUsesCsvlog is false — the
+    /// existing pin above still passes untouched — and the csvlog pair opens with the csv CTE instead of the
+    /// stderr one, gated on PgReadBinaryFileGranted the same way the stderr pair is.
+    /// </summary>
+    [Fact]
+    public void WhenPgLogUsesCsvlog_TheStatementOpensWithTheCsvCte_AndTheStderrPairIsUntouched()
+    {
+        var stderrContext = TestContext();
+        Assert.DoesNotContain("csvlog", PgLogEventsCollector.Instance.BuildQuery(stderrContext).Text, StringComparison.Ordinal);
+
+        var csvContext = TestContext();
+        csvContext.PgLogUsesCsvlog = true;
+        var csvSql = PgLogEventsCollector.Instance.BuildQuery(csvContext).Text;
+        Assert.Contains("name ~* '\\.csv$'", csvSql, StringComparison.Ordinal);
+        Assert.Contains("'csvlog' = ANY", csvSql, StringComparison.Ordinal);
+        Assert.Contains("'" + PgNoCsvlogFileException.Marker + "'", csvSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + PgNoStderrLogFileException.Marker + "'", csvSql, StringComparison.Ordinal);
+
+        var csvBinaryContext = TestContext();
+        csvBinaryContext.PgLogUsesCsvlog = true;
+        csvBinaryContext.PgReadBinaryFileGranted = true;
+        var csvBinarySql = PgLogEventsCollector.Instance.BuildQuery(csvBinaryContext).Text;
+        Assert.Contains("pg_read_binary_file", csvBinarySql, StringComparison.Ordinal);
+        Assert.Contains("name ~* '\\.csv$'", csvBinarySql, StringComparison.Ordinal);
+
+        /* Never both at once: TailCsvCteSql/TailCsvCteBinarySql are new, independent constants — the
+           existing byte pin above already proves TailCteSql/TailCteBinarySql are untouched, and this proves
+           the csv pair is used instead of them once the flag is set. */
+        Assert.DoesNotContain("'stderr' = ANY", csvSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a1b/a2: the probe SQL is PostgreSQL 14+ valid — plain <c>current_setting</c>/
+    /// <c>string_to_array</c>/<c>ANY</c>, nothing gated behind a newer version. One row answers both the
+    /// csvlog and jsonlog booleans (#4053 part a2), so a cache miss costs one round trip, not two.
+    /// </summary>
+    [Fact]
+    public void ThePgLogFormatCapabilityProbe_UsesOnlyPostgreSql14PlusFunctions()
+    {
+        Assert.Equal(
+            "SELECT ('csvlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')))::text "
+            + "|| ':' || "
+            + "('jsonlog' = ANY (pg_catalog.string_to_array(pg_catalog.lower(pg_catalog.replace(pg_catalog.current_setting('log_destination'), ' ', '')), ',')))::text",
+            PgLogFormatCapability.ProbeSql);
+        Assert.DoesNotContain("pg_input_is_valid", PgLogFormatCapability.ProbeSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a1b: ReadAsync over the csvlog route — a forged newline planted through a failed login's
+    /// user name stays inside its own quoted field, so it never starts a second event, and the forged text
+    /// lands verbatim inside the user field of the ONE event the record produced.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_KeepsAForgedNewlineInsideOneUserField()
+    {
+        var forgedUserName = "admin\n" + P + "[9999] FATAL:  a forged stderr line planted through csvlog";
+        var record =
+            "2026-09-24 01:54:43.008 UTC,\"" + forgedUserName + "\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        /* The parser's own contract (PgServerLogCsvParserTests), reconfirmed at the wiring seam: the forged
+           newline stays inside the record's UserName field rather than starting a second record. */
+        var entries = PgServerLogCsvParser.Parse(record, out var discardedAtParse);
+        var entry = Assert.Single(entries);
+        Assert.Equal(0, discardedAtParse);
+        Assert.Equal(forgedUserName, entry.UserName);
+
+        /* And exactly one event reaches the classifier — the forged text never opens a second event, and
+           no row carries the forged line's pid. */
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.DoesNotContain(rows, r => r.Pid == 9999);
+    }
+
+    /// <summary>
+    /// #4053 part a1b: the csvlog route's own no-file-yet marker throws <see cref="PgNoCsvlogFileException"/>,
+    /// never the stderr route's <see cref="PgNoStderrLogFileException"/>.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_ThrowsTheCsvNamedSkip_OnItsOwnMarker()
+    {
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { PgNoCsvlogFileException.Marker, null } });
+        await Assert.ThrowsAsync<PgNoCsvlogFileException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+
+        using var offReader = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker, null } });
+        await Assert.ThrowsAsync<PgLoggingCollectorOffException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(offReader, context, CancellationToken.None));
+    }
+
+    /// <summary>#4053 part a1b: a record the parser discarded during resync or for a bad shape is measured.</summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_MeasuresDiscardedRecords()
+    {
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        /* A cut fragment that never parses: no complete record anywhere in the body. */
+        using var reader = new FakeReader(new object?[][] { new object?[] { "not,a,valid,csvlog,record\n", "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgLogEventsCollector.CsvRecordsDiscardedMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+    }
+
+    /// <summary>
+    /// #4053 review H1: with the target's log_timezone not UTC, a csvlog record in another zone throws
+    /// <see cref="PgLogTimezoneUnsupportedException"/> — the same refusal the stderr route makes — rather
+    /// than the parser silently discarding it and the target reading as quiet.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_UnderANonUtcLogTimezone_ThrowsOnAForeignZoneRecord()
+    {
+        var record =
+            "2026-09-24 01:54:43.008 PST,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "America/New_York" } });
+        await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// #4053 review H1: with the target's log_timezone at UTC, a csvlog record in another zone is skipped and
+    /// counted in <see cref="PgServerLogTail.ForeignZoneLinesMeasurement"/>, the same as the stderr route's
+    /// #4046 behaviour — never <see cref="PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>, which would
+    /// give it the wrong note.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheCsvRoute_UnderAUtcLogTimezone_SkipsAndCountsAForeignZoneRecord()
+    {
+        var record =
+            "2026-09-24 01:54:43.008 PST,\"nosuchuser\",\"postgres\",83,\"::1:35192\",6ab482e3.53,1,"
+            + "\"startup\",2026-09-24 01:54:43 UTC,3/3,0,FATAL,28000,\"role \"\"x\"\" does not exist\","
+            + ",,,,,,,,\"\",\"client backend\",,0\n";
+
+        var context = TestContext();
+        context.PgLogUsesCsvlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record, "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+    }
+
+    /// <summary>
+    /// #4053 part a2: BuildQuery picks the jsonlog pair ahead of both siblings when every flag is set —
+    /// jsonlog wins over csvlog, which wins over stderr. The stderr and csvlog pairs stay byte-unchanged
+    /// (the existing pins above still pass untouched).
+    /// </summary>
+    [Fact]
+    public void WhenPgLogUsesJsonlog_TheStatementOpensWithTheJsonCte_AheadOfCsvlogAndStderr()
+    {
+        var jsonContext = TestContext();
+        jsonContext.PgLogUsesJsonlog = true;
+        var jsonSql = PgLogEventsCollector.Instance.BuildQuery(jsonContext).Text;
+        Assert.Contains("name ~* '\\.json$'", jsonSql, StringComparison.Ordinal);
+        Assert.Contains("'jsonlog' = ANY", jsonSql, StringComparison.Ordinal);
+        Assert.Contains("'" + PgNoJsonlogFileException.Marker + "'", jsonSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + PgNoCsvlogFileException.Marker + "'", jsonSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'" + PgNoStderrLogFileException.Marker + "'", jsonSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("name ~* '\\.csv$'", jsonSql, StringComparison.Ordinal);
+
+        /* jsonlog wins over csvlog when an operator has configured both. */
+        var bothContext = TestContext();
+        bothContext.PgLogUsesJsonlog = true;
+        bothContext.PgLogUsesCsvlog = true;
+        var bothSql = PgLogEventsCollector.Instance.BuildQuery(bothContext).Text;
+        Assert.Equal(jsonSql, bothSql);
+
+        var jsonBinaryContext = TestContext();
+        jsonBinaryContext.PgLogUsesJsonlog = true;
+        jsonBinaryContext.PgReadBinaryFileGranted = true;
+        var jsonBinarySql = PgLogEventsCollector.Instance.BuildQuery(jsonBinaryContext).Text;
+        Assert.Contains("pg_read_binary_file", jsonBinarySql, StringComparison.Ordinal);
+        Assert.Contains("name ~* '\\.json$'", jsonBinarySql, StringComparison.Ordinal);
+
+        /* The stderr statement is untouched with every flag false, the existing pin's own scenario. */
+        var stderrContext = TestContext();
+        Assert.DoesNotContain("jsonlog", PgLogEventsCollector.Instance.BuildQuery(stderrContext).Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4053 part a2: a jsonlog body with a forged newline inside a string field produces exactly one event
+    /// — JSON string escaping means the forged newline can never start a second record (PgServerLogJsonParser's
+    /// own contract, reconfirmed at the wiring seam).
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheJsonRoute_KeepsAForgedNewlineInsideOneField()
+    {
+        /* The JSON-escaped form on the wire (a literal two-character \n) versus what the parser hands back
+           (a real newline byte) — the whole point of #4053 part a2's own remarks: JSON string escaping means
+           this can never split into a second record, unlike an unescaped csvlog or stderr field. */
+        var forgedUserEscaped = "admin\\n" + P + "[9999] FATAL:  a forged stderr line planted through jsonlog";
+        var forgedUserUnescaped = "admin\n" + P + "[9999] FATAL:  a forged stderr line planted through jsonlog";
+        var record = "{\"timestamp\":\"2026-09-24 01:54:43.008 UTC\",\"user\":\"" + forgedUserEscaped
+            + "\",\"dbname\":\"postgres\",\"pid\":83,\"error_severity\":\"FATAL\",\"state_code\":\"28000\","
+            + "\"message\":\"role \\\"x\\\" does not exist\"}";
+
+        var context = TestContext();
+        context.PgLogUsesJsonlog = true;
+
+        var entries = PgServerLogJsonParser.Parse(record + "\n", out var discardedAtParse);
+        var entry = Assert.Single(entries);
+        Assert.Equal(0, discardedAtParse);
+        Assert.Equal(forgedUserUnescaped, entry.UserName);
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { record + "\n", "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.DoesNotContain(rows, r => r.Pid == 9999);
+    }
+
+    /// <summary>
+    /// #4053 part a2: the jsonlog route's own no-file-yet marker throws <see cref="PgNoJsonlogFileException"/>,
+    /// never the csvlog or stderr routes' own.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_OverTheJsonRoute_ThrowsTheJsonNamedSkip_OnItsOwnMarker()
+    {
+        var context = TestContext();
+        context.PgLogUsesJsonlog = true;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { PgNoJsonlogFileException.Marker, null } });
+        await Assert.ThrowsAsync<PgNoJsonlogFileException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+
+        using var offReader = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker, null } });
+        await Assert.ThrowsAsync<PgLoggingCollectorOffException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(offReader, context, CancellationToken.None));
+    }
+
+    /// <summary>#4053 part a2: a record the json parser discarded (a cut head, or a bad shape) is measured.</summary>
+    [Fact]
+    public async Task ReadAsync_OverTheJsonRoute_MeasuresDiscardedRecords()
+    {
+        var context = TestContext();
+        context.PgLogUsesJsonlog = true;
+
+        /* A cut head that never parses as JSON. */
+        using var reader = new FakeReader(new object?[][] { new object?[] { "{not valid json\n", "UTC" } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Empty(rows);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgLogEventsCollector.JsonRecordsDiscardedMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
     }
 
     [Fact]
@@ -1256,6 +1685,12 @@ public sealed class PgLogEventsPipelineTests
         using var marker = new FakeReader(new object?[][] { new object?[] { PgLoggingCollectorOffException.Marker } });
         await Assert.ThrowsAsync<PgLoggingCollectorOffException>(async () => await definition.ReadAsync(marker, context, CancellationToken.None));
 
+        /* #3997: the second marker, logging_collector on but no stderr-format file left after the tail's
+           own csvlog/jsonlog exclusion. Fails on the pre-fix shape: an unrecognised marker would fall
+           through to PgLogEventClassifier.Default.Classify, which is not what a csvlog/jsonlog gap is. */
+        using var noStderr = new FakeReader(new object?[][] { new object?[] { PgNoStderrLogFileException.Marker } });
+        await Assert.ThrowsAsync<PgNoStderrLogFileException>(async () => await definition.ReadAsync(noStderr, context, CancellationToken.None));
+
         var writer = new RecordingWriter();
         definition.WritePayload(rows[0], writer, context);
         Assert.Equal(definition.PayloadColumns.Count, writer.Values.Count);
@@ -1280,6 +1715,72 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(12345L, vacuumWriter.Values[17]);
         Assert.Equal(4567L, vacuumWriter.Values[18]);
         Assert.Equal(false, vacuumWriter.Values[^1]);
+    }
+
+    /// <summary>
+    /// #4046: with the target's log_timezone at UTC, one line stamped in another zone among the UTC lines no
+    /// longer refuses the read. The fixture's fifteen events are classified, the other zone's line is skipped and
+    /// counted on the run, and the runner's note names the setting and the issue beside the count.
+    /// </summary>
+    [Fact]
+    public async Task UnderAUtcLogTimezone_ALineInAnotherZoneIsSkippedAndCounted_AndTheRestIsRead()
+    {
+        var definition = PgLogEventsCollector.Instance;
+        var context = TestContext();
+        var body = "2026-09-18 03:07:12.345 EST [77] ERROR:  not this server's line\n" + SelfHostedLog;
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { body, "UTC" } });
+        var rows = await definition.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(15, rows.Count);
+        Assert.DoesNotContain(rows, r => r.Pid == 77);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(1, measured.Value);
+
+        var run = DarlingCollectorRunner.WithForeignZoneLinesNote(
+            new CollectorRunResult(rows.Count, 1, 1, context.Measurements));
+        Assert.Contains("(#4046)", run.Note, StringComparison.Ordinal);
+        Assert.EndsWith("; foreign_zone_lines_skipped=1", run.Note, StringComparison.Ordinal);
+
+        /* An ordinary run gets no note at all, as before. */
+        var quiet = new CollectorRunResult(15, 1, 1, CollectorContext.NoMeasurements);
+        Assert.Same(quiet, DarlingCollectorRunner.WithForeignZoneLinesNote(quiet));
+        Assert.Null(quiet.Note);
+    }
+
+    /// <summary>
+    /// #4046's other half: when the target's log_timezone is not UTC, or the row carries no setting (a marker arm's
+    /// NULL, or a route that could not read it), a line in another zone refuses the read exactly as #2993 did.
+    /// </summary>
+    [Theory]
+    [InlineData("America/New_York")]
+    [InlineData("Europe/London")]
+    [InlineData(null)]
+    public async Task UnderAnyOtherLogTimezone_ALineInAnotherZoneStillRefusesTheRead(string? setting)
+    {
+        var body = SelfHostedLog + "2026-09-18 03:07:12.345 EST [77] ERROR:  not this server's line\n";
+
+        using var reader = new FakeReader(new object?[][] { new object?[] { body, setting } });
+        var ex = await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgLogEventsCollector.Instance.ReadAsync(reader, TestContext(), CancellationToken.None));
+
+        Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    /// <summary>
+    /// The worker records every run through the #4046 note, beside the #4004 rotation note on the same channel.
+    /// Source-level, for the reason <c>PgLogHashKeyTests</c> gives for its own pin: the arm sits inside a live sweep.
+    /// </summary>
+    [Fact]
+    public void TheWorker_PutsTheForeignZoneNoteOnEveryRunItRecords()
+    {
+        var worker = RepoFile.ReadRepoFile(System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var rotation = worker.IndexOf("result = _logHashKeyRotation.ApplyTo(collectorName, result);", StringComparison.Ordinal);
+        var note = worker.IndexOf("result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);", StringComparison.Ordinal);
+
+        Assert.True(rotation > 0, "the #4004 rotation note's call moved");
+        Assert.True(note > rotation, "the #4046 note is not applied after the rotation note on the recorded run");
     }
 
     [Fact]
@@ -1354,10 +1855,18 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains("total_events = page.WindowTotal", body, StringComparison.Ordinal);
         Assert.DoesNotContain(">= limit", body, StringComparison.Ordinal);
 
-        /* #3996's review (4): raw_line_hash is an unkeyed hash of the raw entry, literals included, so a reader who
-           can rebuild the rest of the line can test guesses at a value against it offline. No row returns it. */
+        /* #3996's review (4), #4004: raw_line_hash and statement_fingerprint hash text a reader can mostly rebuild, so
+           a surface that returned either would hand out what a guess is tested against. Keyed now, and still returned
+           by nothing: not the tool, not the reader's page, not the web log tab. */
         Assert.DoesNotContain("r.RawLineHash", body, StringComparison.Ordinal);
         Assert.DoesNotContain("raw_line_hash =", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("r.StatementFingerprint", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("statement_fingerprint =", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(typeof(DarlingPgLogEventReader.PgLogEventRow).GetProperties(),
+            p => p.Name.Contains("Hash", StringComparison.Ordinal) || p.Name.Contains("Fingerprint", StringComparison.Ordinal));
+        var logTab = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "pages", "server-tabs.js");
+        Assert.DoesNotContain("statement_fingerprint", logTab, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw_line_hash", logTab, StringComparison.Ordinal);
 
         /* The instructions' census moved with the tool. */
         var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
@@ -1402,7 +1911,7 @@ public sealed class PgLogEventsPipelineTests
         await using var store = NpgsqlDataSource.Create(DeadStore);
 
         var client = new FakeRds();
-        var ingestor = new RdsLogEventIngestor(store, new RdsLogSource(_ => client));
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => client));
 
         var failure = await Assert.ThrowsAnyAsync<Exception>(() => ingestor.IngestAsync(1, "target-a", RdsHost));
         Assert.IsNotType<RdsLogUnavailableException>(failure);
@@ -1412,22 +1921,46 @@ public sealed class PgLogEventsPipelineTests
         Assert.Null(client.Downloads[1].Marker);
 
         var local = new FakeRds { FirstBody = SelfHostedLog.Replace(" UTC ", " EST ", StringComparison.Ordinal) };
-        var refusing = new RdsLogEventIngestor(store, new RdsLogSource(_ => local));
+        var refusing = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => local));
         await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(() => refusing.IngestAsync(1, "target-a", RdsHost));
         await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(() => refusing.IngestAsync(1, "target-a", RdsHost));
         Assert.Null(local.Downloads[1].Marker);
 
         /* A non-RDS host is NOT_REACHED, not zero rows (#3017), and no AWS call is made. */
         var quiet = new FakeRds();
-        var notReached = await new RdsLogEventIngestor(store, new RdsLogSource(_ => quiet)).IngestAsync(1, "target-a", "db.internal.example");
+        var notReached = await new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, new RdsLogSource(_ => quiet)).IngestAsync(1, "target-a", "db.internal.example");
         Assert.False(notReached.SourceReached);
         Assert.Empty(quiet.Downloads);
     }
 
     /* ---- helpers ------------------------------------------------------------------------------------- */
 
+    /// <summary>
+    /// #4058 item 3 (security review round 1, L1): a row whose query id or duration came back NULL from the
+    /// guarded casts is a forgery (a real auto_explain line always has an in-range id and a <c>%.3f</c>
+    /// duration). It is skipped and counted, never stored under query id 0 with a 0 ms duration.
+    /// </summary>
+    [Fact]
+    public async Task PlanCapture_SkipsAndCountsARowWithANullIdOrDuration()
+    {
+        const string plan = "{\"Plan\": {\"Node Type\": \"Result\", \"Total Cost\": 0.01}}";
+        var context = TestContext();
+        using var reader = new FakeReader(new object?[][]
+        {
+            new object?[] { null, 1.0, plan },
+            new object?[] { 43L, null, plan },
+            new object?[] { 42L, 12.345, plan },
+        });
+
+        var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Single(rows);
+        Assert.Contains(context.Measurements, m => m.Label == PgPlanCaptureCollector.ForgedCaptureMeasurement && m.Value == 2);
+    }
+
     private static CollectorContext TestContext() => new()
     {
+        LogHashKey = TestLogHashKeys.Fixed,
         ServerId = 1,
         ServerName = "target-a",
         CollectionTime = new DateTime(2026, 9, 18, 3, 10, 0, DateTimeKind.Unspecified),
@@ -1659,7 +2192,7 @@ public sealed class PgLogEventsLivePostgresTests
                — the second write is the overlapping self-hosted re-read, and the read must collapse it. */
             var stamp = DateTime.UtcNow.AddMinutes(-3).ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
             var body = LogFixture(stamp);
-            var events = PgLogEventClassifier.Default.Classify(body);
+            var events = new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(body);
             Assert.Equal(15, events.Count);
 
             await WriteAsync(postgres, events, ct);
@@ -1808,6 +2341,7 @@ public sealed class PgLogEventsLivePostgresTests
             var definition = PgLogEventsCollector.Instance;
             var context = new CollectorContext
             {
+                LogHashKey = TestLogHashKeys.Fixed,
                 ServerId = ServerId, ServerName = ServerName,
                 CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
                 Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
@@ -1848,6 +2382,95 @@ public sealed class PgLogEventsLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #4046 against a REAL target whose <c>log_timezone</c> is UTC: both production log queries return the setting
+    /// beside the text, in the same statement, and both reads classify under it instead of refusing. A line in the
+    /// tail stamped in another zone becomes a count on the run, never a refusal. Gated on
+    /// DARLING_TEST_PG_UTC_LOG_TARGET, a connection string to a PostgreSQL started with <c>logging_collector = on</c>,
+    /// <c>log_timezone = 'UTC'</c> and a <c>log_line_prefix</c> carrying <c>%u</c> and <c>%d</c>, such as
+    /// <c>'%m %u@%d [%p] '</c>, whose log the login can read, with the store from DARLING_TEST_PG. The rig that ran
+    /// this on the way in: a second 18.6 cluster beside the store.
+    /// </summary>
+    [Fact]
+    public async Task AgainstAUtcTarget_TheLogQueriesReadTheSettingWithTheTail_AndStoreWhatTheServerWrote()
+    {
+        var store = ConnectionString;
+        var target = Environment.GetEnvironmentVariable("DARLING_TEST_PG_UTC_LOG_TARGET");
+        Assert.SkipWhen(string.IsNullOrEmpty(store) || string.IsNullOrEmpty(target),
+            "Set DARLING_TEST_PG (store) and DARLING_TEST_PG_UTC_LOG_TARGET (a PostgreSQL with logging_collector = on and log_timezone = 'UTC' whose log the login can read) to run the #4046 live test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var storeConnection = new NpgsqlConnection(store);
+        await storeConnection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(storeConnection, ct);
+        await DarlingMcpTestData.ExecAsync(storeConnection, ct, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId);
+        await using var postgres = NpgsqlDataSource.Create(store!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(storeConnection, ServerId, ServerName, ct);
+
+            var context = new CollectorContext
+            {
+                LogHashKey = TestLogHashKeys.Fixed,
+                ServerId = ServerId, ServerName = ServerName,
+                CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+            };
+
+            List<PgLogEvent> events;
+            List<PgDeadlocksCollector.Row> deadlocks;
+            await using (var targetConnection = new NpgsqlConnection(target))
+            {
+                await targetConnection.OpenAsync(ct);
+
+                await using (var setting = new NpgsqlCommand("SELECT pg_catalog.current_setting('log_timezone')", targetConnection))
+                {
+                    Assert.True(PgDeadlockLogParser.IsUtcLogTimezoneSetting((string?)await setting.ExecuteScalarAsync(ct)),
+                        "DARLING_TEST_PG_UTC_LOG_TARGET must name a target whose log_timezone is UTC");
+                }
+
+                /* A genuine ERROR the server writes itself, so the read has something of its own to store. */
+                await using (var fail = new NpgsqlCommand("SELECT 1 / 0 AS utc_target_4046", targetConnection))
+                {
+                    await Assert.ThrowsAsync<PostgresException>(async () => await fail.ExecuteScalarAsync(ct));
+                }
+
+                await using (var command = new NpgsqlCommand(PgLogEventsCollector.Instance.BuildQuery(context).Text, targetConnection))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    Assert.Equal("log_timezone", reader.GetName(1));
+                    events = await PgLogEventsCollector.Instance.ReadAsync(reader, context, ct);
+                }
+
+                await using (var command = new NpgsqlCommand(PgDeadlocksCollector.Instance.BuildQuery(context).Text, targetConnection))
+                await using (var reader = await command.ExecuteReaderAsync(ct))
+                {
+                    Assert.Equal("log_timezone", reader.GetName(1));
+                    deadlocks = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, ct);
+                }
+            }
+
+            Assert.Contains(events, e => e.Severity == "ERROR" && e.Message.Contains("division by zero", StringComparison.Ordinal));
+            Assert.All(events, e => Assert.Equal(DateTimeKind.Utc, e.OccurredAtUtc.Kind));
+            Assert.All(context.Measurements, m => Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, m.Label));
+
+            await WriteAsync(postgres, events, ct);
+            var page = await DarlingPgLogEventReader.GetEventsAsync(postgres, ServerId, DateTime.UtcNow.AddDays(-1), DateTime.UtcNow.AddMinutes(5), null, 0, 10_000, ct);
+            Assert.Equal(events.Select(e => e.RawLineHash).Distinct().Count(), page.WindowTotal);
+
+            System.Console.WriteLine(
+                $"#4046 rig: events={events.Count} deadlocks={deadlocks.Count} note={CollectorMeasurementNote.Render(context.Measurements) ?? "(none)"}");
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(store!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId));
+        }
+    }
+
     private static string LogFixture(string stamp)
     {
         var fixture = typeof(PgLogEventsPipelineTests).GetField("SelfHostedLog", BindingFlags.NonPublic | BindingFlags.Static)!.GetRawConstantValue() as string;
@@ -1864,6 +2487,7 @@ public sealed class PgLogEventsLivePostgresTests
         writer.Importer = importer;
         var context = new CollectorContext
         {
+            LogHashKey = TestLogHashKeys.Fixed,
             ServerId = ServerId, ServerName = ServerName, CollectionTime = collectionTime,
             Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
         };
@@ -1877,5 +2501,106 @@ public sealed class PgLogEventsLivePostgresTests
             writer.EndPayload(definition.PayloadColumns.Count);
         }
         await importer.CompleteAsync(ct);
+    }
+}
+
+/// <summary>
+/// #4058 item 3 (security review round 1, M2 and L1): the plan-capture collector's OWN SQL, both routes, over a
+/// hand-made log body. The live plan-capture tests plant forgeries through a real server log, and there a forged
+/// line only reaches the casts under a <c>log_line_prefix</c> that echoes <c>%u</c>/<c>%d</c> unescaped, so
+/// those tests never exercise the guarded casts. Here the tail CTE is swapped for one over a literal body that
+/// carries a correctly prefixed real capture, one whose query id overflows bigint, and one whose duration is
+/// <c>1.2.3</c>. Everything after the tail CTE is the collector's shipped text. Gated on DARLING_TEST_PG only
+/// (no auto_explain or log setup), so CI's PostgreSQL job runs it.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class PgPlanCaptureGuardedCastLiveTests
+{
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private const string PlanLine = "\t{\"Plan\": {\"Node Type\": \"Result\", \"Total Cost\": 0.01}}\n";
+
+    private static readonly string ForgedBody =
+        "2026-09-23 10:00:00.123 UTC [4101] 42 LOG:  duration: 12.345 ms  plan:\n" + PlanLine
+        + "2026-09-23 10:00:01.000 UTC [4102] 99999999999999999999 LOG:  duration: 1.000 ms  plan:\n" + PlanLine
+        + "2026-09-23 10:00:02.000 UTC [4103] 43 LOG:  duration: 1.2.3 ms  plan:\n" + PlanLine;
+
+    private static readonly string NoMarkerBody = "2026-09-23 10:00:00.123 UTC [4101] 42 LOG:  statement: SELECT 1\n";
+
+    private static CollectorContext Context(bool binary) => new()
+    {
+        LogHashKey = TestLogHashKeys.Fixed,
+        ServerId = 1,
+        ServerName = "target-a",
+        CollectionTime = new DateTime(2026, 9, 18, 3, 10, 0, DateTimeKind.Unspecified),
+        Deltas = new CollectorDeltaCalculator(),
+        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+        PgReadBinaryFileGranted = binary,
+    };
+
+    /// <summary>The shipped statement with its tail CTE replaced by one over <c>@body</c>.</summary>
+    private static string OverLiteralBody(bool binary)
+    {
+        var text = PgPlanCaptureCollector.Instance.BuildQuery(Context(binary)).Text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var tail = (binary ? PgServerLogTail.TailCteBinarySql : PgServerLogTail.TailCteSql).Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.StartsWith(tail, text, StringComparison.Ordinal);
+        var literal = binary
+            ? "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\ntail AS (SELECT pg_catalog.convert_to(@body, 'UTF8') AS body)"
+            : "\nWITH newest AS (SELECT 'x'::text AS name, 0::bigint AS size),\ntail AS (SELECT @body::text AS body)";
+        return literal + text[tail.Length..];
+    }
+
+    private static async Task<List<(long? QueryId, double? DurationMs, string? Plan)>> RunAsync(NpgsqlConnection connection, bool binary, string body, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(OverLiteralBody(binary), connection);
+        command.Parameters.AddWithValue("body", body);
+        var rows = new List<(long?, double?, string?)>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var plan = reader.IsDBNull(2) ? null : reader.GetString(2);
+            /* The logging-collector marker arms read the rig's own settings; they're not what this test is about. */
+            if (plan == PgLoggingCollectorOffException.Marker || plan == PgNoStderrLogFileException.Marker)
+            {
+                continue;
+            }
+
+            rows.Add((reader.IsDBNull(0) ? null : reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetDouble(1), plan));
+        }
+
+        return rows;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AForgedOutOfRangeNumber_ComesBackNull_AndTheRealCaptureSurvives(bool binary)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the guarded-cast proof.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        /* Before #4058 item 3 the 20-digit id raised 22003 and '1.2.3' raised 22P02, and either one failed the
+           whole statement. */
+        var rows = await RunAsync(connection, binary, ForgedBody, ct);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Contains(rows, r => r.QueryId == 42 && r.DurationMs == 12.345);
+        Assert.Contains(rows, r => r.QueryId is null && r.DurationMs == 1.0);
+        Assert.Contains(rows, r => r.QueryId == 43 && r.DurationMs is null);
+    }
+
+    [Fact]
+    public async Task TheBinaryRoute_WithNoMarkerInTheTail_ReturnsNoCaptures_AndNoError()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the guarded-cast proof.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+
+        Assert.Empty(await RunAsync(connection, binary: true, NoMarkerBody, ct));
     }
 }

@@ -28,5 +28,8 @@
     <!-- #3493: the digest-shaped Slack delivery pin lives beside the digest's own fixtures, and feeds the
          REAL rendered digest to the internal payload builder rather than a lookalike string. -->
     <InternalsVisibleTo Include="Darling.Tests" />
+    <!-- #4012's review: the deadlock re-mask rewrites a finding alert's flattened drill-down with the live
+         alert's own flattening (FindingMessageFormatter.DrillDownItem), not a copy of it. -->
+    <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
   </ItemGroup>
 </Project>

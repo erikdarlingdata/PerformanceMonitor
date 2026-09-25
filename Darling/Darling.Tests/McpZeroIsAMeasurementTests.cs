@@ -94,9 +94,12 @@ public sealed class McpZeroIsAMeasurementTests
             Assert.Contains("EmptyAsync(", body, StringComparison.Ordinal);
             Assert.DoesNotContain("McpHelpers.Status(\"empty\"", body, StringComparison.Ordinal);
 
+            /* #4048 D9 round: the head's empty-answer sentence now ties to the tool's own gate (or floors, or
+               its absence) instead of naming all three witness fields on every tool; last_captured_at stays on
+               the data envelope (asserted above) and in the get_tool_guide topic, just not spelled out in every
+               head's prose. source_observed is the one fact every variant (gated, floors, ungated) still names. */
             var description = DescriptionOf(source, tool);
             Assert.Contains("source_observed", description, StringComparison.Ordinal);
-            Assert.Contains("last_captured_at", description, StringComparison.Ordinal);
         }
     }
 
@@ -188,9 +191,18 @@ public sealed class McpZeroIsAMeasurementTests
         Assert.Contains("undefined_percents = UndefinedPercentNotes(r)", body, StringComparison.Ordinal);
         Assert.Contains("severity = r.DurationRegressionPercent is null ? null : r.Severity", body, StringComparison.Ordinal);
 
+        /* #3898 D3 re-point: the head (DescriptionOf) now carries this guardrail in its own leaner words -
+           "duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0"
+           and "additional_duration_ms is the ranking key" - because the field-name-level detail below does not
+           fit the 620-char head budget alongside the tool's other guardrails (empty/unavailable/not_collected).
+           The literal field name and phrasing stay in the tail, which get_tool_guide serves in full. */
         var description = DescriptionOf(ReadRepoFile(file.Split('/')), "get_query_store_regressions");
-        Assert.Contains("undefined_percents", description, StringComparison.Ordinal);
-        Assert.Contains("null percent never sorts as 0", description, StringComparison.Ordinal);
+        Assert.Contains("null, not 0%, when their baseline is 0", description, StringComparison.Ordinal);
+        Assert.Contains("additional_duration_ms is the ranking key", description, StringComparison.Ordinal);
+
+        var tail = TailOf(ReadRepoFile(file.Split('/')), "get_query_store_regressions");
+        Assert.Contains("undefined_percents", tail, StringComparison.Ordinal);
+        Assert.Contains("null percent never sorts as 0", tail, StringComparison.Ordinal);
     }
 
     /* ───────────────────────── 3. differenced trends: the first point is unrated ───────────────────────── */
@@ -393,13 +405,16 @@ public sealed class McpZeroIsAMeasurementTests
         var lite = ToolDescription(ToolBody(ReadRepoFile(LiteMcp.Split('/').Append("McpPvsTools.cs").ToArray()), "get_pvs_stats"));
         Assert.False(string.IsNullOrEmpty(darling), "could not locate Darling's get_pvs_stats description");
         Assert.Equal(darling, lite);
-        Assert.Contains("pvs_measured says whether the DMV reported a size", darling, StringComparison.Ordinal);
+        /* #3898 wave E: the head teaches the flag inside the pct_of_database rule; the tail keeps the original
+           "pvs_measured says whether the DMV reported a size" sentence. */
+        Assert.Contains("PVS size is unmeasured (pvs_measured false)", darling, StringComparison.Ordinal);
     }
 
     /// <summary>The string literal of a tool body's <c>Description("…")</c> attribute; the PVS tools spell it
     /// on its own line after the attribute's opening, so the match is anchored on the closing <c>")]</c>.</summary>
+    /// <remarks>#3898 D3: the served head, as <see cref="DescriptionOf"/>: pvs_measured is a guardrail.</remarks>
     private static string ToolDescription(string body) =>
-        Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""\)\]", RegexOptions.Singleline).Groups[1].Value;
+        McpToolGuide.Split(Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""\)\]", RegexOptions.Singleline).Groups[1].Value).Head;
 
     [Fact]
     public void ThePvsReason_IsNullOnlyWhenTheShareIsDefined_IncludingADefinedZero()
@@ -517,14 +532,27 @@ public sealed class McpZeroIsAMeasurementTests
         return next < 0 ? source[start..] : source[start..next];
     }
 
-    /// <summary>The Description literal of one tool, whichever side of a line break it sits on (Lite's
-    /// get_pvs_stats opens its string on the next line).</summary>
+    /// <summary>The SERVED head of one tool's Description literal, whichever side of a line break it sits on
+    /// (Lite's get_pvs_stats opens its string on the next line). #3898 D3 re-pointed this deliberately from the
+    /// whole literal to the head: every fact these pins hold (the source witness, unrated_points, the regression
+    /// percent's null) is a zero-is-a-measurement guardrail, so it must reach tools/list, not only get_tool_guide.
+    /// For an unconverted tool the head is the whole literal, as before.</summary>
     private static string DescriptionOf(string source, string toolName)
     {
         var body = ToolBody(source, toolName);
         var match = Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
         Assert.True(match.Success, $"{toolName} has no Description literal");
-        return match.Groups[1].Value;
+        return McpToolGuide.Split(match.Groups[1].Value).Head;
+    }
+
+    /// <summary>The get_tool_guide TAIL of one tool's Description literal - the long-form reading guide,
+    /// for a fact #3898 D3 re-pointed off the 620-char head. Null for an unconverted tool.</summary>
+    private static string? TailOf(string source, string toolName)
+    {
+        var body = ToolBody(source, toolName);
+        var match = Regex.Match(body, @"Description\(\s*""((?:[^""\\]|\\.)*)""", RegexOptions.Singleline);
+        Assert.True(match.Success, $"{toolName} has no Description literal");
+        return McpToolGuide.Split(match.Groups[1].Value).Tail;
     }
 
     private static string Strip(string source) =>

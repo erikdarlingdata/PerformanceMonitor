@@ -34,7 +34,8 @@ namespace PerformanceMonitor.Collectors;
 /// carries colons of its own and a union reads a UTC server as non-UTC on an IPv6 <c>%r</c> — the deadlock
 /// parser's header carries the worked case. <c>%Q</c> glues the query id to the label with no separator
 /// (<c>[1549] 322048460535975151ERROR:</c>), so the label is found by a LAZY run to the first
-/// <c>LABEL:  </c>, never by requiring whitespace before it.</para>
+/// <c>LABEL:  </c>, never by requiring whitespace before it. The space family also reads fields between the zone
+/// and the pid (#4041), as <c>%m %u@%d [%p] </c> renders them, through a gap that stops at the first bracket.</para>
 ///
 /// <para><b>Only <c>stderr</c> format.</b> <c>csvlog</c> and <c>jsonlog</c> are different formats with the
 /// same content, and neither existing log reader handles them; a target whose <c>log_destination</c> is
@@ -48,7 +49,14 @@ namespace PerformanceMonitor.Collectors;
 /// deadlock and plan routes throw, classified by the runner the same way, so an operator sees ONE sentence
 /// about <c>log_timezone</c> whichever log reader met it first. Not skipped per line, because a line under
 /// a non-UTC prefix parses PERFECTLY and lands in the wrong hour with nothing disagreeing; the deadlock
-/// parser's <c>FromBlock</c> remarks argue the whole-read refusal over the partial history.</para>
+/// parser's <c>FromReport</c> remarks argue the whole-read refusal over the partial history.</para>
+///
+/// <para><b>Unless the target's own setting says the line is not the server's (#4046).</b> <c>%u</c> and <c>%d</c>
+/// let any client that reaches the port write a whole line into the log with one failed login, so the refusal
+/// above let one planted line blind a target. A caller that read <c>log_timezone</c> in the statement that read the
+/// text passes whether it renders UTC; if it does, a line in another zone is skipped and counted instead. The
+/// decision rests on the setting, never on how many lines disagree, which a flood of failed logins could
+/// decide.</para>
 ///
 /// <para><b>Window edges.</b> The self-hosted tail starts at an arbitrary byte and the RDS chunk ends at
 /// one. Lines before the first recognisable prefix are the cut head and are dropped; a final line with no
@@ -89,29 +97,58 @@ public static class PgLogEntryAssembler
        `SORGU: BEGIN ... 'ERROR:  ...'` passed the shape rule, the run crossed it, and the ERROR inside the body
        opened an event carrying the body's password. The one thing after a named label's colon that does not make
        it a label is a pid in brackets: the managed family writes `%u@%d:[%p]:`, and a database or role whose name
-       ends in one (`검색쿼리`) would otherwise lose every line. */
-    private static readonly string s_prefixRun =
-        @"(?:(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
-        + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])[^\n])*?";
+       ends in one (`검색쿼리`) would otherwise lose every line.
+
+       A THIRD alternative (#4041): the space family with fields between the zone and the pid, as
+       '%m %u@%d [%p] ' renders them (`UTC app@db [5555] ERROR:  `). Its gap is s_prefixRun's step with '[' taken
+       out of the class, so it holds to both rules at once. It cannot cross a label, by the run's own boundaries, so
+       it never leaves the line's prefix for its text, which is where a forged bracket or label has to live. And it
+       cannot consume a bracket, so the pid is the FIRST bracket after the zone's space and nothing can backtrack
+       past it to a later one (plan capture's #4008 rule). `rest` after it is the unchanged run, so from the zone to
+       the label the whole path crosses no label anywhere, and the label read is the line's first.
+
+       Tried LAST, so a line the first two read is read exactly as before: the engine takes the first alternative
+       that completes the line, and the old space family is this one with an empty gap.
+
+       Its zone holds no colon and no bracket, so this alternative reads only lines whose first token is
+       colon-free, and there that token is the zone. A first token with a colon in it belongs to the managed family.
+       Allowed a colon, this zone ran over a managed line's prefix to its first space: tried first, it read a
+       managed line whose database holds a space (`UTC:...:app@my db:[5555]:`) with the zone `UTC:...:app@my`; tried
+       last, it still ran over a translated label (`UTC:...:[4503]:ANWEISUNG:`), the gap found `[1]` inside the
+       statement, and either way the zone check refused every read of the target. A numeric zone with a colon
+       (`+05:30`) under this prefix reads through the managed family instead, up to its first colon, with the same
+       verdict; the deadlock parser's header argues that trade. */
+    private static readonly string s_prefixRunStep =
+        @"(?!:  )(?!(?<=" + string.Join('|', UnpaddedLabels.Select(l => Regex.Escape(l[..^1]))) + @"):(?!\[[0-9]+\]))"
+        + @"(?!(?<=[\p{L}-[\x00-\x7F]]|[A-Z]{3}):[^0-9\[\s:])";
+
+    private static readonly string s_prefixRun = @"(?:" + s_prefixRunStep + @"[^\n])*?";
+
+    private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"[^\[\n])*?";
 
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
-        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\])"
+        + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\]"
+        + @"|(?<zone>[^ :\[\n]+) (?<mid>" + s_prefixGapBeforePid + @")\[(?<pid>\d+)\])"
         + @"(?<rest>" + s_prefixRun + ")"
         + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /* %u@%d anywhere in the prefix's non-pid text. Both halves required: a background process renders
-       `@` alone under that prefix and means neither. */
+    /* %u@%d anywhere in the prefix's non-pid text, before the pid or after it. Both halves required: a background
+       process renders `@` alone under that prefix and means neither. */
     private static readonly Regex s_userAtDatabase = new(
         @"(?<![\w@.-])(?<user>[A-Za-z_][\w$.-]*)@(?<db>[A-Za-z_][\w$.-]*)(?![\w@])",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* %e: five characters, digits and capitals, at least one digit (every SQLSTATE class or subclass
        carries one), not glued to an identifier character. The digit requirement is what keeps a
-       five-letter upper-case host name in %r from reading as an error code. */
+       five-letter upper-case host name in %r from reading as an error code. Nor is it %r's port: %r renders
+       `host(port)`, and a five-digit port in its parentheses read as the SQLSTATE of every event under the RDS
+       default `%t:%r:%u@%d:[%p]:` (#4047 review), an ephemeral port often in classes 53-58 (resources, operator
+       intervention, system errors). A bare five-digit %l, %x or %v still reads as one; only the target's own
+       log_line_prefix could tell those from %e (#4046). */
     private static readonly Regex s_sqlState = new(
-        @"(?<![A-Za-z0-9])(?=[0-9A-Z]{0,4}\d)(?<state>[0-9A-Z]{5})(?![A-Za-z0-9])",
+        @"(?<![A-Za-z0-9])(?!(?<=\()[0-9A-Z]{5}\))(?=[0-9A-Z]{0,4}\d)(?<state>[0-9A-Z]{5})(?![A-Za-z0-9])",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly HashSet<string> s_primaryLabels = new(StringComparer.Ordinal)
@@ -125,9 +162,30 @@ public static class PgLogEntryAssembler
     /// </summary>
     /// <exception cref="PgLogTimezoneUnsupportedException">A primary line's prefix zone is not a zero-offset
     /// one. Thrown from inside the walk, abandoning every entry assembled so far (#2993).</exception>
-    public static List<PgLogEntry> Assemble(string? logBody)
+    public static List<PgLogEntry> Assemble(string? logBody) => Assemble(logBody, logTimezoneIsUtc: false, out _);
+
+    /// <summary>
+    /// Every complete entry in the slab, in log order, for a caller that read the target's own <c>log_timezone</c>
+    /// in the statement that returned <paramref name="logBody"/> (#4046).
+    ///
+    /// <para><b>When that setting renders UTC</b> (<see cref="PgDeadlockLogParser.IsUtcLogTimezoneSetting"/>), a
+    /// line whose zone is not a zero-offset one is not the server's own: a client planted it through <c>%u</c> or
+    /// <c>%d</c>, or it predates a change to the setting. It is skipped and counted in
+    /// <paramref name="foreignZoneLines"/>, primary or companion, and it ends the open entry the way an unrecognised
+    /// line does, so neither it nor the tab lines under it join a genuine entry. Nothing is refused for it: one
+    /// planted line used to refuse every read of the target for as long as it stayed in the tail.</para>
+    ///
+    /// <para><b>Otherwise</b> (false: the setting is another zone, or the route could not read it) this is exactly
+    /// <see cref="Assemble(string?)"/>, refusal included. That refusal is for a target whose log really is local
+    /// time, where a per-line skip would store a partial history nothing marks as partial (see the type
+    /// header).</para>
+    /// </summary>
+    /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
+    /// <see cref="Assemble(string?)"/>.</exception>
+    public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
     {
         var entries = new List<PgLogEntry>();
+        foreignZoneLines = 0;
 
         if (string.IsNullOrEmpty(logBody))
         {
@@ -171,6 +229,21 @@ public static class PgLogEntryAssembler
                    with the tab lines under it, and it ends the open entry: a message's lines are written
                    together, so what follows belongs to this line's message, not the entry above (a German
                    `FEHLER:` line's untranslated `DETAIL:` would otherwise join the entry before it). */
+                if (current is not null)
+                {
+                    entries.Add(current.Build());
+                    current = null;
+                }
+
+                continue;
+            }
+
+            /* #4046: the setting says this zone is not the server's, so the line is not its own. Skipped and
+               counted, and it ends the open entry like an unrecognised line above. */
+            if (logTimezoneIsUtc && !PgDeadlockLogParser.IsZeroOffsetLogZone(match.Groups["zone"].Value))
+            {
+                foreignZoneLines++;
+
                 if (current is not null)
                 {
                     entries.Add(current.Build());
@@ -246,11 +319,13 @@ public static class PgLogEntryAssembler
             _zone = match.Groups["zone"].Value;
             Pid = match.Groups["pid"].Value;
             _severity = match.Groups["label"].Value;
-            _prefixRest = (match.Groups["mid"].Value + match.Groups["rest"].Value).Trim();
+            /* The fields before the pid and after it, a space between so the two never glue into one token
+               (`%u@%d[%p]%e` would read the database as `app_db28P01`). */
+            _prefixRest = (match.Groups["mid"].Value + " " + match.Groups["rest"].Value).Trim();
 
             /* THROWN rather than skipped, and it is the one intolerant thing in the assembler — see the
-               type header and PgDeadlockLogParser.FromBlock for why a per-line skip is the silent-wrong
-               outcome here. */
+               type header and PgDeadlockLogParser.FromReport for why a per-line skip is the silent-wrong
+               outcome here. Under a UTC log_timezone the walk skips such a line before it gets here (#4046). */
             if (!PgDeadlockLogParser.IsZeroOffsetLogZone(_zone))
             {
                 throw new PgLogTimezoneUnsupportedException(_zone);

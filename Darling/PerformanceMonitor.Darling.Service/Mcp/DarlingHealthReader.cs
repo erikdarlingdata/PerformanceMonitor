@@ -438,7 +438,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window. The viewer's
            calendar makes the identical call, so the two still count the same queries for the same day. */
-        await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier, coverage.HourlyRelationFor(TimescaleSupport.QueryStatsHourlyView, fromDate)));
+        await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier, coverage, fromDate));
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         DarlingMcpReadParameters.AddTimestamp(command, fromDate.Date);

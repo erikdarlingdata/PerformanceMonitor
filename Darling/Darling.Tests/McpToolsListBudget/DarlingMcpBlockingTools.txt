@@ -1,0 +1,43 @@
+# DarlingMcpBlockingTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_blocked_process_xml 465
+param get_blocked_process_xml.as_of 167
+param get_blocked_process_xml.hours_back 29
+param get_blocked_process_xml.limit 113
+param get_blocked_process_xml.server_name 28
+
+tool get_blocking 619
+param get_blocking.as_of 167
+param get_blocking.dedup_key 191
+param get_blocking.hours_back 29
+param get_blocking.limit 133
+param get_blocking.server_name 28
+
+tool get_blocking_trend 289
+param get_blocking_trend.as_of 167
+param get_blocking_trend.hours_back 29
+param get_blocking_trend.server_name 28
+
+tool get_deadlock_detail 492
+param get_deadlock_detail.as_of 167
+param get_deadlock_detail.dedup_key 272
+param get_deadlock_detail.hours_back 29
+param get_deadlock_detail.limit 119
+param get_deadlock_detail.server_name 28
+
+tool get_deadlock_trend 168
+param get_deadlock_trend.as_of 167
+param get_deadlock_trend.hours_back 29
+param get_deadlock_trend.server_name 28
+
+tool get_deadlocks 591
+param get_deadlocks.as_of 167
+param get_deadlocks.dedup_key 191
+param get_deadlocks.hours_back 29
+param get_deadlocks.limit 133
+param get_deadlocks.server_name 28
+
+tool get_lock_wait_trend 646
+param get_lock_wait_trend.as_of 167
+param get_lock_wait_trend.bucket_minutes 55
+param get_lock_wait_trend.hours_back 29
+param get_lock_wait_trend.server_name 28

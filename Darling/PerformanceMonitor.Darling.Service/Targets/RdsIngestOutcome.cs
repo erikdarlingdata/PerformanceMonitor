@@ -38,7 +38,29 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// <paramref name="Rows"/> of 0 is a real statement about what the source held. False when the target's host
 /// is not an RDS or Aurora endpoint, so no AWS call was made and nothing at all is known about the
 /// source.</param>
-public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached)
+/// <param name="ForeignZoneLines">#4046 part 1b: lines this cycle skipped as stamped in a zone other than the
+/// target's own UTC <c>log_timezone</c>, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgServerLogTail.ForeignZoneLinesMeasurement"/>. Always 0 for a
+/// transport that does not carry a zone-stamped prefix (<c>RdsPlanIngestor</c>, <c>RdsCpuIngestor</c>) and
+/// for a cycle where the target's setting could not be read, which keeps today's refusal instead.</param>
+/// <param name="CsvRecordsDiscarded">#4053 part c1: records the csv parser discarded as a resync fragment or a
+/// bad shape, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgLogEventsCollector.CsvRecordsDiscardedMeasurement"/>. Always 0 for
+/// every transport but the csvlog-aware ingestors, and for a cycle that read the stderr file instead.</param>
+/// <param name="ForgedCaptures">#4053 part c3: captures the plan ingestor's csvlog route skipped as a query id or
+/// duration that did not match the guarded shape a real <c>auto_explain</c> capture always has, the
+/// managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgPlanCaptureCollector.ForgedCaptureMeasurement"/>. Always 0 for every
+/// transport but the csvlog-aware plan ingestor.</param>
+/// <param name="RaiseShapedSkipped">#4058 item 1: deadlock-shaped entries the deadlock ingestor's csvlog route
+/// skipped because <see cref="PerformanceMonitor.Collectors.PgDeadlockLogParser.IsRaiseShaped"/> found they were
+/// not written by PostgreSQL's own <c>DeadLockReport</c>, the managed-route twin of
+/// <see cref="PerformanceMonitor.Collectors.PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement"/>. Always 0
+/// for every transport but the csvlog-aware deadlock ingestor. LAST member, added rather than inserted, for the
+/// same source-compatibility reason <see cref="PerformanceMonitor.Collectors.PgLogEntry.Location"/> gives.</param>
+public readonly record struct RdsIngestOutcome(
+    int Rows, bool SourceReached, int ForeignZoneLines = 0, int CsvRecordsDiscarded = 0, int ForgedCaptures = 0,
+    int RaiseShapedSkipped = 0)
 {
     /// <summary>
     /// The source was never asked — this target's host is not an RDS or Aurora endpoint, so this transport
@@ -50,5 +72,8 @@ public readonly record struct RdsIngestOutcome(int Rows, bool SourceReached)
     /// The source was read and held <paramref name="rows"/> rows worth storing — including zero, which here
     /// is a genuine all-clear bounded by the read's own window rather than an absence of information.
     /// </summary>
-    public static RdsIngestOutcome Read(int rows) => new(rows, true);
+    public static RdsIngestOutcome Read(
+        int rows, int foreignZoneLines = 0, int csvRecordsDiscarded = 0, int forgedCaptures = 0,
+        int raiseShapedSkipped = 0)
+        => new(rows, true, foreignZoneLines, csvRecordsDiscarded, forgedCaptures, raiseShapedSkipped);
 }

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -521,6 +522,988 @@ function Get-CimInstance {
         Assert.Equal(installer, service, ignoreCase: true);
     }
 
+    /// <summary>
+    /// #4034: <c>Lock-DarlingInstallTree</c> ships twice, in install-darling.ps1 (a fresh install) and
+    /// upgrade-darling.ps1 (every install made before it existed, closed at its next upgrade). Neither script can
+    /// import the other, since each runs from wherever its zip was extracted, so the copies are compared byte for
+    /// byte: a fix made to one and not the other would leave half the installs open.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ShipsIdenticallyInTheInstallAndUpgradeScripts()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+
+        Assert.Equal(InstallTreeLockBlock(InstallScript), InstallTreeLockBlock(upgrade));
+        /* The account the lock is handed comes from the same lookup in both, for the same reason. */
+        Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingServiceLogonName"), ExtractFunction(upgrade, "Get-DarlingServiceLogonName"));
+    }
+
+    /// <summary>
+    /// #4052, from a PowerShell 5.1 run on a standalone Windows 11 box (the live lock test above runs the lock as
+    /// TrustedInstaller, which is trusted everywhere, so it cannot see these):
+    /// <list type="bullet">
+    /// <item>the service stays trusted on darling.json and its backups. Step 4b gives it an explicit FullControl there
+    /// (#1647); without the trust the walk's explicit-ACE branch strips that grant and the service cannot read its
+    /// own config;</item>
+    /// <item>the bring-your-own key folder is handed to the lock as a NAME, because the lock Join-Paths it onto the
+    /// root and Join-Path does not treat a rooted child as rooted;</item>
+    /// <item>the helper avoids <c>Split-Path -LiteralPath -Parent</c>, an ambiguous parameter set on PowerShell 5.1.</item>
+    /// </list>
+    /// </summary>
+    [Fact]
+    public void TheNarrowedLock_KeepsTheServiceOnItsConfig_AndHandsTheKeyFolderOverAsAName()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var lockText = ExtractFunction(InstallScript, "Lock-DarlingInstallTree");
+        var helper = ExtractFunction(InstallScript, "Get-DarlingExtraServiceWriteDirectories");
+
+        Assert.Contains("$isSecretFile = $target.Name -eq 'darling.json' -or $target.Name -like 'darling.json.bak-*'", lockText, StringComparison.Ordinal);
+        Assert.Contains("-or $isServiceWritePath -or $isSecretFile)) { $trustedHere += $serviceSid }", lockText, StringComparison.Ordinal);
+        Assert.Contains("return @('darling-keys')", helper, StringComparison.Ordinal);
+        Assert.Equal(PerformanceMonitor.Darling.Service.DarlingLogHashKeyFile.BringYourOwnDirectoryName, "darling-keys");
+        Assert.DoesNotContain("(Split-Path -LiteralPath $configPath -Parent)", helper, StringComparison.Ordinal);
+        Assert.Equal(helper, ExtractFunction(upgrade, "Get-DarlingExtraServiceWriteDirectories"));
+    }
+
+    /// <summary>
+    /// #4043: the pre-lock writable-extraction check ships twice for the same reason the lock itself does -
+    /// install-darling.ps1 checks the install root before 1b2 ever runs, upgrade-darling.ps1 checks a folder
+    /// -Source before it copies that folder's content over the (already locked) install root, and neither
+    /// script can import the other's copy. Compared byte for byte so a fix to one does not silently miss the
+    /// other.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_ShipsIdenticallyInTheInstallAndUpgradeScripts()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+
+        Assert.Equal(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"), ExtractFunction(upgrade, "Get-UntrustedWriteGrantees"));
+        Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"), ExtractFunction(upgrade, "Get-DarlingPreLockTrustedSids"));
+        Assert.Equal(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"), ExtractFunction(upgrade, "Get-LocalAdministratorsDirectMemberSids"));
+        Assert.Equal(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"), ExtractFunction(upgrade, "Resolve-DarlingServiceAccountSid"));
+        Assert.Equal(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"), ExtractFunction(upgrade, "Get-DarlingPreLockTrustedSidsForRerun"));
+    }
+
+    /// <summary>
+    /// #4043, executed as shipped: a folder made directly under the system drive root inherits a broad write
+    /// grant from it (the same shape #4034's own test relies on, and the one the pre-lock check exists to
+    /// catch before any lock has run). Proves the check FIRES on that naturally-inherited shape, falls SILENT
+    /// once the tree is hardened to only the trusted set, and also fires when the grant sits on the service
+    /// exe alone with a clean root - the "also check the exe" requirement. The admin running this script must
+    /// never be a finding on its own, since Get-DarlingPreLockTrustedSids adds them.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_CatchesAnInheritedGrant_AndIsSilentOnceHardened()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4043-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                Set-Content -LiteralPath "$root\svc.exe" -Value 'x'
+                $trusted = Get-DarlingPreLockTrustedSids
+
+                # Phase 1: freshly made directly under the drive root - nothing hardened yet, the exact shape
+                # extracting a zip to C:\<name> has the instant it lands, before install-darling.ps1 runs a
+                # single line.
+                'inheritedCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+
+                # Phase 2: hardened to only the trusted set (what 1b2's lock produces) - must fall silent.
+                $c = New-Object System.Security.AccessControl.DirectorySecurity
+                $c.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $c.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                Set-Acl -LiteralPath $root -AclObject $c
+                'lockedDownCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+
+                # Phase 3: root stays clean, but the SERVICE EXE ALONE carries a broad grant - must still fire,
+                # scoped to the exe, because an inherited root grant is not the only way a binary is writable.
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $x = New-Object System.Security.AccessControl.FileSecurity
+                $x.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
+                $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'Allow')))
+                Set-Acl -LiteralPath "$root\svc.exe" -AclObject $x
+                $exeFound = @(Get-UntrustedWriteGrantees "$root\svc.exe" $trusted)
+                'exeOnlyCount=' + $exeFound.Count
+                'exeNamesAuthUsers=' + (($exeFound -join ';') -match 'Authenticated Users')
+                'rootStillCleanCount=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+
+                # The running admin is trusted even with no explicit grant naming them - a folder they own and
+                # can write to is a normal extraction, not a finding.
+                'meIsTrusted=' + ($trusted -contains [Security.Principal.WindowsIdentity]::GetCurrent().User)
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        var inherited = int.Parse(answers.Find(a => a.StartsWith("inheritedCount=", StringComparison.Ordinal))!.Substring("inheritedCount=".Length));
+        Assert.True(inherited > 0, "a folder made directly under the system drive root must inherit at least one write grant outside SYSTEM/Administrators/TrustedInstaller/the admin - if this box's C:\\ no longer grants one, the pre-lock check has nothing to prove here: " + string.Join(" | ", answers));
+
+        Assert.Contains("lockedDownCount=0", answers);
+        Assert.Contains("exeOnlyCount=1", answers);
+        Assert.Contains("exeNamesAuthUsers=True", answers);
+        Assert.Contains("rootStillCleanCount=0", answers);
+        Assert.Contains("meIsTrusted=True", answers);
+    }
+
+    /// <summary>
+    /// #4043 round-1 review: the check must be silent on the ACEs a REAL install location actually carries,
+    /// not only on the fully-trusted synthetic ACL the test above builds by hand. The coordinator ran the
+    /// shipped (unfixed) function against real folders on this machine and found it refused
+    /// <c>C:\Program Files</c> and <c>C:\Program Files\dotnet</c> - the very location the refusal message
+    /// itself recommends - because both carry CREATOR OWNER in their default DACL, and CREATOR OWNER,
+    /// CREATOR GROUP and their two SERVER twins are inherit-only templates: they grant nothing on an object
+    /// that already exists, only rights a CHILD inherits when someone later creates one, and creating that
+    /// child needs write/create rights on THIS path - already covered by every other principal this check
+    /// tests.
+    ///
+    /// <para><b>Red-watch built into the pin.</b> A second, pre-round-1 copy of the function (no exclusion,
+    /// no owner check) is reproduced inline - not read from git history - and run over the SAME captured
+    /// DACL. It must still flag Program Files, proving this test would have failed before the fix and is
+    /// not a tautology.</para>
+    ///
+    /// <para>Case (b) is the contrasting REFUSE, built the identical way (a captured DACL applied to a fresh
+    /// temp folder) so the PASS and the REFUSE are apples to apples: <c>C:\</c>'s own DACL carries
+    /// Authenticated Users: Modify, a real broad grant that must still be caught. Case (c) pins the exclusion
+    /// to exactly the four documented SIDs, regardless of what this box's Program Files happens to carry.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_IsSilentOnRealInheritOnlyTemplates_ButStillCatchesARealBroadGrant()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+
+            # The pre-round-1 shape: no inherit-only exclusion, no owner check. Reproduced inline purely to
+            # prove this test would have failed before the fix (#4043 round-1 review).
+            function Get-UntrustedWriteGrantees-Old([string]$path, [array]$trusted) {
+                $rights = [System.Security.AccessControl.FileSystemRights]
+                $allow = [System.Security.AccessControl.AccessControlType]::Allow
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $write = [int64]($rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership) -bor 0x10000000 -bor 0x40000000
+                $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+                @($acl.GetAccessRules($true, $true, $sidType) | Where-Object {
+                    $_.AccessControlType -eq $allow -and (([int64]$_.FileSystemRights) -band $write) -ne 0 -and $trusted -notcontains $_.IdentityReference })
+            }
+
+            function New-TempAclFolder([string]$sourcePath) {
+                $sourceAcl = Get-Acl -LiteralPath $sourcePath
+                $sddl = $sourceAcl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+                $dir = Join-Path $env:TEMP ('pm4043-r1-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $sec = Get-Acl -LiteralPath $dir
+                $sec.SetSecurityDescriptorSddlForm($sddl, [System.Security.AccessControl.AccessControlSections]::Access)
+                Set-Acl -LiteralPath $dir -AclObject $sec
+                return $dir
+            }
+
+            $trusted = Get-DarlingPreLockTrustedSids
+
+            # (a) A NEW folder carrying C:\Program Files' own DACL - the shape a fresh subfolder inherits.
+            $pf = New-TempAclFolder 'C:\Program Files'
+            try {
+                'caseA_fixedCount=' + @(Get-UntrustedWriteGrantees $pf $trusted).Count
+                'caseA_oldCount=' + @(Get-UntrustedWriteGrantees-Old $pf $trusted).Count
+            }
+            finally {
+                icacls.exe $pf /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $pf -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # (b) A NEW folder carrying C:\'s own DACL - Authenticated Users: Modify, the documented hole a
+            # folder made directly under the drive root inherits. Must still be caught.
+            $cRoot = New-TempAclFolder 'C:\'
+            try {
+                'caseB_fixedCount=' + @(Get-UntrustedWriteGrantees $cRoot $trusted).Count
+            }
+            finally {
+                icacls.exe $cRoot /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $cRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            # (c) All four inherit-only templates, explicitly, regardless of what this box's Program Files
+            # happens to carry - pins the exclusion to exactly those four SIDs, not "whatever this test found".
+            $wk = [System.Security.Principal.WellKnownSidType]
+            $templates = @($wk::CreatorOwnerSid, $wk::CreatorGroupSid, $wk::CreatorOwnerServerSid, $wk::CreatorGroupServerSid)
+            $tRoot = Join-Path $env:TEMP ('pm4043-r1-tmpl-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $tRoot -Force | Out-Null
+            try {
+                $sec = New-Object System.Security.AccessControl.DirectorySecurity
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                foreach ($t in $templates) {
+                    $sid = New-Object System.Security.Principal.SecurityIdentifier($t, $null)
+                    $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'InheritOnly', 'Allow')))
+                }
+                Set-Acl -LiteralPath $tRoot -AclObject $sec
+                'caseC_count=' + @(Get-UntrustedWriteGrantees $tRoot $trusted).Count
+            }
+            finally {
+                icacls.exe $tRoot /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $tRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("caseA_fixedCount=0", answers);
+        var oldCount = int.Parse(answers.Find(a => a.StartsWith("caseA_oldCount=", StringComparison.Ordinal))!.Substring("caseA_oldCount=".Length));
+        Assert.True(oldCount > 0, "red-watch failed: the pre-round-1 shape must still flag C:\\Program Files' CREATOR OWNER ACE, or this test proves nothing about the fix: " + string.Join(" | ", answers));
+
+        var caseB = int.Parse(answers.Find(a => a.StartsWith("caseB_fixedCount=", StringComparison.Ordinal))!.Substring("caseB_fixedCount=".Length));
+        Assert.True(caseB > 0, "a folder carrying C:\\'s own DACL must still be refused for Authenticated Users: Modify - if this box's C:\\ no longer grants it, this test has nothing to prove: " + string.Join(" | ", answers));
+
+        Assert.Contains("caseC_count=0", answers);
+    }
+
+    /// <summary>
+    /// #4043 round-1 review: a re-run of install-darling.ps1 over a tree #4038 already locked - a repair, or
+    /// this script used as its own upgrade path - is not a fresh extraction. #4038's lock itself grants the
+    /// service account Modify on the root, and the UNFIXED check had no way to tell that grant apart from a
+    /// stranger's: every single re-run or repair over an already-locked install would have refused itself
+    /// over the grant #4038 itself made. <c>Get-DarlingPreLockTrustedSids</c> now takes the CURRENT service's
+    /// logon account and trusts exactly what the lock granted - nothing more.
+    ///
+    /// <para><c>NT AUTHORITY\LOCAL SERVICE</c> stands in for the service account precisely because it is NOT
+    /// one of the four SIDs the base trusted set already carries (SYSTEM, Administrators, TrustedInstaller,
+    /// the running admin) - using TrustedInstaller itself here would pass by accident and prove nothing about
+    /// the new parameter.</para>
+    ///
+    /// <para>#4052 moved the service's Modify off the root and onto <c>pg-runtime\</c> and <c>pg-runtime-prev\</c>, so
+    /// the grant this test needs to see now sits one level down. The probe walks the tree with <c>-Recurse</c>, the
+    /// way every real caller of the check does, and also pins that the root itself no longer carries a write grant
+    /// for the service at all.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_TrustsTheAccountTheLockItselfGranted_OnAnAlreadyLockedTree()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4043-r1-lock-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+                $open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\LOCAL SERVICE')
+                $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
+
+                $withoutAccount = Get-DarlingPreLockTrustedSids
+                'withoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount -Recurse).Count
+                'rootOnlyWithoutAccountCount=' + @(Get-UntrustedWriteGrantees $root $withoutAccount).Count
+
+                $withAccount = Get-DarlingPreLockTrustedSids 'NT AUTHORITY\LOCAL SERVICE'
+                'withAccountCount=' + @(Get-UntrustedWriteGrantees $root $withAccount -Recurse).Count
+            }
+            finally {
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        var without = int.Parse(answers.Find(a => a.StartsWith("withoutAccountCount=", StringComparison.Ordinal))!.Substring("withoutAccountCount=".Length));
+        Assert.Contains("withAccountCount=0", answers);
+        /* #4052: the root itself is RX for the service, so no write grant is left there to trust. */
+        Assert.Contains("rootOnlyWithoutAccountCount=0", answers);
+
+        if (answers.Contains("elevated=True"))
+        {
+            /* Elevated (CI): Administrators keeps Full Control on $root, so the lock creates BOTH pg-runtime\
+               and pg-runtime-prev\ on this fresh tree and grants the service account Modify on each - an
+               explicit grant Get-UntrustedWriteGrantees must still flag as untrusted when the caller does not
+               name the account. */
+            Assert.True(without > 0, "a freshly locked tree must still name the service account as untrusted when the caller does not say who it is - otherwise this test proves nothing about the new parameter: " + string.Join(" | ", answers));
+        }
+        else
+        {
+            /* Not elevated: a filtered admin token cannot use the Administrators grant on $root, so the lock
+               cannot create pg-runtime\ or pg-runtime-prev\ on this fresh tree at all (#4052) - it reports both
+               instead of granting anything, so there is nothing anywhere in the tree left for the walk to name
+               as untrusted. */
+            Assert.Equal(0, without);
+            var open = answers.FindAll(a => a.StartsWith("open:", StringComparison.Ordinal));
+            Assert.Contains(open, o => o.StartsWith(@"open:\pg-runtime (could not create this directory to grant the service Modify on it:", StringComparison.Ordinal));
+            Assert.Contains(open, o => o.StartsWith(@"open:\pg-runtime-prev (could not create this directory to grant the service Modify on it:", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// #4043 round-1 review: OWNER RIGHTS is deliberately not one of the four SIDs excluded above - unlike
+    /// CREATOR OWNER, it can redefine what the owner may do instead of naming a risk itself, so what matters
+    /// is WHO the owner is. An owner outside the trusted set holds WRITE_DAC and WRITE_OWNER implicitly and
+    /// can grant itself anything regardless of the current DACL - the same fact
+    /// <c>Lock-DarlingInstallTree</c>'s own post-lock walk already acts on ("owned by").
+    ///
+    /// <para>A real filesystem object cannot be given an untrusted owner without elevation this suite does
+    /// not assume - Windows only lets WRITE_OWNER retarget to yourself or a group your token marks
+    /// owner-capable, confirmed against this exact scenario while writing this test. So <c>Get-Acl</c> is
+    /// shadowed instead, the same idiom
+    /// <see cref="NetworkPathKind_WhenWmiIsUnavailable_FallsBackToPSDriveDisplayRoot"/> already uses, to hand
+    /// back a fully-trusted DACL with only the OWNER outside the trusted set.</para>
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            function Get-Acl {
+                [CmdletBinding()]
+                param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+                $sec = New-Object System.Security.AccessControl.DirectorySecurity
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($s in (Get-DarlingPreLockTrustedSids)) { $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)))
+                return $sec
+            }
+            """);
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine("""
+            $trusted = Get-DarlingPreLockTrustedSids
+            $found = @(Get-UntrustedWriteGrantees 'C:\does-not-need-to-exist-for-this-probe' $trusted)
+            'count=' + $found.Count
+            'text=' + ($found -join ';')
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("count=1", answers);
+        Assert.Contains(answers, a => a.StartsWith("text=", StringComparison.Ordinal) && a.Contains("owned by BUILTIN\\Users", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Found live on 2026-09-23, when dev's upgrade refused DARLING01's pre-#4038 install root: the refusal
+    /// listed "BUILTIN\Users on C:\PerformanceMonitorDarling" twice. A folder made under C:\ inherits
+    /// BUILTIN\Users as two ACEs (one grants append, one grants write), and two of the four callers did not
+    /// drop the repeated line. The function now returns each finding once, so every caller names a principal
+    /// once per path. Same shadowed <c>Get-Acl</c> idiom as
+    /// <see cref="ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl"/>. The two
+    /// ACEs get different inheritance flags so the ACL keeps them apart, as Windows did on the box, and the
+    /// probe counts them first so the test cannot pass on a single merged ACE.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_NamesAPrincipalOnce_WhenTwoOfItsAcesGrantWrite()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine("""
+            $script:usersSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+            function Get-Acl {
+                [CmdletBinding()]
+                param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+                $sec = New-Object System.Security.AccessControl.DirectorySecurity
+                $sec.SetAccessRuleProtection($true, $false)
+                foreach ($s in (Get-DarlingPreLockTrustedSids)) { $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($script:usersSid, 'AppendData', 'ContainerInherit', 'None', 'Allow')))
+                $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($script:usersSid, 'WriteData', 'ObjectInherit', 'None', 'Allow')))
+                $sec.SetOwner((New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)))
+                return $sec
+            }
+            """);
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine("""
+            $usersAces = @((Get-Acl).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $script:usersSid })
+            'usersAces=' + $usersAces.Count
+            $trusted = Get-DarlingPreLockTrustedSids
+            $found = @(Get-UntrustedWriteGrantees 'C:\does-not-need-to-exist-for-this-probe' $trusted)
+            'count=' + $found.Count
+            'text=' + ($found -join ';')
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("usersAces=2", answers);
+        Assert.Contains("count=1", answers);
+        Assert.Contains(answers, a => a.StartsWith("text=", StringComparison.Ordinal) && a.Contains("BUILTIN\\Users on C:\\does-not-need-to-exist-for-this-probe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// #4043 round-1 review, M2: the pre-lock check is now a RECURSIVE walk, not just the root and the
+    /// service exe - a child with an untrusted OWNER, or an EXPLICIT (non-inherited) write grant to an
+    /// untrusted principal, must be reported even when the root's own DACL is perfectly clean; a clean
+    /// recursive tree must stay silent; a junction below the root is reported, not silently skipped.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_Recurses_AndCatchesAChildTheRootDoesNotShow()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm4043-m2-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path "$root\clean", "$root\owned" -Force | Out-Null
+                Set-Content -LiteralPath "$root\clean\a.txt" -Value 'x'
+                Set-Content -LiteralPath "$root\owned\evil.dll" -Value 'x'
+                $trusted = Get-DarlingPreLockTrustedSids
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+
+                # $root itself is fully clean and protected - only a CHILD carries the problem.
+                $rootSec = New-Object System.Security.AccessControl.DirectorySecurity
+                $rootSec.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $rootSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))) }
+                Set-Acl -LiteralPath $root -AclObject $rootSec
+                Set-Acl -LiteralPath "$root\clean" -AclObject $rootSec
+                icacls.exe "$root\clean\a.txt" /reset /Q 2>&1 | Out-Null
+
+                # Explicit write grant to Authenticated Users on a child file, root untouched.
+                $fileSec = New-Object System.Security.AccessControl.FileSecurity
+                $fileSec.SetAccessRuleProtection($true, $false)
+                foreach ($s in $trusted) { $fileSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
+                $fileSec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'Allow')))
+                Set-Acl -LiteralPath "$root\owned\evil.dll" -AclObject $fileSec
+
+                # A junction below the root - never descended, but reported on sight.
+                & cmd.exe /c mklink /J "$root\link" "$root\clean" | Out-Null
+
+                'cleanTreeOnlyCount=' + @(Get-UntrustedWriteGrantees "$root\clean" $trusted -Recurse).Count
+                $found = @(Get-UntrustedWriteGrantees $root $trusted -Recurse)
+                'fullTreeCount=' + $found.Count
+                'namesAuthUsers=' + (($found -join ';') -match 'Authenticated Users')
+                'namesJunction=' + (($found -join ';') -match '\(a junction or link\)')
+                'nonRecurseStaysSilent=' + @(Get-UntrustedWriteGrantees $root $trusted).Count
+            }
+            finally {
+                if (Test-Path -LiteralPath "$root\link") { & cmd.exe /c rmdir "$root\link" | Out-Null }
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("cleanTreeOnlyCount=0", answers);
+        var full = int.Parse(answers.Find(a => a.StartsWith("fullTreeCount=", StringComparison.Ordinal))!.Substring("fullTreeCount=".Length));
+        Assert.True(full >= 2, "the recursive walk must report both the explicit grant on the child file and the junction: " + string.Join(" | ", answers));
+        Assert.Contains("namesAuthUsers=True", answers);
+        Assert.Contains("namesJunction=True", answers);
+        Assert.Contains("nonRecurseStaysSilent=0", answers);
+    }
+
+    /// <summary>
+    /// #4043 round-1 review, M2: a principal that is a DIRECT member of BUILTIN\Administrators is trusted as
+    /// an owner even though it is not the account running this script and not one of the four base SIDs -
+    /// an admin can already do anything on the box, so a tree a DIFFERENT admin extracted is not a finding.
+    /// The current user stands in for "a direct member" since <c>Get-DarlingPreLockTrustedSidsForRerun</c>'s
+    /// probe process always runs as an actual member of that group on a dev/CI box.
+    /// </summary>
+    [Fact]
+    public void ThePreLockWritableExtractionCheck_TrustsADirectAdministratorsMember_AsOwner()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $members = Get-LocalAdministratorsDirectMemberSids
+            'count=' + $members.Count
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            'meIsDirectMember=' + ($members -contains $me)
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.True(int.Parse(answers.Find(a => a.StartsWith("count=", StringComparison.Ordinal))!.Substring("count=".Length)) > 0,
+            "BUILTIN\\Administrators must enumerate at least one member on a real Windows box: " + string.Join(" | ", answers));
+    }
+
+    /// <summary>
+    /// #4043 round-1 review, L3/L4: a re-run must fail with a message NAMING the problem, not silently
+    /// mis-trust or mis-refuse. L3: the service is registered but its logon account cannot be read at all -
+    /// same message as step 1b2. L4: the logon account is readable but will not resolve to a SID (a
+    /// stand-in for an unreachable-domain gMSA) - names the account instead of showing a raw SID later.
+    /// </summary>
+    [Fact]
+    public void GetDarlingPreLockTrustedSidsForRerun_FailsWithANamedReason_RatherThanSilentlyDroppingTheAccount()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"));
+        probe.AppendLine("""
+            function Fail([string]$message) { Write-Host ('FAILCALLED:' + $message); exit 7 }
+
+            # L3: Get-DarlingServiceLogonName returns nothing.
+            function Get-DarlingServiceLogonName([string]$name) { return $null }
+            & { $null = Get-DarlingPreLockTrustedSidsForRerun 'Some Service' ([pscustomobject]@{ Name = 'Some Service' }) }
+            'l3ExitCode=' + $LASTEXITCODE
+            """);
+
+        var l3 = RunWindowsPowerShell(probe.ToString());
+        Assert.Contains(l3, a => a.StartsWith("FAILCALLED:", StringComparison.Ordinal) && a.Contains("sc.exe qc", StringComparison.Ordinal));
+
+        var probe2 = new StringBuilder();
+        probe2.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSids"));
+        probe2.AppendLine(ExtractFunction(InstallScript, "Get-LocalAdministratorsDirectMemberSids"));
+        probe2.AppendLine(ExtractFunction(InstallScript, "Resolve-DarlingServiceAccountSid"));
+        probe2.AppendLine(ExtractFunction(InstallScript, "Get-DarlingPreLockTrustedSidsForRerun"));
+        probe2.AppendLine("""
+            function Fail([string]$message) { Write-Host ('FAILCALLED:' + $message); exit 7 }
+
+            # L4: a name is returned but will never translate - stands in for a gMSA an unreachable DC cannot answer for.
+            function Get-DarlingServiceLogonName([string]$name) { return 'CONTOSO\doesnotexist-4043-round1$' }
+            & { $null = Get-DarlingPreLockTrustedSidsForRerun 'Some Service' ([pscustomobject]@{ Name = 'Some Service' }) }
+            'l4ExitCode=' + $LASTEXITCODE
+            """);
+
+        var l4 = RunWindowsPowerShell(probe2.ToString());
+        Assert.Contains(l4, a => a.StartsWith("FAILCALLED:", StringComparison.Ordinal) && a.Contains("CONTOSO\\doesnotexist-4043-round1$", StringComparison.Ordinal));
+    }
+
+    /// <summary>#4043 round-1 review, H1: the zip-staging folder's ACL is protected - SYSTEM and
+    /// Administrators only, full control, inheritance removed, Administrators as owner.</summary>
+    [Fact]
+    public void ProtectDarlingStagingFolder_LocksTheFolderToSystemAndAdministratorsOnly()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(upgrade, "Protect-DarlingStagingFolder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $path = Join-Path $env:TEMP ('pm4043-h1-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+            try {
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                # /setowner to BUILTIN\Administrators needs an ELEVATED token (the group is only marked
+                # owner-capable there) - not tested end to end on a non-elevated dev box, same reasoning
+                # ThePreLockWritableExtractionCheck_FlagsAnUntrustedOwner_EvenWithAFullyTrustedDacl documents.
+                # The inheritance-removal and the two grants happen BEFORE /setowner, so they are still
+                # checked below even when this throws on a non-elevated run.
+                try { Protect-DarlingStagingFolder $path } catch { 'protectThrew=' + $_.Exception.Message }
+                $acl = Get-Acl -LiteralPath $path
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $adminsSid = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                'protected=' + $acl.AreAccessRulesProtected
+                'ownerIsAdmins=' + ($acl.GetOwner($sidType) -eq $adminsSid)
+                $rules = @($acl.GetAccessRules($true, $false, $sidType))
+                'ruleCount=' + $rules.Count
+                'allFullControl=' + (@($rules | Where-Object { $_.FileSystemRights -ne [System.Security.AccessControl.FileSystemRights]::FullControl }).Count -eq 0)
+            }
+            finally {
+                icacls.exe $path /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("protected=True", answers);
+        Assert.Contains("ruleCount=2", answers);
+        Assert.Contains("allFullControl=True", answers);
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Contains("ownerIsAdmins=True", answers);
+        }
+    }
+
+    /// <summary>#4043: the staging lock leaves SYSTEM and Administrators ONLY even when the folder already carries
+    /// explicit entries. <c>icacls /inheritance:r</c> strips only INHERITED entries, and CI's elevated runner makes
+    /// a TEMP folder with an explicit one of its own: three rules where two were expected. The entry is planted here
+    /// directly, BUILTIN\Users with Modify, so every box reproduces it, elevated or not. An earlier version of this
+    /// test left it to the creator's default DACL to supply one, and CI's runner supplies none that way.</summary>
+    [Fact]
+    public void ProtectDarlingStagingFolder_StripsExplicitEntriesAlreadyOnTheFolder()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(upgrade, "Protect-DarlingStagingFolder"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $path = Join-Path $env:TEMP ('pm4043-np-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+            $sidType = [System.Security.Principal.SecurityIdentifier]
+            $usersSid = 'S-1-5-32-545'
+            try {
+                icacls.exe $path /grant "*${usersSid}:(OI)(CI)M" | Out-Null
+                'usersExplicitBefore=' + (@((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType) | Where-Object { $_.IdentityReference.Value -eq $usersSid }).Count -gt 0)
+                try { Protect-DarlingStagingFolder $path } catch { 'protectThrew=' + $_.Exception.Message }
+                $rules = @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType))
+                'ruleCount=' + $rules.Count
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $allowed = @(
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)).Value,
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)).Value)
+                'onlySystemAndAdmins=' + (@($rules | Where-Object { $allowed -notcontains $_.IdentityReference.Value }).Count -eq 0)
+            }
+            finally {
+                icacls.exe $path /reset /T /C /Q 2>&1 | Out-Null
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        /* The precondition, so the test cannot pass by the folder simply starting without the entry: the lock
+           must have something explicit to strip. */
+        Assert.Contains("usersExplicitBefore=True", answers);
+        Assert.Contains("ruleCount=2", answers);
+        Assert.Contains("onlySystemAndAdmins=True", answers);
+    }
+
+    /// <summary>#4043 round-2 review, M-a: a folder the recursive walk cannot list is a finding, not a silent
+    /// skip. <c>Get-ChildItem -ErrorAction SilentlyContinue</c> used to drop it, and nothing under it reached the
+    /// checks, so a tree hiding a swapped binary behind a folder that refuses listing read as clean. The running
+    /// account is denied List Folder on one child and trusted everywhere else, so the one thing the walk can say
+    /// about that child is that it could not look inside. Both scripts, since each ships its own copy.</summary>
+    [Theory]
+    [InlineData("install-darling.ps1")]
+    [InlineData("upgrade-darling.ps1")]
+    public void ThePreLockWritableExtractionCheck_ReportsAFolderItCannotList_RatherThanSkippingIt(string scriptName)
+    {
+        var script = ReadRepoFile(Path.Combine("Darling", "tools", scriptName));
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(script, "Get-UntrustedWriteGrantees"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path $env:TEMP ('pm4043-ma-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            try {
+                New-Item -ItemType Directory -Path "$root\sealed" -Force | Out-Null
+                Set-Content -LiteralPath "$root\sealed\payload.dll" -Value 'x'
+                icacls.exe "$root\sealed" /deny "*$($me.Value):(RD)" | Out-Null
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $trusted = @(
+                    $me,
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)),
+                    (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)))
+                $found = @(Get-UntrustedWriteGrantees $root $trusted -Recurse)
+                foreach ($f in $found) { 'finding=' + $f }
+                'namesTheSealedFolder=' + (@($found | Where-Object { $_ -like "*\sealed (its contents could not be listed:*" }).Count -eq 1)
+            }
+            finally {
+                if (Test-Path -LiteralPath "$root\sealed") { icacls.exe "$root\sealed" /remove:d "*$($me.Value)" 2>&1 | Out-Null }
+                if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.True(answers.Contains("namesTheSealedFolder=True"),
+            "the walk must name the folder it could not list, not skip it: " + string.Join(" | ", answers));
+    }
+
+    /// <summary>#4043 round-2 review: without -Sha256, SHA256SUMS.txt is the whole proof, so the upgrade reads it
+    /// only after its folder passes the recursive check and the check's refusal, and reads it once. A read moved
+    /// above the check, or a second read by any route, trusts a sidecar that anyone able to write the folder could
+    /// have edited.</summary>
+    [Fact]
+    public void TheSha256SumsSidecarIsReadOnlyAfterItsFolderPassesTheRecursiveCheck()
+    {
+        var upgrade = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
+        const string read = "Get-Content -LiteralPath $sums";
+
+        var check = upgrade.IndexOf("$sumsFolderWritable = @(Get-UntrustedWriteGrantees $sourceRoot $preLockTrusted -Recurse)", StringComparison.Ordinal);
+        Assert.True(check >= 0, "upgrade-darling.ps1 no longer checks the folder SHA256SUMS.txt sits in (#4043 round-1 review, H1)");
+        var refuse = upgrade.IndexOf("if ($sumsFolderWritable.Count -gt 0) {", check, StringComparison.Ordinal);
+        Assert.True(refuse > check, "the SHA256SUMS.txt folder check no longer refuses on a finding");
+        var readAt = upgrade.IndexOf(read, StringComparison.Ordinal);
+        Assert.True(readAt > refuse, "SHA256SUMS.txt must be read only AFTER its folder passes the check");
+        var fail = upgrade.IndexOf("Fail @\"", refuse, StringComparison.Ordinal);
+        Assert.True(fail > refuse && fail < readAt, "the SHA256SUMS.txt folder check must stop the run before the file is read");
+
+        /* Every use of $sums is the path, the existence test or the one read below the check. */
+        foreach (Match use in Regex.Matches(upgrade, @"\$sums\b"))
+        {
+            var start = upgrade.LastIndexOf('\n', use.Index) + 1;
+            var end = upgrade.IndexOf('\n', use.Index);
+            var line = (end < 0 ? upgrade.Substring(start) : upgrade.Substring(start, end - start)).Trim();
+            Assert.True(
+                line == "$sums = Join-Path $sourceRoot 'SHA256SUMS.txt'"
+                || line == "if (Test-Path -LiteralPath $sums) {"
+                || (use.Index >= readAt && use.Index < readAt + read.Length),
+                $"an unexpected use of $sums: '{line}'. SHA256SUMS.txt is read once, after its folder check");
+        }
+    }
+
+    /// <summary>#4043: each script checks the tree for write grants BEFORE it changes anything. A check after the
+    /// lock would pass a tree the lock had just rewritten, which says nothing about who could write to it before;
+    /// a check after the service stop, the backup or the extract refuses a tree this run has already changed.
+    /// Same shape as <see cref="LocationGuard_RunsBeforeAnythingIsInstalled"/>.</summary>
+    [Fact]
+    public void TheWritableTreeCheck_RunsBeforeEitherScriptChangesAnything()
+    {
+        AssertRunsFirst(
+            InstallScript,
+            "install-darling.ps1",
+            "$writable = @(Get-UntrustedWriteGrantees $root $preLockTrusted -Recurse)",
+            new[]
+            {
+                ("Invoke-InstallTreeLock $lockAccount -StopOnOpen", "the step 1b2 install-tree lock"),
+                ("Copy-Item $samplePath $configPath", "copying darling.sample.json to darling.json"),
+                ("& $serviceExe --test-connection", "the --test-connection pre-flight"),
+                ("New-EventLog -LogName Application", "registering the Event Log source"),
+                ("& sc.exe create $serviceName", "creating the service"),
+                ("Set-Acl -Path $secretFile", "hardening the config's ACL"),
+                ("Start-Service -Name $serviceName", "starting the service"),
+            });
+
+        AssertRunsFirst(
+            ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1")),
+            "upgrade-darling.ps1",
+            "$writable = @(Get-UntrustedWriteGrantees $InstallRoot $preLockTrusted -Recurse)",
+            new[]
+            {
+                ("$zipStagingFolder = New-DarlingProtectedStagingFolder", "creating the zip staging folder"),
+                ("Copy-Item -LiteralPath $Source -Destination $stagedZip", "staging the zip"),
+                ("Stop-Service -Name $serviceName -Force", "stopping the service"),
+                ("Lock-DarlingInstallTree $InstallRoot $logonAccount", "locking the install tree"),
+                ("New-Item -ItemType Directory -Path $backupPath", "creating the rollback backup"),
+                ("Expand-Archive -LiteralPath $Source -DestinationPath $InstallRoot", "extracting a zip over the tree"),
+                ("Copy-Item -Path (Join-Path $Source '*') -Destination $InstallRoot", "copying a folder over the tree"),
+                ("Start-Service -Name $serviceName", "starting the service"),
+            });
+
+        static void AssertRunsFirst(string script, string scriptName, string check, (string Marker, string What)[] steps)
+        {
+            var at = script.IndexOf(check, StringComparison.Ordinal);
+            Assert.True(at >= 0, $"{scriptName} no longer checks the tree for write grants before it changes anything (#4043)");
+            foreach (var (marker, what) in steps)
+            {
+                var step = script.IndexOf(marker, StringComparison.Ordinal);
+                Assert.True(step >= 0, $"{scriptName} no longer contains {what} ('{marker}')");
+                Assert.True(at < step, $"{scriptName} must check the tree BEFORE {what} (#4043)");
+            }
+        }
+    }
+
+    /// <summary>
+    /// #4034, executed as shipped against a real tree. A folder created directly under the system drive root
+    /// inherits "Authenticated Users: Modify" from it (the documented install location's hole). After the lock the
+    /// root must be protected and grant ordinary users read and execute only, the service account Modify (it
+    /// extracts pg-runtime into the tree), and every child that inherits must follow. A file with its own
+    /// protected DACL (darling.json, as step 4b leaves it) keeps it. A child that grants a broad principal write
+    /// EXPLICITLY, behind its own protection, is not something a folder lock can override, so it must come back
+    /// in the result for the warning to name, not be silently passed over.
+    /// </summary>
+    [Fact]
+    public void TheInstallTreeLock_ClosesTheInheritedGrant_KeepsProtectedFiles_AndReportsWhatItCannotClose()
+    {
+        var probe = new StringBuilder();
+        probe.AppendLine(ExtractFunction(InstallScript, "Lock-DarlingInstallTree"));
+        probe.AppendLine("""
+            $ErrorActionPreference = 'Stop'
+            $root = Join-Path ([IO.Path]::GetPathRoot([Environment]::SystemDirectory)) ('pm4034-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            try {
+                New-Item -ItemType Directory -Path "$root\pg-runtime\pgsql\bin", "$root\planted" -Force | Out-Null
+                Set-Content -LiteralPath "$root\pg-runtime\pgsql\bin\postgres.exe" -Value 'x'
+                Set-Content -LiteralPath "$root\darling.json" -Value '{}'
+                Set-Content -LiteralPath "$root\planted\evil.dll" -Value 'x'
+                Set-Content -LiteralPath "$root\svc.exe" -Value 'x'
+                $wk = [System.Security.Principal.WellKnownSidType]
+                $sidType = [System.Security.Principal.SecurityIdentifier]
+                $auth = New-Object System.Security.Principal.SecurityIdentifier($wk::AuthenticatedUserSid, $null)
+                $users = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinUsersSid, $null)
+                $interactive = New-Object System.Security.Principal.SecurityIdentifier($wk::InteractiveSid, $null)
+                $system = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
+                $admins = New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null)
+                $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+                $service = (New-Object System.Security.Principal.NTAccount('NT SERVICE\TrustedInstaller')).Translate($sidType)
+                'elevated=' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                'me=' + $me.Value
+                # darling.json as step 4b leaves it: protected, the service and the machine's own accounts in
+                # full, INTERACTIVE reading.
+                $j = New-Object System.Security.AccessControl.FileSecurity
+                $j.SetAccessRuleProtection($true, $false)
+                foreach ($s in @($system, $admins, $service)) { $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($s, 'FullControl', 'Allow'))) }
+                $j.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactive, 'Read', 'Allow')))
+                Set-Acl -LiteralPath "$root\darling.json" -AclObject $j
+                # #4038 round 2's High: a child an ordinary user owns and grants to itself behind its own
+                # protection, as one who re-created it while an older install was open would leave it.
+                $p = New-Object System.Security.AccessControl.DirectorySecurity
+                $p.SetAccessRuleProtection($true, $false)
+                $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+                $p.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($auth, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+                Set-Acl -LiteralPath "$root\planted" -AclObject $p
+                $x = New-Object System.Security.AccessControl.FileSecurity
+                $x.SetAccessRuleProtection($true, $false)
+                $x.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')))
+                Set-Acl -LiteralPath "$root\svc.exe" -AclObject $x
+                # A junction inside the tree (to the tree's own pg-runtime, so cleanup never leaves it).
+                & cmd.exe /c mklink /J "$root\planted-junction" "$root\pg-runtime" | Out-Null
+
+                function Rules($path) { (Get-Acl -LiteralPath $path).GetAccessRules($true, $true, $sidType) }
+                $trustedHere = @($system, $admins, $service, (New-Object System.Security.Principal.SecurityIdentifier($wk::CreatorOwnerSid, $null)))
+                function Untrusted($path) { @((Get-Acl -LiteralPath $path).GetAccessRules($true, $false, $sidType) | Where-Object { $trustedHere -notcontains $_.IdentityReference }).Count }
+
+                # Phase 1, as install step 1b2 runs it on a fresh install: no service account yet, so the tree is
+                # locked and nothing is granted to a service.
+                $null = Lock-DarlingInstallTree $root ''
+                'phase1Protected=' + (Get-Acl -LiteralPath $root).AreAccessRulesProtected
+                'phase1Service=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $service }).Count
+
+                # #4038's leftover shape (round 3, #4052): an install locked BEFORE this fix left an explicit
+                # (OI)(CI)M ACE for the service on $root, and plain icacls /grant only ADDS to an existing
+                # explicit ACE for that SID rather than replacing it - so re-running the OLD lock would never
+                # have cleared it. Planted directly (not through the old code, which no longer exists) so the
+                # phase-2 assertions below prove /grant:r removes it rather than merely never having added it.
+                $null = & icacls.exe $root /grant "*$($service.Value):(OI)(CI)M" 2>&1
+
+                # Phase 2, as step 4b2 and the upgrade run it: the service's grant, and the walk's report.
+                $open = @(Lock-DarlingInstallTree $root 'NT SERVICE\TrustedInstaller')
+                $open | ForEach-Object { 'open:' + $_.Substring($root.Length) }
+
+                $rootAcl = Get-Acl -LiteralPath $root
+                'protected=' + $rootAcl.AreAccessRulesProtected
+                'authenticatedUsers=' + @(Rules $root | Where-Object { $_.IdentityReference -eq $auth }).Count
+                'usersRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $users } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'serviceRights=' + ((Rules $root | Where-Object { $_.IdentityReference -eq $service } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'postgresServiceInherited=' + @(Rules "$root\pg-runtime\pgsql\bin\postgres.exe" | Where-Object { $_.IdentityReference -eq $service -and $_.IsInherited }).Count
+                # #4052: the service's own real access is Modify on pg-runtime\ and pg-runtime-prev\ (an
+                # explicit ACE there, not inherited from root, since root only grants RX), and NOTHING on the
+                # svc.exe / planted paths above - those are a stranger's grant even though the SID is the same.
+                'pgRuntimeServiceRights=' + ((Rules "$root\pg-runtime" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                # Not elevated, pg-runtime-prev\ never gets made (#4052: a filtered admin token cannot use the
+                # Administrators grant left on $root, so the best-effort New-Item fails and the lock reports it
+                # in $open instead) - so there is no ACL to read here, only the 'open:' line above to check.
+                if (Test-Path -LiteralPath "$root\pg-runtime-prev") {
+                    'pgRuntimePrevServiceRights=' + ((Rules "$root\pg-runtime-prev" | Where-Object { $_.IdentityReference -eq $service -and -not $_.IsInherited } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                }
+                'jsonProtected=' + (Get-Acl -LiteralPath "$root\darling.json").AreAccessRulesProtected
+                'jsonInteractive=' + ((Rules "$root\darling.json" | Where-Object { $_.IdentityReference -eq $interactive } | ForEach-Object { $_.FileSystemRights }) -join ',')
+                'jsonOwnerIsService=' + ((Get-Acl -LiteralPath "$root\darling.json").GetOwner($sidType) -eq $service)
+                'plantedUntrusted=' + (Untrusted "$root\planted")
+                'plantedInherits=' + (-not (Get-Acl -LiteralPath "$root\planted").AreAccessRulesProtected)
+                'svcUntrusted=' + (Untrusted "$root\svc.exe")
+                'svcInherits=' + (-not (Get-Acl -LiteralPath "$root\svc.exe").AreAccessRulesProtected)
+                'svcOwnerIsAdmins=' + ((Get-Acl -LiteralPath "$root\svc.exe").GetOwner($sidType) -eq $admins)
+
+                # The account spellings Win32_Service reports that do not translate as written. Last, since each
+                # call grants the account it is handed.
+                'localSystem=' + $(try { $null = Lock-DarlingInstallTree $root 'LocalSystem'; 'ok' } catch { 'threw: ' + $_.Exception.Message })
+                $local = $env:USERDOMAIN -eq $env:COMPUTERNAME
+                'dotAccount=' + $(if (-not $local) { 'skipped' } else { try { $null = Lock-DarlingInstallTree $root ('.\' + $env:USERNAME); 'ok' } catch { 'threw: ' + $_.Exception.Message } })
+
+                # A root that is itself a junction is refused, not locked through.
+                & cmd.exe /c mklink /J "$root-link" "$root" | Out-Null
+                'junctionRoot=' + (@(Lock-DarlingInstallTree "$root-link" 'NT SERVICE\TrustedInstaller') -join ';').Contains('the install folder itself is a junction or link')
+            }
+            finally {
+                # The test user owns every object here and so keeps WRITE_DAC: reset to inherited, then delete. The
+                # junction goes first with rmdir, which removes the link and never what it points at.
+                if (Test-Path -LiteralPath "$root-link") { & cmd.exe /c rmdir "$root-link" | Out-Null }
+                if (Test-Path -LiteralPath $root) {
+                    & icacls.exe $root /reset /T /C /Q 2>&1 | Out-Null
+                    if (Test-Path -LiteralPath "$root\planted-junction") { & cmd.exe /c rmdir "$root\planted-junction" | Out-Null }
+                    Remove-Item -LiteralPath $root -Recurse -Force
+                }
+            }
+            """);
+
+        var answers = RunWindowsPowerShell(probe.ToString());
+
+        Assert.Contains("phase1Protected=True", answers);
+        Assert.Contains("phase1Service=0", answers);
+
+        /* The High: the user-owned, self-granted children are closed where they stand (reset to the tree's ACEs,
+           their own grant gone), not merely reported, while darling.json keeps its protected DACL. */
+        Assert.Contains("plantedUntrusted=0", answers);
+        Assert.Contains("plantedInherits=True", answers);
+        Assert.Contains("svcUntrusted=0", answers);
+        Assert.Contains("svcInherits=True", answers);
+
+        /* Ownership is the half that needs elevation: icacls /setowner to Administrators. Elevated (CI), nothing
+           is left but the junction, which the walk does not descend; darling.json belongs to the service and the
+           planted binary to Administrators. Not elevated (a developer's shell), the lock cannot take ownership,
+           and the walk says so object by object: every remaining entry is one this user still owns, never a
+           writer. (icacls exits 0 under /C even when /setowner is denied, so the walk's owner check is what
+           catches it, not the exit code.) */
+        var open = answers.FindAll(a => a.StartsWith("open:", StringComparison.Ordinal));
+        Assert.Contains(@"open:\planted-junction (a junction or link)", open);
+        if (answers.Contains("elevated=True"))
+        {
+            Assert.Single(open);
+            Assert.Contains("jsonOwnerIsService=True", answers);
+            Assert.Contains("svcOwnerIsAdmins=True", answers);
+        }
+        else
+        {
+            var me = answers.Find(a => a.StartsWith("me=", StringComparison.Ordinal))!.Substring(3);
+            /* #4052, not elevated: a filtered admin token cannot use the Administrators grant left on $root, so
+               the best-effort New-Item for pg-runtime-prev\ (already made by this test's own setup, so pg-runtime\
+               never hits this) fails, and the lock reports it here rather than granting anything. That report is
+               neither a junction, a "could not make owner" line, nor an "(owned by...)" line, so it is checked on
+               its own, separately from the ownership invariant below. */
+            Assert.Contains(open, o => o.StartsWith(@"open:\pg-runtime-prev (could not create this directory to grant the service Modify on it:", StringComparison.Ordinal));
+            var owned = open.FindAll(o => !o.Contains("junction or link", StringComparison.Ordinal) && !o.Contains("could not make", StringComparison.Ordinal) && !o.Contains("could not create this directory", StringComparison.Ordinal));
+            Assert.Contains(owned, o => o.Equals($"open: (owned by {me})", StringComparison.Ordinal));
+            Assert.All(owned, o => Assert.EndsWith($"(owned by {me})", o, StringComparison.Ordinal));
+        }
+
+        Assert.Contains("junctionRoot=True", answers);
+        Assert.Contains("localSystem=ok", answers);
+        Assert.True(answers.Contains("dotAccount=ok") || answers.Contains("dotAccount=skipped"),
+            "a .\\ account must be normalized to this computer, not thrown on: " + string.Join(" | ", answers));
+        Assert.Contains("protected=True", answers);
+        Assert.Contains("authenticatedUsers=0", answers);
+        Assert.Contains("usersRights=ReadAndExecute, Synchronize", answers);
+        /* #4052: the service's grant on $root is /grant:r'd to Read & Execute only - not Modify - so a
+           leftover Modify ACE from an earlier #4038-shaped install (an explicit (OI)(CI)M ADD, which plain
+           /grant would only ADD to and never remove) does not survive an upgrade through this lock. */
+        Assert.Contains("serviceRights=ReadAndExecute, Synchronize", answers);
+        Assert.Contains("postgresServiceInherited=1", answers);
+        Assert.Contains("pgRuntimeServiceRights=Modify, Synchronize", answers);
+        if (answers.Contains("elevated=True"))
+        {
+            /* Elevated (CI): Administrators keeps Full Control on $root as an explicit ACE, so the lock can
+               create pg-runtime-prev\ too and grants the service the same explicit Modify there as pg-runtime\. */
+            Assert.Contains("pgRuntimePrevServiceRights=Modify, Synchronize", answers);
+        }
+        else
+        {
+            /* Not elevated: pg-runtime-prev\ was never created (asserted above via the 'open:' report), so
+               there is no ACL to read and this probe never emits the line at all. */
+            Assert.DoesNotContain(answers, a => a.StartsWith("pgRuntimePrevServiceRights=", StringComparison.Ordinal));
+        }
+        Assert.Contains("jsonProtected=True", answers);
+        Assert.Contains("jsonInteractive=Read, Synchronize", answers);
+    }
+
+    /// <summary>The #4034 block, its explaining comment included, exactly as a script ships it.</summary>
+    private static string InstallTreeLockBlock(string script)
+    {
+        var start = script.IndexOf("# Lock the install tree against ordinary users (#4034).", StringComparison.Ordinal);
+        Assert.True(start >= 0, "a Darling script no longer carries the #4034 install-tree lock");
+        var function = script.IndexOf("function Lock-DarlingInstallTree", start, StringComparison.Ordinal);
+        ExtractBracedBlockAt(script, script.IndexOf('{', function), out var end);
+        return script.Substring(start, end - start + 1);
+    }
+
     /// <summary>Returns the single line of <paramref name="script"/> containing <paramref name="marker"/>,
     /// verbatim — so a composition can be executed as shipped instead of retyped into a probe.</summary>
     private static string ExtractLine(string script, string marker)
@@ -543,13 +1526,20 @@ function Get-CimInstance {
         File.WriteAllText(path, script);
         try
         {
-            using var process = Process.Start(new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
+            var startInfo = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -File \"{path}\"")
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            });
+            };
+            /* A test host started from PowerShell 7 (CI's step shell) hands down a PSModulePath that points
+               Windows PowerShell 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it ships:
+               Get-Acl and Set-Acl, in Microsoft.PowerShell.Security, fail with "the module could not be loaded"
+               (#4038's first CI run). Without the variable, 5.1 builds its own default, as an operator's console
+               does. */
+            startInfo.Environment.Remove("PSModulePath");
+            using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 
             var stdout = process!.StandardOutput.ReadToEnd();

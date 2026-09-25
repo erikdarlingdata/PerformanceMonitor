@@ -63,14 +63,95 @@ public sealed class PgLogEventsCollector : PostgresCollectorDefinitionBase<PgLog
     }
 
     /* The tailer, shared byte-for-byte with PgPlanCaptureCollector and PgDeadlocksCollector — see
-       PgServerLogTail for the full argument. This query's own part is one column: the body, whole. The
-       marker row rides the same UNION ALL arm as its siblings, spelled in this query's one column. */
+       PgServerLogTail for the full argument. This query's own part is one column: the body, whole. Both
+       marker rows ride their own UNION ALL arm, spelled in this query's one column (#3997: the second arm
+       is the csvlog/jsonlog-only gap, mutually exclusive with the first by construction). The second column is
+       the target's log_timezone, read with the body (#4046): see ReadAsync. */
     private const string QueryText = PgServerLogTail.TailCteSql + @"
-SELECT tail.body AS log_body
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
 UNION ALL
-SELECT '" + PgLoggingCollectorOffException.Marker + @"'
-WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /* The binary-route twin (#4046 part 1c), sent instead of QueryText once PgReadBinaryFileCapability
+       finds the grant. tail.body is bytea here, so the marker arms are cast through convert_to rather than
+       left as a bare text literal — a UNION ALL between bytea and an "unknown"-typed string literal would
+       ask PostgreSQL to parse the marker text AS bytea input, which it is not. convert_to produces the
+       marker's own UTF-8 bytes instead, and ReadAsync decodes column 0 the same way whichever arm produced
+       it, so the marker comparison downstream never has to know which route ran. */
+    private const string BinaryQueryText = PgServerLogTail.TailCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoStderrLogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /* The csvlog pair (#4053 part a1b), sent instead of the two above once context.PgLogUsesCsvlog says the
+       target's log_destination includes csvlog. Same shape as QueryText/BinaryQueryText, opened on
+       PgServerLogTail.TailCsvCteSql/TailCsvCteBinarySql instead: the marker arms carry
+       PgLoggingCollectorOffException.Marker for the shared "collector is off" state, and
+       PgNoCsvlogFileException.Marker — not PgNoStderrLogFileException.Marker — for "on, but no .csv file
+       yet", so the fault message this route throws names csvlog, never stderr. */
+    private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoCsvlogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoCsvlogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    /* The jsonlog pair (#4053 part a2), sent ahead of both the csvlog and stderr pairs once
+       context.PgLogUsesJsonlog says the target's log_destination includes jsonlog — jsonlog wins over
+       csvlog when an operator has configured both (PgLogFormatCapability's own remarks say why). Same
+       shape as QueryText/BinaryQueryText, opened on PgServerLogTail.TailJsonCteSql/TailJsonCteBinarySql
+       instead: the marker arms carry PgLoggingCollectorOffException.Marker for the shared "collector is
+       off" state, and PgNoJsonlogFileException.Marker — not PgNoStderrLogFileException.Marker or
+       PgNoCsvlogFileException.Marker — for "on, but no .json file yet", so the fault message this route
+       throws names jsonlog, never stderr or csvlog. */
+    private const string JsonQueryText = PgServerLogTail.TailJsonCteSql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT '" + PgNoJsonlogFileException.Marker + @"', NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
+
+    private const string JsonBinaryQueryText = PgServerLogTail.TailJsonCteBinarySql + @"
+SELECT tail.body AS log_body,
+       " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
+FROM tail
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgLoggingCollectorOffException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
+UNION ALL
+SELECT pg_catalog.convert_to('" + PgNoJsonlogFileException.Marker + @"', 'UTF8'), NULL
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override string Name => "pg_log_events";
 
@@ -86,7 +167,24 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
     /// <summary>Server-wide: one log holds every database's events.</summary>
     public override bool RunsPerDatabase(CollectorTargetInfo target) => false;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>
+    /// The tail query, or a refusal when the host has no log-hash key (#4004): refused HERE, before the query runs, so a
+    /// service whose key file could not be used never pulls 4 MB of log it could only hash without a key.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The context carries no <see cref="CollectorContext.LogHashKey"/>;
+    /// the message is <see cref="PgLogHashKey.UnavailableMessage"/>, which the run records.</exception>
+    public override CollectorQuery BuildQuery(CollectorContext context)
+    {
+        _ = RequireKey(context);
+        return new(context.PgLogUsesJsonlog
+            ? (context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText)
+            : context.PgLogUsesCsvlog
+                ? (context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+                : (context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText));
+    }
+
+    private static PgLogHashKey RequireKey(CollectorContext context) =>
+        context.LogHashKey ?? throw new InvalidOperationException(PgLogHashKey.UnavailableMessage);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -109,10 +207,11 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
         /* As written, with an SQL frame's statement normalized. The CONTEXT companion — for a lock wait, the
            tuple and relation. */
         new CollectorColumn("context", CollectorColumnType.Varchar),
-        /* Hash of the REDACTED statement; the statement itself is never stored. */
+        /* Keyed hash of the REDACTED statement (#4004); the statement itself is never stored, and no read surface
+           returns the hash. */
         new CollectorColumn("statement_fingerprint", CollectorColumnType.Varchar),
-        /* Identity across sightings — this route re-reads the tail every cycle, so the reads dedupe on it
-           as the deadlock reads do on deadlock_hash. */
+        /* Identity across sightings, keyed (#4004) — this route re-reads the tail every cycle, so the reads dedupe on
+           it as the deadlock reads do on deadlock_hash. */
         new CollectorColumn("raw_line_hash", CollectorColumnType.Varchar),
         /* V130 (#3602, #3603): the family-specific numbers, appended AFTER the identity column so the V129
            column order is undisturbed and the ALTER an upgraded store ran lands them in the same positions
@@ -141,10 +240,18 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
     public override async ValueTask<List<PgLogEvent>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<PgLogEvent>();
+        var classifier = new PgLogEventClassifier(RequireKey(context));
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var body = reader.IsDBNull(0) ? null : reader.GetString(0);
+            /* #4046 part 1c: on the binary route column 0 is bytea (real tail data and the convert_to'd
+               marker rows alike), decoded leniently so a byte a failed login planted becomes U+FFFD instead
+               of the 22021 the text route would have thrown before this row ever reached C#. */
+            var body = reader.IsDBNull(0)
+                ? null
+                : context.PgReadBinaryFileGranted
+                    ? PgBinaryTailText.DecodeWhole(reader.GetFieldValue<byte[]>(0), context.PgLogEncoding ?? System.Text.Encoding.UTF8)
+                    : reader.GetString(0);
 
             /* The marker row (#3410). It cannot collide with a real body: a log tail that is exactly the
                marker text and nothing else is not a log. Thrown so the runner records the named skip. */
@@ -153,16 +260,151 @@ WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql;
                 throw new PgLoggingCollectorOffException();
             }
 
+            var logTimezoneIsUtc = PgServerLogTail.LogTimezoneIsUtc(reader, 1);
+
+            if (context.PgLogUsesJsonlog)
+            {
+                /* #4053 part a2: the jsonlog route's own "no file yet" marker — distinct from the csvlog
+                   and stderr routes' own, so the fault message names jsonlog, not csvlog or stderr. */
+                if (string.Equals(body, PgNoJsonlogFileException.Marker, StringComparison.Ordinal))
+                {
+                    throw new PgNoJsonlogFileException();
+                }
+
+                var jsonEntries = PgServerLogJsonParser.Parse(body ?? string.Empty, out var jsonRecordsDiscarded);
+
+                /* The same foreign-zone rule the csvlog and stderr paths apply: under a UTC log_timezone a
+                   record in another zone is not the server's own and is skipped and counted rather than
+                   refusing the whole read; otherwise a foreign zone refuses the read whole (#2993). */
+                var jsonKept = FilterForeignZoneEntries(jsonEntries, logTimezoneIsUtc, out var jsonForeignZoneLines);
+                PgServerLogTail.MeasureForeignZoneLines(context, jsonForeignZoneLines);
+
+                if (jsonRecordsDiscarded > 0)
+                {
+                    context.Measure(JsonRecordsDiscardedMeasurement, jsonRecordsDiscarded);
+                }
+
+                rows.AddRange(classifier.Classify(jsonKept));
+                continue;
+            }
+
+            if (context.PgLogUsesCsvlog)
+            {
+                /* #4053 part a1b: the csvlog route's own "no file yet" marker — distinct from the stderr
+                   route's PgNoStderrLogFileException, so the fault message names csvlog, not stderr. */
+                if (string.Equals(body, PgNoCsvlogFileException.Marker, StringComparison.Ordinal))
+                {
+                    throw new PgNoCsvlogFileException();
+                }
+
+                var entries = PgServerLogCsvParser.Parse(body ?? string.Empty, out var recordsDiscarded);
+
+                /* The same foreign-zone rule the stderr path applies through
+                   PgLogEntryAssembler.Assemble(body, logTimezoneIsUtc, out foreignZoneLines): under a UTC
+                   log_timezone a record in another zone is not the server's own and is skipped and counted
+                   rather than refusing the whole read; otherwise a foreign zone refuses the read whole, the
+                   #2993 trade. */
+                var kept = FilterForeignZoneEntries(entries, logTimezoneIsUtc, out var foreignZoneLines);
+                PgServerLogTail.MeasureForeignZoneLines(context, foreignZoneLines);
+
+                if (recordsDiscarded > 0)
+                {
+                    context.Measure(CsvRecordsDiscardedMeasurement, recordsDiscarded);
+                }
+
+                rows.AddRange(classifier.Classify(kept));
+                continue;
+            }
+
+            /* The second marker row (#3997): logging_collector is on but the tail excluded every file as a
+               csvlog/jsonlog sibling, so there is no stderr-format file this cycle. Same reasoning as above. */
+            if (string.Equals(body, PgNoStderrLogFileException.Marker, StringComparison.Ordinal))
+            {
+                throw new PgNoStderrLogFileException();
+            }
+
             /* The whole pipeline, shared with the RDS transport. A non-UTC zone throws out of here and
-               abandons the batch, which is the trade the deadlock parser argues for (#2993). */
-            rows.AddRange(PgLogEventClassifier.Default.Classify(body));
+               abandons the batch, which is the trade the deadlock parser argues for (#2993) — unless the
+               target's own log_timezone renders UTC, when a line in another zone is not the server's and is
+               skipped and counted instead (#4046). */
+            rows.AddRange(classifier.Classify(body, logTimezoneIsUtc, out var stderrForeignZoneLines));
+            PgServerLogTail.MeasureForeignZoneLines(context, stderrForeignZoneLines);
         }
 
         return rows;
     }
 
+    /// <summary>
+    /// The count a consumer records on its collection-log row when the csvlog parser discarded a record
+    /// (a resync fragment or a bad shape) (#4053 part a1b): reported only when &gt; 0, following
+    /// <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>'s exact pattern.
+    /// </summary>
+    public const string CsvRecordsDiscardedMeasurement = "csv_records_discarded";
+
+    /// <summary>
+    /// The count a consumer records on its collection-log row when the jsonlog parser discarded a record
+    /// (malformed JSON, including a cut head, or a missing/unusable shape) (#4053 part a2): reported only
+    /// when &gt; 0, following <see cref="CsvRecordsDiscardedMeasurement"/>'s exact pattern.
+    /// </summary>
+    public const string JsonRecordsDiscardedMeasurement = "json_records_discarded";
+
+    /// <summary>
+    /// Filters <paramref name="entries"/> the same way <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>
+    /// filters stderr lines (#4053 part a1b): under a UTC <c>log_timezone</c> a record in another zone is not the
+    /// server's own and is dropped and counted in <paramref name="foreignZoneLines"/>; otherwise a foreign zone
+    /// throws <see cref="PgLogTimezoneUnsupportedException"/> and abandons the whole batch, the same #2993 trade the
+    /// stderr assembler makes.
+    ///
+    /// <para>Public (#4053 part c1) so <c>RdsLogEventIngestor</c>, in the Darling assembly, can share it instead of
+    /// keeping its own byte-identical copy — the AWS-log transport applies the exact same rule to the exact same
+    /// <see cref="PgLogEntry"/> shape, just without a <c>CollectorContext</c> of its own to route the measurement
+    /// through until after its caller returns.</para>
+    /// </summary>
+    public static List<PgLogEntry> FilterForeignZoneEntries(List<PgLogEntry> entries, bool logTimezoneIsUtc, out int foreignZoneLines)
+    {
+        foreignZoneLines = 0;
+
+        if (!logTimezoneIsUtc)
+        {
+            foreach (var entry in entries)
+            {
+                if (!PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+                {
+                    throw new PgLogTimezoneUnsupportedException(entry.ZoneText);
+                }
+            }
+
+            return entries;
+        }
+
+        var kept = new List<PgLogEntry>(entries.Count);
+
+        foreach (var entry in entries)
+        {
+            if (PgDeadlockLogParser.IsZeroOffsetLogZone(entry.ZoneText))
+            {
+                kept.Add(entry);
+            }
+            else
+            {
+                foreignZoneLines++;
+            }
+        }
+
+        return kept;
+    }
+
+    /// <exception cref="InvalidOperationException">The event was never stamped with the store's keyed identities
+    /// (#4004): built by <see cref="PgLogEvent.From"/> but not passed through a <see cref="PgLogEventClassifier"/>.
+    /// Both transports write through here, so no row reaches the store without its keyed <c>raw_line_hash</c>.</exception>
     public override void WritePayload(PgLogEvent row, ICollectorRowWriter writer, CollectorContext context)
     {
+        if (string.IsNullOrEmpty(row.RawLineHash))
+        {
+            throw new InvalidOperationException(
+                "A PostgreSQL log event reached the store writer without its keyed identity (#4004); every event must pass through PgLogEventClassifier.");
+        }
+
         writer
             /* Naive UTC, per the store contract: Kind=Utc against a `timestamp` column is refused by Npgsql. */
             .Value(DateTime.SpecifyKind(row.OccurredAtUtc, DateTimeKind.Unspecified))

@@ -155,6 +155,11 @@ public partial class ViewerServerTab
         PgCollectorHealthGrid.ItemsSource =
             ViewerDataService.BuildPostgresCollectorHealth(_server, collectors, facts);
 
+        /* #3691 part a2: the persisted analysis collection caveats, as on the SQL Server Collection Health tab. */
+        var caveats = await _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        PgCollectionCaveatsGrid.ItemsSource = caveats;
+        PgCollectionCaveatsExpander.Visibility = caveats.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
         await LoadPgExtensionsAsync(startUtc, endUtc);
         await LoadPgServerConfigAsync();
         await LoadPgCpuUtilizationAsync(startUtc, endUtc);

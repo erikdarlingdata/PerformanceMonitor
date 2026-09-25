@@ -203,6 +203,58 @@ internal static class McpHelpers
     }
 
     /// <summary>
+    /// Query Store's execution outcomes, spelled as <c>sys.query_store_runtime_stats.execution_type_desc</c>
+    /// reports them and as both SKUs' collectors store them. <c>get_query_store_top</c>'s <c>execution_type</c>
+    /// filter validates against this set through <see cref="ValidateChoice"/> and then filters on the canonical
+    /// spelling, so a caller's "aborted" compares equal to the stored "Aborted".
+    /// </summary>
+    public static readonly IReadOnlyList<string> QueryStoreExecutionTypes = new[] { "Regular", "Aborted", "Exception" };
+
+    /// <summary>
+    /// The <c>empty</c> answer for an <c>execution_type</c> filter that matched nothing while the same read
+    /// without it returns rows. Most queries never abort, so this is the common answer to an Aborted or
+    /// Exception filter, and it is a measured zero: Query Store is collecting and the window has rows, just none
+    /// with that outcome. Without it the read fell through to the "Query Store may not be enabled" guess, which
+    /// is the one thing the unfiltered rows prove false. Shared so both SKUs say it in the same words.
+    /// </summary>
+    public static string QueryStoreExecutionTypeEmpty(string executionType, int hoursBack, string? databaseName)
+    {
+        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        return Status(
+            "empty",
+            $"No {executionType} executions{scope} in the {hoursBack}-hour window searched. The same read without "
+            + "execution_type returns rows, so Query Store is collecting and this is a measured zero, not missing "
+            + "data. Omit execution_type to see the other outcomes.");
+    }
+
+    /// <summary>
+    /// The <c>empty</c> answer for a <c>module_name</c> filter (#4057) that matched nothing while the same read
+    /// without the filters returns rows: Query Store is collecting and the window has rows, just none from that
+    /// module, so it is a measured zero rather than the "may not be enabled" guess. Names an <c>execution_type</c>
+    /// filter too when one rode along, since either can be why nothing matched. Shared so both SKUs say it in the
+    /// same words. Darling passes its window floor (<paramref name="windowTruncated"/> and the served window as
+    /// <paramref name="hints"/>), because the raw tier can stop short of the window asked for; Lite has no floor.
+    /// </summary>
+    public static string QueryStoreModuleEmpty(
+        string moduleName, string? executionType, int hoursBack, string? databaseName,
+        bool windowTruncated = false, object? hints = null)
+    {
+        var outcome = executionType is null ? "" : $" with execution_type {executionType}";
+        var scope = string.IsNullOrWhiteSpace(databaseName) ? "" : $" in database '{databaseName}'";
+        return Status(
+            "empty",
+            $"No Query Store rows matched module_name '{moduleName}'{outcome}{scope} in the {hoursBack}-hour window "
+            + "searched. The same read without the filters returns rows, so Query Store is collecting and this is a "
+            + "measured zero. The match is exact and case-sensitive on the schema-qualified name the collector records "
+            + "(the full_name get_top_procedures_by_cpu returns), applied after interval deduplication and before ranking."
+            + (windowTruncated
+                ? " The raw tier did not reach the whole window (window_truncated), so the module may have run before "
+                  + "effective_start."
+                : ""),
+            hints);
+    }
+
+    /// <summary>
     /// Validates an optional ENUMERATED filter — a parameter whose usable values are a closed set the
     /// caller cannot see. Returns null when the caller sent nothing or a member of the set, the refusal
     /// naming the whole set when not. The match is case-insensitive, and the caller is expected to use the
@@ -288,14 +340,15 @@ internal static class McpHelpers
     /// own — a client still reading <c>truncated</c> off these tools reads a key that is no longer there and
     /// gets <c>undefined</c>, not <c>false</c>. Leading space: it is appended to each tool's own sentence.</para>
     ///
-    /// <para>#3898 cut it to the fact and the remedy it rules out. The WIRE CHANGE sentence stays on the wire
-    /// until the rename has shipped for one release (#3898's ruling on wire-change notices); it has not shipped
-    /// in one yet, and no on-demand guide exists to carry it instead.</para>
+    /// <para>#3898 cut it to the fact and the remedy it rules out. The WIRE CHANGE sentence stays served until
+    /// the rename has shipped for one release (#3898's ruling on wire-change notices); it has not shipped in one
+    /// yet. On a tool whose description is split it sits in the guide tail get_tool_guide serves; on an unsplit
+    /// one it is still in the tools/list text.</para>
     /// </summary>
     public const string WindowTruncatedDescription =
         " window_truncated is true when the store did not hold the start of the window; effective_start / " +
         "effective_hours_back say where the answer begins. That is the window floor, not a page cut: no limit " +
-        "changes it. WIRE CHANGE: spelled truncated before #3653.";
+        "changes it. WIRE CHANGE: formerly named truncated.";
 
     /// <summary>
     /// How far past <c>now</c> an <c>as_of</c> anchor may sit and still be accepted.

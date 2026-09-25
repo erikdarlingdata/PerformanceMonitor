@@ -113,6 +113,80 @@ public sealed class McpFilterSemanticsLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// <c>get_query_store_top</c>'s <c>module_name</c> (#4057) is a filter in the query, the A13 rule above: the
+    /// cheap procedure an investigation names must come back at <c>top = 1</c> even though a hotter module owns
+    /// the unfiltered rank, and its re-collected interval must count ONCE (the #1841 dedup runs first). A miss
+    /// over a window that holds rows is a true negative carrying the window it read; a miss over a window that
+    /// holds nothing is the unfiltered read's "unavailable", because the filter is not why it came back empty.
+    /// </summary>
+    [Fact]
+    public async Task QueryStoreModuleFilter_RanksTheFilteredPopulation_AndTellsAMissFromAnEmptyWindow()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live filter-semantics test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-2);
+
+            /* One hot module, then the cheap target, whose one interval was collected twice (2, then 5). The
+               re-collection shares the interval's identity, first_execution_time included, as a real one does. */
+            var firstExecution = now.AddMinutes(-40);
+            await PlantQueryStoreAsync(connection, ct, now.AddMinutes(-20), firstExecution, 101, "dbo.usp_HighCost", intervalId: 9301, executions: 100, avgDurationUs: 50_000);
+            await PlantQueryStoreAsync(connection, ct, now.AddMinutes(-30), firstExecution, 102, "dbo.usp_Target", intervalId: 9302, executions: 2, avgDurationUs: 200);
+            await PlantQueryStoreAsync(connection, ct, now.AddMinutes(-10), firstExecution, 102, "dbo.usp_Target", intervalId: 9302, executions: 5, avgDurationUs: 200);
+
+            /* Unfiltered at top = 1: the hot module owns the rank. */
+            var unfiltered = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1)).RootElement;
+            var hot = Assert.Single(unfiltered.GetProperty("queries").EnumerateArray().ToArray());
+            Assert.Equal(101, hot.GetProperty("query_id").GetInt64());
+            Assert.Equal("dbo.usp_HighCost", hot.GetProperty("module_name").GetString());
+
+            /* Filtered at the same cap: the target, counted at its latest snapshot (5), not 2 + 5. */
+            var filtered = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1, module_name: "dbo.usp_Target")).RootElement;
+            var target = Assert.Single(filtered.GetProperty("queries").EnumerateArray().ToArray());
+            Assert.Equal(102, target.GetProperty("query_id").GetInt64());
+            Assert.Equal(5, target.GetProperty("execution_count").GetInt64());
+            Assert.Equal("dbo.usp_Target", target.GetProperty("module_name").GetString());
+
+            /* A miss over a window that holds rows: a true negative, carrying the window actually read. */
+            var miss = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1, module_name: "dbo.usp_target")).RootElement;
+            Assert.Equal("empty", miss.GetProperty("status").GetString());
+            Assert.Contains("case-sensitive", miss.GetProperty("message").GetString(), StringComparison.Ordinal);
+            var hints = miss.GetProperty("hints");
+            Assert.Equal(JsonValueKind.String, hints.GetProperty("effective_start").ValueKind);
+            Assert.False(hints.GetProperty("window_truncated").GetBoolean());
+
+            /* Beside #4060's execution_type: the module does run, but never with that outcome. Still a measured
+               zero, and the message names both filters, because either could be why nothing matched. */
+            var bothMiss = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1, execution_type: "Aborted", module_name: "dbo.usp_Target")).RootElement;
+            Assert.Equal("empty", bothMiss.GetProperty("status").GetString());
+            Assert.Contains("with execution_type Aborted", bothMiss.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+            /* The same filter over a window that holds nothing: not the filter's miss, so not "empty". */
+            var asOf = now.AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            var nothing = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, 1, 1, as_of: asOf, module_name: "dbo.usp_Target")).RootElement;
+            Assert.Equal("unavailable", nothing.GetProperty("status").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task ActiveQueries_FiltersInTheQuery_KeepsHeadBlockers_AndNamesAbsentOnes()
     {
@@ -228,14 +302,17 @@ public sealed class McpFilterSemanticsLivePostgresTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            var today = DateTime.UtcNow.Date;
+            var now = DateTime.UtcNow;
+            var today = now.Date;
             /* Inside the collection log's 60-day horizon, outside the signals' 30 — the ghost stretch. */
             var ghostDay = today.AddDays(-45);
             /* Inside every default horizon; becomes a ghost once ONE signal's retention is overridden to 10. */
             var nearDay = today.AddDays(-20);
-            var expectedHorizon = DailySummaryRetention.HorizonFor(DateTime.UtcNow, DarlingRetention.DataRetentionBaseDays);
+            var expectedHorizon = DailySummaryRetention.HorizonFor(now, DarlingRetention.DataRetentionBaseDays);
 
-            await SeedRunAsync(connection, ct, DateTime.UtcNow.AddMinutes(-2), "SUCCESS");
+            /* Today's run has to land on today: two minutes back crosses midnight UTC in a day's first two
+               minutes, which failed CI at 00:01Z. Lite's twin carries the same guard (#3963). */
+            await SeedRunAsync(connection, ct, now.AddMinutes(-2) < today ? now : now.AddMinutes(-2), "SUCCESS");
             await SeedRunAsync(connection, ct, ghostDay.AddHours(12), "SUCCESS");
             await SeedRunAsync(connection, ct, nearDay.AddHours(12), "SUCCESS");
 
@@ -340,6 +417,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
             digest, 10L, cpuUs, cpuUs, 100L, 1, maxDop);
     }
 
+    private static Task PlantQueryStoreAsync(
+        NpgsqlConnection connection, CancellationToken ct, DateTime at, DateTime firstExecution, long queryId, string moduleName, long intervalId, long executions, long avgDurationUs) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO query_store_stats (collection_id, collection_time, server_id, server_name, database_name,
+                                             query_id, plan_id, runtime_stats_interval_id, first_execution_time,
+                                             last_execution_time, execution_type_desc, query_hash, query_plan_hash,
+                                             module_name, execution_count, avg_duration_us, avg_cpu_time_us, query_text)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+            CollectionIdGenerator.Next(), at, ServerId, ServerName, Db,
+            queryId, queryId * 10, intervalId, firstExecution,
+            at, "Regular", $"0xQS{queryId}", $"0xQSP{queryId}",
+            moduleName, executions, avgDurationUs, avgDurationUs / 2, $"SELECT {queryId}");
+
     private static Task PlantSnapshotAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime at, int sessionId, string database, string text, int blockingSessionId, long cpuMs) =>
         DarlingMcpTestData.ExecAsync(connection, ct,
@@ -359,7 +449,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
 
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        var sql = string.Join(" ", new[] { "query_stats", "query_snapshots", "collection_log", "deadlocks" }
+        var sql = string.Join(" ", new[] { "query_stats", "query_store_stats", "query_snapshots", "collection_log", "deadlocks" }
             .Select(tbl => $"DELETE FROM {tbl} WHERE server_id = {ServerId};"));
         sql += " DELETE FROM config_collector_schedules WHERE server_id IS NULL AND collector_name = 'deadlocks' AND retention_days = 10;";
         sql += $" DELETE FROM servers WHERE server_id = {ServerId};";

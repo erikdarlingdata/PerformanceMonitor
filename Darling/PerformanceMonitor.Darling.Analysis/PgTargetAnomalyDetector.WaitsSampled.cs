@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
@@ -76,6 +77,54 @@ SELECT MAX(total_wait_ms / observed_sec)                       AS peak_ms_per_se
         FROM pg_wait_stats AS w
         WHERE w.server_id = $1 AND w.collection_time >= $2 AND w.collection_time <= $3) AS exact_collections
 FROM rated";
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3c): <see cref="SampledWaitRateWindowSql"/>'s tile twin for the ROBUST arm only
+    /// (coordinator's multi-arm ruling: only the trusted-robust arm moves onto tiles; the ratio and no-baseline
+    /// arms stay whole-window, fed from <c>WindowTiles.WholeWindow</c>). Keeps the <c>series</c>/<c>per_collection</c>/
+    /// <c>rated</c> CTEs (<c>rated</c> already exposes <c>collection_time</c> under that name) and groups the outer
+    /// select by target-local hour. <c>exact_collections</c> stays a WINDOW scalar (summed over tiles, per the
+    /// brief), read separately from the whole-window read, not per tile. Column order per tile: 0 local_hour,
+    /// 1 peak_ms_per_sec, 2 mean_ms_per_sec, 3 total_wait_ms, 4 sample_count, 5 peak_time. Binds <c>$4..$6</c> from
+    /// the analysis window's clock.
+    /// </summary>
+    public const string SampledWaitRateTileWindowSql = @"
+WITH series AS (
+    SELECT collection_time, event_type, sample_count, profile_period_ms, sampled_ms,
+           LAG(sample_count) OVER (PARTITION BY event_type, event, query_id ORDER BY collection_time) AS prev_count
+    FROM pg_wait_sampling
+    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+),
+per_collection AS (
+    SELECT collection_time,
+           MAX(sampled_ms) AS sampled_ms,
+           CAST(coalesce(SUM(
+               CASE WHEN prev_count IS NULL THEN NULL
+                    WHEN sample_count < prev_count THEN sample_count
+                    ELSE sample_count - prev_count
+               END * profile_period_ms) FILTER (WHERE lower(event_type) IS DISTINCT FROM 'cpu'), 0) AS DOUBLE PRECISION) AS total_wait_ms,
+           extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS interval_sec
+    FROM series
+    GROUP BY collection_time
+),
+rated AS (
+    SELECT collection_time,
+           total_wait_ms,
+           CAST(coalesce(sampled_ms / 1000.0, interval_sec) AS DOUBLE PRECISION) AS observed_sec,
+           interval_sec
+    FROM per_collection
+    WHERE interval_sec > 0
+    AND   coalesce(sampled_ms / 1000.0, interval_sec) > 0
+)
+SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
+       MAX(total_wait_ms / observed_sec) AS peak_ms_per_sec,
+       AVG(total_wait_ms / observed_sec) AS mean_ms_per_sec,
+       SUM(total_wait_ms)                AS total_wait_ms,
+       CAST(count(*) AS integer)         AS sample_count,
+       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC))[1] AS peak_time
+FROM rated
+GROUP BY " + WindowTiles.LocalHourSql + @"
+ORDER BY " + WindowTiles.LocalHourSql;
 
     /// <summary>The window's six largest (event_type, event) sampled contributors by estimated time — the same
     /// per-series reset-aware difference, CPU/Running excluded — named in the anomaly's <c>contrib_Type:event</c>
@@ -151,61 +200,128 @@ LIMIT 6";
     {
         try
         {
+            /* Coordinator ruling (#3653 A8 option B, "families with more than one gate arm"): the arm choice stays
+               exactly as dev's whole-window body decides it, from the START-hour bucket. Only arm 1 (trusted,
+               robust sigma > 0) moves onto tiles; arms 2 and 3 stay whole-window, outside this lane's scope. */
             var baseline = await _baselineProvider.GetBaselineAsync(
                 context.ServerId, MetricNames.PgSampledWaitMsPerSec, context.TimeRangeStart, context.CancellationToken);
 
+            /* The tile read's $4..$6 need the ANALYSIS window's clock on every arm that might use it, so the map
+               is fetched before the read (lesson 2). It is the same cached compute GetBaselineAsync just used
+               (same metric, same TimeRangeStart), so this costs no second baseline read. */
+            var map = await _baselineProvider.GetBucketMapAsync(
+                context.ServerId, MetricNames.PgSampledWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
+
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-            double peakRate, meanRate, totalWaitMs, observedSec, intervalSec;
-            long sampleCount, collectionCount, unknownSampled, exactCollections;
+            double wholePeak, wholeMean, wholeTotalWaitMs, observedSec, intervalSec;
+            long wholeSampleCount, collectionCount, unknownSampled, exactCollections;
             using (var rateCmd = WindowCommand(SampledWaitRateWindowSql, connection, context))
             {
                 using var rateReader = await rateCmd.ExecuteReaderAsync(context.CancellationToken);
                 if (!await rateReader.ReadAsync(context.CancellationToken)) return;
-                peakRate = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
-                meanRate = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
-                totalWaitMs = rateReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rateReader.GetValue(2));
-                sampleCount = rateReader.IsDBNull(3) ? 0L : Convert.ToInt64(rateReader.GetValue(3));
+                wholePeak = rateReader.IsDBNull(0) ? 0.0 : Convert.ToDouble(rateReader.GetValue(0));
+                wholeMean = rateReader.IsDBNull(1) ? 0.0 : Convert.ToDouble(rateReader.GetValue(1));
+                wholeTotalWaitMs = rateReader.IsDBNull(2) ? 0.0 : Convert.ToDouble(rateReader.GetValue(2));
+                wholeSampleCount = rateReader.IsDBNull(3) ? 0L : Convert.ToInt64(rateReader.GetValue(3));
                 collectionCount = rateReader.IsDBNull(4) ? 0L : Convert.ToInt64(rateReader.GetValue(4));
                 observedSec = rateReader.IsDBNull(5) ? 0.0 : Convert.ToDouble(rateReader.GetValue(5));
                 intervalSec = rateReader.IsDBNull(6) ? 0.0 : Convert.ToDouble(rateReader.GetValue(6));
                 unknownSampled = rateReader.IsDBNull(7) ? 0L : Convert.ToInt64(rateReader.GetValue(7));
+                /* exact_collections stays a WINDOW scalar (design's own rule): the correlated subquery counts
+                   pg_wait_stats collections over the WHOLE analysis window, not per tile. */
                 exactCollections = rateReader.IsDBNull(8) ? 0L : Convert.ToInt64(rateReader.GetValue(8));
             }
 
             /* No rows: this flavour does not write pg_wait_sampling (Aurora) — sit out. Both sources: the exact
                profile is the one that fires (summary). No rated collection: nothing to judge. */
-            if (collectionCount == 0 || exactCollections > 0 || sampleCount == 0) return;
+            if (collectionCount == 0 || exactCollections > 0 || wholeSampleCount == 0) return;
             if (baseline.SampleCount == 0) return;
 
-            bool isNew;
-            double ratio, meanRatio, fallbackExceedance;
-            var modifiedZ = BaselineMath.ModifiedZScore(baseline, peakRate);
-            var meanModifiedZ = BaselineMath.ModifiedZScore(baseline, meanRate);
+            var window = context.TimeRangeEnd - context.TimeRangeStart;
+            bool isNew, isTiled = false;
+            double ratio, meanRatio, fallbackExceedance, fireThreshold;
+            double peakRate, meanRate, totalWaitMs;
+            long sampleCount;
+            BaselineBucket scoredBucket;
+            AnomalyGate.TileVerdict? tv = null;
+            List<WindowTile>? tiles = null;
+            Dictionary<DateTime, double>? totalWaitMsByTile = null;
+
             if (baseline.IsTrustworthy && baseline.EffectiveRobustSigma > 0)
             {
+                /* Arm 1 only: score every tile against its own (hour, dow) bucket with the Šidák-raised mean
+                   clause; null (no tile scored at all) falls back to today's whole-window inline gate against the
+                   start bucket, unchanged. */
+                (tiles, totalWaitMsByTile) = await ReadSampledWaitRateTilesAsync(context, map);
+
+                tv = AnomalyGate.EvaluateTiles(
+                    tiles, map,
+                    HeavyTailModifiedZThreshold, HeavyTailModifiedZThreshold, PgSampledWaitProfileFallbackMsPerSec, PgSampledWaitProfileFallbackMsPerSec, SigmaDisplayCap,
+                    window);
+
+                if (tv is null)
+                {
+                    peakRate = wholePeak;
+                    meanRate = wholeMean;
+                    scoredBucket = baseline;
+                    sampleCount = wholeSampleCount;
+                    totalWaitMs = wholeTotalWaitMs;
+
+                    /* #3653 A8 slice 1: this fallback is inline, not the shared AnomalyGate.EvaluateZScore pair
+                       overload, so the Šidák-corrected peak cutoff is applied here directly, to the peak clause
+                       alone — the mean clause is unaffected, matching the shared gate's rule exactly. */
+                    var modifiedZThresholdForPeak = NAwarePeakCutoff(HeavyTailModifiedZThreshold, window);
+                    var modifiedZFallback = BaselineMath.ModifiedZScore(baseline, peakRate);
+                    var meanModifiedZFallback = BaselineMath.ModifiedZScore(baseline, meanRate);
+                    if (modifiedZFallback < modifiedZThresholdForPeak || meanModifiedZFallback < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
+                }
+                else
+                {
+                    peakRate = tv.Value.Tile.Peak;
+                    meanRate = tv.Value.Tile.Mean;
+                    scoredBucket = tv.Value.Bucket;
+                    sampleCount = tv.Value.Tile.Samples;
+                    totalWaitMs = totalWaitMsByTile!.TryGetValue(tv.Value.Tile.LocalHour, out var tw) ? tw : totalWaitMsByTile.Values.Sum();
+                    if (!tv.Value.Decision.Fire) return;
+                    isTiled = true;
+                }
+
                 isNew = false;
-                ratio = baseline.Mean > 0 ? peakRate / baseline.Mean : 0;
-                meanRatio = baseline.Mean > 0 ? meanRate / baseline.Mean : 0;
+                ratio = scoredBucket.Mean > 0 ? peakRate / scoredBucket.Mean : 0;
+                meanRatio = scoredBucket.Mean > 0 ? meanRate / scoredBucket.Mean : 0;
                 fallbackExceedance = 0;
-                /* The heavy-tail cutoff by reference on BOTH statistics; the (unmeasured) magnitude bar on the peak. */
-                if (modifiedZ < HeavyTailModifiedZThreshold || meanModifiedZ < HeavyTailModifiedZThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
+                fireThreshold = HeavyTailModifiedZThreshold;
             }
             else if (baseline.IsTrustworthy && baseline.Mean > 0)
             {
+                /* Arms 2 and 3 stay whole-window and unchanged (ruling), fed from the whole-window read's Peak and
+                   Mean — outside B's scope. */
                 isNew = false;
+                peakRate = wholePeak;
+                meanRate = wholeMean;
+                scoredBucket = baseline;
+                sampleCount = wholeSampleCount;
+                totalWaitMs = wholeTotalWaitMs;
                 ratio = peakRate / baseline.Mean;
                 meanRatio = meanRate / baseline.Mean;
                 fallbackExceedance = 0;
-                /* unmeasured: PgRatioAnomalyThreshold on both statistics, PgSampledWaitProfileFallbackMsPerSec on the peak. */
-                if (ratio < PgRatioAnomalyThreshold || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
+                fireThreshold = PgRatioAnomalyThreshold;
+                var ratioThresholdForPeak = NAwarePeakCutoff(PgRatioAnomalyThreshold, window);
+                if (ratio < ratioThresholdForPeak || meanRatio < PgRatioAnomalyThreshold || peakRate < PgSampledWaitProfileFallbackMsPerSec) return;
             }
             else
             {
                 isNew = true;
+                peakRate = wholePeak;
+                meanRate = wholeMean;
+                scoredBucket = baseline;
+                sampleCount = wholeSampleCount;
+                totalWaitMs = wholeTotalWaitMs;
                 ratio = 0;
                 meanRatio = 0;
                 fallbackExceedance = peakRate / PgSampledWaitProfileFallbackMsPerSec;
+                fireThreshold = 0;
                 /* unmeasured: the peak's bar alone, the Aurora twin's exact clause, by the 2026-09-20 ruling (summary):
                    no z to trust on either statistic here, so the mean has nothing to be judged against; the pair gate
                    stays on the two arms above, where #3724's rule applies. Gating matched to the unsampled twin;
@@ -213,12 +329,15 @@ LIMIT 6";
                 if (fallbackExceedance < 1.0) return;
             }
 
+            var modifiedZ = BaselineMath.ModifiedZScore(scoredBucket, peakRate);
+            var meanModifiedZ = BaselineMath.ModifiedZScore(scoredBucket, meanRate);
+
             var metadata = new Dictionary<string, double>
             {
                 ["current_ms_per_sec"] = peakRate,
                 ["mean_ms_per_sec"] = meanRate,
-                ["baseline_mean"] = baseline.Mean,
-                ["baseline_samples"] = baseline.SampleCount,
+                ["baseline_mean"] = scoredBucket.Mean,
+                ["baseline_samples"] = scoredBucket.SampleCount,
                 ["total_wait_ms"] = totalWaitMs,
                 ["window_samples"] = sampleCount,
                 ["ratio"] = ratio,
@@ -227,11 +346,12 @@ LIMIT 6";
                 ["mean_modified_z"] = meanModifiedZ,
                 ["is_new"] = isNew ? 1 : 0,
                 ["fallback_exceedance"] = fallbackExceedance,
-                ["fire_threshold"] = isNew ? 0 : (baseline.EffectiveRobustSigma > 0 ? HeavyTailModifiedZThreshold : PgRatioAnomalyThreshold),
+                ["fire_threshold"] = fireThreshold,
                 /* The instrument, on the fact: every figure here is estimated from sampling, over the time the
                    sampler watched (observed) beside the wall time between the same collections (interval), and
                    whether every rated collection disclosed its sampled_ms (V133) or some were read as their
-                   whole interval. The wait facts carry the same three keys (PgTargetScorer.Waits.cs). */
+                   whole interval. The wait facts carry the same three keys (PgTargetScorer.Waits.cs). These are
+                   WINDOW scalars — the sampled-vs-exact disclosure is about the whole window, never one tile. */
                 [PgTargetScorer.WaitIsSampledKey] = 1,
                 [PgTargetScorer.WaitSourceObservedMsKey] = observedSec * 1000.0,
                 [PgTargetScorer.WaitSourceIntervalMsKey] = intervalSec * 1000.0,
@@ -240,7 +360,9 @@ LIMIT 6";
                    is chosen — see AnomalyThresholds.PgSampledWaitProfileFallbackMsPerSec. */
                 ["threshold_lineage"] = 0,
             };
-            AddBaselineContext(metadata, baseline);
+            AddBaselineContext(metadata, scoredBucket);
+            if (isTiled)
+                WindowTiles.AddTileMetadata(metadata, tv!.Value, tiles!, map.WindowClock);
 
             using (var contribCmd = WindowCommand(SampledWaitContribWindowSql, connection, context))
             {
@@ -267,5 +389,32 @@ LIMIT 6";
         {
             _logger?.LogError("[PgTargetAnomalyDetector] Sampled wait-profile anomaly detection failed: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// #3653 A8 option B (lane L3c): <see cref="SampledWaitRateTileWindowSql"/>'s own reader — the per-tile
+    /// <c>total_wait_ms</c> rides beside the tile list keyed by the tile's own <see cref="WindowTile.LocalHour"/>
+    /// (design's "extra window scalars" rule), since <see cref="WindowTile"/> has no home for it.
+    /// </summary>
+    private async Task<(List<WindowTile> Tiles, Dictionary<DateTime, double> TotalWaitMsByTile)> ReadSampledWaitRateTilesAsync(AnalysisContext context, BaselineBucketMap map)
+    {
+        var tiles = new List<WindowTile>();
+        var totalWaitMsByTile = new Dictionary<DateTime, double>();
+
+        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        using var cmd = WindowCommand(SampledWaitRateTileWindowSql, connection, context);
+        cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
+        cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);
+        cmd.Parameters.AddWithValue(map.WindowClock.OffsetAfterMinutes);
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var tile = WindowTiles.ReadTile(reader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, peakTimeOrdinal: 5);
+            tiles.Add(tile);
+            totalWaitMsByTile[tile.LocalHour] = reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3));
+        }
+
+        return (tiles, totalWaitMsByTile);
     }
 }

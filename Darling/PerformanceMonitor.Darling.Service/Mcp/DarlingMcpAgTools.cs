@@ -33,13 +33,21 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpAgTools
 {
     [McpServerTool(Name = "get_ag_health"), Description(
-        "Gets Always On Availability Group health across the monitored fleet from the latest collection per " +
+        "AG health fleet-wide from each server's latest collection: replica role/state and per-database " +
+        "secondary state (queue KB, rate KB/s, lag sec, drain min, suspended+why). One row per REPLICA's view: " +
+        "a multi-replica AG appears once per replica, not merged. Severities restate DMV verdicts only, " +
+        "un-banded on lag/queue depth; lag reads 0 while suspended, so check secondary_lag_seconds and " +
+        "is_suspended yourself. collection_time can be stale after an AG is dropped. Empty: none collected " +
+        "fleet-wide or on the server. Scoped to a server whose engine never runs AG collection: not_collected. " +
+        "<<GUIDE>> Gets Always On Availability Group health across the monitored fleet from the latest collection per " +
         "server: every AG with its replicas (role, connected/operational state, synchronization health, " +
         "availability and failover mode, endpoint) and its per-database secondary state (synchronization state, " +
         "log-send and redo queue sizes in KB, send/redo rates in KB/s, estimated drain minutes, secondary lag " +
         "seconds, and whether data movement is suspended and why). Each group is one monitored server's VIEW of " +
         "an AG and names that server, so an AG with several monitored replicas appears once per replica — compare " +
-        "them to reconcile perspectives. Severities are computed server-side and restate the DMVs' OWN verdicts " +
+        "them to reconcile perspectives (operational_state and recovery_health are populated only for the LOCAL " +
+        "replica, connected_state only from the primary — the perspectives genuinely differ by design). " +
+        "Severities are computed server-side and restate the DMVs' OWN verdicts " +
         "(states and health strings) only: lag and queue depth are NOT banded, so a badly lagging asynchronous " +
         "secondary whose replica health still reads HEALTHY carries a healthy severity — read secondary_lag_seconds " +
         "and the queue sizes yourself, and read lag together with is_suspended (the DMV reports 0 lag while data " +

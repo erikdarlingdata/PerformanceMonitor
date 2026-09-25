@@ -786,6 +786,14 @@ public sealed class DarlingWorker : BackgroundService
        a best-effort errand and there is nothing in it that a later hour cannot do. */
     private Task? _oversizedPlanSweep;
 
+    /* #4130: the in-flight daily retention purge, fire-and-tracked like the per-server sweeps and the
+       oversized-plan backlog above rather than awaited inline. Measured at 346-400s deleting ~839k rows;
+       awaited on this loop, that is 346-400s in which NO server's sweep body launches and the whole fleet
+       reads stale — the same shape as the oversized-plan backlog's field incident, one maintenance step
+       over. Tracked (not fire-and-forget) so the launch loop can see it is still running and skip a second
+       launch, and so shutdown can drain it instead of abandoning a live DELETE. */
+    private Task? _purgeTask;
+
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval, pinned to :30 past the minute by TimescaleSupport.NextCompressionCheckUtc
        (#3575) so no steady-state sample lands on the :MM:00 instant the compression policies fire on. The
@@ -825,6 +833,9 @@ public sealed class DarlingWorker : BackgroundService
        store-metrics tick. Held here (not in the runner) so its lifetime matches the sweep that drains it. */
     private readonly CollectorCostAccumulator _collectorCost = new();
 
+    /* #4004 review, round 3: "the log-hash key was replaced at start", held for the first pg_log_events run. */
+    private readonly LogHashKeyRotationNote _logHashKeyRotation = new();
+
     /* Fleet-level working-set launch-guard latch (#1556): true once ShouldLaunchSweeps has tripped this
        episode, so its CRITICAL log is emitted ONCE rather than every sweep (the WarnedThisEpisode idiom —
        but fleet-wide: the guard is about the whole process's working set, so it is a single worker field,
@@ -850,6 +861,17 @@ public sealed class DarlingWorker : BackgroundService
     private string? _storeLogRemaskCursor;
 
     private bool _storeLogRemaskDone;
+
+    /* #4012: the re-mask of PostgreSQL deadlock alerts, then deadlock reports, then stored analysis findings'
+       deadlock exemplars, stored before #4005 with their SQL raw. The alerts go first because they are found
+       through the reports' raw hashes, which the report stage replaces; the findings last, so their read cannot
+       hold the reports back. In memory, like the store-log cursor above (#4012's review ruled out a store
+       migration): each stage is done after a whole walk that rewrote nothing, and a restart walks again. */
+    private readonly PgDeadlockRemask.RemaskProgress _pgDeadlockRemask = new();
+
+    /* #4012: the re-mask keys an alert whose report is gone under the store's log-hash key. Null when the service
+       has none; every other stage runs without it (#4012's review, finding 1). */
+    private PgLogHashKey? _pgDeadlockRemaskKey;
 
     /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
        process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
@@ -1434,7 +1456,7 @@ public sealed class DarlingWorker : BackgroundService
     /// ships in an open-source repo, so anything that can READ the file can unprotect all of it — the ACL is
     /// the access boundary, exactly as <see cref="DarlingFileSecurity"/> says of the credential files. It never
     /// got one: every harden call site targeted the credential directory, while the config sat beside the
-    /// binary, and the documented install (extract the zip to <c>C:\PerformanceMonitorDarling</c>) inherits
+    /// binary, and the documented install (extract the zip to <c>C:\Program Files\PerformanceMonitorDarling</c>) inherits
     /// <c>BUILTIN\Users: Read &amp; Execute</c> from the root DACL. Any local unprivileged user could read it,
     /// decrypt every SQL password, and lift the tokens that unlock the MCP write surface.
     ///
@@ -2014,6 +2036,17 @@ public sealed class DarlingWorker : BackgroundService
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
            CollectSchemaChangeEvents is a file-only knob (darling.json), read the same way for symmetry —
            default true keeps every SKU collecting Object DDL; set false to silence a benchmark box's flood. */
+        /* #4004: the store's log-hash key, loaded ONCE here and shared by every run that hashes log text (pg_log_events
+           on the pg_read_file and RDS routes), so raw_line_hash and statement_fingerprint are keyed with a secret the
+           store never holds. Generated when none exists, and replaced only when its directory was found open to other
+           users, by whichever look found it so (role provisioning above, a host, or this load), which removes the key
+           there and then: null means the file could not be used, the reason is already logged, and those runs refuse
+           rather than hash without it. */
+        var logHashKeyLoad = DarlingLogHashKeyFile.LoadForService(config, DarlingConfig.ResolveConfigPath(), _logger);
+        var logHashKey = logHashKeyLoad.Key;
+        /* #4004 review, round 3: a key that replaced one the directory check discarded is noted on the collection-log
+           row of the first pg_log_events run after this, and only that run (RunOneAsync takes it). */
+        _logHashKeyRotation.Arm(DarlingLogHashKeyFile.RotationNote(logHashKeyLoad));
         var runner = new DarlingCollectorRunner(postgres, deltas, _logger, () => config.CapturePlans, () => config.CollectSchemaChangeEvents,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
             /* #2171: live provider like its siblings — a store reload flipping plan_xml_compression
@@ -2027,7 +2060,8 @@ public sealed class DarlingWorker : BackgroundService
             /* #3477: the per-collector database scope, resolved live against the SAME _scheduleOverrides
                the cadence gate reads — one source, so the scope a run collects under and the schedule it
                was dispatched under can never come from two different reloads. */
-            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides));
+            databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides),
+            logHashKey: logHashKey);
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -2527,40 +2561,13 @@ public sealed class DarlingWorker : BackgroundService
                     server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
             }
 
-            if (DateTime.UtcNow >= _nextPurgeUtc)
-            {
-                _nextPurgeUtc = DateTime.UtcNow.AddHours(24);
-                /* Honor fleet-wide retention overrides (config_collector_schedules, server_id NULL) layered
-                   on CollectorScheduleDefaults; a per-server override can't apply to a shared-table purge.
-                   Empty overrides (Stage 1 seeds none) resolve to the defaults — identical behavior. */
-                var overrides = _scheduleOverrides;
-                await DarlingRetention.PurgeAsync(
-                    postgres, _timescaleAvailable, _logger, stoppingToken,
-                    name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
-                    config.PlanContentRetentionDays);
-
-                /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
-                   app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
-                   service must actually invoke it or analysis_findings grows unbounded. Rides the
-                   daily purge; never throws (logs + degrades). The horizon is the shared base window
-                   rather than a literal of the same value, so findings stay worth exactly as long as
-                   the metric data they are correlated against instead of holding at 30 on their own
-                   if that window ever moves. */
-                await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(
-                    retentionDays: DarlingRetention.DataRetentionBaseDays);
-
-                /* #1652: sweep the service's own rolling log files. The provider swept only in its
-                   constructor, so a service up for months — the normal case — swept once at startup and
-                   never again while writing a file a day. Rides the daily purge like every other
-                   maintenance chore; static + best-effort, so the worker needs no reference to the
-                   provider the host owns and a locked file can never break the tick. */
-                DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
-
-                /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
-                   CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
-                await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
-                await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
-            }
+            /* #4130: fire-and-track, exactly like the per-server sweeps just above and the oversized-plan
+               backlog just below — see TryStartScheduledPurge's doc for why the inline await was the
+               defect. */
+            TryStartScheduledPurge(
+                DateTime.UtcNow,
+                token => RunScheduledPurgeAsync(postgres, config, token),
+                stoppingToken);
 
             /* #3392: drain the oversized-plan backlog. Its own low-frequency cadence off this loop, beside
                the purge, and deliberately NOT inside the per-server collector rotation: fetching a plan the
@@ -2826,6 +2833,10 @@ public sealed class DarlingWorker : BackgroundService
             if (DateTime.UtcNow >= _nextStoreMetricsUtc)
             {
                 _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);
+
+                /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
+                   same log-hash key the runner's log-event runs share. */
+                _pgDeadlockRemaskKey = runner.LogHashKey;
                 await SweepStoreSelfMetricsAsync(stoppingToken);
 
                 /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
@@ -2923,6 +2934,15 @@ public sealed class DarlingWorker : BackgroundService
             await Task.WhenAny(
                 Task.WhenAll(inFlightSweeps),
                 Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
+        }
+
+        /* #4130: drain the in-flight daily purge the same way as the per-server sweeps above, rather than
+           abandoning it mid-DELETE. RunTrackedAsync's own try/catch swallows the OperationCanceledException
+           that stoppingToken's cancellation raises inside PurgeAsync, so this await completes cleanly
+           without throwing — same shape as the sweeps' catch-all. */
+        if (_purgeTask is { IsCompleted: false })
+        {
+            await Task.WhenAny(_purgeTask, Task.Delay(s_shutdownDrainBudget, CancellationToken.None));
         }
 
         /* Drain the concurrent command loop on shutdown (it observes the same token). */
@@ -6971,6 +6991,49 @@ LIMIT 1";
                 }
             }
 
+            /* #4012: PostgreSQL deadlock reports stored before #4005 keep their SQL raw, with a hash over the raw
+               graph, for pg_deadlocks' 90 days, and a deadlock alert fired before it keeps the same in its history
+               row, and an analysis finding its exemplars. Every read normalizes them; a direct SELECT does not.
+               Page after page until the slice's own cap (#4012's review: a page an hour took about 11 days for the
+               reports alone), alerts, then reports, then findings, with the store-log slice's own-catch, own-cap
+               posture: neither a failure nor a slow slice may cost the collector-cost flush below. RunAsync ends
+               quietly on its cap and keeps each walk's cursor; a stage's own failures are counted and logged there.
+               Gated on Pending, not Done (#4036's round-2 review, finding 1): a stage that gave up counts as done,
+               and RunAsync is where it is tried again a day later, so it must still be called. */
+            if (_pgDeadlockRemask.Pending)
+            {
+                if (connection.State != ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(budget.Token);
+                }
+
+                /* #4012's review, finding 1: no key is no reason to skip the pass. The key file can be unusable for
+                   good (an untrusted directory or ACL, an unreadable file, DPAPI after the service moved machines),
+                   and the reports, alerts, findings and finding alerts need no key; only the alert-key stage waits
+                   for one, and RunAsync says so once. */
+                using var remaskBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                remaskBudget.CancelAfter(PgDeadlockRemask.SliceBudget);
+                try
+                {
+                    await PgDeadlockRemask.RunAsync(connection, _pgDeadlockRemask, _pgDeadlockRemaskKey, _logger, remaskBudget.Token);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    || (remaskBudget.IsCancellationRequested && !budget.IsCancellationRequested))
+                {
+                    _logger.LogWarning(
+                        "PostgreSQL deadlocks: re-masking alerts, reports and findings stored before this build failed, and is retried next hour: {Message}",
+                        ex.Message);
+                }
+            }
+
+            /* The flush runs on this same connection, which a canceled slice above can leave closed. */
+            if (connection.State != ConnectionState.Open)
+            {
+                await connection.CloseAsync();
+                await connection.OpenAsync(budget.Token);
+            }
+
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
             await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
@@ -7537,6 +7600,108 @@ LIMIT 1";
 
     /// <summary>A failure result_json body: <c>{ "success": false, "error": ... }</c>.</summary>
     private static string JsonError(string error) => JsonSerializer.Serialize(new { success = false, error });
+
+    /// <summary>
+    /// #4130: the launch-loop decision for the daily retention purge, extracted so it is testable without
+    /// driving the whole fleet loop. Fires and tracks <paramref name="startPurge"/> in <see cref="_purgeTask"/>
+    /// exactly like the per-server sweeps (<see cref="ServerLoopState.InFlightSweep"/>) and the oversized-plan
+    /// backlog (<see cref="_oversizedPlanSweep"/>) — never awaited here, so this returns immediately whether
+    /// or not it launched anything.
+    ///
+    /// <para>The purge was measured at 346-400s deleting ~839k rows. Awaited inline on this loop (the pre-4130
+    /// shape), that is 346-400s in which the loop launches NO server sweeps and the whole fleet reads
+    /// stale — the same shape as the oversized-plan backlog's own field incident, one maintenance step
+    /// over.</para>
+    ///
+    /// <para>Owns <c>_nextPurgeUtc</c>'s update too, rather than leaving it to the caller: on a launch it
+    /// advances the stamp by the full 24h cadence, and when the due time arrived but the previous purge is
+    /// still running it leaves the stamp untouched, so the next launch-loop tick tries again rather than
+    /// silently pushing the purge out by a whole day. A slow purge that overruns one 24h cycle simply gets
+    /// its next attempt on the very next tick once it completes, rather than piling up a second instance on
+    /// top of the first. Returns whether it launched.</para>
+    /// </summary>
+    internal bool TryStartScheduledPurge(
+        DateTime nowUtc, Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
+    {
+        if (nowUtc < _nextPurgeUtc)
+        {
+            return false;
+        }
+
+        if (_purgeTask is { IsCompleted: false })
+        {
+            _logger.LogInformation(
+                "daily retention purge was still running at its next scheduled time — skipping this launch; "
+                + "it will be retried on the next tick once the current run completes");
+            return false;
+        }
+
+        _nextPurgeUtc = nowUtc.AddHours(24);
+        _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
+        return true;
+    }
+
+    /// <summary>
+    /// Wraps a purge delegate so <see cref="_purgeTask"/> can never fault unobserved (the launch loop never
+    /// awaits it, so an unhandled fault here would otherwise surface only as an UnobservedTaskException at
+    /// GC time). <see cref="OperationCanceledException"/> is swallowed too — that is the normal shutdown-drain
+    /// outcome once <c>stoppingToken</c> is cancelled, not a failure to log as one.
+    /// </summary>
+    private async Task RunTrackedAsync(Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await startPurge(stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown drain. */
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "daily retention purge failed");
+        }
+    }
+
+    /// <summary>
+    /// The daily retention purge's actual work — <see cref="DarlingRetention.PurgeAsync"/>, then the AN3
+    /// findings cleanup, the #1652 log-file sweep, and the module-map refresh — moved out of the launch loop
+    /// body so <see cref="TryStartScheduledPurge"/> can fire-and-track it as one delegate. Order and behavior
+    /// are unchanged from the pre-4130 inline sequence.
+    /// </summary>
+    private async Task RunScheduledPurgeAsync(NpgsqlDataSource postgres, DarlingConfig config, CancellationToken stoppingToken)
+    {
+        /* Honor fleet-wide retention overrides (config_collector_schedules, server_id NULL) layered
+           on CollectorScheduleDefaults; a per-server override can't apply to a shared-table purge.
+           Empty overrides (Stage 1 seeds none) resolve to the defaults — identical behavior. */
+        var overrides = _scheduleOverrides;
+        await DarlingRetention.PurgeAsync(
+            postgres, _timescaleAvailable, _logger, stoppingToken,
+            name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
+            config.PlanContentRetentionDays);
+
+        /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
+           app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
+           service must actually invoke it or analysis_findings grows unbounded. Rides the
+           daily purge; never throws (logs + degrades). The horizon is the shared base window
+           rather than a literal of the same value, so findings stay worth exactly as long as
+           the metric data they are correlated against instead of holding at 30 on their own
+           if that window ever moves. */
+        await new PgFindingStore(postgres, _logger).CleanupOldFindingsAsync(
+            retentionDays: DarlingRetention.DataRetentionBaseDays);
+
+        /* #1652: sweep the service's own rolling log files. The provider swept only in its
+           constructor, so a service up for months — the normal case — swept once at startup and
+           never again while writing a file a day. Rides the daily purge like every other
+           maintenance chore; static + best-effort, so the worker needs no reference to the
+           provider the host owns and a locked file can never break the tick. */
+        DarlingFileLoggerProvider.SweepOldFiles(DarlingFileLoggerProvider.DefaultLogDirectory());
+
+        /* Keep the retained sql_handle->module map current (object_name attribution for old query_stats
+           CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
+        await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
+        await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+    }
 
     /// <summary>
     /// The <c>purge_now</c> command handler (the daily retention purge on demand): runs
@@ -9015,6 +9180,77 @@ LIMIT 1";
         }
     }
     /// <summary>
+    /// #4046 part 1c: the general handler's one call for a fault on a log-tail read (#4051 round-2 review). It
+    /// returns <see cref="LogTailUndecodableByteExplanation"/>'s sentence, or null, and it drops a stale
+    /// pg_read_binary_file verdict through <see cref="DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict"/>.
+    /// The sentence is built first, because it reads the verdict that the second step can drop. Nothing here
+    /// allocates on the way to null for a fault that is not a <see cref="PostgresException"/>, because the general
+    /// handler is also the OutOfMemoryException landing pad.
+    /// </summary>
+    internal static string? LogTailGeneralFault(Exception ex, string collectorName, ServerRuntime runtime)
+    {
+        var explanation = LogTailUndecodableByteExplanation(ex, collectorName, runtime);
+        DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+        return explanation;
+    }
+
+    /// <summary>
+    /// #4046 part 1c: the sentence for a log-tail read that PostgreSQL refused because of one byte, or null for
+    /// any other fault. <c>pg_read_file()</c> returns text, which PostgreSQL checks before this process sees a
+    /// byte. A failed login can plant a bad byte in the FATAL message's unescaped %u/%d echo, under any
+    /// log_line_prefix, and that byte fails the WHOLE tail read for as long as it sits inside the window. Every
+    /// reader sharing PgServerLogTail's tail CTE goes blind, not just the one that read this cycle.
+    ///
+    /// <para><b>Two sentences.</b> On a UTF8 or SQL_ASCII database the fault is a 22021, and the sentence names
+    /// the pg_read_binary_file grant that moves the reader to the byte route. On any other encoding the byte
+    /// route does not apply (<see cref="PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding"/>), and the
+    /// fault is a 22021 (EUC encodings) or a 22P05 (a WIN1252 byte with no UTF-8 equivalent). There the sentence
+    /// says that the grant does not help and names #4062 (#4051 round-2 review, L-1).</para>
+    ///
+    /// <para><b>ERROR, not PERMISSIONS (#4051 review M1).</b> The general handler records this under ERROR with
+    /// the sentence as its message, rather than PostgresFaultOutcome giving it a PERMISSIONS arm. Anyone who can
+    /// attempt a login can plant the byte, so the blinding has to count in error_count and the daily error
+    /// figures. A PERMISSIONS row drops out of both, and a reader an attacker blinds most of the week would
+    /// still band HEALTHY whenever one cycle got through.</para>
+    ///
+    /// <para>Null for a proven write to the STORE (#3111's rule, #4051 review L3): a 22021 the store's COPY
+    /// raises is not about the target's log. The checks run cheapest first and allocate nothing on the way to
+    /// null, because the general handler is also the OutOfMemoryException landing pad.</para>
+    /// </summary>
+    internal static string? LogTailUndecodableByteExplanation(Exception ex, string collectorName, ServerRuntime runtime)
+    {
+        if (ex is not PostgresException { SqlState: "22021" or "22P05" } pg
+            || !ReadsServerLogWithPgReadFile(collectorName)
+            || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
+        {
+            return null;
+        }
+
+        const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "
+            + "database name that the client sends lands unescaped in the FATAL message (#4046).";
+
+        if (pg.SqlState == "22P05" || PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(runtime.StorageName))
+        {
+            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte "
+                + "that this database's encoding cannot pass to this collector, so PostgreSQL refused the whole read."
+                + Planted
+                + " Granting pg_read_binary_file does not help on this database. The binary route decodes the log in "
+                + "the database's own server_encoding, but this collector does not map this database's encoding "
+                + "(EUC_TW, EUC_JIS_2004, LATIN6, LATIN8, LATIN10, MULE_INTERNAL, or one this runtime cannot resolve). "
+                + "The read fails until the line with the byte leaves the 4 MB tail window.";
+        }
+
+        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte that "
+            + "is not valid UTF-8, so PostgreSQL refused the whole read. pg_read_file() returns text, and PostgreSQL "
+            + "checks text before this collector sees a row, even when only one byte in the 4 MB window is bad."
+            + Planted
+            + " Grant EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint) to the monitoring role "
+            + WhereToGrantIt(CollectorFaultDatabase.For(ex, runtime.ConnectedDatabase))
+            + " From the next cycle, this collector reads the same bytes as bytea, which PostgreSQL does not check. "
+            + "An invalid byte then shows as U+FFFD instead of stopping the read.";
+    }
+
+    /// <summary>
     /// Maps a PostgreSQL fault to a collection_log status plus the sentence an operator needs.
     /// <para>PERMISSIONS is the non-fatal-degradation bucket for the cases whose absent thing the code
     /// cannot name — a denied grant, an undeclared missing object, a disabled feature — and the MESSAGE
@@ -9057,7 +9293,11 @@ LIMIT 1";
                 + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) — the "
                 + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
-                + WhereToGrantIt(connectedDatabase)),
+                + WhereToGrantIt(connectedDatabase)
+                + " While issuing that grant, also GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, "
+                + "bigint, bigint) to the same role (#4046): a byte that is not valid UTF-8 makes "
+                + "pg_read_file() fail the whole tail read, pg_read_binary_file() does not, and the "
+                + "collector switches to it on its own once it is granted."),
 
             CollectorTargetFault.Permissions => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}) — the monitoring login lacks a grant this "
@@ -9085,6 +9325,9 @@ LIMIT 1";
                     + "which is worth a look at that server's setting and what actually sits behind it. A "
                     + "server whose logging_collector is off does not land here — that is detected first "
                     + "and recorded as its own named state."),
+
+            /* #4046 part 1c: a 22021 on a log-tail reader has no arm here on purpose. It keeps ERROR, and the
+               general handler records it with LogTailUndecodableByteExplanation's sentence instead. */
 
             /* #3240: a missing source object on a collector that DECLARES its extension dependency
                (ICollectorSchemaInfo.RequiredPgExtensions, #3191) is not ambiguous — the absent thing is
@@ -9415,6 +9658,35 @@ LIMIT 1";
                 result = result with { HostNote = EnumeratedCollectorDriver.MergeNotes(result.HostNote, partialNote) };
             }
 
+            /* #4004 review, round 3: the first pg_log_events run after a start that replaced a discarded log-hash key
+               carries that on its row, through the same HostNote channel; taking it clears it, so no later run does. */
+            result = _logHashKeyRotation.ApplyTo(collectorName, result);
+
+            /* #4046: a log read that skipped lines stamped outside the target's UTC log_timezone carries their count;
+               this puts the sentence that names the setting and the issue beside it, on the same HostNote channel. */
+            result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);
+
+            /* #4058 L1: a plan-capture run that skipped forged captures (a NULL query id or duration out of
+               the guarded CASE chain) carries their count; this puts the sentence that names the issue
+               beside it, on the same HostNote channel, following the ForeignZoneLines pattern above. */
+            result = DarlingCollectorRunner.WithForgedCaptureNote(result);
+
+            /* #4058 item 1: a deadlock-capture run that skipped RAISE-shaped entries (not written by
+               PostgreSQL's own DeadLockReport) carries their count; this puts the sentence that names the
+               issue beside it, on the same HostNote channel, following the ForgedCapture pattern above. */
+            result = DarlingCollectorRunner.WithRaiseShapedDeadlocksSkippedNote(result);
+
+            /* #4046: the once-a-day nudge for a self-hosted target still on the text route, BEFORE it ever
+               hits the 22021 byte — gated to pg_log_events alone so a target with all three log-tail
+               collectors scheduled gets one note a day, not whichever of the three wins the 24-hour gate.
+               Never fires for Aurora/RDS: they reach the log through the AWS API and never populate
+               PgReadBinaryFileCapability's cache, so WithReadBinaryFileAdvisoryNote's cache read finds
+               nothing for them. */
+            if (string.Equals(collectorName, "pg_log_events", StringComparison.Ordinal))
+            {
+                result = DarlingCollectorRunner.WithReadBinaryFileAdvisoryNote(result, runtime);
+            }
+
             /* #3102: Debug, which is BELOW the default filter's Information, for the same reason the
                per-database fault split takes its arm's level — see LogPerDatabaseFaultSplit's remarks. A
                timing on the default log with no reason beside it is the shape to avoid, and a run that
@@ -9594,8 +9866,10 @@ LIMIT 1";
         }
         catch (PgLogTimezoneUnsupportedException ex)
         {
-            /* #2993: this target's log_timezone is not UTC, so the deadlock reports in its server log are
-               stamped in local time and occurred_at cannot be filled from them.
+            /* #2993: this target's log_timezone is not UTC, so the lines in its server log are stamped in
+               local time and cannot be stored against UTC. Both readers that assemble log entries through
+               PgLogEntryAssembler (pg_log_events and pg_deadlocks) land here, which is why the message names
+               the log, not deadlocks.
 
                PERMISSIONS for the same reason the PostgresException FeatureDisabled arm below is: none of
                the store's five statuses means "this target is configured in a way this source cannot be
@@ -9648,6 +9922,108 @@ LIMIT 1";
                marker row — the RDS transport runs no SQL and its platform keeps the logging collector on —
                so the elapsed time is a target query and belongs in sqlMs. */
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: logging_collector is off, so the target writes no server log files",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgNoStderrLogFileException ex)
+        {
+            /* #3997's narrower sibling to the arm above: logging_collector is ON, but log_destination
+               carries no stderr format, so the shared tail's newest CTE excluded every file it saw as a
+               csvlog/jsonlog sibling and there is nothing left for the pg_read_file route to read. Same
+               disposition as PgLoggingCollectorOffException and for the same reasons — a setting on the
+               monitored server, satisfiable and re-derived every cycle, not broken on the monitoring side,
+               and a SUCCESS row with zero rows would read as a target with nothing to report rather than
+               one this route cannot read at all. Same slot rule too: only the pg_read_file route produces
+               this marker, so the elapsed time is a target query and belongs in sqlMs. */
+
+            /* #4053 review L1: the cache said stderr-only, but no stderr-format file is left — the far more
+               likely explanation is csvlog/jsonlog was just added and the cache has not caught up, not that
+               log_destination emptied entirely. Drop the verdict so the next cycle re-probes instead of
+               reading no stderr file (and, on the csvlog route, no rows) for up to an hour.
+
+               #4053 review L1 (round 2): this marker is also thrown by pg_deadlocks and pg_plan_capture when
+               they read the stderr tail (csvlog off, or a jsonlog-only target, which they don't read yet).
+               Their no-stderr-file fault says nothing about a csvlog or jsonlog verdict, so it must not drop
+               one. Gate on RoutedCollectors, the same set the runner
+               keys the probe itself on, so only a collector this cache actually informs can invalidate it.
+
+               #4053 a2 review W1: and only when the cached verdict said stderr-only. A missing stderr file
+               contradicts that verdict and nothing else. On a jsonlog-only target the deadlock and plan
+               collectors (still stderr readers) hit this arm every cycle, and clearing a jsonlog verdict there
+               would re-probe the target on every routed run. */
+            var cacheKey = DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime);
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName)
+                && PgLogFormatCapability.CachedVerdictIsStderrOnly(cacheKey))
+            {
+                PgLogFormatCapability.Invalidate(cacheKey);
+            }
+
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: log_destination carries no stderr-format file for this target",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgNoCsvlogFileException ex)
+        {
+            /* #4053 part a1b's own narrow state: pg_log_events is on the csvlog route (log_destination
+               includes csvlog), logging_collector is on, but no .csv file has appeared under log_directory
+               yet — most likely csvlog was only just added to the destinations and the syslogger has not
+               rolled a file since the reload. Same disposition as PgNoStderrLogFileException and for the
+               same reasons: a setting on the monitored server, satisfiable and re-derived every cycle, not
+               broken on the monitoring side. Only the csvlog route produces this marker, so the elapsed
+               time is a target query and belongs in sqlMs. */
+
+            /* #4053 review L1: the cache said csvlog was one of the destinations, but no .csv file exists.
+               The most likely explanation once the syslogger has had time to roll a file is that csvlog was
+               REMOVED from log_destination since the cache checked — the exception's own message text
+               ("was only just added") is aimed at the fresher case, but this fault is exactly the evidence a
+               stale cache needs. Drop the verdict so the next cycle re-probes; a genuinely fresh csvlog
+               addition simply gets the same true verdict back next time.
+
+               #4053: every csvlog reader throws this marker (pg_log_events, pg_deadlocks and pg_plan_capture on
+               the self-hosted route; the RDS ingestors on a stale csv listing). The RoutedCollectors gate is
+               applied here too, for the same reason as the sibling arm above: one guard the cache trusts, not
+               two that must agree by accident. */
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+            {
+                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+            }
+
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no csvlog file has appeared for this target yet",
+                server.Config.DisplayName, collectorName);
+
+            await DarlingObservability.LogCollectionAsync(
+                _postgres!, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgNoJsonlogFileException ex)
+        {
+            /* #4053 part a2's own narrow state: pg_log_events is on the jsonlog route (log_destination
+               includes jsonlog), logging_collector is on, but no .json file has appeared under log_directory
+               yet — most likely jsonlog was only just added to the destinations and the syslogger has not
+               rolled a file since the reload. Same disposition as PgNoCsvlogFileException and
+               PgNoStderrLogFileException, and for the same reasons: a setting on the monitored server,
+               satisfiable and re-derived every cycle, not broken on the monitoring side. Only the jsonlog
+               route produces this marker, so the elapsed time is a target query and belongs in sqlMs. */
+
+            /* Same #4053 review L1 reasoning as the csvlog arm above: the cache said jsonlog was one of the
+               destinations, but no .json file exists — drop the verdict so the next cycle re-probes rather
+               than reading no rows for up to an hour, gated on RoutedCollectors so only a collector this
+               cache actually informs can invalidate it. */
+            if (PgLogFormatCapability.RoutedCollectors.Contains(collectorName))
+            {
+                PgLogFormatCapability.Invalidate(DarlingCollectorRunner.ReadBinaryFileCacheKey(runtime));
+            }
+
+            _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: no jsonlog file has appeared for this target yet",
                 server.Config.DisplayName, collectorName);
 
             await DarlingObservability.LogCollectionAsync(
@@ -9729,6 +10105,10 @@ LIMIT 1";
                GRANT, following the AzureDmvPermissionHint precedent: the status is the store's
                non-fatal-degradation bucket, the text is where the truth goes. */
             var (status, explanation) = (outcome.Status, outcome.Explanation);
+
+            /* #4051 review L1: a 42501 while the binary route is in use means that grant is gone, so the
+               cached verdict must not outlive it by up to an hour. */
+            DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
 
             if (status == "YIELDED")
             {
@@ -9860,6 +10240,10 @@ LIMIT 1";
                gets the very string it has now, with nothing allocated. That matters here specifically,
                because this arm is also the OutOfMemoryException landing pad. */
             var message = CollectorFaultCopyPhase.Describe(ex);
+
+            /* #4046 part 1c: a planted byte on a log-tail read keeps ERROR, with its own sentence, and drops a
+               stale pg_read_binary_file verdict so a grant made in answer takes effect next cycle. */
+            message = LogTailGeneralFault(ex, collectorName, runtime) ?? message;
 
             _logger.LogError("  [{Server}] {Collector} => ERROR: {Message}",
                 server.Config.DisplayName, collectorName, message);

@@ -3560,6 +3560,7 @@
             <Grid Margin="8">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <!-- Fleet-wide "Purge Now": runs the daily retention purge on demand via the purge_now
@@ -3572,7 +3573,23 @@
                     <TextBlock x:Name="PurgeNowIndicator" Text="" FontSize="12"
                                Foreground="DarkGoldenrod" FontWeight="SemiBold" VerticalAlignment="Center"/>
                 </StackPanel>
-                <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
+                <!-- #3691 part a2: the persisted analysis collection caveats (V141, part a1) — data
+                     families the scheduled analysis pass currently cannot read on this server, and why.
+                     Collapsed (Visibility=Collapsed, set in code-behind) when the list is empty, which is
+                     also what a pre-V141 store reads as (GetCollectionCaveatsAsync returns an empty list
+                     rather than throwing on the missing table). -->
+                <Expander x:Name="CollectionCaveatsExpander" Grid.Row="1" Header="Analysis could not read these data families"
+                          IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
+                    <DataGrid x:Name="CollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
+                            <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                            <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150"/>
+                            <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </Expander>
+                <TabControl Grid.Row="2" Background="Transparent" BorderThickness="0" ItemContainerStyle="{DynamicResource SubTabItemStyle}">
                     <TabItem Header="Health Summary">
                         <DataGrid x:Name="CollectionHealthGrid" Style="{StaticResource DarkGrid}"
                                   MouseDoubleClick="CollectionHealthGrid_MouseDoubleClick">
@@ -3794,8 +3811,25 @@
                     <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" x:Name="PgEngineBanner" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,4" TextWrapping="Wrap"/>
-                <TextBlock Grid.Row="1" x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
-                           Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                <StackPanel Grid.Row="1">
+                    <TextBlock x:Name="PgOverviewNote" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"
+                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                    <!-- #3691 part a2: the same persisted analysis collection caveats, on the PostgreSQL tab set.
+                         The Collection Health tab is SQL Server-only, and the PostgreSQL-target analysis engine
+                         is what writes most of these rows, so without this the section would never show for
+                         the servers it describes. Collapsed when the list is empty (a pre-V141 store too). -->
+                    <Expander x:Name="PgCollectionCaveatsExpander" Header="Analysis could not read these data families"
+                              IsExpanded="True" Margin="0,0,0,8" Visibility="Collapsed">
+                        <DataGrid x:Name="PgCollectionCaveatsGrid" Style="{StaticResource DarkGrid}" MaxHeight="160" Margin="0,4,0,0">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Family" Binding="{Binding Family}" Width="160"/>
+                                <DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="*"/>
+                                <DataGridTextColumn Header="Since" Binding="{Binding FirstSeenFormatted}" Width="150"/>
+                                <DataGridTextColumn Header="Last seen" Binding="{Binding LastSeenFormatted}" Width="150"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </Expander>
+                </StackPanel>
                 <DataGrid Grid.Row="2" x:Name="PgCollectorHealthGrid" Style="{StaticResource DarkGrid}"
                           HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" CanUserSortColumns="True">
                     <DataGrid.RowStyle>
@@ -4024,7 +4058,7 @@
                                     <DataGridTextColumn Header="Detail" Binding="{Binding Detail}" Width="220"/>
                                     <!-- The CONTEXT companion: for a lock wait, the tuple and relation. -->
                                     <DataGridTextColumn Header="Context" Binding="{Binding Context}" Width="200"/>
-                                    <DataGridTextColumn Header="Statement Fingerprint" Binding="{Binding StatementFingerprint}" Width="150"/>
+                                    <!-- No statement fingerprint column: no viewer returns any hash (#4004). -->
                                     <!-- Re-reads of the SAME line, not repeats - the deadlock grid's Sightings, same
                                          mechanism. -->
                                     <DataGridTextColumn Header="Sightings" Binding="{Binding TimesSeen}" Width="80"/>

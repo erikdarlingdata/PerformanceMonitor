@@ -30,20 +30,32 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// the two existing ingestors are untouched and this one arrives beside them.</para>
 ///
 /// <para><b>What it deliberately does NOT duplicate.</b> Assembly, classification, redaction and hashing
-/// are <see cref="PgLogEventClassifier.Default"/>, the same instance the <c>pg_read_file</c> route's
-/// <see cref="PgLogEventsCollector"/> calls; this type hands it the chunk's text and gets rows. The WRITE
+/// are <see cref="PgLogEventClassifier"/>'s, the same parsers the <c>pg_read_file</c> route's
+/// <see cref="PgLogEventsCollector"/> runs, keyed with the same store key (#4004); this type hands it the chunk's
+/// text and gets rows. The WRITE
 /// goes through <c>PgCollectorRowWriter</c> and the collector's own definition, so column order and the
 /// COPY command are the collector's. The marker moves after the write and nowhere else (#3008).</para>
 /// </summary>
 public sealed class RdsLogEventIngestor
 {
     private readonly NpgsqlDataSource _postgres;
+    private readonly PgLogEventClassifier _classifier;
     private readonly RdsLogSource _logs;
     private readonly ILogger? _logger;
 
-    public RdsLogEventIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null)
+    /// <summary>
+    /// The csvlog partial-record carry (#4053 part c1), extracted (#4053 part c2) into
+    /// <see cref="RdsCsvlogCarryBook"/> at its original behaviour — this ingestor's own book, never shared
+    /// with another, for the reason <see cref="RdsLogSource"/>'s own marker remark gives.
+    /// </summary>
+    private readonly RdsCsvlogCarryBook _csvCarry = new();
+
+    /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
+    /// runs carry, so the two transports store identical identities for identical text.</param>
+    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
         _logs = logs ?? new RdsLogSource();
         _logger = logger;
     }
@@ -54,17 +66,37 @@ public sealed class RdsLogEventIngestor
     /// <exception cref="PgLogTimezoneUnsupportedException">The log is stamped in a non-UTC zone (#2993).
     /// Propagated so the runner names the setting; the marker is not committed, so the window comes back
     /// once the setting is fixed.</exception>
+    /// <param name="pgLogUsesCsvlog">#4053 part c1: whether the target's <c>log_destination</c> includes
+    /// <c>csvlog</c>, read by the caller through <see cref="PgLogFormatCapability"/> on its own connection —
+    /// this ingestor reaches the log through the AWS API, not SQL, so it has no connection of its own to probe
+    /// with. True reads the newest <c>.csv</c> file through <see cref="PgServerLogCsvParser"/> instead of the
+    /// stderr file; false is today's stderr route, unchanged.</param>
     public async Task<RdsIngestOutcome> IngestAsync(
         int serverId,
         string storageName,
         string host,
+        bool logTimezoneIsUtc = false,
+        bool pgLogUsesCsvlog = false,
         CancellationToken cancellationToken = default)
     {
         RdsLogSource.LogChunk? chunk;
 
+        var kind = pgLogUsesCsvlog ? RdsLogSource.LogFileKind.Csv : RdsLogSource.LogFileKind.Stderr;
+
         try
         {
-            chunk = await _logs.ReadNewestAsync(host, cancellationToken);
+            chunk = await _logs.ReadNewestAsync(host, kind, cancellationToken);
+        }
+        catch (PgNoCsvlogFileException)
+        {
+            /* #4053 review round 1 (item 4): the stale-csv check inside NewestLogFileAsync throws this
+               directly — propagated UNWRAPPED, not folded into RdsLogUnavailableException below, so it
+               reaches DarlingWorker's own PgNoCsvlogFileException arm, the same arm the self-hosted
+               pg_read_file route's "no .csv file yet" fault reaches. That arm invalidates
+               PgLogFormatCapability's cached verdict for this server, which is exactly the fix a stale
+               "csvlog is on" cache needs: csvlog was turned off, the cache hasn't caught up, and the next
+               probe re-reads log_destination instead of this route reading a dead .csv listing forever. */
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -86,36 +118,87 @@ public sealed class RdsLogEventIngestor
             return RdsIngestOutcome.NotReached;
         }
 
-        var written = await StoreAsync(serverId, storageName, chunk.Value.Text, cancellationToken);
+        var (carry, carryKey, droppedByRotation, currentFileName) = pgLogUsesCsvlog
+            ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
+            : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008). Everything the chunk held is in the store or was
-           nothing to store; anything else threw out of StoreAsync and left the marker where it was. */
+        var (written, foreignZoneLines, csvRecordsDiscarded, nextCarry) = await StoreAsync(
+            serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
+            carry, chunk.Value.MoreAvailable, cancellationToken);
+
+        /* THE MARKER MOVES HERE AND NOWHERE ELSE (#3008), and the csvlog carry moves alongside it for the
+           same reason: DownloadDBLogFilePortion is consume-once, so a store failure must leave both the
+           marker AND the partial record exactly where they were, not just the marker. A process restart
+           between here and the next read loses at most the one record this carry holds. */
         _logs.CommitResume(chunk.Value.Resume);
 
-        return RdsIngestOutcome.Read(written);
+        /* #4053 review round 1 (item 3): the carry advances ONLY when the marker actually did —
+           CommitResume is a no-op on an empty/null marker (a replay), and gluing this portion's carry onto
+           itself in that case would apply the same bytes' tail twice. */
+        var resumeAdvanced = !string.IsNullOrEmpty(chunk.Value.Resume.Marker);
+
+        if (carryKey is not null && resumeAdvanced)
+        {
+            csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
+        }
+
+        return RdsIngestOutcome.Read(written, foreignZoneLines, csvRecordsDiscarded);
     }
 
-    private async Task<int> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
         int serverId,
         string storageName,
         string text,
+        bool logTimezoneIsUtc,
+        bool pgLogUsesCsvlog,
+        RdsCsvlogCarry.CsvCarry carry,
+        bool additionalDataPending,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(text))
-        {
-            return 0;
-        }
+        List<PgLogEvent> events;
+        int foreignZoneLines;
+        var csvRecordsDiscarded = 0;
+        var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
 
-        /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
-           about the target's configuration and has to reach the runner uncommitted (#3008). */
-        var events = PgLogEventClassifier.Default.Classify(text);
+        if (pgLogUsesCsvlog)
+        {
+            if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
+            {
+                return (0, 0, 0, carry);
+            }
+
+            var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
+            var entries = portion.Entries;
+            csvRecordsDiscarded = portion.RecordsDiscarded;
+            nextCarry = portion.Next;
+
+            /* The SAME foreign-zone rule the stderr path applies below, via PgLogEventClassifier's own
+               assembler-backed overload — restated here because the csv parser accepts every zone and leaves
+               the decision to this filter (its own #4053 fix), the same trade PgLogEventsCollector.ReadAsync's
+               csvlog arm makes on the self-hosted route. */
+            var kept = PgLogEventsCollector.FilterForeignZoneEntries(entries, logTimezoneIsUtc, out foreignZoneLines);
+            events = _classifier.Classify(kept);
+        }
+        else
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return (0, 0, 0, nextCarry);
+            }
+
+            /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
+               about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
+               logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
+               self-hosted route already makes. */
+            events = _classifier.Classify(text, logTimezoneIsUtc, out foreignZoneLines);
+        }
 
         if (events.Count == 0)
         {
-            return 0;
+            return (0, foreignZoneLines, csvRecordsDiscarded, nextCarry);
         }
 
-        return await WriteAsync(serverId, storageName, events, cancellationToken);
+        return (await WriteAsync(serverId, storageName, events, cancellationToken), foreignZoneLines, csvRecordsDiscarded, nextCarry);
     }
 
     /// <summary>

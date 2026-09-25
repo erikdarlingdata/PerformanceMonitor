@@ -54,13 +54,15 @@ public sealed class PgDeadlockLogParserTests
         Assert.Equal("transaction 808, transaction 809", deadlock.Resources);
 
         /* The victim's statement, not merely SOME statement: the report names both, and attributing the
-           wrong one to the cancelled session would point an investigation at the surviving query. */
-        Assert.StartsWith("BEGIN; UPDATE dl SET v=v+1 WHERE id=1;", deadlock.VictimStatement, StringComparison.Ordinal);
-
+           wrong one to the cancelled session would point an investigation at the surviving query. Normalized
+           (#4005), so the two read alike here and the attribution is pinned by pid. */
         var statements = PgDeadlockLogParser.ParseStatements(deadlock.GraphText);
         Assert.Equal(2, statements.Count);
-        Assert.Contains("WHERE id=1", statements[1549], StringComparison.Ordinal);
-        Assert.Contains("WHERE id=2", statements[1556], StringComparison.Ordinal);
+        Assert.Equal(statements[1549], deadlock.VictimStatement);
+        Assert.StartsWith("BEGIN; UPDATE dl SET v=v+? WHERE id=?;", deadlock.VictimStatement, StringComparison.Ordinal);
+        Assert.StartsWith("BEGIN; UPDATE dl SET v=v+? WHERE id=?;", statements[1556], StringComparison.Ordinal);
+        Assert.DoesNotContain("id=1", deadlock.GraphText, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_sleep(2)", deadlock.GraphText, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -153,11 +155,11 @@ public sealed class PgDeadlockLogParserTests
         Assert.Equal(2, deadlock.ParticipantCount);
         Assert.Equal("ShareLock", deadlock.LockModes);
 
-        /* The prefix is not part of the graph, so one report has one identity whichever prefix rendered
-           it, and the two transports' copies of it dedupe against each other. */
-        Assert.Equal(
-            Assert.Single(PgDeadlockLogParser.Extract(RealBlock)).DeadlockHash,
-            deadlock.DeadlockHash);
+        /* The prefix is not part of the graph. The identity covers the report's own timestamp as well since
+           #4005, because normalizing the queries can make two different reports' graphs alike; a report is
+           written once, under one prefix, so every sighting of it carries the same stamp. */
+        Assert.Equal(Assert.Single(PgDeadlockLogParser.Extract(RealBlock)).GraphText, deadlock.GraphText);
+        Assert.Equal(PgDeadlockLogParser.IdentityOf(deadlock.OccurredAtUtc, deadlock.GraphText), deadlock.DeadlockHash);
     }
 
     /// <summary>
@@ -324,8 +326,185 @@ public sealed class PgDeadlockLogParserTests
 
         var deadlock = Assert.Single(PgDeadlockLogParser.Extract(multiline));
 
-        Assert.Contains("SET status = 'shipped'", deadlock.VictimStatement, StringComparison.Ordinal);
-        Assert.Contains("WHERE id = 1;", deadlock.VictimStatement, StringComparison.Ordinal);
+        /* Whole, and normalized (#4005): the lexer reads the statement across its lines and writes it on one. */
+        Assert.Contains("SET status = '?'", deadlock.VictimStatement, StringComparison.Ordinal);
+        Assert.Contains("WHERE id = ?;", deadlock.VictimStatement, StringComparison.Ordinal);
+        Assert.DoesNotContain("shipped", deadlock.GraphText, StringComparison.Ordinal);
+    }
+
+    /* The report shape DeadLockReport writes, with values in both queries: a string, a number, and a value
+       quoted inside a comment-free literal that holds a quote of its own. */
+    private const string ReportWithLiterals =
+        "2026-08-26 22:25:24.100 UTC [1549] ERROR:  deadlock detected\n"
+        + "2026-08-26 22:25:24.100 UTC [1549] DETAIL:  Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
+        + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
+        + "\tProcess 1549: UPDATE accounts SET pin = '4721', note = 'o''brien' WHERE card = 4111111111111111\n"
+        + "\tProcess 1556: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559\n"
+        + "2026-08-26 22:25:24.100 UTC [1549] HINT:  See server log for query details.\n"
+        + "2026-08-26 22:25:24.100 UTC [1549] STATEMENT:  UPDATE accounts SET pin = '4721', note = 'o''brien' WHERE card = 4111111111111111\n";
+
+    /// <summary>
+    /// #4005: every query in a report is normalized before it is stored, the victim's included, by the lexer
+    /// #3944 ruled every stored statement goes through. Before, the graph and the victim statement were the
+    /// DETAIL verbatim, so the PIN and the card numbers of both sessions reached the store, its readers and the
+    /// deadlock alert. The wait-for lines are prose and stay as written: they are the graph.
+    /// </summary>
+    [Fact]
+    public void NormalizesTheLiteralsInBothQueries_AndKeepsTheWaitForLinesAsWritten()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportWithLiterals));
+
+        foreach (var value in new[] { "4721", "9034", "brien", "4111111111111111", "5500005555555559" })
+        {
+            Assert.DoesNotContain(value, deadlock.GraphText, StringComparison.Ordinal);
+            Assert.DoesNotContain(value, deadlock.VictimStatement, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(
+            "Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
+            + "Process 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
+            + "Process 1549: UPDATE accounts SET pin = '?', note = '?' WHERE card = ?\n"
+            + "Process 1556: UPDATE accounts SET pin = '?' WHERE card = ?",
+            deadlock.GraphText);
+        Assert.Equal("UPDATE accounts SET pin = '?', note = '?' WHERE card = ?", deadlock.VictimStatement);
+        Assert.Equal(2, deadlock.ParticipantCount);
+        Assert.Equal("transaction 808, transaction 809", deadlock.Resources);
+
+        /* Idempotent: what the collector stores reads back unchanged, which is what lets every read normalize
+           a stored row without knowing which build wrote it. */
+        Assert.Equal(deadlock.GraphText, PgDeadlockLogParser.NormalizeGraph(deadlock.GraphText));
+        Assert.Equal(deadlock.VictimStatement, PgDeadlockLogParser.NormalizeStatement(deadlock.VictimStatement));
+
+        /* The identity is over what a reader of the row sees, never over the raw report (#4004's oracle). */
+        Assert.Equal(PgDeadlockLogParser.IdentityOf(deadlock.OccurredAtUtc, deadlock.GraphText), deadlock.DeadlockHash);
+    }
+
+    /// <summary>
+    /// #4005: PostgreSQL cuts each query at <c>track_activity_query_size</c>, and a cut inside a literal leaves
+    /// text no mask can be trusted to have covered, so that query is withheld whole. The HINT DeadLockReport
+    /// always writes after the DETAIL is the proof the report arrived whole (#3996's <c>DetailComplete</c>), so
+    /// the query after the cut one is still read from its own head. A report cut before its HINT, as an RDS
+    /// chunk boundary leaves it, carries no such proof, and every query after the cut one is withheld too.
+    /// </summary>
+    [Fact]
+    public void AQueryCutMidLiteral_IsWithheld_AndOnlyTheHintLetsTheNextOneBeRead()
+    {
+        var cut =
+            "2026-08-26 22:25:24.100 UTC [1549] ERROR:  deadlock detected\n"
+            + "2026-08-26 22:25:24.100 UTC [1549] DETAIL:  Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
+            + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
+            + "\tProcess 1549: UPDATE accounts SET note = 'card 4111 1111 1111 1111 exp 09/2\n"
+            + "\tProcess 1556: UPDATE accounts SET pin = '9034' WHERE card = 5500005555555559\n";
+        const string hint = "2026-08-26 22:25:24.100 UTC [1549] HINT:  See server log for query details.\n";
+
+        var whole = Assert.Single(PgDeadlockLogParser.Extract(cut + hint));
+        Assert.Equal(PgLogTextRedactor.WithheldStatement, whole.VictimStatement);
+        Assert.Contains("Process 1549: " + PgLogTextRedactor.WithheldStatement, whole.GraphText, StringComparison.Ordinal);
+        Assert.Contains("Process 1556: UPDATE accounts SET pin = '?' WHERE card = ?", whole.GraphText, StringComparison.Ordinal);
+
+        var unproven = Assert.Single(PgDeadlockLogParser.Extract(cut));
+        Assert.Contains("Process 1556: " + PgLogTextRedactor.WithheldStatement, unproven.GraphText, StringComparison.Ordinal);
+
+        foreach (var deadlock in new[] { whole, unproven })
+        {
+            Assert.DoesNotContain("4111", deadlock.GraphText, StringComparison.Ordinal);
+            Assert.DoesNotContain("9034", deadlock.GraphText, StringComparison.Ordinal);
+            Assert.Equal(2, deadlock.ParticipantCount);
+        }
+    }
+
+    /// <summary>
+    /// #4005: a statement's literal holding a report's words is not a report. The block pattern found
+    /// <c>ERROR:  deadlock detected</c> and <c>DETAIL:  </c> anywhere on their lines, so a logged statement
+    /// carrying them stored a deadlock that never happened, and under a translated <c>lc_messages</c>, where the
+    /// real report's label does not match, that is the only thing that could. The label is now the line's own,
+    /// read by the assembler #3996 hardened for the same hole.
+    /// </summary>
+    [Fact]
+    public void AStatementLiteralHoldingAReport_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-08-26 22:25:24.100 UTC [1600] LOG:  statement: SELECT 'x ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"
+            + "\tProcess 2 waits for ShareLock on transaction 6; blocked by process 1.\n"
+            + "\t'\n"
+            + "2026-08-26 22:25:24.200 UTC [1601] FEHLER:  Verklemmung entdeckt: SELECT 'ERROR:  deadlock detected\n"
+            + "2026-08-26 22:25:24.200 UTC [1601] DETAIL:  Process 3 waits for ShareLock on transaction 7; blocked by process 4.\n"
+            + "\tProcess 4 waits for ShareLock on transaction 8; blocked by process 3.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+
+        /* And a real report right after one still reads: the candidate before it never takes its first line. */
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(forged + ReportWithLiterals));
+        Assert.Equal(1549, deadlock.VictimPid);
+    }
+
+    /// <summary>
+    /// #4014's shape: a backend's own STATEMENT companion whose SQL comment echoes a report's header, with the
+    /// DETAIL arriving as the statement's tab-indented continuation. The pid bracket on that line is real, so
+    /// a gap that may cross a field label reaches the echoed header directly.
+    /// </summary>
+    [Fact]
+    public void AStatementCompanionEchoingAReport_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-09-23 10:00:02.000 UTC [7777] STATEMENT:  SELECT 1 -- ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 1 waits for ShareLock on transaction 5; blocked by process 2.\n"
+            + "\tProcess 2 waits for ShareLock on transaction 6; blocked by process 1.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+        Assert.Equal(1549, Assert.Single(PgDeadlockLogParser.Extract(forged + ReportWithLiterals)).VictimPid);
+    }
+
+    /// <summary>
+    /// #4014, the managed prefix: a lazy gap before the pid bracket could backtrack past the line's real
+    /// bracket to a forged one later in the statement. The gap excludes '[' now, as plan capture's does (#4008).
+    /// </summary>
+    [Fact]
+    public void AForgedHeaderBehindARealColonPrefixedBracket_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-08-25 14:50:05 UTC:192.0.2.10(52345):app_user@app_db:[58]:STATEMENT:  SELECT 1 -- [1] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 11 waits for ShareLock on transaction 5; blocked by process 12.\n"
+            + "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+    }
+
+    /// <summary>
+    /// #4041: <c>'%m %u@%d [%p] '</c> puts fields between the zone and the pid. Both the pattern and the assembler
+    /// behind it wanted the bracket right after the zone, so every report under that prefix was dropped and the
+    /// server read as having no deadlocks.
+    /// </summary>
+    [Fact]
+    public void AReportUnderACustomPrefixWithFieldsBeforeThePid_StillReads()
+    {
+        var deadlock = Assert.Single(PgDeadlockLogParser.Extract(ReportUnder("2026-08-26 22:25:24.100 UTC app_user@app_db [1549] ")));
+
+        Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, 100, DateTimeKind.Utc), deadlock.OccurredAtUtc);
+        Assert.Equal(1549, deadlock.VictimPid);
+        Assert.Equal(2, deadlock.ParticipantCount);
+        Assert.Equal(Assert.Single(PgDeadlockLogParser.Extract(RealBlock)).GraphText, deadlock.GraphText);
+    }
+
+    /// <summary>
+    /// #4041, the forgeries the widened space family must still refuse: a header behind the line's real bracket
+    /// (the gap stops at the first bracket), and one on a line with no bracket before its label (the gap cannot
+    /// cross a field label). A real report after them still reads.
+    /// </summary>
+    [Fact]
+    public void AForgedHeaderUnderACustomPrefix_IsNotReadAsOne()
+    {
+        var forged =
+            "2026-08-25 14:50:05.000 UTC app_user@app_db [58] STATEMENT:  SELECT 1 -- [1] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 11 waits for ShareLock on transaction 5; blocked by process 12.\n"
+            + "\tProcess 12 waits for ShareLock on transaction 6; blocked by process 11.\n"
+            + "2026-08-25 14:50:05.000 UTC app_user@app_db LOG:  statement: SELECT 'x [2] ERROR:  deadlock detected\n"
+            + "\tDETAIL:  Process 21 waits for ShareLock on transaction 7; blocked by process 22.\n"
+            + "\tProcess 22 waits for ShareLock on transaction 8; blocked by process 21.\n";
+
+        Assert.Empty(PgDeadlockLogParser.Extract(forged));
+        Assert.Equal(1549, Assert.Single(PgDeadlockLogParser.Extract(forged + ReportUnder("2026-08-26 22:25:24.100 UTC app_user@app_db [1549] "))).VictimPid);
     }
 
     /// <summary>
@@ -447,7 +626,7 @@ public sealed class PgDeadlockLogParserTests
     ///
     /// <para>Cut immediately after the first wait edge, which is where a boundary lands most cheaply — the
     /// line is complete and newline-terminated, so the pattern's <c>(?:\t[^\n]*\n)*</c> continuation
-    /// group is satisfied by taking none of them. The block MATCHES, <c>FromBlock</c> finds an edge, and a
+    /// group is satisfied by taking none of them. The block MATCHES, <c>FromReport</c> finds an edge, and a
     /// row lands naming one of the two locked resources and neither participant's SQL. Absence would at
     /// least be absence; this is a stored deadlock that is quietly smaller than the one that happened.</para>
     ///
@@ -555,8 +734,10 @@ public sealed class PgDeadlockLogParserTests
         Assert.Contains("EST", ex.Message, StringComparison.Ordinal);
 
         /* The sentence that stops the row being read as an empty log. A refusal whose message does not say
-           so is the same silent nothing one layer over. */
-        Assert.Contains("NOT 'no deadlocks were detected'", ex.Message, StringComparison.Ordinal);
+           so is the same silent nothing one layer over. It names the log, not deadlocks: pg_log_events
+           throws this same message through PgLogEntryAssembler. */
+        Assert.Contains("this is NOT an empty log", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("deadlock", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -629,26 +810,18 @@ public sealed class PgDeadlockLogParserTests
         => Assert.Equal(expected, PgDeadlockLogParser.IsZeroOffsetLogZone(zone));
 
     /// <summary>
-    /// The WIRING, not the pattern: the collector's four result columns reach the parser in the right
-    /// order, driven through the real <c>ReadAsync</c>.
+    /// The WIRING, not the pattern: the collector's result column reaches the parser, driven through the real
+    /// <c>ReadAsync</c>.
     ///
-    /// <para>An <c>Assert.Contains</c> on the query text cannot see this. The zone arrived as a new column
-    /// in the middle of the list, so a mis-ordinal would hand the parser the zone where it expects the
-    /// victim pid — which parses as nothing, returns null, and drops every deadlock silently. This is the
-    /// one seam where that is possible.</para>
+    /// <para>An <c>Assert.Contains</c> on the query text cannot see this. Before #4005 the query returned the
+    /// stamp, zone, pid and DETAIL as four columns, and a mis-ordinal would hand the parser the zone where it
+    /// expects the victim pid — which parses as nothing, returns null, and drops every deadlock silently. It
+    /// returns each candidate report's text whole now, and this is the seam where it reaches the parser.</para>
     /// </summary>
     [Fact]
-    public async Task TheCollectorHandsTheParserItsFourColumnsInOrder()
+    public async Task TheCollectorHandsTheParserTheCandidateReport()
     {
-        var reader = new FakeCollectorDataReader(
-            new object[]
-            {
-                "2026-08-26 22:25:24.100",
-                "UTC",
-                "1549",
-                "Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
-                + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n",
-            });
+        var reader = new FakeCollectorDataReader(new object[] { RealBlock });
 
         var rows = await PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
@@ -656,24 +829,21 @@ public sealed class PgDeadlockLogParserTests
         Assert.Equal(1549, row.VictimPid);
         Assert.Equal(2, row.ParticipantCount);
         Assert.Equal(new DateTime(2026, 8, 26, 22, 25, 24, 100, DateTimeKind.Utc), row.OccurredAtUtc);
+
+        /* What the collector writes is the normalized report (#4005): no literal reaches the store. */
+        Assert.StartsWith("BEGIN; UPDATE dl SET v=v+? WHERE id=?;", row.VictimStatement, StringComparison.Ordinal);
+        Assert.DoesNotContain("id=1", row.GraphText, StringComparison.Ordinal);
+        Assert.Equal(PgDeadlockLogParser.IdentityOf(row.OccurredAtUtc, row.GraphText), row.DeadlockHash);
     }
 
     /// <summary>
-    /// And the same seam refuses: the zone column is READ rather than carried past, so a non-UTC target
+    /// And the same seam refuses: the prefix zone is READ rather than carried past, so a non-UTC target
     /// gets a classified refusal out of the collector instead of rows stamped in local time.
     /// </summary>
     [Fact]
     public async Task TheCollectorRefusesWhenItsZoneColumnIsNotUtc()
     {
-        var reader = new FakeCollectorDataReader(
-            new object[]
-            {
-                "2026-08-26 22:25:24.100",
-                "EST",
-                "1549",
-                "Process 1549 waits for ShareLock on transaction 809; blocked by process 1556.\n"
-                + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n",
-            });
+        var reader = new FakeCollectorDataReader(new object[] { WithLogZone("EST") });
 
         var ex = await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
             async () => await PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None));
@@ -710,6 +880,69 @@ public sealed class PgDeadlockLogParserTests
             () => PgDeadlockLogParser.Extract(straddled));
 
         Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    /* #4046: the same straddle, read by a caller that knows the target's log_timezone renders UTC. The block in
+       another zone cannot be the server's own, so it is skipped and its three prefix lines counted, and the
+       readable report is stored instead of the whole read being refused. */
+    [Fact]
+    public async Task UnderAUtcLogTimezone_AnotherZonesReportIsSkippedAndCounted_AndTheReadGoesOn()
+    {
+        var foreign = RealBlock.Replace(" UTC [", " EST [", StringComparison.Ordinal)
+                               .Replace("1549", "1827", StringComparison.Ordinal)
+                               .Replace("1556", "1830", StringComparison.Ordinal);
+
+        Assert.Null(PgDeadlockLogParser.FromReport(foreign, logTimezoneIsUtc: true, out var skipped));
+        Assert.Equal(3, skipped);
+
+        var context = MakeContext();
+        var reader = new FakeCollectorDataReader(
+            new object[] { RealBlock, "UTC" },
+            new object[] { foreign, "Etc/UTC" });
+
+        var rows = await PgDeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(1549, row.VictimPid);
+        var measured = Assert.Single(context.Measurements);
+        Assert.Equal(PgServerLogTail.ForeignZoneLinesMeasurement, measured.Label);
+        Assert.Equal(3, measured.Value);
+    }
+
+    /* #4046's other half: a target whose log_timezone is not UTC, or a row with no setting, is refused exactly
+       as before. Europe/London is the case a current-offset rule would get wrong: GMT all winter, BST all summer. */
+    [Theory]
+    [InlineData("America/New_York")]
+    [InlineData("Europe/London")]
+    [InlineData(null)]
+    public async Task UnderAnyOtherLogTimezone_AnotherZoneStillRefusesTheRead(string? setting)
+    {
+        var reader = new FakeCollectorDataReader(
+            new object[] { RealBlock, "UTC" },
+            new object[] { WithLogZone("EST"), (object?)setting ?? DBNull.Value });
+
+        var ex = await Assert.ThrowsAsync<PgLogTimezoneUnsupportedException>(
+            async () => await PgDeadlocksCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None));
+
+        Assert.Equal("EST", ex.ObservedZone);
+    }
+
+    [Theory]
+    [InlineData("UTC", true)]
+    [InlineData("Etc/UTC", true)]
+    [InlineData("utc", true)]
+    [InlineData(" GMT ", true)]
+    [InlineData("Etc/Greenwich", true)]
+    [InlineData("Zulu", true)]
+    [InlineData("Europe/London", false)]
+    [InlineData("Africa/Abidjan", false)]
+    [InlineData("UTC0", false)]
+    [InlineData("localtime", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsUtcLogTimezoneSetting_IsAnAllowlistOfZeroOffsetZones(string? setting, bool expected)
+    {
+        Assert.Equal(expected, PgDeadlockLogParser.IsUtcLogTimezoneSetting(setting));
     }
 
     /* The fixture's own positive control: without it a straddled slab that had somehow stopped holding
