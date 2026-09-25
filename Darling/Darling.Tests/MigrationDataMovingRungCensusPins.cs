@@ -148,6 +148,22 @@ public sealed class MigrationDataMovingRungCensusPins
             + "a DEFAULT, so each is a catalog-only entry that rewrites no row, on a compressed hypertable "
             + "(query_store_health) and two plain tables alike; and the CREATE OR REPLACE VIEW is a catalog "
             + "write over no rows"),
+        new(
+            142,
+            SetsTheFloor: false,
+            "CREATE INDEX (server_id, collection_time DESC) over the populated collect.index_object_stats "
+            + "hypertable (#4196) - V104's shape (index-only rung over a real collected series) rather than "
+            + "V113's (a small bounded control table), but costed rather than assumed like V113 was: measured "
+            + "on a rig seeded at real fleet-daily scale (43 servers, ~12,000 rows each in the busiest chunk, "
+            + "matching the issue's own measured rows/server/day), the build took 228 ms end to end across "
+            + "three chunks, one compressed. index_object_stats is the DAILY object-stats collector - "
+            + "roughly half a million rows/day fleet-wide per the issue's own measurement, against "
+            + "pg_deadlocks' event-driven-but-unbounded series - and CompressAfterDays leaves only about one "
+            + "day's chunk uncompressed at migration time, with every older chunk's decompressed relation an "
+            + "empty shell (a compressed chunk's CREATE INDEX cost is one 8 KB page, not the rows inside it - "
+            + "PgTableTuning's ForcePlanFailuresIndexName finding measured the same property). A store many "
+            + "times today's size would still build in low seconds, nowhere near a MigrationCommandTimeoutSeconds "
+            + "window, so this rung does not move the multiple"),
     ];
 
     /// <summary>

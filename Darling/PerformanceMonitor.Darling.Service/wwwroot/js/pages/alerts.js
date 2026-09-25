@@ -13,6 +13,12 @@
  * the expanders included (B2): the channel / sent / muted / delivery-error columns collapse into one compact
  * Status column, and the Detail column shows a truncated one-liner that expands to the full payload (structured
  * "Story:/Severity:/Confidence:" findings render as labeled fields).
+ *
+ * #4194: the Detail expansion is built lazily, on first open (detailCell/detailBody), not up front for all 200
+ * rows. The 60s poll (app.js's refresh loop calls renderAlerts(main) again, not a diff of its own) reconciles
+ * the existing table by row key instead of rebuilding it (renderAlerts/refreshAlerts/drawAlerts/reconcileRows) -
+ * the header and filter box also survive a poll tick untouched, so typing in the filter is no longer clobbered
+ * every 60s. Sort order, filters and every rendered field are unchanged.
  */
 
 import { el, mount, readTool, buildQuery, loadingStrip, errorStrip, emptyStrip, disclosure,
@@ -116,11 +122,34 @@ function statusCell(a) {
 /* The Detail cell (B2): a truncated one-liner that expands to the full payload. Structured finding detail_text
  * (indented "Story:/Severity:/Confidence:/..." lines) renders as labeled fields; anything else renders as a
  * plain text block. A delivery error is appended as its own labeled field so it is fully readable in the
- * expansion, not merely a hover title on the status glyph. */
+ * expansion, not merely a hover title on the status glyph.
+ *
+ * #4194: the expansion used to be built for all 200 rows up front, even though it sits behind a collapsed
+ * <details> almost nobody opens - parseDetailFields() plus one DOM row per parsed field, times 200, was most
+ * of the page's ~19,500 DOM nodes. It is now built once, on first open (the native "toggle" event, which fires
+ * on both open and close - `built` skips the close firing and any open after the first). The placeholder is a
+ * bare, unstyled div so the eventual body's markup - div.detail-fields, div.detail-fields.detail-error - lands
+ * exactly as it did before this change; only the disc-body -> placeholder -> body nesting is one level deeper. */
 function detailCell(a) {
   const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   if (!hasDetail && !a.send_error) return el("span", { class: "muted", text: "—" });
 
+  const summary = hasDetail ? a.detail_text : "Delivery error: " + a.send_error;
+  const placeholder = el("div", {});
+  const node = disclosure(summary, placeholder, { max: 120 });
+
+  let built = false;
+  node.addEventListener("toggle", () => {
+    if (built || !node.open) return;
+    built = true;
+    mount(placeholder, detailBody(a));
+  });
+  return node;
+}
+
+/* The expansion body: unchanged shape from the pre-#4194 eager version (see detailCell above), just built lazily. */
+function detailBody(a) {
+  const hasDetail = a.detail_text != null && String(a.detail_text).trim().length > 0;
   const fields = hasDetail ? parseDetailFields(a.detail_text) : null;
   const body = [];
   if (fields) {
@@ -131,9 +160,7 @@ function detailCell(a) {
   if (a.send_error) {
     body.push(el("div", { class: "detail-fields detail-error" }, [fieldRow(["Delivery error", a.send_error])]));
   }
-
-  const summary = hasDetail ? a.detail_text : "Delivery error: " + a.send_error;
-  return disclosure(summary, body, { max: 120 });
+  return body;
 }
 
 function fieldRow([k, v]) {
@@ -167,7 +194,62 @@ function parseDetailFields(text) {
   return matched >= 2 ? fields : null;
 }
 
+/* A row's identity for the #4194 keyed refresh: the same (server, metric, fired instant) triple triageCell()
+ * above already treats as identifying one alert - there is no surrogate id in get_alert_history's payload. */
+function alertKey(a) {
+  return a.server_name + "\u0000" + a.metric_name + "\u0000" + a.alert_time;
+}
+
+/* Builds ONE <tr>, styled identically to VIZ.table's own row (same columns, same cell()), by handing it a
+ * single-row page and lifting the <tr> back out - reuses the shared renderer's formatting/severity classes
+ * without duplicating them, and without vizTable itself having to know about incremental refresh. */
+function alertRowNode(row) {
+  const wrap = VIZ.table({ alerts: [row] }, { rowsKey: "alerts", columns: ALERT_COLUMNS });
+  return wrap.querySelector("tbody tr");
+}
+
+/* #4194: app.js's route() calls renderAlerts(main) fresh on every 60s poll tick as well as on first navigation
+ * (see app.js's refresh loop). Reconciles the existing <tbody> to the new row set by key instead of tearing
+ * down and rebuilding every row: unchanged rows keep their DOM node, only added/removed rows touch the DOM.
+ * Order follows `rows` (already alert_time_desc from the read), so a row that moves position - it cannot,
+ * since alert_time is immutable once written, but this stays correct if that ever changes - would still land
+ * in the right place. */
+function reconcileRows(tbody, rows, rowMap) {
+  const nextKeys = new Set(rows.map(alertKey));
+  for (const [key, tr] of rowMap) {
+    if (!nextKeys.has(key)) {
+      tr.remove();
+      rowMap.delete(key);
+    }
+  }
+  let anchor = tbody.firstChild;
+  for (const row of rows) {
+    const key = alertKey(row);
+    let tr = rowMap.get(key);
+    if (!tr) {
+      tr = alertRowNode(row);
+      rowMap.set(key, tr);
+    }
+    if (tr === anchor) {
+      anchor = anchor.nextSibling;
+    } else {
+      tbody.insertBefore(tr, anchor);
+    }
+  }
+}
+
+/* Remembers the last mount so a poll tick landing on the SAME still-open page can reconcile in place instead of
+ * rebuilding (module-level: renderAlerts gets no state of its own from app.js's route(), which just calls it
+ * again). `headEl.isConnected` tells a poll tick apart from a fresh navigation: mount() on any OTHER page
+ * detaches this page's headEl from the document, so a stale `live` falls through to a full rebuild below. */
+let live = null;
+
 export async function renderAlerts(main) {
+  if (live && live.main === main && live.headEl.isConnected) {
+    await refreshAlerts(live);
+    return;
+  }
+
   const filter = el("input", {
     class: "filter-box",
     type: "text",
@@ -176,33 +258,62 @@ export async function renderAlerts(main) {
   });
 
   const tableBox = el("div", {});
-  mount(main, [
-    el("div", { class: "page-head" }, [
-      el("h2", { text: "Alert History" }),
-      el("div", { class: "meta", text: "fleet-wide · last 24h" }),
-      el("div", { class: "spacer" }),
-      filter,
-    ]),
-    tableBox,
+  const headEl = el("div", { class: "page-head" }, [
+    el("h2", { text: "Alert History" }),
+    el("div", { class: "meta", text: "fleet-wide · last 24h" }),
+    el("div", { class: "spacer" }),
+    filter,
   ]);
+  mount(main, [headEl, tableBox]);
 
   mount(tableBox, loadingStrip("Loading alerts…"));
   const res = await readTool("get_alert_history", { hours_back: 24, limit: 200 });
   if (res.kind === "error") return mount(tableBox, errorStrip(res.message));
   if (res.kind === "empty") return mount(tableBox, emptyStrip(res.message));
 
-  const alerts = res.data.alerts || [];
+  live = { main, headEl, tableBox, filter, alerts: res.data.alerts || [], tbody: null, rowMap: null };
+  filter.addEventListener("input", () => drawAlerts(live));
+  drawAlerts(live);
+}
 
-  const draw = () => {
-    const q = filter.value.trim().toLowerCase();
-    const rows = q ? alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : alerts;
-    if (!rows.length) {
-      mount(tableBox, emptyStrip(q ? 'No alerts match "' + filter.value + '".' : "No alerts in this window."));
-      return;
-    }
-    mount(tableBox, VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: ALERT_COLUMNS }));
-  };
+/* A background poll tick: re-fetch, then hand the new alerts to drawAlerts() to reconcile in place. Unlike the
+ * first mount, this never shows the loading strip - the previous table stays exactly as it is until the new
+ * page is ready, so a healthy 60s tick with no new alert produces no visible change and no DOM churn at all. */
+async function refreshAlerts(state) {
+  const res = await readTool("get_alert_history", { hours_back: 24, limit: 200 });
+  if (res.kind === "error" || res.kind === "empty") {
+    state.tbody = null;
+    state.rowMap = null;
+    mount(state.tableBox, res.kind === "error" ? errorStrip(res.message) : emptyStrip(res.message));
+    return;
+  }
+  state.alerts = res.data.alerts || [];
+  drawAlerts(state);
+}
 
-  filter.addEventListener("input", draw);
-  draw();
+/* Applies the (client-side, unchanged) server filter to state.alerts and either reconciles the existing table
+ * or, the first time / after an empty or error state, builds it fresh and records tbody + rowMap for next time. */
+function drawAlerts(state) {
+  const q = state.filter.value.trim().toLowerCase();
+  const rows = q ? state.alerts.filter((a) => String(a.server_name || "").toLowerCase().includes(q)) : state.alerts;
+
+  if (!rows.length) {
+    state.tbody = null;
+    state.rowMap = null;
+    mount(state.tableBox, emptyStrip(q ? 'No alerts match "' + state.filter.value + '".' : "No alerts in this window."));
+    return;
+  }
+
+  if (state.tbody) {
+    reconcileRows(state.tbody, rows, state.rowMap);
+    return;
+  }
+
+  const table = VIZ.table({ alerts: rows }, { rowsKey: "alerts", columns: ALERT_COLUMNS });
+  mount(state.tableBox, table);
+  const tbody = table.querySelector("tbody");
+  const rowMap = new Map();
+  [...tbody.children].forEach((tr, i) => rowMap.set(alertKey(rows[i]), tr));
+  state.tbody = tbody;
+  state.rowMap = rowMap;
 }
