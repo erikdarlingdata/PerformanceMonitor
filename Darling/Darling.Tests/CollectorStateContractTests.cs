@@ -134,9 +134,14 @@ public sealed class CollectorStateContractTests
            CPU carrier stays for the operator who disables wait_stats, each with its own prior because the
            load is by (server_id, collector_name). pg_wait_stats persists pg_postmaster_start_time(): Aurora's
            wait counters live in instance memory and stats_reset does not move on a clean restart, so the
-           statements epoch could never speak for them. Same change-only discipline, no host code. */
+           statements epoch could never speak for them. Same change-only discipline, no host code.
+
+           EIGHT since #4200. blocked_process_report and deadlocks each persist the dedicated XE ring-buffer
+           session's own execution_count (server-scoped, or per database via XeShredGate.KeyFor on Azure SQL
+           DB) so the next cycle can tell "nothing arrived" from a stale watermark and skip the cast+shred.
+           Also no host code: change-only, generic wiring. */
         Assert.Equal(
-            new[] { "cpu_utilization", "default_trace_events", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
+            new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

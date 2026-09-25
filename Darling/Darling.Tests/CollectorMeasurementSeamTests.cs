@@ -568,6 +568,11 @@ public class CollectorMeasurementSeamTests
                 /* #4058: deadlock-shaped records that IsRaiseShaped caught before FromEntry ever ran. Measured
                    by pg_deadlocks' own ReadAsync, which is why the const lives in PgDeadlocksCollector.cs. */
                 PgDeadlocksCollector.RaiseShapedDeadlocksSkippedMeasurement,
+                /* #4200: whether the blocked_process_report / deadlocks XE shred gate skipped the cast+shred
+                   this cycle. Both collectors declare their own const (same "shred_gated" string, each read
+                   from its own trailing result set), so only one need be listed here for the distinct-label
+                   set this assertion actually checks. */
+                BlockedProcessReportCollector.ShredGatedMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
