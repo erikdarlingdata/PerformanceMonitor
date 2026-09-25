@@ -11,9 +11,9 @@ tool get_collection_log 606
 param get_collection_log.as_of 167
 param get_collection_log.collector_name 149
 param get_collection_log.hours_back 191
-param get_collection_log.limit 120
+param get_collection_log.limit 160
 param get_collection_log.min_duration_ms 191
-param get_collection_log.server_name 28
+param get_collection_log.server_name 120
 param get_collection_log.status 195
 
 tool get_current_waits_trend 443
