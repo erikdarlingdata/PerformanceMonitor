@@ -202,6 +202,39 @@ public sealed class MaterializationHoleRepairTests
         Assert.Throws<ArgumentNullException>(() => TimescaleSupport.CapMaterializationHoleRepairs(null!, 24, width));
     }
 
+    /// <summary>
+    /// #4186 round-3 H1: the seam window's own direction. Mirrors
+    /// <see cref="TheCap_TakesTheOldestFirst_SplitsAStraddlingRangeExactly_AndDefersTheRest"/> exactly, with
+    /// <c>newestFirst: true</c> — same three ranges, same cap, but the NEWEST 24 buckets are kept and a
+    /// straddling range splits at its OLDER edge instead of its newer one, so the kept portion stays adjacent
+    /// to whatever sits above it (the successor's already-materialized span in the real caller).
+    /// </summary>
+    [Fact]
+    public void TheCap_NewestFirst_TakesTheNewestFirst_SplitsAStraddlingRangeAtItsOlderEdge_AndDefersTheRest()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var ranges = new List<(DateTime Start, DateTime End)>
+        {
+            (Hour.AddHours(30), Hour.AddHours(40)),   /* newest, 10 buckets */
+            (Hour, Hour.AddHours(20)),                /* oldest, 20 buckets */
+            (Hour.AddHours(22), Hour.AddHours(28)),   /* middle, 6 buckets */
+        };
+
+        var (repair, deferred) = TimescaleSupport.CapMaterializationHoleRepairs(ranges, 24, width, newestFirst: true);
+
+        /* Newest 10 whole, then the middle's 6 whole (16 spent), then 8 of the oldest's 20 — split at its NEWER
+           edge, since newestFirst keeps the portion adjacent to what is already above it (24 = 10 + 6 + 8) —
+           the older remaining 12 hours of the oldest range deferred. */
+        Assert.Equal(new[] { (Hour.AddHours(30), Hour.AddHours(40)), (Hour.AddHours(22), Hour.AddHours(28)), (Hour.AddHours(12), Hour.AddHours(20)) }, repair);
+        Assert.Equal(new[] { (Hour, Hour.AddHours(12)) }, deferred);
+        Assert.Equal(24, repair.Sum(r => (int)((r.End - r.Start).Ticks / width.Ticks)));
+
+        /* Under the cap and exactly at it: everything repaired, nothing deferred, same as oldest-first. */
+        var small = new List<(DateTime Start, DateTime End)> { (Hour, Hour.AddHours(2)) };
+        Assert.Equal(small, TimescaleSupport.CapMaterializationHoleRepairs(small, 24, width, newestFirst: true).Repair);
+        Assert.Empty(TimescaleSupport.CapMaterializationHoleRepairs(small, 24, width, newestFirst: true).Deferred);
+    }
+
     [Fact]
     public void AlignDown_LandsOnABucketBoundary_ForBothWidths()
     {
@@ -408,8 +441,11 @@ public sealed class MaterializationHoleRepairTests
         Assert.DoesNotContain("aggregate(s) scanned", storage, StringComparison.Ordinal);
         Assert.DoesNotContain("no holes.", storage, StringComparison.Ordinal);
         Assert.Contains("passClock.Elapsed", storage, StringComparison.Ordinal);
-        Assert.Contains("holesFound += ranges.Count;", storage, StringComparison.Ordinal);
-        Assert.Contains("bucketsFound += holes.Count;", storage, StringComparison.Ordinal);
+        /* #4186 round-3 H1: found is now the seam and ordinary windows' ranges/buckets summed, since the two
+           are scanned and capped separately (the seam newest-first, the ordinary oldest-first) rather than
+           merged into one list before counting. */
+        Assert.Contains("holesFound += seamRanges.Count + ordinaryRanges.Count;", storage, StringComparison.Ordinal);
+        Assert.Contains("bucketsFound += seamHoles.Count + ordinaryHoles.Count;", storage, StringComparison.Ordinal);
         Assert.Contains("had {Buckets} bucket(s) in [{Start}, {End})", storage, StringComparison.Ordinal);
         Assert.Contains("left for the next start", storage, StringComparison.Ordinal);
         Assert.Contains("could not scan or repair {View} this start", storage, StringComparison.Ordinal);

@@ -322,13 +322,21 @@ ORDER BY c.bucket";
     }
 
     /// <summary>
-    /// The cap applied to the merged ranges: the OLDEST ranges up to <paramref name="capBuckets"/> buckets in
-    /// total are repaired this start, the rest are reported and left. A range that straddles the cap is split
-    /// at it, so the budget is spent exactly and the remainder is a well-formed range for the next start.
-    /// Pure, so the tests can walk it.
+    /// The cap applied to the merged ranges: up to <paramref name="capBuckets"/> buckets in total are repaired
+    /// this start, the rest are reported and left. A range that straddles the cap is split at it, so the budget
+    /// is spent exactly and the remainder is a well-formed range for the next start. Pure, so the tests can walk
+    /// it.
+    ///
+    /// <para><b>Direction (#4186 round-3 H1).</b> Oldest-first (<paramref name="newestFirst"/> <c>false</c>,
+    /// the default) takes the OLDEST ranges, splitting a straddler at its NEWER edge — safe for the ordinary
+    /// window, where a repair sits strictly above the floor and can never move it. Newest-first takes the
+    /// ranges closest to the END of the ordering, splitting a straddler at its OLDER edge so the kept portion
+    /// stays adjacent to whatever is already materialized — the seam window's own requirement, since there the
+    /// floor IS a bare <c>min(bucket)</c> with no contiguity check behind it, and only a gapless top-down
+    /// descent keeps every unrepaired row inside the gate's probe window.</para>
     /// </summary>
     public static (IReadOnlyList<(DateTime Start, DateTime End)> Repair, IReadOnlyList<(DateTime Start, DateTime End)> Deferred) CapMaterializationHoleRepairs(
-        IReadOnlyList<(DateTime Start, DateTime End)> ranges, int capBuckets, TimeSpan bucketWidth)
+        IReadOnlyList<(DateTime Start, DateTime End)> ranges, int capBuckets, TimeSpan bucketWidth, bool newestFirst = false)
     {
         ArgumentNullException.ThrowIfNull(ranges);
         if (capBuckets <= 0)
@@ -340,7 +348,8 @@ ORDER BY c.bucket";
         var deferred = new List<(DateTime Start, DateTime End)>();
         var remaining = capBuckets;
 
-        foreach (var range in ranges.OrderBy(r => r.Start))
+        var ordered = newestFirst ? ranges.OrderByDescending(r => r.Start) : ranges.OrderBy(r => r.Start);
+        foreach (var range in ordered)
         {
             var width = (int)((range.End - range.Start).Ticks / bucketWidth.Ticks);
             if (remaining <= 0)
@@ -353,6 +362,15 @@ ORDER BY c.bucket";
             {
                 repair.Add(range);
                 remaining -= width;
+                continue;
+            }
+
+            if (newestFirst)
+            {
+                var newestSplit = range.End - TimeSpan.FromTicks(bucketWidth.Ticks * remaining);
+                repair.Add((newestSplit, range.End));
+                deferred.Add((range.Start, newestSplit));
+                remaining = 0;
                 continue;
             }
 
@@ -546,28 +564,74 @@ ORDER BY c.bucket";
                 }
 
                 scanned++;
-                var holes = new List<DateTime>();
-                foreach (var (from, to) in windows)
+
+                /* #4186 round-3 H1: the seam window's holes are scanned, capped and walked SEPARATELY from
+                   the ordinary window's, never merged into one oldest-first pass. windows[0] is the seam
+                   window whenever one exists — MaterializationHoleScanWindows always emits it first, and it
+                   exists exactly when seamFloor < floor (both bucket-aligned, so that comparison alone
+                   decides it; see that method for why). An interior (ordinary) repair can never move the
+                   successor's floor (s.mn) — it only fills a gap strictly above an already-materialized
+                   bucket — so oldest-first there is exactly as safe as it always was. A SEAM repair is
+                   different: s.mn is a bare min(bucket) with no contiguity check behind it, so materializing
+                   the OLDEST seam buckets first (the bug) can drop the floor straight to the seam's bottom
+                   while newer seam buckets in between are still holes, and RetentionArmSafetySql's probe —
+                   bounded above by s.mn — stops looking there. Walking the seam from the TOP (the buckets
+                   next to s.mn) and stopping at the first range that fails keeps the descent gapless: the
+                   floor only ever retreats into ground this pass already covered, so every unrepaired seam
+                   row stays inside the probe window — the property RollupBackfill.cs:39-44 states for its own
+                   newest-first slices. */
+                var isSeamWindow = seamFloor < floor.Value;
+                var seamWindow = isSeamWindow ? windows[0] : ((DateTime From, DateTime To)?)null;
+                var ordinaryWindows = isSeamWindow ? windows.Skip(1) : windows;
+
+                var seamHoles = seamWindow is { } sw
+                    ? await ScanHolesAsync(connection, target, materialization.Value, sw.From, sw.To, cancellationToken)
+                    : new List<DateTime>();
+
+                var ordinaryHoles = new List<DateTime>();
+                foreach (var (from, to) in ordinaryWindows)
                 {
-                    holes.AddRange(await ScanHolesAsync(connection, target, materialization.Value, from, to, cancellationToken));
+                    ordinaryHoles.AddRange(await ScanHolesAsync(connection, target, materialization.Value, from, to, cancellationToken));
                 }
 
-                if (holes.Count == 0)
+                if (seamHoles.Count == 0 && ordinaryHoles.Count == 0)
                 {
                     continue;
                 }
 
-                var ranges = MergeContiguousBuckets(holes, target.BucketWidth);
+                var seamRanges = MergeContiguousBuckets(seamHoles, target.BucketWidth);
+                var ordinaryRanges = MergeContiguousBuckets(ordinaryHoles, target.BucketWidth);
 
                 /* #3756: found is counted as the scan saw it — contiguous ranges and the buckets they span — BEFORE
                    the cap decides what this start repairs and what it leaves, so the summary can say "found"
                    independently of "repaired" and "deferred" (the record's summary states the arithmetic). */
-                holesFound += ranges.Count;
-                bucketsFound += holes.Count;
+                holesFound += seamRanges.Count + ordinaryRanges.Count;
+                bucketsFound += seamHoles.Count + ordinaryHoles.Count;
 
-                var (repair, deferred) = CapMaterializationHoleRepairs(ranges, MaterializationHoleRepairCapBuckets(target.BucketWidth), target.BucketWidth);
+                /* One shared cap per aggregate, same total as before this fix — the seam spends from it FIRST,
+                   newest end down, and whatever it leaves is what the ordinary window (oldest-first, as
+                   always) has this start. That keeps "a start never re-materializes more for one aggregate
+                   than an ordinary policy run does" true with the seam in the mix, not only without it. */
+                var cap = MaterializationHoleRepairCapBuckets(target.BucketWidth);
+                var (seamRepair, seamDeferred) = CapMaterializationHoleRepairs(seamRanges, cap, target.BucketWidth, newestFirst: true);
+                var seamBucketsTaken = seamRepair.Sum(r => (int)((r.End - r.Start).Ticks / target.BucketWidth.Ticks));
+                var ordinaryCap = cap - seamBucketsTaken;
 
-                foreach (var (start, end) in repair)
+                IReadOnlyList<(DateTime Start, DateTime End)> ordinaryRepair;
+                IReadOnlyList<(DateTime Start, DateTime End)> ordinaryDeferred;
+                if (ordinaryCap > 0)
+                {
+                    (ordinaryRepair, ordinaryDeferred) = CapMaterializationHoleRepairs(ordinaryRanges, ordinaryCap, target.BucketWidth);
+                }
+                else
+                {
+                    ordinaryRepair = Array.Empty<(DateTime Start, DateTime End)>();
+                    ordinaryDeferred = ordinaryRanges;
+                }
+
+                /* One range's plain-then-forced repair, shared by the seam and ordinary walks below. Returns
+                   the holes still standing in [start, lastBucket] after both attempts. */
+                async Task<int> RepairRangeAsync(DateTime start, DateTime end)
                 {
                     var buckets = (int)((end - start).Ticks / target.BucketWidth.Ticks);
                     var lastBucket = end - target.BucketWidth;
@@ -609,9 +673,31 @@ ORDER BY c.bucket";
                             "Materialization-hole repair (#3653): {View} still shows {Remaining} of {Buckets} bucket(s) in [{Start}, {End}) as holes after a plain and a forced refresh ({Seconds:F1}s) — the source has rows there that the refresh produced no output for; the aggregate's own filter and the scan's copy of it may have diverged, or the refresh was cut short. Re-judged on the next start.",
                             target.View, remaining, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds);
                     }
+
+                    return remaining;
                 }
 
-                foreach (var (start, end) in deferred)
+                /* #4186 round-3 H1: newest seam range first; stop at the first one that throws (propagates to
+                   this target's own catch below, exactly the risk the ordinary window always carried) or
+                   leaves buckets standing (remaining > 0) — do NOT go on to an older seam range once either
+                   happens, or the floor could advance past a still-open hole the same way the bug did. */
+                foreach (var (start, end) in seamRepair)
+                {
+                    var remaining = await RepairRangeAsync(start, end);
+                    if (remaining > 0)
+                    {
+                        break;
+                    }
+                }
+
+                /* Ordinary window: unchanged from before this fix. An interior repair cannot move the floor,
+                   so a remainder here only means "re-judged on the next start" — it never risks the gate. */
+                foreach (var (start, end) in ordinaryRepair)
+                {
+                    await RepairRangeAsync(start, end);
+                }
+
+                foreach (var (start, end) in seamDeferred.Concat(ordinaryDeferred))
                 {
                     var buckets = (int)((end - start).Ticks / target.BucketWidth.Ticks);
                     holesDeferred++;

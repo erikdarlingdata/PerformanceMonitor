@@ -6055,10 +6055,31 @@ AND   j.hypertable_name = '{relation}'";
     /// down to the legacy's last bucket, unclamped by the horizon that bounds its ordinary scan window — so an
     /// outage longer than that horizon's own span (#4186 follow-up: the first cut folded the seam into the same
     /// horizon clamp as the ordinary window, and a seam older than it was silently never scanned) still gets
-    /// repaired instead of clamped away. Once that repair runs, the seam is empty and this gate's fallback
-    /// releases automatically, with no manual step, bounded only by the repair's own per-start cap — a seam
-    /// wider than one start's cap takes more than one start to close in full, but every start makes progress on
-    /// it.</para>
+    /// repaired instead of clamped away — PROVIDED the raw purge was already held when the store stopped.
+    /// That proviso is real, not decoration: PostgreSQL runs its own overdue retention jobs at start, before
+    /// this service's start sweep can hold anything, so a purge left armed across a long enough stop drops the
+    /// chunk holding the seam before the walk ever gets a turn (#4299, pre-existing — 3.8.0 loses the same
+    /// chunk on the same schedule). Once the repair does run, the seam is empty and this gate's fallback
+    /// releases — automatically within the hour on a store that keeps running (#3812), but only from the
+    /// SECOND start after an outage that crosses the upgrade: the walk skips a successor with nothing
+    /// materialized yet, so the seam does not exist for it to find until the successor's own first refresh has
+    /// run, and nothing re-runs the walk between starts (#4300). Once it does run, release is bounded only by
+    /// the repair's own per-start cap — a seam wider than one start's cap takes more than one start to close in
+    /// full, but every start makes progress on it.</para>
+    ///
+    /// <para><b>The stitch also trusts the frozen legacy's OWN span unconditionally — accepted as 3.8.0 parity,
+    /// not fixed by this round.</b> The seam probe above only checks AT OR AFTER the legacy's last bucket.
+    /// Below that bucket, <c>LEAST(legacy.min, successor.min)</c> runs with no check at all: a raw-row gap that
+    /// opened INSIDE the frozen legacy's own materialized span — from an outage before this store ever took the
+    /// freeze, that 3.8.0's own retention already lost before the upgrade — reads Covered forever, because the
+    /// legacy stopped refreshing at the freeze and the six frozen views never re-enter the walk to close it
+    /// (<see cref="MaterializationHoleTargets"/> excludes them; see its note). This is accepted, not a
+    /// regression: 3.8.0 has no walk at all, so it loses the exact same rows on the exact same schedule — its
+    /// raw purge drops them once they age past the horizon, upgrade or not. What this build adds beyond that
+    /// parity is the A6 backfill (<c>--backfill-rollups</c>, <see cref="RollupBackfill"/>), which — unlike the
+    /// automatic walk — fills the successor down to RAW's own oldest row, not merely the legacy's boundary, so
+    /// an operator who runs it closes a pre-upgrade hole the automatic gate will otherwise trust without ever
+    /// looking.</para>
     ///
     /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
     /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude

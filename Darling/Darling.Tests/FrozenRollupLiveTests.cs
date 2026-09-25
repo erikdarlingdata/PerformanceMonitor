@@ -636,6 +636,201 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// #4186 round-3 H1: a seam wider than one start's repair cap (24 hourly buckets) used to release the gate
+    /// early. Oldest-first repaired the buckets FARTHEST from the successor's floor first, which still moved
+    /// the floor (a bare <c>min(bucket)</c>) all the way down to them — stranding the un-repaired NEWER seam
+    /// buckets above the new floor and outside <see cref="TimescaleSupport.RetentionArmSafetySql"/>'s probe.
+    /// Newest-first must NOT do that: repairing the top 24 of a 35-bucket seam should leave the floor exactly
+    /// adjacent to the still-open 11-bucket remainder, so the probe keeps finding it and the gate stays Short
+    /// until a second walk closes the rest.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamWiderThanTheCap_NewestFirstRepairsTheTopAndKeepsTheGateHeldUntilFullyRepaired()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* S is the stop. The legacy materializes only ONE bucket, 35 hours back, so l.mx = S-35h and the
+               seam floor is S-34h. Raw carries an unbroken run of 35 hourly buckets from S-34h through S —
+               wider than the 24-bucket cap, so ONE walk cannot close it in one pass. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 0; hour <= 35; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seam35_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-35), s.AddHours(-34), ct);
+
+            var u = s.AddDays(2);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seam35_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* Walk 1: the cap takes the NEWEST 24 of the 35 seam buckets (S-23h..S), leaving the OLDER 11
+               (S-34h..S-24h) as a hole immediately below the new floor. The product's own start-path entry
+               point (DarlingWorker calls this exact method). */
+            var summary1 = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
+            Assert.Equal(24, summary1.BucketsRepaired);
+
+            /* The regression this pins: with the old oldest-first order, this walk would instead have
+               repaired S-34h..S-11h (the OLDEST 24) and left S-10h..S as holes ABOVE the new floor — outside
+               the probe window entirely, and the gate below would have read true (Covered) after only one
+               walk. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* Walk 2: the remaining 11-bucket range is now the whole seam (S-34h..S-24h, under the cap), and
+               closes it completely. */
+            var summary2 = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
+            Assert.Equal(11, summary2.BucketsRepaired);
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4186 round-3 H1, the failure arm: a seam with TWO separate ranges, where the NEWER one fails. A CHECK
+    /// constraint added directly to the successor's own materialization chunk (the mechanism verified against
+    /// this rig's TimescaleDB before this test was written — <c>ALTER TABLE</c> against the continuous
+    /// aggregate's VIEW or its parent materialization hypertable is refused, but a concrete chunk table takes
+    /// one) makes the refresh over the newer range raise 23514, the same way a real refresh failure would.
+    /// Newest-first must stop there: the older range must be left completely untouched, and the gate must
+    /// still read not-safe, exactly as if neither range had been attempted.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamTwoRanges_NewerRangeFails_OlderRangeUntouchedAndGateStillNotSafe()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* S is the stop. The legacy materializes one bucket 20 hours back (l.mx = S-20h, seam floor
+               S-19h). Range A sits right above the seam floor — the OLDEST part of the seam. */
+            var s = D0.AddDays(3);
+            await InsertProcedureStatsAsync(connection, s.AddHours(-20), "seam2_proc_legacy_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-20), s.AddHours(-19), ct);
+
+            await InsertProcedureStatsAsync(connection, s.AddHours(-19), "seam2_proc_a0", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, s.AddHours(-18), "seam2_proc_a1", 900, 9, 3600, ct);
+
+            /* The successor's own first refresh sets floor = U-1h and, in the same call, creates the
+               materialization chunk for that whole calendar day — the chunk range B (below) also falls in. */
+            var u = s.AddDays(2);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seam2_proc_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            /* Range B: two buckets below the floor, on the SAME calendar day as it, separated from range A by
+               a multi-day gap where raw holds nothing (so A and B are two DISTINCT merged ranges, not one). A
+               CHECK constraint on B's exact bucket span, added to the chunk the floor refresh just created,
+               blocks it before it ever holds a row. */
+            var chunks = await ReadMaterializationChunksAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ct);
+            Assert.Single(chunks);
+            await using (var block = new NpgsqlCommand(
+                $"ALTER TABLE {chunks[0]} ADD CONSTRAINT seam2_block_b CHECK (bucket NOT BETWEEN '{u.AddHours(-5):O}'::timestamp AND '{u.AddHours(-4):O}'::timestamp)",
+                connection))
+            {
+                await block.ExecuteNonQueryAsync(ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, u.AddHours(-5), "seam2_proc_b0", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-4), "seam2_proc_b1", 900, 9, 3600, ct);
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* Newest-first tries B (closer to the floor) before A. B's refresh raises 23514, caught by this
+               target's own per-aggregate catch — the walk must stop there, never reaching A. */
+            var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
+            Assert.True(summary.Failures >= 1, $"expected B's constraint violation to be caught as a failure, got {summary.Failures}");
+
+            /* A is untouched: no row near it exists in the successor at all. */
+            await using (var probeA = new NpgsqlCommand(
+                $"SELECT count(*) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView} WHERE bucket >= '{s.AddHours(-19):O}'::timestamp AND bucket < '{s.AddHours(-17):O}'::timestamp",
+                connection))
+            {
+                Assert.Equal(0L, (long)(await probeA.ExecuteScalarAsync(ct))!);
+            }
+
+            /* The floor never moved off U-1h — B's insert rolled back with its transaction, so both A and B
+               still sit inside the probe window, and the gate must still read not-safe. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// #4186: the no-deadlock twin of <see cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases"/> —
     /// same frozen-legacy-plus-outage shape, but the seam itself holds NO raw rows (an outage that began
     /// right at a legacy refresh, or a tail already purged before this fix existed). A FLOOR-only
