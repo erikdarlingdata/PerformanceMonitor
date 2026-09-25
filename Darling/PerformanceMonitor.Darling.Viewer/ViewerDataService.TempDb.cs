@@ -24,6 +24,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// session columns (<see cref="TotalSessionsUsingTempDb"/>/<see cref="TopSessionId"/>/
 /// <see cref="TopSessionTempDbMb"/>) are carried to keep the port of Lite's query column-for-column,
 /// even though the three charts don't render them yet.
+/// <para>#4349: bucketed like <see cref="TempDbFileIoSample"/> — <c>CollectionTime</c> is a <c>date_bin</c>
+/// bucket start, EXCEPT when every bucket the call returned holds exactly one physical collection, in
+/// which case every point is stamped at its own raw collection time instead — see
+/// <see cref="ViewerDataService.GetTempDbTrendAsync"/>. Every column is a gauge, averaged per bucket,
+/// except <see cref="TopSessionId"/> (the top session's identity picks the bucket's LAST raw collection's
+/// value, not an average — averaging a session ID number is meaningless).</para>
 /// </summary>
 public sealed record TempDbSample(
     DateTime CollectionTime,
@@ -54,29 +60,48 @@ public sealed record TempDbFileIoSample(
 public sealed partial class ViewerDataService
 {
     /// <summary>
-    /// The tempdb usage/size read — Lite's <c>GetTempDbTrendAsync</c> ported to Postgres. Reads
-    /// <c>v_tempdb_stats</c> (a <c>SELECT *</c> passthrough over <c>tempdb_stats</c> in the Darling
-    /// store) to mirror Lite's view-based query verbatim. The MB columns are <c>numeric(18,2)</c>, so
-    /// each is CAST to double precision for the typed GetDouble reader (the established viewer
-    /// convention); <c>total_sessions_using_tempdb</c> is <c>bigint</c> (GetInt64 — GetInt32 would
-    /// throw against a bigint), <c>top_session_id</c> is <c>integer</c>.
-    /// $1 server_id, $2 window start (naive UTC).
+    /// The tempdb usage/size read — Lite's <c>GetTempDbTrendAsync</c> ported to Postgres, then bucketed
+    /// (#4349). Reads <c>v_tempdb_stats</c> (a <c>SELECT *</c> passthrough over <c>tempdb_stats</c> in the
+    /// Darling store) to mirror Lite's view-based query verbatim, then AVERAGES every gauge per bucket
+    /// (all columns here are point-in-time readings, not accumulating counters — no #3540 rated split
+    /// applies). <c>total_sessions_using_tempdb</c>'s bigint average rounds back to bigint (an AVG of
+    /// integers is fractional). <c>top_session_id</c> and its paired <c>top_session_tempdb_mb</c> are NOT
+    /// averaged — an average of a session ID is meaningless — so both take the bucket's LAST raw
+    /// collection's pair together via <c>array_agg(... ORDER BY collection_time DESC)[1]</c>. $1 server_id,
+    /// $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
     /// </summary>
-    public const string TempDbTrendSql = """
+    public const string TempDbTrendSql = $$"""
+        WITH per_collection AS (
+            SELECT
+                collection_time,
+                CAST(user_object_reserved_mb AS double precision) AS user_object_reserved_mb,
+                CAST(internal_object_reserved_mb AS double precision) AS internal_object_reserved_mb,
+                CAST(version_store_reserved_mb AS double precision) AS version_store_reserved_mb,
+                CAST(total_reserved_mb AS double precision) AS total_reserved_mb,
+                CAST(unallocated_mb AS double precision) AS unallocated_mb,
+                total_sessions_using_tempdb,
+                top_session_id,
+                CAST(top_session_tempdb_mb AS double precision) AS top_session_tempdb_mb
+            FROM v_tempdb_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        )
         SELECT
-            collection_time,
-            CAST(user_object_reserved_mb AS double precision) AS user_object_reserved_mb,
-            CAST(internal_object_reserved_mb AS double precision) AS internal_object_reserved_mb,
-            CAST(version_store_reserved_mb AS double precision) AS version_store_reserved_mb,
-            CAST(total_reserved_mb AS double precision) AS total_reserved_mb,
-            CAST(unallocated_mb AS double precision) AS unallocated_mb,
-            total_sessions_using_tempdb,
-            top_session_id,
-            CAST(top_session_tempdb_mb AS double precision) AS top_session_tempdb_mb
-        FROM v_tempdb_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        ORDER BY collection_time
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+            AVG(user_object_reserved_mb) AS user_object_reserved_mb,
+            AVG(internal_object_reserved_mb) AS internal_object_reserved_mb,
+            AVG(version_store_reserved_mb) AS version_store_reserved_mb,
+            AVG(total_reserved_mb) AS total_reserved_mb,
+            AVG(unallocated_mb) AS unallocated_mb,
+            CAST(ROUND(AVG(total_sessions_using_tempdb)) AS bigint) AS total_sessions_using_tempdb,
+            (array_agg(top_session_id ORDER BY collection_time DESC))[1] AS top_session_id,
+            (array_agg(top_session_tempdb_mb ORDER BY collection_time DESC))[1] AS top_session_tempdb_mb,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM per_collection
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -129,28 +154,62 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// tempdb space-usage samples for one server since <paramref name="sinceUtc"/>, time-ordered, for
-    /// the tempdb tab's usage and allocated-size charts.
+    /// tempdb space-usage samples for one server over the window, bucket-ordered, for the tempdb tab's
+    /// usage and allocated-size charts. Bucketed to <see cref="TrendBudget.Chart"/>'s point budget (#4349);
+    /// a bucket holding exactly one physical collection is stamped at that collection's own raw time
+    /// rather than the bucket grid when EVERY bucket this call returned is such a singleton (ruling item 3).
     /// </summary>
-    public async Task<List<TempDbSample>> GetTempDbTrendAsync(int serverId, DateTime sinceUtc, CancellationToken cancellationToken = default)
+    public async Task<List<TempDbSample>> GetTempDbTrendAsync(int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var samples = new List<TempDbSample>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(TempDbTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
         command.Parameters.Add(new NpgsqlParameter<DateTime>
         {
-            TypedValue = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified),
+            TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<DateTime>
+        {
+            TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
+        });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double UserObjectReservedMb, double InternalObjectReservedMb, double VersionStoreReservedMb, double TotalReservedMb, double UnallocatedMb, long TotalSessionsUsingTempDb, int TopSessionId, double TopSessionTempDbMb)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            samples.Add(new TempDbSample(
+            if (reader.GetInt64(10) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
                 reader.GetDateTime(0),
+                reader.GetDateTime(9),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
+                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+                /* bigint — GetInt64; GetInt32 would throw against the bigint column. */
+                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+                reader.IsDBNull(8) ? 0 : reader.GetDouble(8)));
+        }
+
+        var samples = new List<TempDbSample>(rows.Count);
+        foreach (var row in rows)
+        {
+            samples.Add(new TempDbSample(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.UserObjectReservedMb,
+                row.InternalObjectReservedMb,
+                row.VersionStoreReservedMb,
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
                 reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
                 /* bigint — GetInt64; GetInt32 would throw against the bigint column. */

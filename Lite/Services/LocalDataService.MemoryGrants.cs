@@ -10,13 +10,45 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
     /// <summary>
-    /// Gets memory grant trend — total granted MB per collection snapshot for the Memory Overview overlay.
+    /// The bucketed memory-grant overlay statement text (#4349), pulled out of
+    /// <see cref="GetMemoryGrantTrendAsync"/> so its shape is checkable without a live DuckDB, the same
+    /// idiom <see cref="MemoryTrendSql"/> uses. A gauge (not an accumulating counter), so a bucket's value
+    /// is the plain AVERAGE of its collections' summed-per-collection totals — no #3540 rated split
+    /// applies. $1 server_id, $2/$3 the UTC window (also the GREATEST clamp), $4 the bucket width minutes.
+    /// </summary>
+    internal static string MemoryGrantTrendSql => $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        SUM(granted_memory_mb) AS total_granted_mb
+    FROM v_memory_grant_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(total_granted_mb) AS total_granted_mb,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM per_collection
+GROUP BY 1
+ORDER BY 1";
+
+    /// <summary>
+    /// Gets memory grant trend — total granted MB per bucket for the Memory Overview overlay. Bucketed to
+    /// <see cref="TrendBudget.Chart"/>'s point budget (#4349); a bucket holding exactly one physical
+    /// collection is stamped at that collection's own raw time rather than the bucket grid when EVERY
+    /// bucket this call returned is such a singleton (ruling item 3).
     /// </summary>
     public async Task<List<MemoryTrendPoint>> GetMemoryGrantTrendAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -25,40 +57,113 @@ public partial class LocalDataService
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
-        command.CommandText = @"
-SELECT
-    collection_time,
-    0 AS total_server_memory_mb,
-    0 AS target_server_memory_mb,
-    0 AS buffer_pool_mb,
-    SUM(granted_memory_mb) AS total_granted_mb
-FROM v_memory_grant_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-GROUP BY collection_time
-ORDER BY collection_time";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = MemoryGrantTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<MemoryTrendPoint>();
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double TotalGrantedMb, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = reader.GetInt64(3);
+            if (collectionCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.GetDateTime(2),
+                reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                collectionCount));
+        }
+
+        var items = new List<MemoryTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new MemoryTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                TotalGrantedMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                TotalGrantedMb = row.TotalGrantedMb
             });
         }
         return items;
     }
 
     /// <summary>
-    /// Gets memory grant chart data aggregated by collection_time and pool_id
-    /// for the Memory Grants sub-tab charts.
+    /// The bucketed Memory Grants chart statement text (#4349), pulled out of
+    /// <see cref="GetMemoryGrantChartDataAsync"/> so its shape is checkable without a live DuckDB. The
+    /// inner <c>per_collection</c> CTE is the UNCHANGED pre-bucket aggregation (multiple resource-semaphore
+    /// rows per pool summed to one row per collection + pool); the outer bucket then AVERAGES every gauge
+    /// (sizing MB, grantee/waiter counts — point-in-time readings) and SUMS the two true deltas
+    /// (<c>timeout_error_count_delta</c>/<c>forced_grant_count_delta</c>) over a <c>rated</c> CTE that
+    /// nulls them out (not filters the row) when <c>sample_interval_seconds</c> is 0 (#3540), matching
+    /// Darling's <c>MemoryGrantChartDataSql</c>. $1 server_id, $2/$3 the UTC window, $4 bucket width minutes.
+    /// </summary>
+    internal static string MemoryGrantChartDataSql => $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        pool_id,
+        SUM(available_memory_mb) AS available_memory_mb,
+        SUM(granted_memory_mb) AS granted_memory_mb,
+        SUM(used_memory_mb) AS used_memory_mb,
+        SUM(grantee_count) AS grantee_count,
+        SUM(waiter_count) AS waiter_count,
+        MAX(sample_interval_seconds) AS interval_seconds,
+        SUM(timeout_error_count_delta) AS timeout_error_count_delta,
+        SUM(forced_grant_count_delta) AS forced_grant_count_delta
+    FROM v_memory_grant_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time, pool_id
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        pool_id,
+        available_memory_mb,
+        granted_memory_mb,
+        used_memory_mb,
+        grantee_count,
+        waiter_count,
+        CASE WHEN interval_seconds IS DISTINCT FROM 0 THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
+        CASE WHEN interval_seconds IS DISTINCT FROM 0 THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
+    FROM per_collection
+)
+SELECT
+    pool_id,
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(available_memory_mb) AS available_memory_mb,
+    AVG(granted_memory_mb) AS granted_memory_mb,
+    AVG(used_memory_mb) AS used_memory_mb,
+    AVG(grantee_count) AS grantee_count,
+    AVG(waiter_count) AS waiter_count,
+    SUM(rated_timeout_error_count_delta) AS timeout_error_count_delta,
+    SUM(rated_forced_grant_count_delta) AS forced_grant_count_delta,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY pool_id, 2
+ORDER BY pool_id, 2";
+
+    /// <summary>
+    /// Gets memory grant chart data aggregated by bucket and pool_id for the Memory Grants sub-tab charts.
+    /// Bucketed to <see cref="TrendBudget.Chart"/>'s point budget PER POOL (#4349); a bucket holding
+    /// exactly one physical collection is stamped at that collection's own raw time rather than the
+    /// bucket grid when EVERY bucket this call returned (across every pool) is such a singleton (ruling
+    /// item 3).
     /// </summary>
     public async Task<List<MemoryGrantChartPoint>> GetMemoryGrantChartDataAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -67,43 +172,56 @@ ORDER BY collection_time";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
-        command.CommandText = @"
-SELECT
-    collection_time,
-    pool_id,
-    SUM(available_memory_mb) AS available_memory_mb,
-    SUM(granted_memory_mb) AS granted_memory_mb,
-    SUM(used_memory_mb) AS used_memory_mb,
-    SUM(grantee_count) AS grantee_count,
-    SUM(waiter_count) AS waiter_count,
-    SUM(timeout_error_count_delta) AS timeout_error_count_delta,
-    SUM(forced_grant_count_delta) AS forced_grant_count_delta
-FROM v_memory_grant_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-GROUP BY collection_time, pool_id
-ORDER BY collection_time, pool_id";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = MemoryGrantChartDataSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<MemoryGrantChartPoint>();
+        var rows = new List<(int PoolId, DateTime BucketStart, DateTime FirstCollectionTime, double Available, double Granted, double Used, int Grantee, int Waiter, long TimeoutDelta, long ForcedDelta, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = reader.GetInt64(10);
+            if (collectionCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(9),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
+                reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
+                reader.IsDBNull(5) ? 0 : (int)ToInt64(reader.GetValue(5)),
+                reader.IsDBNull(6) ? 0 : (int)ToInt64(reader.GetValue(6)),
+                reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
+                reader.IsDBNull(8) ? 0 : ToInt64(reader.GetValue(8)),
+                collectionCount));
+        }
+
+        var items = new List<MemoryGrantChartPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new MemoryGrantChartPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                PoolId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                AvailableMemoryMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                GrantedMemoryMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                UsedMemoryMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4)),
-                GranteeCount = reader.IsDBNull(5) ? 0 : (int)ToInt64(reader.GetValue(5)),
-                WaiterCount = reader.IsDBNull(6) ? 0 : (int)ToInt64(reader.GetValue(6)),
-                TimeoutErrorCountDelta = reader.IsDBNull(7) ? 0 : ToInt64(reader.GetValue(7)),
-                ForcedGrantCountDelta = reader.IsDBNull(8) ? 0 : ToInt64(reader.GetValue(8))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                PoolId = row.PoolId,
+                AvailableMemoryMb = row.Available,
+                GrantedMemoryMb = row.Granted,
+                UsedMemoryMb = row.Used,
+                GranteeCount = row.Grantee,
+                WaiterCount = row.Waiter,
+                TimeoutErrorCountDelta = row.TimeoutDelta,
+                ForcedGrantCountDelta = row.ForcedDelta
             });
         }
         return items;
