@@ -161,7 +161,13 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
 
                 if (sb.Length > 0)
                 {
-                    File.AppendAllText(CurrentLogFile(), sb.ToString());
+                    /* #4281 review, finding 1 (Medium): the no-arg overload uses a STRICT UTF-8 encoder that
+                       throws EncoderFallbackException on a lone surrogate and writes ZERO bytes -- dropping
+                       every OTHER line already dequeued into this batch, not just the offending one. A
+                       permissive UTF-8 encoding (U+FFFD instead of a throw) keeps one malformed line from
+                       costing its batch-mates. Still BOM-less, like the strict encoder it replaces. */
+                    File.AppendAllText(
+                        CurrentLogFile(), sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
             }
             catch (Exception ex)
@@ -285,7 +291,15 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
                 var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{Abbreviate(logLevel)}] [{_category}] {formatter(state, exception)}";
                 if (exception is not null)
                 {
-                    line += $" | {exception.GetType().Name}: {exception.Message}";
+                    /* #4281 review, finding 5: exception.Message can repeat request text (a PostgreSQL cast
+                       error echoes the bad value; KeyNotFoundException echoes the key) and reached the file log
+                       unsanitized -- CR/LF in it could forge a second line the same way an unsanitized route
+                       could. Control characters map to '.', with no length cap: unlike a request-supplied
+                       route, this sink already accepts an unbounded formatted message, and an operator needs
+                       the exception text in full. The FORMATTED message is deliberately left alone: at least
+                       one call site (DarlingWorker's "Store host profile" line) embeds '\n' on purpose to print
+                       a readable multi-line block, and that text is never request-supplied. */
+                    line += $" | {exception.GetType().Name}: {SanitizeMessageForLog(exception.Message)}";
                 }
 
                 _provider.Enqueue(line);
@@ -294,6 +308,20 @@ public sealed class DarlingFileLoggerProvider : ILoggerProvider
             {
                 /* A formatter that throws must never take down the caller. */
             }
+        }
+
+        /// <summary>Maps control characters (including CR/LF) to '.', the same rule
+        /// <see cref="Hosting.DarlingHttpRefusalLog.Sanitize"/> applies to request-supplied text — but with no
+        /// length cap (#4281 review, finding 5).</summary>
+        private static string SanitizeMessageForLog(string value)
+        {
+            var builder = new StringBuilder(value.Length);
+            foreach (var c in value)
+            {
+                builder.Append(c < ' ' || c == (char)0x7F ? '.' : c);
+            }
+
+            return builder.ToString();
         }
 
         private static string Abbreviate(LogLevel level) => level switch

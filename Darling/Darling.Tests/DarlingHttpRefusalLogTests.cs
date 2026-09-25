@@ -294,6 +294,39 @@ public class DarlingHttpRefusalLogTests
         Assert.Equal("10.0.0.26:5152", DarlingHttpRefusalLog.Sanitize("10.0.0.26:5152"));
     }
 
+    /// <summary>
+    /// #4281 review, finding 1 (Medium): a 256-character cut landing between a surrogate pair's high and low
+    /// half used to leave a lone high surrogate at the end. File.AppendAllText's UTF-8 encoder throws
+    /// EncoderFallbackException on a lone surrogate and drops the WHOLE log batch, not just this line -- so
+    /// the cut must never split a pair.
+    /// </summary>
+    [Fact]
+    public void ASurrogatePairStraddlingTheCut_IsNeverSplit()
+    {
+        /* 255 ASCII chars, then a non-BMP character (a surrogate pair) straddling the 256-char cut at
+           index 255/256 -- the review's exact repro shape. */
+        var value = new string('a', 255) + "\U0001F600";
+
+        var sanitized = DarlingHttpRefusalLog.Sanitize(value, 256);
+
+        Assert.Equal(new string('a', 255) + "…", sanitized);
+        /* The oracle the production failure actually hit: a strict UTF-8 encoder must not throw. */
+        new System.Text.UTF8Encoding(false, true).GetBytes(sanitized);
+    }
+
+    /// <summary>A lone surrogate already in the input (not a truncation artifact) sanitizes the same way a
+    /// control character does, so it can never reach the file-log encoder either.</summary>
+    [Fact]
+    public void ALoneSurrogateNotAtTheCut_MapsToADot()
+    {
+        var value = "before" + '\uDC00' + "after";
+
+        var sanitized = DarlingHttpRefusalLog.Sanitize(value, 256);
+
+        Assert.Equal("before.after", sanitized);
+        new System.Text.UTF8Encoding(false, true).GetBytes(sanitized);
+    }
+
     /// <summary>Every gate is named the way an operator would have to name it to fix it — the CIDR gate
     /// by its config key, not by "403".</summary>
     [Fact]

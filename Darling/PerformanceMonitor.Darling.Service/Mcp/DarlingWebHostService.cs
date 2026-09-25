@@ -704,6 +704,12 @@ public sealed class DarlingWebHostService : BackgroundService
             {
                 ContentRootPath = AppContext.BaseDirectory,
                 WebRootPath = "wwwroot",
+                /* #4281 review, finding 4: with no EnvironmentName set here, an ASPNETCORE_ENVIRONMENT or
+                   DOTNET_ENVIRONMENT of "Development" left set anywhere on the machine (a leftover from testing
+                   something unrelated) would add the developer exception page ahead of the Host guard — a
+                   caller with NO credentials then gets the exception message and stack trace for any throw
+                   that escapes. Pinned so the ambient variable can never reach this host. */
+                EnvironmentName = Environments.Production,
             });
 
             var listenerCertificate = serverCertificate;
@@ -1193,11 +1199,10 @@ public sealed class DarlingWebHostService : BackgroundService
            own examples, /api/ag and /api/fleet, plus any future one) cannot reach ASP.NET Core's own error
            handling — which writes into the providers ClearProviders silenced above, so the browser got an
            empty 500 with no trace anywhere. AFTER the Host-allowlist guard and the auth gate on purpose (see
-           the pipeline-order comment above app.UseResponseCompression): both already handle their own
-           exceptions (HandleAuthFlowAsync's try/catch above), so this only ever fires for an UNANTICIPATED
-           throw from a gate, or an uncaught one from a route MapAll wires. A client that closed the page is
-           not a failure — DarlingWebFailureLog never sees it, and nothing is written to a caller who is
-           gone. */
+           the pipeline-order comment above app.UseResponseCompression) — but that means it covers the ROUTES
+           ONLY: it is registered after both gates, so a gate throw never enters this try, and is not logged
+           here (#4281 review, finding 4). A client that closed the page is not a failure — DarlingWebFailureLog
+           never sees it, and nothing is written to a caller who is gone. */
         app.Use(async (context, next) =>
         {
             var route = context.Request.Path.Value ?? "/";
@@ -1208,6 +1213,21 @@ public sealed class DarlingWebHostService : BackgroundService
             }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             {
+            }
+            catch (BadHttpRequestException bad)
+            {
+                /* #4281 review, finding 3: Kestrel throws this for a malformed or oversized request body (a
+                   413/400/408 a client can trigger on purpose at no cost) — it is not a service failure, so it
+                   must not cost the generic 500 or an Error line the way a real failure does. Debug only: the
+                   default LoggerFilterOptions.MinLevel (Information) keeps it out of the file in production,
+                   same as every other Debug call site, while still letting an operator opt in. No body beyond
+                   what Kestrel itself would have written before this backstop existed. */
+                _logger.LogDebug(bad, "Web dashboard request rejected ({StatusCode}): {Message}", bad.StatusCode, bad.Message);
+
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.StatusCode = bad.StatusCode;
+                }
             }
             catch (Exception ex)
             {

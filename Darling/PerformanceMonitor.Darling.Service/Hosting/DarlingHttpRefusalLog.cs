@@ -292,11 +292,41 @@ internal sealed class DarlingHttpRefusalLog
         }
 
         var take = Math.Min(value.Length, maxLength);
+
+        /* #4281 review, finding 1 (Medium): a cut at exactly `take` can land between a surrogate pair's high
+           and low half, leaving a lone high surrogate at the end. File.AppendAllText's UTF-8 encoder throws
+           on a lone surrogate and drops the WHOLE log batch, not just this line -- so the cut must never
+           split a pair. */
+        if (take < value.Length && char.IsHighSurrogate(value[take - 1]))
+        {
+            take--;
+        }
+
         var builder = new StringBuilder(take + 1);
         for (var i = 0; i < take; i++)
         {
             var c = value[i];
-            builder.Append(c < ' ' || c == (char)0x7F ? '.' : c);
+            if (c < ' ' || c == (char)0x7F)
+            {
+                builder.Append('.');
+            }
+            else if (char.IsHighSurrogate(c) && i + 1 < take && char.IsLowSurrogate(value[i + 1]))
+            {
+                /* A well-formed pair inside the kept range, copied whole. */
+                builder.Append(c);
+                builder.Append(value[i + 1]);
+                i++;
+            }
+            else if (char.IsSurrogate(c))
+            {
+                /* A lone surrogate that is not a truncation artifact -- the input already carried one.
+                   Sanitized the same way a control character is. */
+                builder.Append('.');
+            }
+            else
+            {
+                builder.Append(c);
+            }
         }
 
         if (value.Length > maxLength)

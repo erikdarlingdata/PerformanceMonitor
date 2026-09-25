@@ -132,6 +132,54 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
         Assert.Single(reports);
     }
 
+    /* ---------------- #4281 review, finding 1 (Medium): a lone surrogate must not cost the batch ---------------- */
+
+    /// <summary>
+    /// File.AppendAllText's default UTF-8 encoder throws EncoderFallbackException on a lone surrogate and
+    /// writes ZERO bytes -- so one malformed line used to cost the WHOLE 5-second batch, including every
+    /// other line queued in the same flush. The surrogate is injected directly here, bypassing
+    /// DarlingHttpRefusalLog.Sanitize entirely, to isolate this fix (Flush's encoding) from that one: Flush
+    /// itself must never throw or drop a batch, whatever put the surrogate there.
+    /// </summary>
+    [Fact]
+    public void Flush_ALoneSurrogateInOneLine_StillWritesTheBatchsOtherLines()
+    {
+        var reports = new ConcurrentQueue<string>();
+        var logDir = Path.Combine(_tempRoot, "logs");
+
+        using var provider = new DarlingFileLoggerProvider(logDir, reports.Enqueue);
+        var logger = provider.CreateLogger("Test");
+
+        logger.LogInformation("bad line {Tail}", new string('a', 255) + '\uD83D');
+        logger.LogInformation("the other line in the same batch");
+        provider.Flush();
+
+        Assert.Empty(reports);
+        var written = File.ReadAllText(provider.CurrentLogFile());
+        Assert.Contains("the other line in the same batch", written, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4281 review, finding 5: exception.Message can repeat request text (a PostgreSQL cast error
+    /// echoes the bad value; KeyNotFoundException echoes the key) and reached the file log unsanitized -- CR/LF
+    /// in it could forge a second line the same way an unsanitized route could. The FORMATTED message is
+    /// deliberately left alone (DarlingWorker's "Store host profile" line embeds '\n' on purpose); only
+    /// exception.Message is sanitized.</summary>
+    [Fact]
+    public void Log_ExceptionMessageCarriesCrLf_SanitizesSoNoForgedLineReachesTheFile()
+    {
+        var logDir = Path.Combine(_tempRoot, "logs");
+        using var provider = new DarlingFileLoggerProvider(logDir, _ => { });
+        var logger = provider.CreateLogger("Test");
+
+        var ex = new InvalidOperationException("bad value\r\n2026-08-21 12:00:00 WARN  Forged line");
+        logger.LogError(ex, "operation failed");
+        provider.Flush();
+
+        var written = File.ReadAllText(provider.CurrentLogFile());
+        Assert.DoesNotContain("\r\n2026-08-21", written, StringComparison.Ordinal);
+        Assert.Contains("bad value..2026-08-21 12:00:00 WARN  Forged line", written, StringComparison.Ordinal);
+    }
+
     /* ---------------- #1652 gap 3: the RECURRING retention sweep ---------------- */
 
     /// <summary>

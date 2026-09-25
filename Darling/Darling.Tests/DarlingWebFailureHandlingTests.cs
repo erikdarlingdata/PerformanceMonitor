@@ -231,6 +231,9 @@ public sealed class DarlingWebFailureHandlingTests
             return Task.CompletedTask;
         });
 
+        app.MapGet("/api/__test/bad-request", (HttpContext _) =>
+            throw new BadHttpRequestException("Request body too large.", StatusCodes.Status413PayloadTooLarge));
+
         await app.StartAsync();
         return (app.GetTestServer(), capturing.Inner);
     }
@@ -313,6 +316,95 @@ public sealed class DarlingWebFailureHandlingTests
 
         using var reader = new StreamReader(ctx.Response.Body);
         Assert.Equal(string.Empty, await reader.ReadToEndAsync());
+    }
+
+    /* ═══════════════════════════ the wired pipeline: BadHttpRequestException (#4281 review, finding 3) ═══════════════════════════ */
+
+    /// <summary>
+    /// Kestrel throws BadHttpRequestException for a malformed or oversized request body -- a client can
+    /// trigger it on purpose at no cost. Before this fix it fell into the generic catch and cost a 500 plus
+    /// an Error line per request. It must answer its OWN status code, write no body beyond what Kestrel
+    /// itself would have written, and log at Debug only -- never Error or Warning.
+    /// </summary>
+    [Fact]
+    public async Task BadHttpRequestException_AnswersItsOwnStatus_WritesNoBody_LogsAtDebugNeverError()
+    {
+        var (server, logger) = await BuildServer();
+        using var _ = server;
+
+        var ctx = await Send(server, "/api/__test/bad-request");
+
+        Assert.Equal(StatusCodes.Status413PayloadTooLarge, ctx.Response.StatusCode);
+
+        using var reader = new StreamReader(ctx.Response.Body);
+        Assert.Equal(string.Empty, await reader.ReadToEndAsync());
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Debug));
+    }
+
+    /* ═══════════════════════════ WebApplicationOptions.EnvironmentName (#4281 review, finding 4) ═══════════════════════════ */
+
+    /// <summary>
+    /// With no EnvironmentName set, an ASPNETCORE_ENVIRONMENT (or DOTNET_ENVIRONMENT) of "Development" left
+    /// set anywhere on the machine -- a leftover from testing something unrelated -- would add the developer
+    /// exception page ahead of the Host guard, handing a caller with NO credentials the exception message and
+    /// stack trace for any throw that escapes. This mirrors the exact WebApplicationOptions shape the real
+    /// web host builds (ContentRootPath/WebRootPath, now plus EnvironmentName): the real call site is deep
+    /// inside StartServerAsync (port pre-checks, store connection resolution) and needs a live store
+    /// connection to reach from a test, so this proves the override mechanism the fix relies on directly.
+    /// </summary>
+    [Fact]
+    public void WebHostEnvironment_IsAlwaysProduction_EvenWhenAspnetcoreEnvironmentSaysDevelopment()
+    {
+        Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Development");
+        Environment.SetEnvironmentVariable("DOTNET_ENVIRONMENT", "Development");
+        try
+        {
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                ContentRootPath = Path.Combine(RepoFile.Root, "Darling", "PerformanceMonitor.Darling.Service"),
+                WebRootPath = "wwwroot",
+                EnvironmentName = Microsoft.Extensions.Hosting.Environments.Production,
+            });
+
+            Assert.Equal(Microsoft.Extensions.Hosting.Environments.Production, builder.Environment.EnvironmentName);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", null);
+            Environment.SetEnvironmentVariable("DOTNET_ENVIRONMENT", null);
+        }
+    }
+
+    /* ═══════════════════════════ source pin: the /api/read/* dispatcher catch (#4281 review, finding 2) ═══════════════════════════ */
+
+    /// <summary>
+    /// The /api/read/* dispatcher's own catch (a binding-layer throw, not a tool's own swallowed exception --
+    /// those still answer through ToHttpResult's ServerError arm, #4283) used to fall through to
+    /// McpHelpers.FormatError(name, ex), putting the exception text on the wire. It must answer the same
+    /// ruled body and status the top-of-pipeline backstop gives. Source pin, not an HTTP test: every real read
+    /// defensively TryParse's its own query params, so there is no natural binding-layer throw to send a
+    /// request at.
+    /// </summary>
+    [Fact]
+    public void ReadDispatchCatch_AnswersTheRuledBodyAndStatus_NotFormatError()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/DarlingWebEndpoints.cs"));
+
+        var loopStart = code.IndexOf("foreach (var (name, handler) in BuildReadDispatch", StringComparison.Ordinal);
+        Assert.True(loopStart >= 0, "MapAll no longer builds the /api/read/* dispatch loop this pin is reading.");
+
+        var loopEnd = code.IndexOf("return ToHttpResult(result);", loopStart, StringComparison.Ordinal);
+        Assert.True(loopEnd >= 0, "The dispatch loop no longer falls through to ToHttpResult; this pin is reading nothing.");
+
+        var catchBlock = code[loopStart..loopEnd];
+
+        Assert.Contains("DarlingWebFailureLog.Body(ex)", catchBlock, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebFailureLog.StatusCode(ex)", catchBlock, StringComparison.Ordinal);
+        Assert.DoesNotContain("McpHelpers.FormatError(name, ex)", catchBlock, StringComparison.Ordinal);
     }
 
     /* ═══════════════════════════ source pin: registered ahead of every /api/* route ═══════════════════════════ */
