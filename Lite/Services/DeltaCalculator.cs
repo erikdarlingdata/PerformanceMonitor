@@ -213,6 +213,11 @@ ORDER BY server_id, sql_handle, statement_start_offset, statement_end_offset, pl
     {
         try
         {
+            /* Read lock (#4343): every family below is a plain SELECT (DuckDbInitializer's own rule — an
+               ordinary read only needs "the file must not be reorganized under me"), but with the sentinel
+               live a connection opened with no lock at all can attach to an instance ResetDatabaseAsync is
+               tearing down mid-reset, rather than merely reading stale data as before #4262. */
+            using var readLock = duckDb.AcquireReadLock();
             using var connection = duckDb.CreateConnection();
             await connection.OpenAsync();
 
