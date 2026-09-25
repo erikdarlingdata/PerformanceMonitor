@@ -31,10 +31,10 @@ namespace Darling.Tests;
 public sealed class QueryStoreIntervalLatestRungTests
 {
     private const int RungVersion = 143;
-    private const int PreviousVersion = 141;
+    private const int PreviousVersion = 142;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
-    private const int ProbeOrdinal = 117;
+    private const int ProbeOrdinal = 118;
 
     private static PgMigrations.Migration V143 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
