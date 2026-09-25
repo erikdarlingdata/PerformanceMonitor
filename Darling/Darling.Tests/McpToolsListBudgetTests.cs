@@ -99,6 +99,12 @@ public sealed class McpToolsListBudgetTests
        so neither counts here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
+    /* #4198: +364 bytes for get_analysis_findings' new limit/full_text parameters (the head is unchanged —
+       both parameter descriptions are under the D2 200-char cap and the guidance moved to the tool's tail,
+       get_tool_guide, which is not served in tools/list and so is not counted here). */
+    /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). */
 
     /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
        limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
@@ -132,7 +138,9 @@ public sealed class McpToolsListBudgetTests
        combined total with blocking (#4267) changes on top. */
     /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
        combined total with qs-regressions (#4264) changes on top. */
-    private const int TotalCeilingBytes = 173_157;
+    /* #4198 (analysis-findings, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264);
+       combined total with analysis-findings (#4266) changes on top. */
+    private const int TotalCeilingBytes = 173_522;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
