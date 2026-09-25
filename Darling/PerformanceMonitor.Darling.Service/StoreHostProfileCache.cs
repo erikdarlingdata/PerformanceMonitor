@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>finally</c> always releases the gate, so a thrown exception leaves the next call free to try again
 /// rather than stuck behind a faulted cache.</para>
 /// </summary>
-public sealed class StoreHostProfileCache
+public sealed class StoreHostProfileCache : IDisposable
 {
     /// <summary>The production singleton, registered once per host start (<c>DarlingMcpHostService.cs</c>,
     /// <c>DarlingWebEndpoints.cs</c>'s direct-call dispatch) so every caller shares the same 5-minute window.
@@ -97,4 +97,12 @@ public sealed class StoreHostProfileCache
         var entry = _entry;
         return entry is not null && _utcNow() - entry.GatheredAtUtc < _ttl ? entry : null;
     }
+
+    /// <summary>CA1001 (owns the disposable <see cref="_gate"/>) — mirrors <c>DarlingWebOidcClient</c>'s own
+    /// gate disposal. Safe for <see cref="Shared"/> despite two hosts (<c>DarlingMcpHostService</c>,
+    /// <c>DarlingWebEndpoints.cs</c>'s direct-call dispatch) both holding a reference to it: both register it
+    /// with the DI INSTANCE overload (<c>AddSingleton&lt;StoreHostProfileCache&gt;(Shared)</c>), and the
+    /// built-in container never disposes an instance it did not itself construct — so no container shutdown
+    /// disposes <see cref="Shared"/> out from under the other host.</summary>
+    public void Dispose() => _gate.Dispose();
 }
