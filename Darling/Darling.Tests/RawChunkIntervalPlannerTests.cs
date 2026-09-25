@@ -138,29 +138,98 @@ public sealed class RawChunkIntervalPlannerTests
     }
 
     [Fact]
-    public void Hysteresis_WidensOnlyWhenUnderHalfItsShare()
+    public void Hysteresis_WidensWhenStoreTotalStaysAtOrUnderHalfBudget()
     {
-        /* Two tables, each already at 6 h from a busier past. lightTable's rate has since fallen far enough
-           that even at the wider 12-hour rung it would sit under half its equal share of a generous budget;
-           closeTable's rate is still just over that half-share line, so it must stay put — proving the
-           hysteresis GAP (half, not all, of the share) actually gates something. */
-        var budget = 24.0 * GB; // two tables => share = 12 GB each, half-share = 6 GB
+        /* One table, already narrowed to 6 h. Budget is set so the store-wide total after widening lands
+           EXACTLY on the B/2 line (#4211 ruling, issuecomment-5836734285: "at or under half of B") — the
+           boundary is inclusive, so this must widen, not hold. */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("light_table", 0.1 * GB, 6, AsOf.AddDays(-3)),
-            new RawChunkIntervalPlanner.TableInput("close_table", 0.51 * GB, 6, AsOf.AddDays(-3)), // *12h = 6.12 GB, just over the 6 GB half-share
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, 6, AsOf.AddDays(-3)),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budget, currentTotalChunkCount: 10, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 24 * GB, currentTotalChunkCount: 10, AsOf)
+            .ToDictionary(d => d.TableName, StringComparer.Ordinal);
+
+        Assert.Equal(12, decisions["query_stats"].TargetIntervalHours);
+        Assert.True(decisions["query_stats"].Changes);
+        Assert.Contains("moved up", decisions["query_stats"].Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Hysteresis_HeldWhenStoreTotalFallsInTheBandAboveHalfBudget()
+    {
+        /* heavy_table sits at the ceiling and never moves — it is only there to give the store a total large
+           enough that widening narrowing_table lands in the BAND above B/2 but still under B (246 GB now,
+           252 GB if narrowing_table widens; half-budget is 150 GB, budget is 300 GB). Under the ruling this
+           must hold, not widen. Under the old equal-share rule it would have widened: with two tables,
+           shareBytes = 150 GB, halfShare = 75 GB, and narrowing_table's OWN widened bytes (12 GB) sit far
+           under that — the old rule never looked at the store-wide total against half the budget, only this
+           table's own bytes against its slice, so it missed that the move would leave the store deep in the
+           band. Confirmed once by hand against the pre-#4211-ruling pass 2: with these inputs it set
+           narrowing_table's TargetIntervalHours to 12 (Changes = true), where the ruling requires 6 (held). */
+        var tables = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("heavy_table", 10 * GB, 24, null),
+            new RawChunkIntervalPlanner.TableInput("narrowing_table", 1 * GB, 6, AsOf.AddDays(-3)),
+        };
+
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 300 * GB, currentTotalChunkCount: 10, AsOf)
+            .ToDictionary(d => d.TableName, StringComparer.Ordinal);
+
+        Assert.Equal(6, decisions["narrowing_table"].TargetIntervalHours);
+        Assert.False(decisions["narrowing_table"].Changes);
+        Assert.Contains("over half", decisions["narrowing_table"].Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Hysteresis_LighterNarrowedTableWidensBeforeHeavierWhenOnlyOneFitsUnderHalfBudget()
+    {
+        /* Both tables are already at 6 h. Only one widen fits under the 50 GB half-budget line, and the
+           lightest-rate table gets the chance first (#4211 ruling): light_table's move (36 -> 42 GB) fits,
+           so it goes first and takes the room; by the time heavy_table is considered the store is already at
+           42 GB, and its own move would push the total to 72 GB, over the line, so it is held. */
+        var tables = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("light_table", 1 * GB, 6, AsOf.AddDays(-3)),
+            new RawChunkIntervalPlanner.TableInput("heavy_table", 5 * GB, 6, AsOf.AddDays(-3)),
+        };
+
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 100 * GB, currentTotalChunkCount: 10, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         Assert.Equal(12, decisions["light_table"].TargetIntervalHours);
         Assert.True(decisions["light_table"].Changes);
         Assert.Contains("moved up", decisions["light_table"].Reason, StringComparison.Ordinal);
 
-        Assert.Equal(6, decisions["close_table"].TargetIntervalHours);
-        Assert.False(decisions["close_table"].Changes);
-        Assert.Contains("not under half its", decisions["close_table"].Reason, StringComparison.Ordinal);
+        Assert.Equal(6, decisions["heavy_table"].TargetIntervalHours);
+        Assert.False(decisions["heavy_table"].Changes);
+        Assert.Contains("over half", decisions["heavy_table"].Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Hysteresis_WidenedStoreIsNotNarrowedByASecondPlanCall()
+    {
+        /* Day 1: the table widens from 6 h to 12 h, landing the store total exactly on the B/2 line (as in
+           Hysteresis_WidensWhenStoreTotalStaysAtOrUnderHalfBudget). Day 2, one day later (eligible again):
+           feed that 12-hour result back in and confirm it does not flap back down to 6 h. Pass 1 never
+           considers it (12 GB already fits comfortably under the 24 GB budget), and pass 2 holds it at 12 h
+           rather than widening again to 24 h (24 GB would be over the 12 GB half-budget line). */
+        var dayOne = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, 6, AsOf.AddDays(-3)),
+        };
+        var dayOneDecision = Assert.Single(RawChunkIntervalPlanner.Plan(dayOne, budgetBytes: 24 * GB, currentTotalChunkCount: 10, AsOf));
+        Assert.Equal(12, dayOneDecision.TargetIntervalHours);
+
+        var dayTwo = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, dayOneDecision.TargetIntervalHours, AsOf),
+        };
+        var dayTwoDecision = Assert.Single(RawChunkIntervalPlanner.Plan(dayTwo, budgetBytes: 24 * GB, currentTotalChunkCount: 10, AsOf.AddDays(1)));
+
+        Assert.Equal(12, dayTwoDecision.TargetIntervalHours);
+        Assert.False(dayTwoDecision.Changes);
     }
 
     [Fact]

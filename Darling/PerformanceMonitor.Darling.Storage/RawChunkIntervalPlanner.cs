@@ -45,12 +45,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// among them) from moving the same table twice.</para>
 ///
 /// <para><b>Moving back up.</b> Considered only for a table the narrowing pass above did not touch today,
-/// and only when narrower than the ceiling. It widens one rung when its OWN bytes at that wider rung would
-/// stay under HALF of its equal share of the budget (B divided by the table count) — half, not all, so a
-/// table sitting right at the line does not narrow again on the very next run — and when the store-wide total
-/// still fits under B once it does. A table left over-budget after the narrowing pass (every lighter table
-/// already at the floor, or blocked by the day limit or the chunk cap) never widens: that safety check alone
-/// refuses it, since widening only adds bytes.</para>
+/// and only when narrower than the ceiling. A table moves back up one rung only when the store-wide open-chunk
+/// total, with that move made, stays at or under half of B (#4211 ruling, issuecomment-5836734285). Narrowing
+/// starts above B and widening needs the total under B/2, so a store sitting near the line never flaps. The
+/// lightest-rate table is considered first, so the moves that add the fewest bytes go first; a rate tie breaks
+/// on the table name, as in the narrowing pass.</para>
 ///
 /// <para><b>The chunk-count cap.</b> TimescaleDB's own guidance treats maintaining over ~1,000 chunks on one
 /// hypertable as an anti-pattern. This class has no per-table retention input to forecast an exact per-table
@@ -260,9 +259,15 @@ public static class RawChunkIntervalPlanner
                 $"moved to {narrower} h: store-wide open-chunk bytes exceeded the {budgetBytes:N0} B budget (rate-ordered, {table.IngestBytesPerHour:N0} B/h)");
         }
 
-        /* Pass 2 — widen, hysteresis-guarded, only for tables pass 1 left undecided. */
-        var shareBytes = tables.Count == 0 ? 0.0 : budgetBytes / tables.Count;
-        foreach (var table in tables)
+        /* Pass 2 — widen, hysteresis-guarded (#4211 ruling, issuecomment-5836734285): a table moves back up one
+           rung only when the store-wide open-chunk total, with that move made, stays at or under half of B.
+           Narrowing starts above B and widening needs the total under B/2, so a store near the line never flaps.
+           Lightest rate first, so the moves that add the fewest bytes go first; a rate tie breaks on the table
+           name, as in pass 1. */
+        var halfBudget = budgetBytes / 2.0;
+        foreach (var table in tables
+                     .OrderBy(t => t.IngestBytesPerHour)
+                     .ThenBy(t => t.TableName, StringComparer.Ordinal))
         {
             if (decisions.ContainsKey(table.TableName))
             {
@@ -276,30 +281,20 @@ public static class RawChunkIntervalPlanner
             }
 
             var wider = RungHours[rungIndex - 1];
-            var widenedOwnBytes = table.IngestBytesPerHour * wider;
-            var halfShare = shareBytes / 2.0;
-
-            if (widenedOwnBytes >= halfShare)
+            var widenedTotal = TotalBytes() - (table.IngestBytesPerHour * current[table.TableName])
+                + (table.IngestBytesPerHour * wider);
+            if (widenedTotal > halfBudget)
             {
                 decisions[table.TableName] = new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"held at {table.CurrentIntervalHours} h: at {wider} h it would be {widenedOwnBytes:N0} B, not under half its {halfShare:N0} B share");
-                continue;
-            }
-
-            var widenedTotal = TotalBytes() - (table.IngestBytesPerHour * current[table.TableName]) + widenedOwnBytes;
-            if (widenedTotal > budgetBytes)
-            {
-                decisions[table.TableName] = new Decision(
-                    table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    $"held at {table.CurrentIntervalHours} h: widening to {wider} h would put the store back over budget");
+                    $"held at {table.CurrentIntervalHours} h: at {wider} h the store would hold {widenedTotal:N0} B, over half the {budgetBytes:N0} B budget");
                 continue;
             }
 
             current[table.TableName] = wider;
             decisions[table.TableName] = new Decision(
                 table.TableName, table.CurrentIntervalHours, wider,
-                $"moved up to {wider} h: {widenedOwnBytes:N0} B stays under half its {halfShare:N0} B share");
+                $"moved up to {wider} h: the store holds {widenedTotal:N0} B, under half the {budgetBytes:N0} B budget");
         }
 
         var results = new List<Decision>(tables.Count);
