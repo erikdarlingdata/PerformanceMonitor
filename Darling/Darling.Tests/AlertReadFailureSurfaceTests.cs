@@ -403,7 +403,7 @@ public sealed class AlertReadFailureSurfaceTests
         var observations = 0;
         var observedBothParts = 0;
 
-        while (!writers.All(w => w.IsCompleted))
+        do
         {
             var reading = counter.ReadFor(Key);
             observations++;
@@ -423,12 +423,14 @@ public sealed class AlertReadFailureSurfaceTests
                 observedBothParts++;
             }
         }
+        while (!writers.All(w => w.IsCompleted));
 
         await Task.WhenAll(writers);
 
-        /* Liveness, so a silent pass cannot be the reader never running or never seeing a populated
-           reading: the subtraction has to have been exercised over two NONZERO parts, which is the only
-           state in which a wrong sampling order can show. */
+        /* The do makes the first observation certain, so a silent pass on that count cannot be the
+           reader never running. observedBothParts stays a liveness check: the subtraction has to have
+           been exercised over two NONZERO parts, which is the only state in which a wrong sampling
+           order can show. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             observedBothParts > 0,
@@ -773,7 +775,7 @@ public sealed class AlertReadFailureSurfaceTests
         var blends = new List<string>();
         var observations = 0;
 
-        while (!writers.All(w => w.IsCompleted))
+        do
         {
             var reading = counter.ReadFor(Key);
             observations++;
@@ -795,11 +797,12 @@ public sealed class AlertReadFailureSurfaceTests
                 blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
             }
         }
+        while (!writers.All(w => w.IsCompleted));
 
         await Task.WhenAll(writers);
 
-        /* Guaranteed rather than hoped for: the bucket was seeded, so the first iteration observed a
-           complete trio whatever the scheduler did. */
+        /* Guaranteed rather than hoped for: the do makes one observation certain, and the seeded bucket
+           makes that first observation a complete trio whatever the scheduler did. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             blends.Count == 0,
