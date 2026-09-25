@@ -135,11 +135,11 @@ public partial class ServerTab : UserControl
         }
     }
 
-    private void DownloadSnapshotPlan_Click(object sender, RoutedEventArgs e)
+    private async void DownloadSnapshotPlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row) return;
 
-        if (row.QueryPlan == null)
+        if (!row.HasQueryPlan)
         {
             MessageBox.Show(
                 "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.",
@@ -149,14 +149,37 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        SavePlanFile(row.QueryPlan, $"EstimatedPlan_Session{row.SessionId}");
+        btn.IsEnabled = false;
+        var originalContent = btn.Content;
+        btn.Content = "...";
+        try
+        {
+            /* #4239: the grid no longer carries the payload in-row — fetch it by capture key. */
+            var plan = await Task.Run(() => _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, row));
+            if (plan == null)
+            {
+                MessageBox.Show(
+                    "No estimated plan is available for this snapshot. The plan may have been evicted from the plan cache.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            SavePlanFile(plan, $"EstimatedPlan_Session{row.SessionId}");
+        }
+        finally
+        {
+            btn.Content = originalContent;
+            btn.IsEnabled = true;
+        }
     }
 
-    private void DownloadSnapshotLivePlan_Click(object sender, RoutedEventArgs e)
+    private async void DownloadSnapshotLivePlan_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.DataContext is not QuerySnapshotRow row) return;
 
-        if (row.LiveQueryPlan == null)
+        if (!row.HasLiveQueryPlan)
         {
             MessageBox.Show(
                 "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.",
@@ -166,7 +189,29 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        SavePlanFile(row.LiveQueryPlan, $"ActualPlan_Session{row.SessionId}");
+        btn.IsEnabled = false;
+        var originalContent = btn.Content;
+        btn.Content = "...";
+        try
+        {
+            var plan = await Task.Run(() => _dataService.ResolveSnapshotLivePlanAsync(_serverId, row));
+            if (plan == null)
+            {
+                MessageBox.Show(
+                    "No live query plan is available for this snapshot. The query may have completed before the plan could be captured.",
+                    "No Plan Available",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            SavePlanFile(plan, $"ActualPlan_Session{row.SessionId}");
+        }
+        finally
+        {
+            btn.Content = originalContent;
+            btn.IsEnabled = true;
+        }
     }
 
     private void ShowPlanLoading(string label)
@@ -290,11 +335,16 @@ public partial class ServerTab : UserControl
         switch (grid.CurrentItem)
         {
             case QuerySnapshotRow snap:
-                planXml = snap.LiveQueryPlan ?? snap.QueryPlan;
                 queryText = snap.QueryText;
-                label = snap.LiveQueryPlan != null
+                /* #4239: fetch by capture key (or read the in-row XML a Live Snapshot row already has —
+                   ResolveSnapshot*PlanAsync tries that first). Live preferred over estimated, same as the
+                   old in-row `LiveQueryPlan ?? QueryPlan`. */
+                planXml = await Task.Run(() => _dataService.ResolveSnapshotLivePlanAsync(_serverId, snap));
+                label = planXml != null
                     ? $"Plan - SPID {snap.SessionId}"
                     : $"Est Plan - SPID {snap.SessionId}";
+                if (planXml == null)
+                    planXml = await Task.Run(() => _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, snap));
                 break;
             case QueryStatsRow stats:
                 planXml = stats.QueryPlan;
@@ -384,9 +434,13 @@ public partial class ServerTab : UserControl
             case QuerySnapshotRow snapshot:
                 queryText = snapshot.QueryText;
                 databaseName = snapshot.DatabaseName;
-                planXml = snapshot.LiveQueryPlan ?? snapshot.QueryPlan;
                 isolationLevel = snapshot.TransactionIsolationLevel;
                 label = $"Actual Plan - SPID {snapshot.SessionId}";
+                /* #4239: fetch BEFORE QueryModificationDetector.Detect below judges planXml — a null plan
+                   fails safe to "this may modify data" for every click, not just the genuinely plan-less ones. */
+                planXml = await Task.Run(() => _dataService.ResolveSnapshotLivePlanAsync(_serverId, snapshot));
+                if (planXml == null)
+                    planXml = await Task.Run(() => _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, snapshot));
                 break;
             case QueryStatsRow stats:
                 queryText = stats.QueryText;
