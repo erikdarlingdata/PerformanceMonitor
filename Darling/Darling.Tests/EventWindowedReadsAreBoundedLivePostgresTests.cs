@@ -433,15 +433,28 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
 
     /// <summary>
     /// Runs both statements as <c>EXPLAIN (COSTS OFF)</c> and asserts the floored one plans meaningfully fewer
-    /// chunks than the unfloored oracle. A relative reduction, not an absolute ceiling like the issue's own
-    /// "3 chunks or fewer" wording — <c>darlingtest</c> is a store every live class in the suite shares, and a
-    /// fleet-wide read with no server_id predicate (job history) or a table other classes also seed with
+    /// distinct chunks than the unfloored oracle. A relative reduction, not an absolute ceiling like the issue's
+    /// own "3 chunks or fewer" wording — <c>darlingtest</c> is a store every live class in the suite shares, and
+    /// a fleet-wide read with no server_id predicate (job history) or a table other classes also seed with
     /// near-"now" rows (system health, blocking) can legitimately pick up a chunk this test's own seed did not
     /// create. <see cref="FleetReadsAreBoundedByTheFleetTests"/>'s own plan test hit the same thing first and
     /// same fix: compare relative to the oracle's own footprint, which the pollution affects identically, not
     /// to a hard number. Confirmed once, by hand, against a freshly created database (not part of this
     /// suite's shared-store contract): the floored system-health plan touches exactly 3 chunks for the 24-hour
     /// window, matching the issue's own wording — see the PR body's measured table.
+    ///
+    /// <para>Counts <b>distinct</b> chunks (<see cref="PlanChunkScans.DistinctChunkCount"/>), not scan nodes:
+    /// job history's floored read is #4229's own GROUP BY fix split into a job_stats CTE plus its own base join,
+    /// each independently floor-bounded, so it scans every in-window chunk twice. A node-count comparison
+    /// against the single-scan OLD oracle charged that doubling against the reduction — with
+    /// <c>ChunkIntervalDays = 1</c> and the floor sitting exactly 2 raw days back (the window's own day plus
+    /// <see cref="EventWindowFloor.SkewAllowance"/>'s one more), an exact-instant "now" almost never lands on a
+    /// chunk boundary, so the floored read always touches parts of 3 calendar-day chunks, never 2 — reducing
+    /// job history's own achievable margin (old 7 minus new-as-nodes 6 = 1) below <c>minReduction: 2</c> on
+    /// every run, seed pollution or none: reproduced on a freshly created database with nothing else in it
+    /// (old=7, new=6 as raw nodes). Distinct counting removes the doubling artifact (new=3 distinct chunks)
+    /// without weakening what the assertion actually proves — that the floor prunes out-of-window chunks —
+    /// since a chunk touched by two scan nodes still means only one physical chunk read past the floor.</para>
     /// </summary>
     private static async Task AssertChunksAsync(
         NpgsqlConnection connection, string oldSql, NpgsqlParameter[] oldArgs, string newSql, NpgsqlParameter[] newArgs,
@@ -450,8 +463,8 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
         _ = maxChunks;
         var oldPlan = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + oldSql, oldArgs, ct);
         var newPlan = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + newSql, newArgs, ct);
-        var oldChunks = PlanChunkScans.Count(oldPlan);
-        var newChunks = PlanChunkScans.Count(newPlan);
+        var oldChunks = PlanChunkScans.DistinctChunkCount(oldPlan);
+        var newChunks = PlanChunkScans.DistinctChunkCount(newPlan);
 
         Assert.True(oldChunks - newChunks >= minReduction,
             $"{label}: expected the floor to exclude at least {minReduction} of the 4 seeded old-day chunks (old={oldChunks}, new={newChunks}):\nOLD:\n{oldPlan}\nNEW:\n{newPlan}");
