@@ -1,3 +1,4 @@
+using System;
 using System.Net;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
@@ -95,5 +96,39 @@ public class EmailTemplateBrandingTests
         Assert.Contains("Availability Group", html);
         Assert.Contains("SET HADR RESUME", plain);
         Assert.Contains("Availability Group", plain);
+    }
+
+    /* ---------------- #4220: the triage-page link reaches both bodies ---------------- */
+
+    /// <summary>
+    /// #4220's trap, named twice in the issue: the HTML body and the plain-text body are built by two
+    /// different methods (<c>BuildHtmlBody</c> / <c>BuildPlainTextBody</c>), so a link wired into one says
+    /// nothing about the other. The HTML anchor is HTML-encoded; the plain-text line carries the raw URL.
+    /// </summary>
+    [Fact]
+    public void BuildAlertEmail_TriageUrl_AddsAnEncodedAnchorToHtml_AndAPlainLineToPlainText()
+    {
+        const string url = "http://box:5153/#/triage?server=SRV&metric=High%20CPU&at=2026-08-31T08%3A00%3A00Z&dedup=a%26b";
+
+        var (html, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            "High CPU", "SRV", "95%", "90%", 15, EmailAlertService.Branding, triageUrl: url);
+
+        Assert.Contains("Open triage page", html);
+        Assert.Contains($"href=\"{WebUtility.HtmlEncode(url)}\"", html);
+
+        Assert.Contains($"Open triage page: {url}", plain);
+    }
+
+    /// <summary>Null triageUrl (base unset, or — Darling — the dashboard disabled) renders neither addition,
+    /// so the email is byte-identical to the pre-#4220 shape.</summary>
+    [Fact]
+    public void BuildAlertEmail_NoTriageUrl_OmitsTheAnchorAndThePlainLine()
+    {
+        var (html, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            "High CPU", "SRV", "95%", "90%", 15, EmailAlertService.Branding);
+
+        Assert.DoesNotContain("Open triage page", html);
+        Assert.DoesNotContain("triage", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Open triage page", plain);
     }
 }

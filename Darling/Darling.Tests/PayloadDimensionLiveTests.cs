@@ -768,7 +768,7 @@ public sealed class PayloadDimensionLiveTests
                    in the oldest slice on the rig. DrainBatchesAsync is the same loop DarlingRetention
                    runs, so this exercises the real termination condition rather than a test-only one. */
                 var swept = await DarlingRetention.DrainBatchesAsync(
-                    token => gc.ExecuteNonQueryAsync(token), batchSize: 1, ct);
+                    async token => (await gc.ExecuteNonQueryAsync(token), 1), ct);
 
                 /* At least this test's expired row. The GC is fleet-wide, so an exact count would be a
                    flake waiting on a rig that happens to hold another ancient row; the two scoped counts
@@ -865,9 +865,9 @@ public sealed class PayloadDimensionLiveTests
                 async batchCt =>
                 {
                     batches++;
-                    return await delete.ExecuteNonQueryAsync(batchCt);
+                    var rows = await delete.ExecuteNonQueryAsync(batchCt);
+                    return (rows, cap);
                 },
-                cap,
                 ct);
 
             /* Every expired row, and only those. */
@@ -877,6 +877,115 @@ public sealed class PayloadDimensionLiveTests
                deleting 110 rows would mean the LIMIT never bound, which is the unbounded statement
                #2388 replaced — the one that times out on a real backlog. */
             Assert.Equal(5, batches);
+
+            Assert.Equal(0L, await ScalarAsync(
+                connection, "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen < $1", ct, cutoff));
+            Assert.Equal((long)liveCount, await ScalarAsync(
+                connection,
+                "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen = $1", ct, liveSeen));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                foreach (var digest in expiredDigests.Concat(liveDigests))
+                {
+                    await DeleteDimRowAsync(cleanup, PayloadDimensions.QueryPlanDimTable, digest, cleanupCt);
+                }
+            });
+        }
+    }
+
+    /// <summary>
+    /// The ADAPTIVE plan-dim drain (#4130) against a real table: <see cref="DarlingRetention.RunPlanDimBatchAsync"/>
+    /// and <see cref="DarlingRetention.NextPlanDimBatchCap"/> composed exactly as <c>PurgeOneAsync</c> composes
+    /// them, rather than the fixed-cap loop the sibling test above drives. Proves the real
+    /// <c>ctid IN (...)</c> statement still deletes correctly when it is REBUILT every attempt at a
+    /// changing cap (rather than one command reused with a constant LIMIT), and that a real (fast, local)
+    /// batch grows the cap the way <see cref="DarlingRetention.NextPlanDimBatchCap"/>'s pure tests say it
+    /// should: every batch here finishes in milliseconds, so each one is "fast" and the next cap doubles.
+    ///
+    /// <para>Cap sequence is exact and deterministic BECAUSE local execution is always fast: 10 -> 20 -> 40,
+    /// each one a FULL batch at its own (grown) cap — including the third, which happens to exactly exhaust
+    /// the seeded rows. A full batch always earns another round (<see cref="DarlingRetention.DrainBatchesAsync"/>'s
+    /// own contract: "an exact multiple of the cap terminates on the following EMPTY batch"), so a fourth,
+    /// zero-row attempt at cap 80 is expected too, not a bug in this test.</para>
+    /// </summary>
+    [Fact]
+    public async Task AdaptivePlanDimDrain_GrowsCapOnFastBatches_AndDrainsExactlyTheExpiredRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
+
+        var ct = TestContext.Current.CancellationToken;
+        var run = Guid.NewGuid().ToString("N")[..12];
+
+        const int startCap = 10;
+        const int floorCap = 5;
+        const int ceilingCap = 100;
+        const int expiredCount = 70;    // 10 + 20 + 40, exactly, plus one trailing empty batch at 80
+        const int liveCount = 6;
+
+        var expiredSeen = new DateTime(2002, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var liveSeen = new DateTime(2002, 6, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var cutoff = new DateTime(2002, 3, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        var expiredDigests = new List<byte[]>(expiredCount);
+        var liveDigests = new List<byte[]>(liveCount);
+
+        await using var connection = await OpenMigratedStoreAsync(connectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            for (var i = 0; i < expiredCount + liveCount; i++)
+            {
+                var expired = i < expiredCount;
+                var payload = $"<ShowPlanXML adaptivedrain=\"{(expired ? "old" : "new")}-{run}-{i}\"/>";
+                var digest = PayloadDimensions.Digest(payload);
+                (expired ? expiredDigests : liveDigests).Add(digest);
+
+                using var insert = new NpgsqlCommand(
+                    "INSERT INTO query_plan_dim (digest, query_plan_xml, last_seen) VALUES ($1, $2, $3)",
+                    connection);
+                insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+                insert.Parameters.AddWithValue(payload);
+                insert.Parameters.AddWithValue(expired ? expiredSeen : liveSeen);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var batches = 0;
+            var capsUsed = new List<int>();
+            var cap = startCap;
+
+            var deleted = await DarlingRetention.DrainBatchesAsync(
+                async ct2 =>
+                {
+                    var (rows, usedCap, elapsed) = await DarlingRetention.RunPlanDimBatchAsync(
+                        async (attemptCap, attemptCt) =>
+                        {
+                            batches++;
+                            using var delete = new NpgsqlCommand(
+                                DarlingRetention.RowCappedDeleteSql(
+                                    PayloadDimensions.QueryPlanDimTable, PayloadDimensions.LastSeenColumn, attemptCap),
+                                connection);
+                            delete.Parameters.AddWithValue(cutoff);
+                            return await delete.ExecuteNonQueryAsync(attemptCt);
+                        },
+                        cap,
+                        floorCap,
+                        ct2);
+
+                    capsUsed.Add(usedCap);
+                    cap = DarlingRetention.NextPlanDimBatchCap(usedCap, elapsed.TotalSeconds, floorCap, ceilingCap);
+                    return (rows, usedCap);
+                },
+                ct);
+
+            Assert.Equal(expiredCount, deleted);
+            Assert.Equal(4, batches);
+            Assert.Equal(new[] { 10, 20, 40, 80 }, capsUsed);
 
             Assert.Equal(0L, await ScalarAsync(
                 connection, "SELECT COUNT(*) FROM query_plan_dim WHERE last_seen < $1", ct, cutoff));

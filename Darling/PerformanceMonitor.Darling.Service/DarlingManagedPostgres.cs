@@ -494,6 +494,21 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV14 = "# Managed by PerformanceMonitor Darling (v14 PostgreSQL 17 maintenance_work_mem limit) -- do not remove this block";
 
     /// <summary>
+    /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
+    /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
+    /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
+    /// what <see cref="BuildMemorySizingConfAppend"/>/<see cref="BuildHardwareSizingConfAppend"/>/etc. decide,
+    /// and a second list keyed the other way (setting -> marker) would be one more place those two could drift.
+    /// v1 (<see cref="ConfMarker"/>) is included even though it never carries one of the seven checked
+    /// settings — harmless, since a scan for a setting v1 never sets simply never lands inside its span.
+    /// </summary>
+    internal static readonly string[] AllManagedConfMarkers =
+    [
+        ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
+        ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
+    ];
+
+    /// <summary>
     /// Prefix of the v8 fingerprint line — the record of what the sizing beneath it was derived FROM,
     /// which is the whole mechanism: a marker can only say "a block exists", a fingerprint says "a block
     /// exists FOR THIS MACHINE". Compared by <see cref="ConfHasCurrentHardwareFingerprint"/> against the
@@ -749,10 +764,19 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(ConfMarkerV4).Append('\n');
-        builder.Append("max_connections = 200\n");
+        builder.Append("max_connections = ").Append(TargetMaxConnections).Append('\n');
         builder.Append("max_wal_size = 4GB\n");
         return builder.ToString();
     }
+
+    /// <summary>
+    /// The fixed <c>max_connections</c> the v4 block writes (#4214): a single named constant instead of the
+    /// literal <c>200</c> living in two places (this append, and the host-profile check's "value derived for
+    /// this host" for the same setting), which is not RAM/hypertable-derived like the settings in
+    /// <see cref="DeriveMemorySettings"/> — it is a fixed headroom figure, so there is no <c>Derive*</c>
+    /// function to share; this constant is the shared source instead.
+    /// </summary>
+    internal const int TargetMaxConnections = 200;
 
     /// <summary>
     /// The v5 co-located-sizing override block (#1559): re-states <c>shared_buffers</c> at the CAPPED
@@ -1192,9 +1216,30 @@ public sealed class DarlingManagedPostgres
     /// was raised for — a planner hint with no allocation, found at 11.86 GB (75% of 16 GB) on hosts that
     /// now have 31.5 GB, which biases the planner toward sequential scans on a store serving ~670k small
     /// index lookups a day. <c>maintenance_work_mem</c> is a per-operation CEILING that PostgreSQL grows
-    /// into rather than reserves, so re-deriving it cannot overcommit. The two worker settings are
-    /// restart-only counts of background slots that only ever grow as collectors are added, and re-stating
-    /// them is what finally makes the v2 block's "never goes stale" claim true.</para>
+    /// into rather than reserves, so re-deriving it cannot overcommit. <c>work_mem</c> re-joined this list in
+    /// #4207: see the bullet below for why v3's original exclusion in #2845 does not hold up. The two worker
+    /// settings are restart-only counts of background slots that only ever grow as collectors are added, and
+    /// re-stating them is what finally makes the v2 block's "never goes stale" claim true.</para>
+    ///
+    /// <para><b>work_mem WAS excluded (#2845); #4207 measured why that was wrong.</b> The original argument
+    /// was that the formula would take it 31 MB -> ~63 MB at 31.5 GB and the only measurements above 31 MB on
+    /// the heaviest read were WORSE: PlanRegressionSql at default 26,565 ms, at 31 MB 25,617 ms, and at
+    /// <b>512 MB</b> 59,323 ms. That comparison never tested the value this formula actually derives — 512 MB
+    /// is 8x <see cref="DeriveMemorySettings"/>'s own 64 MB ceiling, a value nothing in this codebase would
+    /// ever write, so the regression it found says nothing about the ~63 MB case. What #2845 left unmeasured,
+    /// #4207 measured directly: three field stores stuck at the v3 block's 31 MB (16 GB-derived) after a
+    /// resize spilled <b>33 TB and 7 TB</b> of <c>pg_stat_database.temp_bytes</c> to disk since creation, on
+    /// hosts reporting 33,788,809,216 bytes — nominally "31.5 GiB", actually 31.47 GiB, which
+    /// <see cref="QuantizeRam"/> rounds DOWN to 31 GB (the 31.5 GB midpoint rounds up; this reading is half a
+    /// GB short of it) and <see cref="DeriveMemorySettings"/> turns into <b>62 MB</b>, not the round "63 MB"
+    /// the issue's own back-of-envelope RAM/512 gave for a bare 31.5 GiB. Either figure is what nothing
+    /// re-applied — the exact staleness this whole block exists to heal, just for the one setting it skipped.
+    /// The claim that
+    /// <c>work_mem</c> is "not a property of the machine" is also narrower than it reads: the formula's own
+    /// ceiling (RAM/512, clamped 16-64 MB) is deliberately modest specifically BECAUSE it is a per-connection,
+    /// per-sort cost against a machine with a fixed amount of RAM (see <see cref="DeriveMemorySettings"/>),
+    /// and a spill that costs disk I/O and wall-clock time is worse than the same query having had the RAM
+    /// its own host was sized to offer.</para>
     ///
     /// <para><b>What it deliberately does NOT emit, and why the omissions are the load-bearing part.</b></para>
     /// <list type="bullet">
@@ -1207,14 +1252,8 @@ public sealed class DarlingManagedPostgres
     ///   any host above 4 GB, so a hardware change cannot move it and emitting it would buy nothing. The
     ///   reason to leave it out is the FUTURE one: if the cap is ever raised deliberately, that is a formula
     ///   change and belongs to a version-keyed block where it gets reviewed, not something a resize should
-    ///   silently propagate to production.</item>
-    /// <item><b>work_mem</b> — EXCLUDED. The formula would take it 31 MB -> 63 MB at 31.5 GB, and the only
-    ///   measurements above 31 MB on this store's heaviest read are WORSE: PlanRegressionSql at default
-    ///   26,565 ms, at 31 MB 25,617 ms, at 512 MB 59,323 ms (#2845). 63 MB is not 512 MB and no one has
-    ///   measured it, which is the point — the evidence that exists points the wrong way, so a resize is
-    ///   not the moment to move it. The deeper reason is that it does not belong to this block at all:
-    ///   everything here is a property of the MACHINE, while work_mem is a per-sort, per-connection ceiling
-    ///   whose right value follows from the QUERY MIX. The hardware changed; the sort behaviour did not.</item>
+    ///   silently propagate to production. work_mem has no such structural reason: nothing caps its formula
+    ///   to a value a hardware change cannot move, which is exactly why letting it go stale had a cost.</item>
     /// <item><b>max_parallel_workers</b> — not emitted because this class has never set it; it sits at the
     ///   PostgreSQL default of 8 regardless of core count. Deriving it from cores is a plausible want on a
     ///   16-core host, but it is a behaviour change rather than a staleness fix, and it multiplies the
@@ -1225,10 +1264,10 @@ public sealed class DarlingManagedPostgres
     ///   to do, and fingerprinting it would append a block of identical values on every resize.</item>
     /// </list>
     ///
-    /// <para><b>Reload semantics.</b> <c>effective_cache_size</c> and <c>maintenance_work_mem</c> are
-    /// SIGHUP-reloadable; the two worker settings are restart-only. The append runs before
-    /// <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on that
-    /// very start — the same story as v3 and v7.</para>
+    /// <para><b>Reload semantics.</b> <c>effective_cache_size</c>, <c>maintenance_work_mem</c> and
+    /// <c>work_mem</c> are all SIGHUP-reloadable; the two worker settings are restart-only. The append runs
+    /// before <c>pg_ctl start</c> on a service-owned start, so in practice the whole block takes effect on
+    /// that very start — the same story as v3 and v7.</para>
     /// </summary>
     internal static string BuildHardwareSizingConfAppend(long totalPhysicalMemoryBytes, int hypertableCount)
     {
@@ -1241,8 +1280,155 @@ public sealed class DarlingManagedPostgres
         builder.Append(BuildHardwareFingerprint(totalPhysicalMemoryBytes, hypertableCount)).Append('\n');
         builder.Append("effective_cache_size = ").Append(settings.EffectiveCacheSizeMb).Append("MB\n");
         builder.Append("maintenance_work_mem = ").Append(settings.MaintenanceWorkMemMb).Append("MB\n");
+        builder.Append("work_mem = ").Append(settings.WorkMemMb).Append("MB\n");
         builder.Append("timescaledb.max_background_workers = ").Append(workers.MaxBackgroundWorkers).Append('\n');
         builder.Append("max_worker_processes = ").Append(workers.MaxWorkerProcesses).Append('\n');
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The [start, end) span of the v8 block whose marker begins at <paramref name="markerStart"/>: from the
+    /// marker line through the last content line before the next blank line, or end of file (#4207).
+    ///
+    /// <para><b>Why this is the rule, when the marker carries no end sentinel of its own</b> (unlike the
+    /// begin/end pair <see cref="ReconcilePgHba"/> replaces between). <see cref="BuildHardwareSizingConfAppend"/>,
+    /// like every <c>Build*ConfAppend</c> in this file, writes its block as ONE leading blank line — the
+    /// separator from whatever came before, itself OUTSIDE the block — followed by the marker and then
+    /// content lines with NO blank line between them. So the first blank line found after the marker is
+    /// always the start of what follows: either the next block's own leading separator, or trailing
+    /// whitespace at end of file. That holds for a v8 block written by ANY version of the builder, past or
+    /// future, not only today's line count — a setting added to or removed from the block moves where the
+    /// next blank line falls without this rule having to change.</para>
+    ///
+    /// <para><b>Known edge case.</b> An operator line spliced in directly after a v8 block's last setting
+    /// line, with NO blank line of its own before it, reads as more content of that block rather than as
+    /// something outside it — every block this codebase writes is blank-line-separated from what follows
+    /// (each <c>Build*ConfAppend</c> begins with its own leading blank line), so this only bites a hand edit
+    /// that does not follow that convention. <c>ALTER SYSTEM</c> (postgresql.auto.conf) is unaffected either
+    /// way, since this function never reads that file.</para>
+    /// </summary>
+    /// <remarks>Internal, not private (#4214): the body never mentions v8 specifically — it walks from a
+    /// marker line to the next blank line or EOF, which is the same shape every <c>Build*ConfAppend</c> in
+    /// this class writes. The host-profile check's generic managed-block scan reuses this exact walk for
+    /// EVERY marker rather than re-implementing it, so the two cannot drift on what "a block's span" means.</remarks>
+    internal static int FindHardwareSizingBlockEnd(string conf, int markerStart)
+    {
+        var cursor = conf.IndexOf('\n', markerStart);
+        if (cursor < 0)
+        {
+            return conf.Length;
+        }
+
+        cursor++;
+        while (cursor < conf.Length)
+        {
+            var lineEnd = conf.IndexOf('\n', cursor);
+            var line = lineEnd < 0 ? conf[cursor..] : conf[cursor..lineEnd];
+            if (line.TrimEnd('\r').Length == 0)
+            {
+                return cursor;
+            }
+
+            if (lineEnd < 0)
+            {
+                return conf.Length;
+            }
+
+            cursor = lineEnd + 1;
+        }
+
+        return cursor;
+    }
+
+    /// <summary>
+    /// Every v8 block's [start, end) span in <paramref name="conf"/>, in file order — file order being
+    /// append order, so the first span is also the chronologically first block (#4207). On each of the three
+    /// field stores this returns three spans, one per fingerprint change since the store's creation, because
+    /// the prior code appended a fresh block on every change instead of replacing the one it superseded.
+    /// <see cref="ReplaceOrAppendHardwareSizingBlock"/> is what collapses them.
+    /// </summary>
+    internal static List<(int Start, int End)> FindHardwareSizingBlockSpans(string conf)
+    {
+        var spans = new List<(int Start, int End)>();
+        var searchFrom = 0;
+        while (true)
+        {
+            var markerStart = conf.IndexOf(ConfMarkerV8, searchFrom, StringComparison.Ordinal);
+            if (markerStart < 0)
+            {
+                break;
+            }
+
+            /* Defensive: the marker only means "a v8 block starts here" at the start of a line — it is
+               never written any other way — so a match that is not line-initial (impossible today, but
+               cheap to rule out) is skipped rather than treated as a block. */
+            if (markerStart > 0 && conf[markerStart - 1] != '\n')
+            {
+                searchFrom = markerStart + ConfMarkerV8.Length;
+                continue;
+            }
+
+            var end = FindHardwareSizingBlockEnd(conf, markerStart);
+            spans.Add((markerStart, end));
+            searchFrom = end;
+        }
+
+        return spans;
+    }
+
+    /// <summary>
+    /// Collapses however many v8 blocks <paramref name="conf"/> carries into exactly one, at the position of
+    /// the FIRST (#4207). Every block after the first is a leftover from the append-not-replace bug — a
+    /// stale copy the code once left behind on every fingerprint change — and is removed outright; the first
+    /// is rewritten in place with <paramref name="newBlockAppend"/>'s content (the same string
+    /// <see cref="BuildHardwareSizingConfAppend"/> returns for a plain append, leading blank line included).
+    /// No v8 block at all falls back to a plain append — the v2-v7 shape — so a cluster's first v8 write is
+    /// unchanged.
+    ///
+    /// <para>Nothing outside a v8 span is touched, INCLUDING the blank line that separates one block from the
+    /// next: that separator is not part of either block under <see cref="FindHardwareSizingBlockEnd"/>'s
+    /// rule, so removing a duplicate can leave a doubled blank line where three blocks once stood. That is
+    /// cosmetic — PostgreSQL ignores blank lines — and the alternative (also consuming the separator) would
+    /// touch a byte that is provably not part of any v8 block, which the pin on this function
+    /// (<c>ReplaceOrAppendHardwareSizingBlock_LinesOutsideBlocks_AreByteIdenticalAfterRewrite</c>) forbids.</para>
+    ///
+    /// <para><b>Why rewriting the FIRST block's position, not the last, keeps manual overrides winning
+    /// exactly as before.</b> postgresql.conf takes the LAST occurrence of a setting, so what decides a
+    /// manual edit's fate is only ITS position relative to wherever the v8 lines end up — and collapsing can
+    /// only move that position EARLIER in the file (to the first block) or leave it unchanged (already one
+    /// block), never later. An edit that already sat after every v8 block still sits after the single
+    /// survivor; an edit that already lost to a later v8 block was losing before this function ever ran, for
+    /// the same reason. <c>ALTER SYSTEM</c> values in <c>postgresql.auto.conf</c> are unaffected either way —
+    /// that file is read after postgresql.conf in its entirety and outranks anything this function does.</para>
+    /// </summary>
+    internal static string ReplaceOrAppendHardwareSizingBlock(string conf, string newBlockAppend)
+    {
+        var spans = FindHardwareSizingBlockSpans(conf);
+        if (spans.Count == 0)
+        {
+            return conf + newBlockAppend;
+        }
+
+        /* newBlockAppend carries the same leading blank line every Build*ConfAppend does; splicing it in at
+           an existing marker's position would double that separator, since the blank line already there
+           (untouched, being outside the span by definition) still precedes it. */
+        var content = newBlockAppend.StartsWith('\n') ? newBlockAppend[1..] : newBlockAppend;
+
+        var builder = new StringBuilder(conf.Length + content.Length);
+        var cursor = 0;
+        for (var i = 0; i < spans.Count; i++)
+        {
+            var (start, end) = spans[i];
+            builder.Append(conf, cursor, start - cursor);
+            if (i == 0)
+            {
+                builder.Append(content);
+            }
+
+            cursor = end;
+        }
+
+        builder.Append(conf, cursor, conf.Length - cursor);
         return builder.ToString();
     }
 
@@ -2753,7 +2939,17 @@ public sealed class DarlingManagedPostgres
            fresh initdb has just written v3 with identical values. The redundant first block is the price of
            a simple invariant — after any start, the conf carries a fingerprint for the CURRENT host — and
            without recording one on the first start there would be nothing for the second start to compare
-           against. It converges immediately: the next start finds its own fingerprint and appends nothing. */
+           against. It converges immediately: the next start finds its own fingerprint and rewrites nothing.
+
+           REPLACES rather than appends (#4207). A fingerprint change used to append a fresh block, and
+           because the fingerprint includes the worker count, which moves with the hypertable count, each
+           field store had grown three copies by the time #4207 was filed. ReplaceOrAppendHardwareSizingBlock
+           rewrites the FIRST existing block in place and drops every other copy, so any fingerprint change —
+           a resize or a hypertable-count change alike — now costs one rewritten block, never a growing file.
+           That also removes the one remaining reason #2845 considered for splitting the worker count into
+           its own fingerprint (so a hypertable-count change would not re-trigger the memory lines): with an
+           in-place rewrite a worker-only change is exactly as cheap as a memory-only one, so the single
+           fingerprint stays single rather than gaining a second axis with nothing left to buy. */
         /* INVARIANT this check depends on: `conf` was read ONCE at the top of this method, before v1-v7
            may have appended. That is safe only because none of them emits a line carrying
            ConfHardwareFingerprintPrefix, so nothing appended above can change this answer. A future version
@@ -2783,12 +2979,24 @@ public sealed class DarlingManagedPostgres
                appears nowhere in the file. QuantizeRam is idempotent, so the call below still quantizes and
                still gets the same answer. */
             var v8QuantizedRam = QuantizeRam(v8RamBytes);
-            File.AppendAllText(confPath, BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount));
+            var v8Append = BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount);
+
+            /* Re-read rather than reuse the `conf` snapshot from the top of this method: v1-v7 above may
+               have just appended their own healing blocks straight to disk (File.AppendAllText, bypassing
+               `conf` entirely), and rewriting the whole file from the stale snapshot would silently drop
+               them. None of v1-v7 can itself contain a v8 span, so this re-read cannot move or hide one. */
+            var v8CurrentConf = File.ReadAllText(confPath);
+            var v8PriorCopies = FindHardwareSizingBlockSpans(v8CurrentConf).Count;
+            File.WriteAllText(confPath, ReplaceOrAppendHardwareSizingBlock(v8CurrentConf, v8Append));
+
             var v8Settings = DeriveMemorySettings(v8QuantizedRam);
             var v8Workers = DeriveWorkerSettings(hypertableCount);
             _logger.LogInformation(
-                "Appended v8 hardware sizing to postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers and work_mem deliberately NOT re-derived, see #2845)",
-                v8QuantizedRam / (1024L * 1024L), hypertableCount, v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses);
+                "{Action} v8 hardware sizing in postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, work_mem {WorkMem}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers deliberately NOT re-derived, see #2845){CollapseNote}",
+                v8PriorCopies == 0 ? "Appended" : "Rewrote", v8QuantizedRam / (1024L * 1024L), hypertableCount,
+                v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Settings.WorkMemMb,
+                v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses,
+                v8PriorCopies > 1 ? $" (collapsed {v8PriorCopies} copies into 1, #4207)" : string.Empty);
         }
 
         /* Checked independently of v1-v8, and placed AFTER v8 on purpose: v8 keys on the last fingerprint
@@ -3049,24 +3257,57 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     private bool TryGetAuthoritativePhysicalMemoryBytes(out long totalPhysicalMemoryBytes)
     {
+        if (TryReadWindowsPhysicalMemoryBytes(out totalPhysicalMemoryBytes, out var win32Error, out var thrown))
+        {
+            return true;
+        }
+
+        if (thrown is not null)
+        {
+            _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", thrown.Message);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "GlobalMemoryStatusEx did not return total physical memory (Win32 error {Error}); sizing Postgres memory from a fallback.",
+                win32Error);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The RAW <c>GlobalMemoryStatusEx</c> read, with no logger dependency (#4214) — split out of
+    /// <see cref="TryGetAuthoritativePhysicalMemoryBytes"/> so the host-profile check's RAM fact can call the
+    /// SAME authoritative read this class sizes Postgres from, rather than a second P/Invoke of the same API
+    /// (the "RAM: reuse the authoritative read on Windows" ruling). <paramref name="thrown"/> carries the
+    /// exception on the rare throw path so each caller can log its own wording without this method taking a
+    /// logger; <paramref name="win32Error"/> is <see cref="Marshal.GetLastWin32Error"/> on a clean false.
+    /// </summary>
+    internal static bool TryReadWindowsPhysicalMemoryBytes(out long totalPhysicalMemoryBytes, out int win32Error, out Exception? thrown)
+    {
         try
         {
             var status = new MemoryStatusEx();
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
                 totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                win32Error = 0;
+                thrown = null;
                 return true;
             }
 
-            _logger.LogWarning(
-                "GlobalMemoryStatusEx did not return total physical memory (Win32 error {Error}); sizing Postgres memory from a fallback.",
-                Marshal.GetLastWin32Error());
+            win32Error = Marshal.GetLastWin32Error();
         }
         catch (Exception ex)
         {
-            _logger.LogWarning("Could not query total physical memory ({Message}); sizing Postgres memory from a fallback.", ex.Message);
+            thrown = ex;
+            totalPhysicalMemoryBytes = 0;
+            win32Error = 0;
+            return false;
         }
 
+        thrown = null;
         totalPhysicalMemoryBytes = 0;
         return false;
     }

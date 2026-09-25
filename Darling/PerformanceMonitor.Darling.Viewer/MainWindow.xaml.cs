@@ -608,12 +608,21 @@ public partial class MainWindow : Window
             _ = RefreshAvailabilityGroupsAsync();
         }
 
-        /* Two tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
+        /* Four tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
            analysis findings change on the service's 30-minute cadence, so an interval auto-refresh is pointless
-           churn and would reset the incident expanders' state under the reader), and the Overview has its OWN
-           timer, so this one skips it (they'd otherwise double-refresh the same grid). Every other aggregate tab
-           still auto-refreshes. */
+           churn and would reset the incident expanders' state under the reader); Job History (#4229) refreshes
+           on tab-activation and its own Refresh button ONLY — job history changes at job-run cadence, not every
+           NocRefreshIntervalSeconds, and polling the whole fleet tab re-ran its costliest read (the per-job
+           success average/max join over the window's newest 2,000 rows) for a grid that had not moved since the
+           last poll; FinOps (#4227) refreshes on tab-activation, its own sub-tab switch and its own Refresh
+           button ONLY — every figure on it moves hourly at the fastest (utilization) or daily (sizes, inventory,
+           growth), so polling the whole aggregate tab every NocRefreshIntervalSeconds re-ran its costliest reads
+           (including the raw query_stats top-consumer grids and the object-growth bounds scan) for numbers that
+           had not moved since the last poll; and the Overview has its OWN timer, so this one skips it (they'd
+           otherwise double-refresh the same grid). Every other aggregate tab still auto-refreshes. */
         if (ReferenceEquals(MainTabs.SelectedItem, RecommendationsTab)
+            || ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem)
+            || ReferenceEquals(MainTabs.SelectedItem, FinOpsTab)
             || ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
             return;

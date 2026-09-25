@@ -221,6 +221,8 @@ public static class PgMigrations
         new Migration(139, "postmaster-start-time", V139Sql),
         new Migration(140, "checkpointer-timed-count", V140Sql),
         new Migration(141, "collection-caveats", V141Sql),
+        new Migration(142, "index-object-stats-server-time", V142Sql),
+        new Migration(143, "query-store-interval-latest", V143Sql),
     };
 
     /// <summary>
@@ -1892,6 +1894,152 @@ CREATE TABLE IF NOT EXISTS collect.analysis_collection_caveats
     first_seen_utc timestamp NOT NULL,
     last_seen_utc timestamp NOT NULL,
     CONSTRAINT pk_analysis_collection_caveats PRIMARY KEY (server_id, family)
+);";
+
+    /// <summary>
+    /// V142 — #4196: the supporting index for the anomaly detector's "latest two object-stats snapshots"
+    /// read (<c>PgAnomalyDetector.ObjectGrowthSql</c> / <c>PgAnomalyDetector.ObjectContentionSql</c>'s
+    /// <c>snaps</c> CTE, <c>SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1
+    /// ORDER BY collection_time DESC LIMIT 2</c>). Neither existing index leads with <c>collection_time</c>
+    /// second: V1's <c>idx_index_object_stats_object</c> is <c>(server_id, database_name, object_id, index_id,
+    /// collection_time)</c> and V22's <c>idx_index_object_stats_latest</c> is <c>(server_id, database_id,
+    /// object_id, index_id, collection_time DESC)</c> — both put two unconstrained columns between the equality
+    /// filter and the sort key the read needs, so neither can drive it. TimescaleDB's automatic per-chunk
+    /// <c>collection_time</c> index CAN drive the <c>ORDER BY ... LIMIT 2</c> directly (SkipScan), but it has no
+    /// <c>server_id</c> column at all, so every server's rows in the chunk are read and rejected by a Filter
+    /// until two matching ones turn up. <c>index_object_stats</c> is collected once daily per server, so the
+    /// "prior" snapshot is usually a chunk boundary away, but the "latest" one is always in the newest chunk
+    /// alongside the rest of that day's fleet — paid once per server per analysis pass, twice (once per
+    /// statement). No other read needs a new index: the <c>cur</c>/<c>prv</c> CTEs also filter on
+    /// <c>collection_time</c> once the two times are known, but they are already bounded to the one server by
+    /// <c>idx_index_object_stats_latest</c>'s leading <c>server_id</c> column (a Filter there costs one
+    /// server's history, not the fleet's), which is why only the <c>snaps</c> step gets a new index.
+    ///
+    /// <para><b>No SQL text changes.</b> The <c>snaps</c> CTE already has the ideal shape for this index
+    /// (<c>DISTINCT</c> + <c>ORDER BY</c> + <c>LIMIT</c> on exactly the sort key, filtered on exactly the
+    /// leading equality column) — it only lacked the index. Measured on a rig seeded with three chunks (one at
+    /// real fleet-daily scale: 43 servers, ~12,000 index/table rows each, matching the issue's own ~11,900
+    /// rows/server/day measurement, plus two smaller older chunks, one compressed): before this index, the
+    /// <c>snaps</c> read for one server was <c>Custom Scan (SkipScan)</c> over the chunk's bare
+    /// <c>collection_time</c> index with <c>Filter: (server_id = $1)</c>, <c>Rows Removed by Filter: 36000</c>,
+    /// <c>Buffers: shared hit=92 read=972</c>, 18.5 ms. After, the same read is <c>Index Only Scan</c> using
+    /// this index with <c>Index Cond: (server_id = $1) AND (collection_time &lt; ...)</c>, no Filter line,
+    /// <c>Buffers: shared hit=33 read=4</c>, 0.4 ms — roughly 29x fewer buffers and 44x faster on this seed; the
+    /// ratio widens on a bigger fleet since the old plan's cost scales with the WHOLE fleet's newest-chunk rows
+    /// and the new plan's does not.</para>
+    ///
+    /// <para><b>Locking — plain <c>CREATE INDEX</c>, in the ladder, deliberately.</b> <c>CREATE INDEX
+    /// CONCURRENTLY</c> is refused outright on a TimescaleDB hypertable ("hypertables do not support concurrent
+    /// index creation" — see <see cref="PgTableTuning"/>'s <c>ForcePlanFailuresIndexName</c> finding for the
+    /// same limitation on a much bigger table), and <c>MigrateAsync</c> wraps every rung in a transaction, which
+    /// also rules out the per-chunk <c>WITH (timescaledb.transaction_per_chunk)</c> form. So this rung takes the
+    /// ordinary ShareLock on the hypertable root for its build's duration, same as V22's index on this same
+    /// table. Unlike <c>PgTableTuning</c>'s query_store_stats index — 8-16 million rows/DAY, big enough that the
+    /// build was moved out of the ladder into the runtime Tuning stage — <c>index_object_stats</c> is the daily
+    /// object-stats collector: roughly half a million rows/day fleet-wide per the issue's own measurement, and
+    /// <see cref="TimescaleSupport.CompressAfterDays"/> = 1 means only about one day's chunk is ever uncompressed
+    /// at migration time; every older chunk's decompressed relation is an empty shell (a compressed chunk's
+    /// <c>CREATE INDEX</c> cost is one 8 KB page, not a function of the rows inside it — the same property
+    /// <c>PgTableTuning</c> measured). Measured on the same three-chunk rig: 228 ms end to end for the whole
+    /// build (one 516,000-row uncompressed chunk plus two smaller chunks, one compressed) — small enough,
+    /// against this table's daily write rate, to stay in the ladder rather than needing the Tuning-stage
+    /// treatment.</para>
+    ///
+    /// <para>Additive and idempotent like V22 (<c>CREATE INDEX IF NOT EXISTS</c>): a fresh store gets it at
+    /// V142 like every other rung, an upgraded store gets it exactly once, a re-run is a no-op. Explicitly
+    /// <c>collect.</c>-qualified like V21/V22/V23. No table shape change, so nothing to refresh for the binary
+    /// COPY.</para>
+    /// </summary>
+    private const string V142Sql = @"
+CREATE INDEX IF NOT EXISTS idx_index_object_stats_server_time ON collect.index_object_stats (server_id, collection_time DESC);";
+
+    /// <summary>
+    /// V143 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
+    /// drill-down read one row per interval instead of deduplicating the whole raw <c>query_store_stats</c> slice on
+    /// every pass. Three new tables, all engine-plain here (the <c>PgMigrations</c> rule); nothing on an existing
+    /// table changes, and there is no backfill.
+    ///
+    /// <para><b><c>collect.query_store_interval_latest</c></b>: one row per Regular interval identity, the dedup's
+    /// <c>GROUP BY</c> plus <c>server_id</c>, holding the snapshot the raw read's
+    /// <c>ORDER BY collection_time DESC, execution_count DESC</c> would keep. Its columns are exactly what the two reads
+    /// consume, and their types and nullability mirror raw's, so the table can never refuse a row raw accepted. One
+    /// unique index, <c>NULLS NOT DISTINCT</c> because <c>replica_role</c> is NULL off an availability group and must
+    /// still collapse (PostgreSQL 15+; the product minimum is 17). The column order is the writer's: a batch is one
+    /// database's rows for one or two interval ids, so each batch's entries form one contiguous run.
+    /// <c>fillfactor = 50</c> was measured (99% HOT against 56-59% at 70). The hypertable conversion, compression and
+    /// retention are runtime work in <c>collection_log</c>'s shape, not this rung's.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_latest_coverage</c></b>: per server, <c>filled_since</c> (every raw
+    /// snapshot at or after it is represented, except the pending batches below) and <c>applied_through</c> (the
+    /// newest batch accounted for). The reader uses the table only where that claim covers everything the raw read
+    /// would read.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_latest_pending</c></b>: one row per raw batch whose apply failed. The
+    /// apply runs behind a savepoint in the raw COPY's transaction, so a fault rolls back only the apply, records the
+    /// batch here, and raw still commits: raw ingestion never depends on this table. The next apply for the server
+    /// replays the row, and a server with any pending row reads raw. Empty in steady state.</para>
+    /// </summary>
+    private const string V143Sql = @"
+/* One row per Regular Query Store interval identity: the raw dedup's GROUP BY plus server_id. Types and nullability
+   mirror query_store_stats exactly, so no row raw accepts can be refused here. fillfactor 50 keeps the open
+   interval's refreshes HOT (measured, #3953). */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest
+(
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    replica_role text,
+    runtime_stats_interval_id bigint,
+    first_execution_time timestamp NOT NULL,
+    collection_time timestamp NOT NULL,
+    query_plan_hash text,
+    query_hash text,
+    execution_count bigint,
+    avg_cpu_time_us bigint,
+    avg_duration_us bigint,
+    last_execution_time timestamp,
+    is_forced_plan boolean,
+    force_failure_count bigint,
+    query_text text
+)
+WITH (fillfactor = 50);
+
+/* NULLS NOT DISTINCT: replica_role is NULL off an availability group, and a NULL-role re-collection must update its
+   row, not insert a second one. Column order is the writer's locality, not the reader's. */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_latest
+ON collect.query_store_interval_latest
+(
+    server_id,
+    database_name,
+    runtime_stats_interval_id,
+    plan_id,
+    query_id,
+    replica_role,
+    first_execution_time
+)
+NULLS NOT DISTINCT;
+
+/* Per server: every raw snapshot at or after filled_since is represented (except the pending batches), and
+   applied_through is the newest batch accounted for. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_coverage
+(
+    server_id integer NOT NULL,
+    filled_since timestamp NOT NULL,
+    applied_through timestamp NOT NULL,
+    CONSTRAINT pk_query_store_interval_latest_coverage PRIMARY KEY (server_id)
+);
+
+/* One row per raw batch whose apply failed; it commits with that batch's raw rows, and the next apply for the
+   server replays it. Empty in steady state. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
+(
+    server_id integer NOT NULL,
+    collection_time timestamp NOT NULL,
+    database_name text NOT NULL,
+    recorded_at timestamp NOT NULL,
+    failure text,
+    CONSTRAINT pk_query_store_interval_latest_pending PRIMARY KEY (server_id, collection_time, database_name)
 );";
 
     /// <summary>

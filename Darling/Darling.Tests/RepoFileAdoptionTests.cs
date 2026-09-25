@@ -110,6 +110,10 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        /* #4194: its live-mount-guard pin anchors the `if (live …) { … return; }` block in renderAlerts across
+           its four source lines as one literal, so the guard's return is told apart from just those words
+           appearing somewhere else in the file. */
+        "AlertHistoryLazyRenderTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",
@@ -195,6 +199,10 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfSubjects =
     {
+        /* #4198 (lane W2): its source-text pin asserts a single-line entry in the endpoint dispatch
+           table (the `get_active_queries` row in DarlingWebEndpoints.cs) — the pin contains no line
+           break, so LF normalization does not affect what the assertion can match. */
+        "DarlingWebEndpointsTests.cs",
         /* The equivalence test FOR the reader, parameterised over both spellings and calling each of them
            directly. It compares the reader's output against the bytes on disk put through the same
            transform, so it performs the CRLF-to-LF normalisation itself rather than depending on the

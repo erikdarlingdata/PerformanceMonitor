@@ -1,7 +1,8 @@
 # DarlingMcpQueryStoreRegressionTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
-tool get_query_store_regressions 616
+tool get_query_store_regressions 605
 param get_query_store_regressions.as_of 167
 param get_query_store_regressions.database_name 46
+param get_query_store_regressions.full_text 84
 param get_query_store_regressions.hours_back 110
-param get_query_store_regressions.limit 86
+param get_query_store_regressions.limit 164
 param get_query_store_regressions.server_name 28

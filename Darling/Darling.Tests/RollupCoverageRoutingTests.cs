@@ -502,10 +502,10 @@ public sealed class RollupCoverageRoutingTests
         }
 
         /* Rot detector, not a census: if the scan stops matching, the guard passes vacuously and nobody
-           notices. Six production call sites today (the composer, the MCP daily-health reader, the viewer's
-           calendar, and three FinOps readers). A legitimate REMOVAL should lower this deliberately rather
-           than be absorbed silently. */
-        Assert.True(scanned >= 6, $"expected to find the production routing callers, but matched {scanned} call(s) — the scan has rotted.");
+           notices. Five production call sites today (the composer, the MCP daily-health reader, the viewer's
+           calendar, and two FinOps readers). #4227 merged the three FinOps reads into two. A legitimate
+           REMOVAL should lower this deliberately rather than be absorbed silently. */
+        Assert.True(scanned >= 5, $"expected to find the production routing callers, but matched {scanned} call(s) — the scan has rotted.");
 
         Assert.True(offenders.Count == 0,
             "These readers reach the tier router without real coverage, so on a store whose rollups were " +

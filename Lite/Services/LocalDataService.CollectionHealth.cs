@@ -17,6 +17,16 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>Re-probe at most this often per server (#4226 lane V1b): measured 46-58 ms on a seeded
+    /// 20-collector/7-day/1-minute-cadence DuckDB (Lite's realistic scale for one server), against a 30 s
+    /// floor on the auto-refresh timer (<c>ServerTab.AutoRefreshSecondsForIndex</c>) — over the ~50 ms bar
+    /// worth memoizing, even though Lite has no fleet fan-out to amortize across. The same "benignly racy"
+    /// TTL shape Darling's <c>GetFleetCollectionHealthByServerAsync</c> uses, not a lock: a refresh racing a
+    /// cold per-server entry may run the scan twice, which is still far cheaper than never caching.</summary>
+    private static readonly TimeSpan PermissionDeniedCountMemoLifetime = TimeSpan.FromSeconds(20);
+
+    private readonly Dictionary<int, (int Count, DateTime AtUtc)> _permissionDeniedCountByServer = new();
+
     /// <summary>
     /// #1591: how many DISTINCT collectors were permission-denied in the last 7 days — the badge count for the
     /// Collection Health tab header.
@@ -29,6 +39,12 @@ public partial class LocalDataService
     /// </summary>
     public async Task<int> GetPermissionDeniedCollectorCountAsync(int serverId)
     {
+        if (_permissionDeniedCountByServer.TryGetValue(serverId, out var cached) &&
+            DateTime.UtcNow - cached.AtUtc < PermissionDeniedCountMemoLifetime)
+        {
+            return cached.Count;
+        }
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = @"
@@ -42,7 +58,9 @@ AND   status = 'PERMISSIONS'";
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
 
         var scalar = await command.ExecuteScalarAsync();
-        return scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        var count = scalar is null or DBNull ? 0 : Convert.ToInt32(scalar);
+        _permissionDeniedCountByServer[serverId] = (count, DateTime.UtcNow);
+        return count;
     }
 
     /// <summary>
@@ -465,6 +483,104 @@ AND   ($7 IS NULL OR status = UPPER($7))
 LIMIT $4";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(collectorName) ? DBNull.Value : collectorName.Trim() });
+        command.Parameters.Add(new DuckDBParameter { Value = (object?)minDurationMs ?? DBNull.Value });
+        command.Parameters.Add(new DuckDBParameter { Value = string.IsNullOrWhiteSpace(status) ? DBNull.Value : status.Trim() });
+
+        var items = new List<CollectionLogRow>();
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            items.Add(new CollectionLogRow
+            {
+                CollectorName = reader.GetString(0),
+                CollectionTime = reader.GetDateTime(1),
+                DurationMs = reader.IsDBNull(2) ? null : (int?)Convert.ToInt32(reader.GetValue(2)),
+                SqlDurationMs = reader.IsDBNull(3) ? null : (int?)Convert.ToInt32(reader.GetValue(3)),
+                DuckDbDurationMs = reader.IsDBNull(4) ? null : (int?)Convert.ToInt32(reader.GetValue(4)),
+                RowsCollected = reader.IsDBNull(5) ? null : (int?)Convert.ToInt32(reader.GetValue(5)),
+                Status = reader.GetString(6),
+                ErrorMessage = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ServerName = reader.IsDBNull(8) ? null : reader.GetString(8)
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Whether ANY of the given (enabled) servers has EVER recorded a collector run — the fleet-wide twin of
+    /// <see cref="HasAnyCollectionLogAsync"/> (#4199), used the same way: to tell a genuinely quiet fleet-wide
+    /// window from a fleet that has never once collected.
+    /// </summary>
+    public async Task<bool> HasAnyCollectionLogFleetAsync(IReadOnlyList<int> serverIds)
+    {
+        if (serverIds.Count == 0)
+        {
+            return false;
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        /* server_id is a deterministic hash of the storage name (ServerResolver / RemoteCollectorService),
+           never caller-supplied text, so inlining the list is safe -- DuckDB's ADO driver has no array
+           parameter binding to hand these to as one $-placeholder instead. */
+        command.CommandText = $@"
+SELECT 1
+FROM v_collection_log
+WHERE server_id IN ({string.Join(",", serverIds)})
+LIMIT 1";
+
+        return await command.ExecuteScalarAsync() is not null and not DBNull;
+    }
+
+    /// <summary>
+    /// The FLEET-WIDE form of <see cref="GetRecentCollectionLogAsync"/> (#4199): the same per-run log, across
+    /// every id in <paramref name="serverIds"/> (the caller's enabled servers) at once, ranked and capped
+    /// together rather than one server at a time. Same filters, same newest-first/slowest-first coupling; the
+    /// row shape already carries <see cref="CollectionLogRow.ServerName"/>, so no new row type is needed.
+    /// </summary>
+    public async Task<List<CollectionLogRow>> GetRecentCollectionLogFleetAsync(IReadOnlyList<int> serverIds, int hoursBack = 24, DateTime? asOfUtc = null, int maxRows = 200, string? collectorName = null, double? minDurationMs = null, string? status = null)
+    {
+        if (serverIds.Count == 0)
+        {
+            return new List<CollectionLogRow>();
+        }
+
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var ordering = minDurationMs is null
+            ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"
+            : "ORDER BY duration_ms DESC NULLS LAST, collection_time DESC";
+
+        command.CommandText = $@"
+SELECT
+    collector_name,
+    collection_time,
+    duration_ms,
+    sql_duration_ms,
+    duckdb_duration_ms,
+    rows_collected,
+    status,
+    error_message,
+    server_name
+FROM v_collection_log
+WHERE server_id IN ({string.Join(",", serverIds)})
+AND   collection_time >= $1
+AND   collection_time <= $2
+AND   ($4 IS NULL OR collector_name = $4)
+AND   ($5 IS NULL OR duration_ms >= $5)
+AND   ($6 IS NULL OR status = UPPER($6))
+" + ordering + @"
+LIMIT $3";
+
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });

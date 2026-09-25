@@ -22,16 +22,15 @@ public sealed class McpToolGuideHeadsQsRegressionsTests
 
     /// <summary>Guardrail facts the head must carry: the disambiguator against get_query_store_top, the CPU
     /// gate, the null-vs-0% percent semantics tied to the RIGHT fields (cpu_regression_percent's own WHERE
-    /// gate means it is never null in a returned row, so only duration and io are named), the ranking key, and
-    /// all three status words zero rows can arrive under.</summary>
+    /// gate means it is never null in a returned row, so only duration, io and severity are named), the ranking
+    /// key, and all three status words zero rows can arrive under.</summary>
     private static readonly string[] HeadFacts =
     [
         "get_query_store_top ranks EXPENSIVE, this ranks CHANGED.",
         "Gated: average CPU regressed over 25%.",
-        "duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0",
-        "severity is null with the former",
+        "duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0",
         "additional_duration_ms is the ranking key.",
-        "empty: no regression (all clear), or a baseline with nothing yet in the window.",
+        "empty: no regression, or nothing yet in the baseline window.",
         "unavailable: no baseline exists yet.",
         "not_collected: this server's engine cannot run Query Store.",
     ];

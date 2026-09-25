@@ -73,6 +73,11 @@ public static class DarlingCliCommands
         string.Equals(arg, "--test-connection", StringComparison.OrdinalIgnoreCase)
         || string.Equals(arg, "--validate-config", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The verb <see cref="CheckSettingsAsync"/> handles — the store host profile + per-setting
+    /// verdict table (#4214).</summary>
+    public static bool IsCheckSettingsVerb(string arg) =>
+        string.Equals(arg, "--check-settings", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The verb <see cref="PrintViewerConnectionAsync"/> handles (darling-network-endpoints D8).</summary>
     public static bool IsPrintViewerConnectionVerb(string arg) =>
         string.Equals(arg, "--print-viewer-connection", StringComparison.OrdinalIgnoreCase);
@@ -181,6 +186,7 @@ public static class DarlingCliCommands
     public static bool IsKnownVerb(string arg) =>
         IsEncryptPasswordVerb(arg)
         || IsValidateConfigVerb(arg)
+        || IsCheckSettingsVerb(arg)
         || IsPrintViewerConnectionVerb(arg)
         || IsPrintMcpTokenVerb(arg)
         || IsPrintWebTokenVerb(arg)
@@ -257,7 +263,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe                     Run the service (also how the Windows Service Control Manager starts it)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --version, -v       Print the product version and exit." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --help, -h          Print this help and exit." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --test-connection   Validate darling.json and probe every configured server (the store's registry when it is reachable, otherwise the file's list)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --check-settings [--json]   Print the store host profile and a verdict per sizing-relevant setting; exits non-zero if any is stale-after-hardware-change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --encrypt-password  Encrypt a SQL-auth password for darling.json (reads stdin)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-viewer-connection   Print a remote-viewer connection string (managed store)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --print-mcp-token   Reprint the MCP bearer token from darling.json (run elevated; writes a LIVE token to stdout)." + Environment.NewLine +
@@ -279,9 +286,19 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
-    /// Loads + validates darling.json, then probes every server. Prints one PASS/FAIL line per server and a
-    /// summary. Returns 0 only when the config is valid AND every server is reachable; 1 otherwise (so it is
-    /// usable as a deployment gate). Store/collection are never touched — this is a pure config pre-flight.
+    /// Loads + validates darling.json, then probes servers. Prints one PASS/FAIL line per server and a
+    /// summary. Returns 0 only when the config is valid AND every probed server is reachable; 1 otherwise (so
+    /// it is usable as a deployment gate). Store data/collection are never touched — this is a pre-flight.
+    ///
+    /// <para><b>#4214's fix: probes the STORE'S REGISTRY when the store can be reached, not the file's seed
+    /// list.</b> Before this it always probed <c>config.Servers</c> (darling.json), which is authoritative
+    /// only once, at first bootstrap (<see cref="StoreConfigProvider.SeedIfEmptyAsync"/>) — every start after
+    /// that, the store governs, and a field store still carrying two long-removed servers in the file made
+    /// this verb exit 1 forever, on a store monitoring 42 healthy servers with a config that parses cleanly.
+    /// A file-only server (never reached the registry, or removed from it since) is now a WARNING on stdout,
+    /// not a probe failure — it cannot be reached because nothing runs it, which is not what this verb tests.
+    /// When the store itself cannot be reached, this falls back to the file's list and says so plainly, which
+    /// is the one case where the file genuinely is the best available answer.</para>
     /// </summary>
     public static async Task<int> ValidateConfigAsync(
         string? configPath, TextWriter output, TextWriter error, CancellationToken cancellationToken)
@@ -309,10 +326,12 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        output.WriteLine($"Validating connectivity to {config.Servers.Count} server(s)...");
+        var targets = await ResolveValidationTargetsAsync(config, output, cancellationToken);
+
+        output.WriteLine($"Validating connectivity to {targets.Count} server(s)...");
 
         var allReachable = true;
-        foreach (var server in config.Servers)
+        foreach (var server in targets)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var probe = await DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
@@ -327,6 +346,161 @@ public static class DarlingCliCommands
             ? "All servers reachable."
             : "One or more servers failed the connection pre-flight (see above).");
         return allReachable ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The probe target list for <see cref="ValidateConfigAsync"/> (#4214): the store's registry
+    /// (<c>config_monitored_servers</c>) when the store can be reached, with a warning per file-only server;
+    /// darling.json's own list, with a stated reason, when it cannot. Never throws — a store connection
+    /// failure here is the "store unreachable" case, not a fatal error for this verb.
+    /// </summary>
+    private static async Task<IReadOnlyList<MonitoredServer>> ResolveValidationTargetsAsync(
+        DarlingConfig config, TextWriter output, CancellationToken cancellationToken)
+    {
+        var postgres = config.Postgres;
+        var connectionString = postgres is { Managed: true } && OperatingSystem.IsWindows()
+            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
+            : postgres?.ConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            output.WriteLine("NOTE: the store's registry is not reachable (no store connection configured), so validating darling.json's own server list instead.");
+            return config.Servers;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            output.WriteLine($"NOTE: the store's registry is not reachable ({ex.Message}), so validating darling.json's own server list instead.");
+            return config.Servers;
+        }
+
+        IReadOnlyList<MonitoredServer> registryServers;
+        try
+        {
+            registryServers = await StoreConfigProvider.ReadMonitoredServersAsync(connection, config, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            output.WriteLine($"NOTE: could not read the store's registry ({ex.Message}), so validating darling.json's own server list instead.");
+            return config.Servers;
+        }
+
+        var registryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var server in registryServers)
+        {
+            if (!string.IsNullOrEmpty(server.Name))
+            {
+                registryNames.Add(server.Name);
+            }
+        }
+
+        var fileOnly = config.Servers.Where(s => !registryNames.Contains(s.Name)).Select(s => s.DisplayName).ToList();
+        if (fileOnly.Count > 0)
+        {
+            output.WriteLine(
+                $"WARNING: darling.json lists {fileOnly.Count} server(s) not in the store's registry (never registered, or since removed): {string.Join(", ", fileOnly)}. "
+                + "They are not part of this validation — the store governs which servers actually run.");
+        }
+
+        return registryServers;
+    }
+
+    /// <summary>Exit codes <see cref="CheckSettingsAsync"/> returns — separate codes for a config problem, an
+    /// unreachable store, and a settings result that needs attention, so a caller can tell them apart (#4214's
+    /// ruling 7) instead of collapsing every failure into a bare non-zero.</summary>
+    public static class CheckSettingsExitCode
+    {
+        public const int Ok = 0;
+        public const int ConfigError = 1;
+        public const int StoreUnreachable = 2;
+        public const int StaleSettings = 3;
+    }
+
+    /// <summary>
+    /// <c>--check-settings</c> (#4214, part 1): prints the store host profile and a verdict per
+    /// sizing-relevant setting (text, or <c>--json</c> for automation). Exits
+    /// <see cref="CheckSettingsExitCode.StaleSettings"/> when any verdict is <c>stale-after-hardware-change</c>,
+    /// so an install/upgrade script can gate on it. A config parse error and an unreachable store each get
+    /// their own exit code, separate from the settings result — a parse error is not a sizing problem, and an
+    /// unreachable store never produced a settings result to judge.
+    /// </summary>
+    public static async Task<int> CheckSettingsAsync(
+        string? configPath, bool json, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+    {
+        DarlingConfig config;
+        try
+        {
+            config = DarlingConfig.Load(configPath);
+        }
+        catch (Exception ex)
+        {
+            error.WriteLine($"Could not load configuration: {ex.Message}");
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        var postgres = config.Postgres;
+        if (postgres is null)
+        {
+            error.WriteLine("postgres section is required.");
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        var problems = config.Validate();
+        if (problems.Count > 0)
+        {
+            error.WriteLine("Configuration is invalid:");
+            foreach (var problem in problems)
+            {
+                error.WriteLine("  - " + problem);
+            }
+
+            return CheckSettingsExitCode.ConfigError;
+        }
+
+        var connectionString = postgres.Managed && OperatingSystem.IsWindows()
+            ? DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres)
+            : postgres.ConnectionString;
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            error.WriteLine(postgres.Managed && OperatingSystem.IsWindows()
+                ? DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres)
+                : "postgres.connectionString is empty, so there is no store to check.");
+            return CheckSettingsExitCode.StoreUnreachable;
+        }
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not connect to the store: {ex.Message}");
+            return CheckSettingsExitCode.StoreUnreachable;
+        }
+
+        HostProfile profile;
+        try
+        {
+            profile = await DarlingStoreHostProfile.GatherAsync(postgres, connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            error.WriteLine($"Could not read the store host profile: {ex.Message}");
+            return CheckSettingsExitCode.StoreUnreachable;
+        }
+
+        output.WriteLine(json ? DarlingStoreHostProfile.FormatProfileJson(profile) : DarlingStoreHostProfile.FormatProfileText(profile));
+
+        return profile.Settings.Any(s => s.Verdict == HostSettingVerdict.StaleAfterHardwareChange)
+            ? CheckSettingsExitCode.StaleSettings
+            : CheckSettingsExitCode.Ok;
     }
 
     /// <summary>Formats one server's probe outcome as a PASS/FAIL line (pure — unit-testable).</summary>

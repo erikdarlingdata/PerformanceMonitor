@@ -43,6 +43,11 @@ internal static class EmailTemplateBuilder
     /// (a custom alert rule's name). Null or empty renders <paramref name="metricName"/> unchanged, so
     /// built-in alerts are byte-identical. Severity/color still derive from <paramref name="metricName"/>.
     /// </param>
+    /// <param name="triageUrl">
+    /// #4220: the per-alert triage-page link (<see cref="TriageLink.Build"/>), the same URL the webhook
+    /// channels carry for this firing. Null (the pre-#4220 default) renders BOTH bodies exactly as before —
+    /// no anchor in the HTML body, no line in the plain-text body.
+    /// </param>
     public static (string HtmlBody, string PlainTextBody) BuildAlertEmail(
         string metricName,
         string serverName,
@@ -52,7 +57,8 @@ internal static class EmailTemplateBuilder
         AlertBranding branding,
         AlertContext? context = null,
         string? detailText = null,
-        string? displayName = null)
+        string? displayName = null,
+        string? triageUrl = null)
     {
         var utcNow = DateTime.UtcNow;
         var localNow = DateTime.Now;
@@ -64,10 +70,10 @@ internal static class EmailTemplateBuilder
 
         var html = BuildHtmlBody(titleName, serverName, currentValue,
             thresholdValue, utcNow, localNow, accentColor, badgeText, branding, context: context, emailCooldownMinutes: emailCooldownMinutes,
-            prose: prose);
+            prose: prose, triageUrl: triageUrl);
 
         var plain = BuildPlainTextBody(titleName, serverName, currentValue,
-            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context, prose);
+            thresholdValue, utcNow, localNow, emailCooldownMinutes, branding, context, prose, triageUrl);
 
         return (html, plain);
     }
@@ -105,7 +111,8 @@ internal static class EmailTemplateBuilder
         bool isTest = false,
         AlertContext? context = null,
         int emailCooldownMinutes = 15,
-        string? prose = null)
+        string? prose = null,
+        string? triageUrl = null)
     {
         var sb = new StringBuilder(2048);
 
@@ -177,6 +184,16 @@ internal static class EmailTemplateBuilder
         {
             sb.Append("<tr><td style=\"padding:4px 24px 12px 24px;\">");
             sb.Append($"<span style=\"font-family:{FontStack};font-size:12px;color:#B0B0B0;\">&#128206; Attached: {WebUtility.HtmlEncode(context.AttachmentFileName)}</span>");
+            sb.Append("</td></tr>");
+        }
+
+        /* #4220: the triage-page link, one HTML-encoded anchor, above the footer. Null (base URL unset, or
+           the dashboard disabled — see DarlingAlertSettings.TriageBaseUrl) renders nothing here, same as
+           the pre-#4220 body. */
+        if (!string.IsNullOrEmpty(triageUrl))
+        {
+            sb.Append("<tr><td style=\"padding:4px 24px 16px 24px;\">");
+            sb.Append($"<a href=\"{WebUtility.HtmlEncode(triageUrl)}\" style=\"display:inline-block;font-family:{FontStack};font-size:13px;font-weight:600;color:#FFFFFF;background-color:{accentColor};padding:8px 16px;border-radius:4px;text-decoration:none;\">Open triage page</a>");
             sb.Append("</td></tr>");
         }
 
@@ -339,7 +356,8 @@ internal static class EmailTemplateBuilder
         int emailCooldownMinutes,
         AlertBranding branding,
         AlertContext? context = null,
-        string? prose = null)
+        string? prose = null,
+        string? triageUrl = null)
     {
         var sb = new StringBuilder();
         sb.Append($"{branding.EditionName} Alert\r\n");
@@ -418,6 +436,13 @@ internal static class EmailTemplateBuilder
         if (!string.IsNullOrEmpty(context?.AttachmentFileName))
         {
             sb.Append($"\r\nAttached: {context.AttachmentFileName}\r\n");
+        }
+
+        /* #4220: same link as the HTML anchor (BuildHtmlBody), as a plain line — null renders nothing,
+           same as the pre-#4220 body. */
+        if (!string.IsNullOrEmpty(triageUrl))
+        {
+            sb.Append($"\r\nOpen triage page: {triageUrl}\r\n");
         }
 
         /* Footer — mirrors the HTML body's cooldown disclosure (BuildHtmlBody). The HTML and

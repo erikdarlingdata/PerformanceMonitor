@@ -14,6 +14,7 @@ using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -202,7 +203,11 @@ public sealed partial class ViewerDataService
     /// Postgres, built from the shared <see cref="PgBlockingPairRowQuery"/> column fragments (the same
     /// source of truth the Darling drill-down + fact collectors use, so the apex and column order can't
     /// drift). Selects the full SQL text (the chain viewer renders it). <see cref="PgBlockingPairRowQuery.SpidFilter"/>
-    /// drops the missing-blocker sentinel so no consumer invents a SPID-0 apex.
+    /// drops the missing-blocker sentinel so no consumer invents a SPID-0 apex. $4 is the
+    /// <see cref="EventWindowFloor"/> for $2 — <c>v_blocked_process_reports</c> is a hypertable partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a
+    /// chunk on (#4229); the floor lets it skip every chunk older than the window, without being able to
+    /// drop a row (an event is collected after it happens).
     /// </summary>
     public const string BlockingPairRowsSql = $"""
         SELECT
@@ -213,6 +218,7 @@ public sealed partial class ViewerDataService
             {PgBlockingPairRowQuery.TrailingIdentityColumns}
         FROM v_blocked_process_reports
         WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+        AND   collection_time >= $4
         {PgBlockingPairRowQuery.SpidFilter}
         ORDER BY event_time DESC
         LIMIT 5000
@@ -363,6 +369,7 @@ public sealed partial class ViewerDataService
             command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
             command.CommandText = BlockingPairRowsSql;
             AddBlockingParameters(command, serverId, startUtc, endUtc);
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
                 rows.Add(PgBlockingPairRowQuery.Read(reader));

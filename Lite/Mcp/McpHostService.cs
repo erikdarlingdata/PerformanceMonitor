@@ -137,8 +137,15 @@ public sealed class McpHostService : BackgroundService
                    an answer to a different question with nothing anywhere saying so; for a surface whose
                    callers are language models, a silently dropped key is a confidently wrong answer.
                    The SAME filter object Darling's host registers (shared from
-                   PerformanceMonitor.Common), so the two SKUs cannot refuse differently. */
-                .WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
+                   PerformanceMonitor.Common), so the two SKUs cannot refuse differently.
+
+                   #4198 ruled out a second filter here that trimmed any oversized result after the
+                   fact: it would make a tool's own truncated/*_returned fields wrong, cut calls that
+                   explicitly asked for more rows, and drop the newest rows of anything sorted
+                   oldest-first. Each tool sizes its own defaults to fit instead — see
+                   McpResponseBudget.DefaultBytes, the one shared size target both SKUs read. */
+                .WithRequestFilters(filters => filters
+                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance));
 
             _app = builder.Build();
 
