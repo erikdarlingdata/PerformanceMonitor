@@ -484,13 +484,22 @@ public sealed class RollupCoverageRoutingTests
     /// daily exists and is backfilled, which is exactly the shape the three FinOps splices and
     /// <c>ComposeSourceRouter</c>'s daily arm were in before this lane routed them.
     ///
-    /// <para>Matched over comment-stripped text, on the literal <c>collect.{TimescaleSupport.&lt;X&gt;DailyView}</c>
-    /// substring for each of the three superseded legacy dailies (<see cref="TimescaleSupport.SupersededDailyRollups"/>),
-    /// the same shape the fixed call sites used to write. <see cref="IsExcludedFromScan"/> keeps the test
-    /// project and build output out of the walk, same carve-out as
-    /// <see cref="NoReaderOutsideTheBuilder_CallsHourlyRelationForDirectly"/> above; <c>TimescaleSupport.cs</c>
-    /// is excluded the same way — it is the builder, and <c>s_stitchColumnsByLegacy</c>'s doc comments and the
-    /// registry itself necessarily say these names beside <c>collect.</c> text.</para>
+    /// <para>Matched over comment-stripped text against three regex shapes, so a splice cannot dodge the scan
+    /// merely by moving the constant reference inside a ternary or a string concatenation:
+    /// <list type="bullet">
+    /// <item>an interpolation hole naming a legacy daily constant ANYWHERE in its expression — so
+    /// <c>collect.{(tier == RetentionTier.Hourly ? ... : TimescaleSupport.QueryStatsDbDailyView)} AS f</c> is
+    /// caught, not just the bare <c>collect.{TimescaleSupport.X} AS f</c> shape;</item>
+    /// <item>a <c>"collect." + TimescaleSupport.&lt;X&gt;DailyView</c> (or unqualified) concatenation; and</item>
+    /// <item>the legacy view NAME itself written straight after <c>collect.</c>, for a caller that already
+    /// resolved the constant into a local.</item>
+    /// </list></para>
+    ///
+    /// <para><see cref="IsExcludedFromScan"/> keeps the test project and build output out of the walk, same
+    /// carve-out as <see cref="NoReaderOutsideTheBuilder_CallsHourlyRelationForDirectly"/> above;
+    /// <c>TimescaleSupport.cs</c> is excluded the same way — it is the builder, and
+    /// <c>s_stitchColumnsByLegacy</c>'s doc comments and the registry itself necessarily say these names beside
+    /// <c>collect.</c> text.</para>
     /// </summary>
     [Fact]
     public void NoReaderOutsideTheBuilder_SplicesADailyViewNameBySubstitution()
@@ -502,17 +511,13 @@ public sealed class RollupCoverageRoutingTests
             "PerformanceMonitor.sln). This test scans the source tree, so it cannot run without it — fix the " +
             "walk-up rather than skipping.");
 
+        const string constants = @"(?:QueryStatsDailyView|ProcedureStatsDailyView|QueryStatsDbDailyView)";
+        var viewNames = "(?:" + string.Join("|", TimescaleSupport.SupersededDailyRollups.Select(p => Regex.Escape(p.LegacyDaily))) + ")";
         var patterns = new[]
         {
-            "collect.{TimescaleSupport.QueryStatsDailyView}",
-            "collect.{TimescaleSupport.ProcedureStatsDailyView}",
-            "collect.{TimescaleSupport.QueryStatsDbDailyView}",
-            /* The unqualified spellings, for a file that opens with "using static TimescaleSupport;" or that
-               already holds a local named identically via a using alias — belt and suspenders over the
-               qualified form above, which is what every real call site actually wrote before this lane. */
-            "collect.{QueryStatsDailyView}",
-            "collect.{ProcedureStatsDailyView}",
-            "collect.{QueryStatsDbDailyView}",
+            new Regex(@"collect\.\{[^{}]*\b" + constants + @"\b[^{}]*\}", RegexOptions.CultureInvariant),
+            new Regex(@"collect\.""\s*\+\s*(?:TimescaleSupport\.)?" + constants + @"\b", RegexOptions.CultureInvariant),
+            new Regex(@"collect\." + viewNames + @"\b", RegexOptions.CultureInvariant),
         };
 
         var offenders = new List<string>();
@@ -528,12 +533,10 @@ public sealed class RollupCoverageRoutingTests
             var text = StripComments(File.ReadAllText(file));
             foreach (var pattern in patterns)
             {
-                var index = 0;
-                while ((index = text.IndexOf(pattern, index, StringComparison.Ordinal)) >= 0)
+                foreach (Match match in pattern.Matches(text))
                 {
-                    var line = text.AsSpan(0, index).Count('\n') + 1;
-                    offenders.Add($"{relative}:{line} ({pattern})");
-                    index += pattern.Length;
+                    var line = text.AsSpan(0, match.Index).Count('\n') + 1;
+                    offenders.Add($"{relative}:{line} ({match.Value})");
                 }
             }
         }

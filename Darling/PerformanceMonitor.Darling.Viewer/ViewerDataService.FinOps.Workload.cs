@@ -109,15 +109,12 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Database resource usage for <paramref name="tier"/>. Raw returns the constant untouched. The
-    /// one-argument form reads the legacy hourly, unstitched; the callers below pass the coverage/window they
-    /// resolved (#3653 A6) so a successor can be stitched in.</summary>
+    /// one-argument form reads the legacy relation for that tier, unstitched (<see cref="RollupCoverage.Unknown"/>
+    /// carries <see cref="RollupAvailability.None"/>, so <see cref="RollupCoverage.StitchedRelationSql"/> names
+    /// the legacy alone — the same bytes as before #3653 A6 routed this through the builder); the callers below
+    /// pass the coverage/window they resolved so a successor can be stitched in instead.</summary>
     public static string DatabaseResourceUsageSqlFor(RetentionTier tier) =>
-        tier == RetentionTier.Raw
-            ? DatabaseResourceUsageSql
-            : RouteOrThrow(
-                DatabaseResourceUsageSql, WorkloadCteRaw,
-                WorkloadCteForCagg($"collect.{(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsDbHourlyView : TimescaleSupport.QueryStatsDbDailyView)} AS f"),
-                "database resource usage");
+        DatabaseResourceUsageSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
     /// <summary>
     /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> over the relation <paramref name="coverage"/>
@@ -139,14 +136,11 @@ public sealed partial class ViewerDataService
                     : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDbDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "database resource usage");
 
-    /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy hourly, unstitched.</summary>
+    /// <summary>Top consumers (by total) for <paramref name="tier"/>, over the legacy relation for that tier,
+    /// unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> for why routing this through the
+    /// stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
     public static string TopResourceConsumersByTotalSqlFor(RetentionTier tier) =>
-        tier == RetentionTier.Raw
-            ? TopResourceConsumersByTotalSql
-            : RouteOrThrow(
-                TopResourceConsumersByTotalSql, ConsumerCteRaw,
-                ConsumerCteForCagg($"collect.{(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView)} AS f"),
-                "top consumers by total");
+        TopResourceConsumersByTotalSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
     /// <summary>Top consumers (by total) over the stitched relation (#3653 A6) — see
     /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
@@ -161,14 +155,11 @@ public sealed partial class ViewerDataService
                     : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "top consumers by total");
 
-    /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy hourly, unstitched.</summary>
+    /// <summary>Top consumers (by average) for <paramref name="tier"/>, over the legacy relation for that tier,
+    /// unstitched (see <see cref="DatabaseResourceUsageSqlFor(RetentionTier)"/> for why routing this through the
+    /// stitch builder with <see cref="RollupCoverage.Unknown"/> reproduces that).</summary>
     public static string TopResourceConsumersByAvgSqlFor(RetentionTier tier) =>
-        tier == RetentionTier.Raw
-            ? TopResourceConsumersByAvgSql
-            : RouteOrThrow(
-                TopResourceConsumersByAvgSql, ConsumerCteRaw,
-                ConsumerCteForCagg($"collect.{(tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView)} AS f"),
-                "top consumers by average");
+        TopResourceConsumersByAvgSqlFor(tier, RollupCoverage.Unknown, DateTime.MinValue);
 
     /// <summary>Top consumers (by average) over the stitched relation (#3653 A6) — see
     /// <see cref="DatabaseResourceUsageSqlFor(RetentionTier, RollupCoverage, DateTime)"/>.</summary>
