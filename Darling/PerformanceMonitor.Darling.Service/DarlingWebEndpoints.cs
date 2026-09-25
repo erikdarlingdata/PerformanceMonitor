@@ -515,10 +515,11 @@ public static class DarlingWebEndpoints
             /* The compile-and-run itself lives in the shared RunComposedPanelAsync (the ONE runner behind both
                this endpoint and the MCP run_custom_view_panel tool); this route only adds the web concerns —
                content-type gate, stream parse — then maps the discriminated outcome onto HTTP status.
-               RunComposedPanelAsync itself is UNCHANGED by #4283: its outcome.Error keeps carrying the real
-               "Error running query: {ex.Message}" sentence, because run_custom_view_panel's MCP caller
+               RunComposedPanelAsync's outward text is UNCHANGED by #4283: its outcome.Error keeps carrying the
+               real "Error running query: {ex.Message}" sentence, because run_custom_view_panel's MCP caller
                (DarlingMcpCustomViewTools) reads that same field and #4283 does not touch what an MCP client
-               sees. Only THIS web mapping stops putting it on the wire. */
+               sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
+               the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
             var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted);
             if (outcome.Payload is not null)
@@ -526,16 +527,7 @@ public static class DarlingWebEndpoints
                 return JsonNodeResult(outcome.Payload);
             }
 
-            /* outcome.IsServerError is false for the 400 arm above (a bad spec, or #4283's allow-listed
-               "Query failed: {ex.MessageText}" from the PostgresException catch — a Custom Views author needs
-               that syntax error, statement_timeout cancel included, to fix their own panel) — that text STAYS.
-               true is the generic-Exception catch, where outcome.Error is "Error running query: {ex.Message}";
-               reclassified here exactly as ToHttpResult's ServerError arm reclassifies a tool's envelope, since
-               by this point the real Exception is equally gone — only the sentence survived the round trip
-               through ComposeRunOutcome. */
-            return outcome.IsServerError
-                ? ServerErrorResult(outcome.Error!, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds)
-                : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
+            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -954,15 +946,30 @@ public static class DarlingWebEndpoints
     /// annotations}</c> payload on success, or an error the caller maps onto its own surface (HTTP status /
     /// MCP envelope). <see cref="IsServerError"/> distinguishes a client-correctable error — a bad spec or a
     /// bounded query failure (statement_timeout / Postgres error), i.e. HTTP 400 — from an unexpected internal
-    /// failure (HTTP 500).</summary>
-    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError)
+    /// failure (HTTP 500). <see cref="Fault"/> (#4283 review round 1, M1) rides along on a BadRequest for a
+    /// PostgresException the panel author cannot act on — the real exception, so the WEB endpoint mapping can
+    /// answer it through the same backstop as an uncaught one; <see cref="Error"/>/<see cref="IsServerError"/>
+    /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.</summary>
+    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null)
     {
         internal static ComposeRunOutcome Ok(JsonObject payload) => new(payload, null, false);
 
         internal static ComposeRunOutcome BadRequest(string error) => new(null, error, false);
 
+        internal static ComposeRunOutcome BadRequest(string error, PostgresException fault) => new(null, error, false, fault);
+
         internal static ComposeRunOutcome ServerError(string error) => new(null, error, true);
     }
+
+    /// <summary>#4283 review round 1 (M1): the PostgresException SQLSTATEs a Custom Views panel author can act
+    /// on by editing their own panel — a statement_timeout cancel, or a class-22/class-42 error other than
+    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel). Everything else (28P01
+    /// auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...) is a STORE
+    /// fault the author cannot fix.</summary>
+    internal static bool IsComposeRunAuthorActionable(string? sqlState) =>
+        sqlState == "57014"
+        || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
+        || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1110,13 +1117,48 @@ public static class DarlingWebEndpoints
         }
         catch (PostgresException ex)
         {
-            /* A statement_timeout cancel (57014) or any bounded query error — client-correctable. */
-            return ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
+            /* #4283 review round 1 (M1): 57014 / class 22 / class 42 except 42501 are what a panel author
+               can act on — kept as Query failed: {MessageText} under 400, verbatim. Anything else (28P01
+               auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...)
+               is a STORE fault the author cannot fix; the real exception rides back on Fault so the WEB
+               endpoint (which has the logger) can answer through the same backstop shape #4276 gives an
+               uncaught one. outcome.Error/IsServerError stay exactly what they always were either way, so
+               run_custom_view_panel's MCP answer does not change. */
+            return IsComposeRunAuthorActionable(ex.SqlState)
+                ? ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}")
+                : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
         }
+    }
+
+    /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
+    /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
+    /// <see cref="MuteRuleToolResult"/> shape) so the three arms are directly testable without a live Postgres
+    /// round trip. <see cref="ComposeRunOutcome.Fault"/> (#4283 M1) is checked first: a STORE fault the panel
+    /// author could not have caused answers through the same fixed-body backstop #4276 gives an uncaught
+    /// exception, logged once, no role/host text on the wire — even though the outcome that carried it is
+    /// itself a BadRequest shape (<see cref="ComposeRunOutcome.IsServerError"/> false), it still needs the
+    /// 500-class backstop treatment, not a 400. Absent a Fault, <see cref="ComposeRunOutcome.IsServerError"/>
+    /// false is a bad spec or #4283's allow-listed "Query failed: {ex.MessageText}" (a Custom Views author
+    /// needs that syntax error, statement_timeout cancel included, to fix their own panel) — that text STAYS;
+    /// true is the generic-Exception catch's "Error running query: {ex.Message}", reclassified here exactly as
+    /// <see cref="ToHttpResult"/>'s ServerError arm reclassifies a tool's envelope, since by this point the
+    /// real Exception is equally gone — only the sentence survived the round trip through
+    /// <see cref="ComposeRunOutcome"/>.</summary>
+    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs)
+    {
+        if (outcome.Fault is not null)
+        {
+            DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault);
+            return Results.Json(DarlingWebFailureLog.Body(outcome.Fault), statusCode: DarlingWebFailureLog.StatusCode(outcome.Fault));
+        }
+
+        return outcome.IsServerError
+            ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs)
+            : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
     }
 
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>

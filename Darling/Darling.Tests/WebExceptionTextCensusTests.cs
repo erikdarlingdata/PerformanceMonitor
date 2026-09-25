@@ -385,6 +385,102 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
     }
 
+    /* ═══════════════════════════ DarlingWebEndpoints.ComposeRunFailureResult / IsComposeRunAuthorActionable (#4283 M1) ═══════════════════════════ */
+
+    /// <summary>The ruled design (round-1 review, M1): 42601 (syntax error) is a class-42 SQLSTATE, not 42501,
+    /// so it stays author-actionable — the existing "Query failed: {MessageText}" 400 pin must stay green,
+    /// verbatim, with no <see cref="DarlingWebEndpoints.ComposeRunOutcome.Fault"/> attached.</summary>
+    [Fact]
+    public void IsComposeRunAuthorActionable_SyntaxError42601_IsTrue_AndStaysBadRequest_MessageTextVerbatim()
+    {
+        Assert.True(DarlingWebEndpoints.IsComposeRunAuthorActionable("42601"));
+
+        var logger = new CapturingTestLogger();
+        var ex = new PostgresException("syntax error at or near \"selct\"", "ERROR", "ERROR", "42601");
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
+
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
+        Assert.Equal("Query failed: syntax error at or near \"selct\"", json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>42501 (insufficient_privilege) is the one class-42 SQLSTATE the ruling carves OUT of
+    /// author-actionable: a STORE role problem, not the panel.</summary>
+    [Fact]
+    public void IsComposeRunAuthorActionable_InsufficientPrivilege42501_IsFalse()
+    {
+        Assert.False(DarlingWebEndpoints.IsComposeRunAuthorActionable("42501"));
+    }
+
+    /// <summary>28P01 (auth failure) is not author-actionable — the ruled design's <c>Fault</c> arm answers
+    /// through the SAME fixed-body backstop #4276 gives an uncaught exception: 500, the generic message, one
+    /// error log, and the role name in the synthetic exception's own text never reaches the wire.</summary>
+    [Fact]
+    public void ComposeRunFailureResult_AuthFailure28P01_AnswersFixedBody_LogsOnce_NoRoleText()
+    {
+        Assert.False(DarlingWebEndpoints.IsComposeRunAuthorActionable("28P01"));
+
+        var logger = new CapturingTestLogger();
+        var ex = new PostgresException("password authentication failed for user \"app_rw\"", "FATAL", "FATAL", "28P01");
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain("app_rw", json.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>57P01 (admin shutdown) is 28P01's twin here — not author-actionable, same fixed body, one log
+    /// line, and the host name in the synthetic exception's own text never reaches the wire.</summary>
+    [Fact]
+    public void ComposeRunFailureResult_AdminShutdown57P01_AnswersFixedBody_LogsOnce_NoHostText()
+    {
+        Assert.False(DarlingWebEndpoints.IsComposeRunAuthorActionable("57P01"));
+
+        var logger = new CapturingTestLogger();
+        var ex = new PostgresException("terminating connection due to administrator command on host db-primary.internal", "FATAL", "FATAL", "57P01");
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", logger, 5);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain("db-primary.internal", json.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>Revert-proof for M1 (run once, by hand, against <c>ComposeRunOutcome.BadRequest(error, fault)</c>
+    /// removed and the catch block's non-actionable arm reverted to the pre-M1
+    /// <c>ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}")</c> for every SQLSTATE): the 28P01
+    /// and 57P01 tests above fail — the role/host text they assert absent is exactly what the old single-arm
+    /// catch put on the wire.</summary>
+    [Fact]
+    public void ComposeRunFailureResult_NonActionableFault_IsServerErrorFalse_ButStillMapsThroughFault()
+    {
+        // A Fault-carrying outcome is a BadRequest shape (IsServerError false) that ComposeRunFailureResult
+        // must still route through the Fault arm, not the plain 400 ErrorResult arm — pinning the ordering
+        // the doc comment above ComposeRunFailureResult describes.
+        var ex = new PostgresException("too many connections for role \"app_rw\"", "FATAL", "FATAL", "53300");
+        var outcome = DarlingWebEndpoints.ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+
+        Assert.False(outcome.IsServerError);
+        Assert.NotNull(outcome.Fault);
+
+        var result = DarlingWebEndpoints.ComposeRunFailureResult(outcome, "/api/compose/run", new CapturingTestLogger(), 5);
+        ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+    }
+
     /// <summary>Reads an <see cref="IResult"/> built by <c>Results.Json</c>/<c>Results.Text</c> the same way
     /// the pipeline would, via <see cref="DefaultHttpContext"/>'s response body.</summary>
     private static JsonDocument ResultBody(IResult result, out int statusCode)
