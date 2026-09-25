@@ -80,7 +80,11 @@ public sealed class McpToolsListBudgetTests
     /// total, banking the accumulated saving; a future PR only raises it again.</item>
     /// </list>
     /// </summary>
-    private const int TotalCeilingBytes = 170_798;
+    /* #4198/#4199 (M2b): +839 bytes for get_fleet_overview's worst_only/band filters (2 new params) and
+       get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
+       parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
+       tools/list and so is not counted here. */
+    private const int TotalCeilingBytes = 171_637;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
