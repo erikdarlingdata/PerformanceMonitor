@@ -62,6 +62,9 @@ public sealed class WebExceptionTextCensusTests
         Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingTriageEndpoint.cs"),
         Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingFleetSweepEndpoints.cs"),
         Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebOidc.cs"),
+        // #4283 review round 1 (L2): widened alongside the pattern below, since H1/H2 touched both.
+        Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingServerResolver.cs"),
+        Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebFailureLog.cs"),
     };
 
     /// <summary>Each surviving <c>ex.Message</c> / <c>ex.MessageText</c> CODE occurrence (comments stripped),
@@ -89,6 +92,39 @@ public sealed class WebExceptionTextCensusTests
             "which routes it ONLY to ReportSignInRefusal (a log line) and answers the browser a fixed sentence " +
             "('The identity provider rejected the sign-in exchange...') regardless. Never reaches a browser."
         ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "conflict.Message",
+            "CustomViewResult.Conflict / CustomAlertRuleResult.Conflict's own business-outcome text (409 body) " +
+            "— the store-write layer's own sentence, never ex.Message."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "invalid.Message",
+            "CustomViewResult.Invalid / CustomAlertRuleResult.Invalid's own validation text (400 body) " +
+            "— the store-write layer's own sentence, never ex.Message."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
+            "snapshot.Detail",
+            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — never " +
+            "PostgresException.Detail."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebFailureLog.cs"),
+            "exception.InnerException",
+            "IsStatementTimeout's own type-pattern check (exception.InnerException is TimeoutException) — never " +
+            "reads .Message off it, nothing reaches the wire."
+        ),
+        (
+            Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingServerResolver.cs"),
+            "RegistryReadFaultPrefix}{ex.Message}",
+            "LoadEnabledOrFaultAsync's fault sentence, built once and shared by two consumers, same shape as " +
+            "ComposeRunOutcome.ServerError's text above: MCP reads it back unchanged (RegistryReadFaultPrefix " +
+            "is pinned byte-identical to the pre-#4283 literal), and the web surface reclassifies it through " +
+            "ToHttpResult/DarlingWebFailureLog before it ever reaches a browser (see " +
+            "ToHttpResult_ResolverRegistryFault_MapsTo500_NotClientError_OneErrorLog below)."
+        ),
     };
 
     /// <summary>Strips <c>/* ... */</c> and <c>// ...</c> so the census reads CODE, not this class's own doc
@@ -99,7 +135,66 @@ public sealed class WebExceptionTextCensusTests
         return Regex.Replace(noBlock, @"//[^\n]*", "");
     }
 
-    private static readonly Regex s_exMessagePattern = new(@"\b(ex|exception)\.Message(Text)?\b", RegexOptions.Compiled);
+    /// <summary>#4283 review round 1 (L2): widened past a fixed <c>ex</c>/<c>exception</c> identifier — a
+    /// leading <c>.Message</c>/<c>.MessageText</c>/<c>.InnerException</c>/<c>.Detail</c>/<c>.Hint</c> is
+    /// distinctive enough on its own to catch a differently-named caught exception, at the cost of the new
+    /// allow-list entries above for the property names that collide (<c>conflict.Message</c> etc.).
+    /// <c>.Where</c> needs the negative lookahead so plain LINQ <c>.Where(</c> calls do not flood the census.
+    /// <c>.ToString()</c> is its OWN alternation, gated on an exception-shaped identifier immediately before
+    /// the call (the review handoff's own literal regex folded it into the first alternation, unrestricted —
+    /// that matched every unrelated <c>.ToString()</c> in the roster, e.g.
+    /// <c>value.ToString()</c>/<c>m.Archetype.ToString()</c>/<c>builder.ToString()</c>; caught by
+    /// <see cref="ExMessagePattern_MatchesEveryKnownExceptionTextShape_AndNothingElse"/>'s own
+    /// <c>count.ToString()</c> negative case, which the handoff's own test table named but its regex did not
+    /// actually satisfy). The third alternation catches a bare <c>{ex}</c>/<c>{pgEx}</c>/<c>{exception}</c>/
+    /// <c>{e}</c> inside a <c>$"..."</c> interpolation — gated on the same ex-shaped fragment so it does not
+    /// also match a structured-logging <c>{Name}</c> template placeholder (capitalized, never ex-shaped) or a
+    /// route template segment like <c>{id}</c>.</summary>
+    private static readonly Regex s_exMessagePattern = new(
+        @"\b[A-Za-z_]\w*\.(Message\b|MessageText\b|InnerException\b|Detail\b|Hint\b|Where\b(?!\s*\())"
+        + @"|\b(?:[A-Za-z_]*[Ee]x(?:ception)?|e)\.ToString\(\)"
+        + @"|\{(?:[A-Za-z_]*[Ee]x(?:ception)?|e)\}",
+        RegexOptions.Compiled);
+
+    /// <summary>#4283 review round 1 (L2): the widened pattern itself, independent of what any roster file
+    /// contains — a reintroduced <c>pgEx.MessageText</c> or <c>$"{e}"</c> must always be caught, and the LINQ
+    /// <c>.Where(</c>/non-exception <c>.ToString()</c>/structured-logging-template cases must never be.</summary>
+    [Fact]
+    public void ExMessagePattern_MatchesEveryKnownExceptionTextShape_AndNothingElse()
+    {
+        foreach (var positive in new[]
+        {
+            "pgEx.MessageText", "e.Message", "ex.InnerException", "ex.ToString()", "$\"{e}\"", "ex.Detail",
+            "ex.Hint", "ex.Where",
+        })
+        {
+            Assert.True(s_exMessagePattern.IsMatch(positive), $"expected a match in: {positive}");
+        }
+
+        foreach (var negative in new[]
+        {
+            "servers.Where(s => s.Enabled)", "count.ToString()", "$\"{route}\"",
+            "logger.LogError(\"{Route} failed\", route)",
+        })
+        {
+            Assert.False(s_exMessagePattern.IsMatch(negative), $"expected no match in: {negative}");
+        }
+    }
+
+    /// <summary>Revert-proof for the widening itself (#4283 L2): the OLD pattern
+    /// (<c>\b(ex|exception)\.Message(Text)?\b</c>) would have missed a reintroduced <c>pgEx.MessageText</c>
+    /// (different identifier) and a bare <c>$"{e}"</c> interpolation (no property access at all) — both real
+    /// shapes the round-1 review found live in the roster once H1/H2/M1 landed. Proven by running the two
+    /// cases the new pattern catches against the retired pattern here, once, rather than by hand-reverting
+    /// <see cref="s_exMessagePattern"/> and re-running the suite.</summary>
+    [Fact]
+    public void ExMessagePattern_OldNarrowerPattern_WouldHaveMissedTheWidenedCases()
+    {
+        var old = new Regex(@"\b(ex|exception)\.Message(Text)?\b", RegexOptions.Compiled);
+
+        Assert.False(old.IsMatch("pgEx.MessageText"), "the pre-L2 pattern was expected to miss a differently-named exception identifier");
+        Assert.False(old.IsMatch("$\"{e}\""), "the pre-L2 pattern was expected to miss a bare interpolated exception with no property access");
+    }
 
     [Fact]
     public void NoWebEndpoint_BuildsAnAnswerFromExMessage_ExceptTheNamedAllowList()
@@ -113,15 +208,28 @@ public sealed class WebExceptionTextCensusTests
             Assert.True(File.Exists(path), $"#4283 census target not found: {path}");
 
             var code = StripComments(File.ReadAllText(path));
+            var lines = code.Split('\n');
             var matches = s_exMessagePattern.Matches(code);
 
             foreach (Match match in matches)
             {
-                var window = code.Substring(Math.Max(0, match.Index - 60), Math.Min(120, code.Length - Math.Max(0, match.Index - 60)));
+                // #4283 review round 1 (L2): match against the OFFENDING LINE, not a ±60-char window — a
+                // window can spill the allow-listed snippet from a neighboring statement onto a line that
+                // never contains it, silently marking a real hit accounted for.
+                var lineIndex = 0;
+                for (var i = 0; i < match.Index; i++)
+                {
+                    if (code[i] == '\n')
+                    {
+                        lineIndex++;
+                    }
+                }
+
+                var line = lines[lineIndex];
                 var accounted = false;
                 foreach (var (file, snippet, _) in s_allowList)
                 {
-                    if (string.Equals(file, relative, StringComparison.Ordinal) && window.Contains(snippet, StringComparison.Ordinal))
+                    if (string.Equals(file, relative, StringComparison.Ordinal) && line.Contains(snippet, StringComparison.Ordinal))
                     {
                         accounted = true;
                         break;
@@ -130,7 +238,7 @@ public sealed class WebExceptionTextCensusTests
 
                 if (!accounted)
                 {
-                    unaccounted.Add($"{relative}: ...{window}...");
+                    unaccounted.Add($"{relative}: ...{line.Trim()}...");
                 }
             }
         }
