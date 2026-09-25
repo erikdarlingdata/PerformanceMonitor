@@ -221,10 +221,14 @@ public partial class RemoteCollectorService
             return false;
         }
         var state = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-        var databases = await GetBackfillCandidateDatabasesAsync(serverId, cancellationToken);
 
         var nowUtc = DateTime.UtcNow;
         var floorLimit = nowUtc - BackfillHorizonFor(server);
+
+        /* #4197: the same rule as Darling's twin — floorLimit is computed before the candidate read so
+           it can bind the read's own lower bound, then the store's list is unioned with every database
+           a hole key already names (state is loaded above, for free). */
+        var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken);
 
         foreach (var databaseName in databases)
         {
@@ -253,7 +257,7 @@ public partial class RemoteCollectorService
             /* The derived ceiling: everything at or above the stored MIN shipped complete. Null
                means the live path has not made first contact for this database yet. */
             var storedFloor = await GetMinCollectedTimeForDatabaseAsync(
-                serverId, QueryStoreCollector.Instance.TargetTable, "last_execution_time", "database_name", databaseName, cancellationToken);
+                serverId, QueryStoreCollector.Instance.TargetTable, "last_execution_time", "database_name", databaseName, floorLimit, cancellationToken);
             if (storedFloor is null)
             {
                 continue;
@@ -462,9 +466,22 @@ public partial class RemoteCollectorService
         }
     }
 
-    /// <summary>Databases that shipped query_store rows recently — the backfill universe, derived
-    /// from the store so no live enumeration is needed.</summary>
-    private async Task<List<string>> GetBackfillCandidateDatabasesAsync(int serverId, CancellationToken cancellationToken)
+    /// <summary>The candidate read's SQL text — a shared constant so the shape pin and the DuckDB
+    /// fixture test assert the exact statement <see cref="GetBackfillCandidateDatabasesAsync"/> runs.
+    /// #4197: the twin of Darling's <c>QueryStoreBackfill.CandidateSql</c>, so both SKUs keep one
+    /// rule.</summary>
+    internal const string CandidateSql =
+        "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
+
+    /// <summary>Databases that shipped query_store rows since <paramref name="floorLimit"/>, unioned
+    /// with every database a hole key already names — the backfill universe. #4197: the twin of
+    /// Darling's <c>QueryStoreBackfill.GetCandidateDatabasesAsync</c> — bound at the same
+    /// <paramref name="floorLimit"/> the loop uses to decide whether a database still needs digging,
+    /// then merged with <see cref="QueryStoreBackfillState.MergeHoleDatabases"/> so a database that
+    /// has gone fully quiet does not lose a recorded hole. DuckDB has no chunks to decompress, so the
+    /// bound buys Lite nothing but the shared rule; see the PR body's measured table.</summary>
+    private async Task<List<string>> GetBackfillCandidateDatabasesAsync(
+        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
     {
         var databases = new List<string>();
         try
@@ -472,9 +489,9 @@ public partial class RemoteCollectorService
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
+            cmd.CommandText = CandidateSql;
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow.AddDays(-7) });
+            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -489,27 +506,46 @@ public partial class RemoteCollectorService
             _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
         }
 
-        return databases;
+        return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
     }
 
-    /// <summary>MIN(last_execution_time) stored for one database — the derived backfill ceiling,
-    /// the mirror of <see cref="GetLastCollectedTimeForDatabaseAsync"/>. Null skips this tick;
-    /// failure never invents a boundary.</summary>
+    /// <summary>The derived backfill ceiling for one database, the mirror of
+    /// <see cref="GetLastCollectedTimeForDatabaseAsync"/>. Null skips this tick; failure never invents
+    /// a boundary. #4197: the twin of Darling's exact bounded form — see
+    /// <c>QueryStoreBackfill.GetStoredFloorAsync</c> for why the EXISTS-then-bounded-MIN pair returns
+    /// the same value an unbounded MIN would.</summary>
     private async Task<DateTime?> GetMinCollectedTimeForDatabaseAsync(
-        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, DateTime floorLimit, CancellationToken cancellationToken)
     {
         try
         {
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
-            cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
+
+            using (var exists = conn.CreateCommand())
             {
-                return dt;
+                exists.CommandText = $"SELECT 1 FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time <= $3 LIMIT 1";
+                exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                exists.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
+                var hit = await exists.ExecuteScalarAsync(cancellationToken);
+                if (hit is not null)
+                {
+                    return floorLimit;
+                }
+            }
+
+            using (var min = conn.CreateCommand())
+            {
+                min.CommandText = $"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3";
+                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
+                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
+                min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
+                var result = await min.ExecuteScalarAsync(cancellationToken);
+                if (result is DateTime dt)
+                {
+                    return dt;
+                }
             }
         }
         catch (Exception ex)

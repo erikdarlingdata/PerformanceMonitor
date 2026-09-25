@@ -7,6 +7,10 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.CompilerServices;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -220,5 +224,87 @@ public sealed class QueryStoreBackfillTests
         Assert.Equal("done:", QueryStoreBackfillState.DoneKeyPrefix);
         Assert.Equal("hole:", QueryStoreBackfillState.HoleKeyPrefix);
         Assert.Empty(QueryStoreCollector.Instance.StateKeys);
+    }
+
+    /// <summary>
+    /// #4197: the candidate read is now bound at floorLimit, so a database that has gone fully quiet
+    /// (no row newer than the horizon) can only still surface through a recorded hole key. This pins
+    /// the merge in isolation — no store connection needed — against the exact shape
+    /// <c>RunServerSliceAsync</c> feeds it: a done-key database is never pulled in (only hole keys
+    /// are), a database named by neither surfaces from the store list alone, and the result is sorted
+    /// ordinal so the loop's walk order stays deterministic regardless of dictionary enumeration order.
+    /// </summary>
+    [Fact]
+    public void MergeHoleDatabases_UnionsHoleKeysOnly_DedupesAndSortsOrdinal()
+    {
+        var candidates = new List<string> { "zeta", "alpha" };
+        var state = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [QueryStoreBackfillState.HoleKeyPrefix + "quiet_db"] = QueryStoreBackfillState.EncodeHole(
+                new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 8, 2, 0, 0, 0, DateTimeKind.Utc)),
+            [QueryStoreBackfillState.HoleKeyPrefix + "alpha"] = QueryStoreBackfillState.EncodeHole(
+                new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 8, 2, 0, 0, 0, DateTimeKind.Utc)),
+            [QueryStoreBackfillState.DoneKeyPrefix + "finished_db"] = "2026-08-01T00:00:00.0000000Z",
+        };
+
+        var merged = QueryStoreBackfillState.MergeHoleDatabases(candidates, state);
+
+        Assert.Equal(new[] { "alpha", "quiet_db", "zeta" }, merged);
+        Assert.DoesNotContain("finished_db", merged);
+    }
+
+    /// <summary>
+    /// #4197's SQL-shape pin: fails on the unbounded shapes both reads shipped with. The candidate
+    /// scan's old form bound a hardcoded 7-day <c>CandidateWindow</c> — wider than raw retention, so
+    /// no chunk was ever excluded (206 ms / 21,411 buffers on the design's heavy rig server). The
+    /// floor read's old form had no <c>collection_time</c> bound at all. Reverting either method back
+    /// to its pre-#4197 text fails this test; see the PR body for the measured before/after.
+    /// </summary>
+    [Fact]
+    public void Sql_CandidateAndFloorReadsAreBound_NotTheOldUnboundedShapes()
+    {
+        var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/QueryStoreBackfill.cs");
+
+        Assert.DoesNotContain(
+            "command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - CandidateWindow, DateTimeKind.Unspecified));",
+            source, StringComparison.Ordinal);
+        Assert.Contains("command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));", source, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreBackfillState.MergeHoleDatabases(databases, state)", source, StringComparison.Ordinal);
+
+        /* The old GetStoredFloorAsync text: an unqualified MIN with no collection_time predicate at
+           all. Its absence is the pin — the exact bounded EXISTS/MIN pair replaces it. */
+        Assert.DoesNotContain(
+            "\"SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2\"",
+            source, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 LIMIT 1", source, StringComparison.Ordinal);
+        Assert.Contains("SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time > $3", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>Lite parity for the pin above — the twin file must carry the same bound shapes.</summary>
+    [Fact]
+    public void Sql_LiteTwinCarriesTheSameBoundShapes()
+    {
+        var source = ReadRepoFile("Lite/Services/RemoteCollectorService.QueryStoreBackfill.cs");
+
+        Assert.Contains("cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("DateTime.UtcNow.AddDays(-7)", source, StringComparison.Ordinal);
+        Assert.Contains("QueryStoreBackfillState.MergeHoleDatabases(databases, state)", source, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3 LIMIT 1", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "$\"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2\"",
+            source, StringComparison.Ordinal);
+    }
+
+    private static string ReadRepoFile(string relativePath, [CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        var parts = relativePath.Split('/');
+        while (dir is not null && !File.Exists(Path.Combine(new[] { dir }.Concat(parts).ToArray())))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return File.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
     }
 }
