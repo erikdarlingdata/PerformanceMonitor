@@ -677,8 +677,8 @@ public sealed class DarlingMcpDataTools
                    sends changes it: the raw tier is where the rows were, and it stops where it stops. */
                 window_truncated = windowTruncated,
                 truncation_note = windowTruncated
-                    ? "The window reaches further back than this server's raw query_stats retains, so the older "
-                      + "part of it was not read."
+                    ? "The window reaches further back than this server's raw query_stats retains (or this "
+                      + "server has been monitored for less time than that), so the older part of it was not read."
                     : null,
                 queries = result
             }, McpHelpers.JsonOptions);
@@ -779,8 +779,8 @@ public sealed class DarlingMcpDataTools
                 /* #4231: the WINDOW floor (#3653 item 17 vocabulary) — never bare `truncated`. */
                 window_truncated = windowTruncated,
                 truncation_note = windowTruncated
-                    ? "The window reaches further back than this server's raw procedure_stats retains, so the "
-                      + "older part of it was not read."
+                    ? "The window reaches further back than this server's raw procedure_stats retains (or this "
+                      + "server has been monitored for less time than that), so the older part of it was not read."
                     : null,
                 procedures = result
             }, McpHelpers.JsonOptions);

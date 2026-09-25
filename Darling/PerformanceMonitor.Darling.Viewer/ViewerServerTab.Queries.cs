@@ -10,8 +10,10 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -171,29 +173,56 @@ public partial class ViewerServerTab
 
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
+        var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetTopQueriesByCpuAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc);
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
 
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
+        var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetTopProceduresByCpuAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _procStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc);
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
 
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc)
     {
+        var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc);
         var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
+    }
+
+    /// <summary>
+    /// #4231: the Queries-tab grid header's disclosure — "Showing since &lt;effective start&gt;" when
+    /// <paramref name="floor"/> sits past <see cref="RawWindowFloor.IsTruncated"/>'s slack after
+    /// <paramref name="requestedStartUtc"/>, collapsed otherwise. The chart-title idiom
+    /// (<see cref="DescribeTrendCoverage"/>) states the same fact on Performance Trends; this is its grid-header
+    /// form, in <see cref="ViewerTimeHelper.ForDisplay"/>'s own <c>yyyy-MM-dd HH:mm</c>, the format every trend
+    /// chart title already uses for a head timestamp.
+    /// </summary>
+    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc)
+    {
+        if (!RawWindowFloor.IsTruncated(floor, requestedStartUtc))
+        {
+            banner.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        var effectiveStart = ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc));
+        banner.Text = $"Showing since {effectiveStart:yyyy-MM-dd HH:mm}";
+        banner.Visibility = Visibility.Visible;
     }
 
     /// <summary>
@@ -240,8 +269,10 @@ public partial class ViewerServerTab
     {
         try
         {
+            var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var rows = await _dataService.GetTopQueriesByCpuAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _queryStatsFilterMgr!.UpdateData(rows);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc);
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -263,8 +294,10 @@ public partial class ViewerServerTab
     {
         try
         {
+            var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var rows = await _dataService.GetTopProceduresByCpuAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _procStatsFilterMgr!.UpdateData(rows);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
@@ -286,8 +319,10 @@ public partial class ViewerServerTab
     {
         try
         {
+            var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _queryStoreFilterMgr!.UpdateData(rows);
+            UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)

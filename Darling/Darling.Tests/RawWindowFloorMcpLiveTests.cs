@@ -63,12 +63,20 @@ public sealed class RawWindowFloorMcpLiveTests
             var queries = JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(postgres, ServerName, 24)).RootElement;
             Assert.True(queries.GetProperty("window_truncated").GetBoolean());
             Assert.True(queries.GetProperty("effective_hours_back").GetDouble() < 1.0);
-            Assert.Contains("query_stats", queries.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+            /* #4231 parity: exactly Lite's (#4279) sentence, "or this server has been monitored for less time
+               than that" included — a caller reading Darling and Lite side by side sees the same words. */
+            Assert.Equal(
+                "The window reaches further back than this server's raw query_stats retains (or this server "
+                + "has been monitored for less time than that), so the older part of it was not read.",
+                queries.GetProperty("truncation_note").GetString());
 
             var procedures = JsonDocument.Parse(await DarlingMcpDataTools.GetTopProceduresByCpu(postgres, ServerName, 24)).RootElement;
             Assert.True(procedures.GetProperty("window_truncated").GetBoolean());
             Assert.True(procedures.GetProperty("effective_hours_back").GetDouble() < 1.0);
-            Assert.Contains("procedure_stats", procedures.GetProperty("truncation_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(
+                "The window reaches further back than this server's raw procedure_stats retains (or this server "
+                + "has been monitored for less time than that), so the older part of it was not read.",
+                procedures.GetProperty("truncation_note").GetString());
 
             /* Inside the #2364 slack (90 minutes): a floor sitting 30 minutes after the requested start of a
                2-hour window must NOT be called truncated. */
