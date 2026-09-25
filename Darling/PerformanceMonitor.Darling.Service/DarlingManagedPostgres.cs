@@ -1234,19 +1234,80 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// Whether the v8 block should be appended on this start (#2845) — the whole decision as one pure
-    /// function so the property can be pinned without a data directory.
+    /// Whether the v8 block should be appended on this start (#2845; the second and third conditions are
+    /// #4207's heal for a store resized BEFORE that fix shipped) — the whole decision as one pure function
+    /// so the property can be pinned without a data directory.
     ///
-    /// <para>Two conditions, and the FIRST is the one that is easy to get wrong: the RAM reading must be
-    /// authoritative. A non-authoritative reading is not evidence that the hardware is unchanged, it is the
-    /// absence of evidence either way — and re-deriving production sizing from a number we could not read is
-    /// worse than leaving the last good block in force. It also stops a flapping Win32 call from minting a
-    /// novel fingerprint on every blip and appending a block each time, which a value-only guard cannot do
-    /// because the fallback it would guard against is a live, varying quantity rather than a fixed
-    /// sentinel.</para>
+    /// <para>The RAM reading must be authoritative for ANY of the three conditions below to act — checked
+    /// first, and short-circuiting the rest. A non-authoritative reading is not evidence that the hardware
+    /// is unchanged, it is the absence of evidence either way — and re-deriving production sizing from a
+    /// number we could not read is worse than leaving the last good block in force. It also stops a
+    /// flapping Win32 call from minting a novel fingerprint on every blip and appending a block each time,
+    /// which a value-only guard cannot do because the fallback it would guard against is a live, varying
+    /// quantity rather than a fixed sentinel.</para>
+    ///
+    /// <para><b>Given an authoritative reading, any of three conditions triggers a heal:</b></para>
+    /// <list type="bullet">
+    /// <item>the newest fingerprint in the conf does not match today's inputs (#2845's original condition —
+    /// a genuine hardware or hypertable-count change).</item>
+    /// <item>the conf holds MORE THAN ONE v8 block (<see cref="FindHardwareSizingBlockSpans"/>). #4225 made
+    /// a fingerprint change collapse to a single rewritten block, but a store that had already accumulated
+    /// duplicates before that fix shipped has no fingerprint change left to trigger on — its newest
+    /// fingerprint already matches, so the first condition alone would leave the duplicates in place
+    /// forever.</item>
+    /// <item>the newest block's content does not match what THIS BUILD would write for those same inputs
+    /// (<see cref="NewestHardwareSizingBlockIsCurrent"/>), even though its fingerprint line matches. A block
+    /// written by an older build — before <c>work_mem</c> rejoined this list in #4207 — fingerprints as
+    /// "current" for its RAM and hypertable count, because the fingerprint encodes only those two inputs,
+    /// never the formula version that turned them into settings. Without this condition, that store would
+    /// never re-derive: nothing about its hardware ever changes again, so the first condition never fires
+    /// either.</item>
+    /// </list>
     /// </summary>
-    internal static bool ShouldAppendHardwareSizing(string conf, bool ramReadingIsAuthoritative, string expectedFingerprint)
-        => ramReadingIsAuthoritative && !ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint);
+    internal static bool ShouldAppendHardwareSizing(
+        string conf, bool ramReadingIsAuthoritative, string expectedFingerprint, string expectedBlockAppend)
+        => ramReadingIsAuthoritative
+            && (!ConfHasCurrentHardwareFingerprint(conf, expectedFingerprint)
+                || FindHardwareSizingBlockSpans(conf).Count > 1
+                || !NewestHardwareSizingBlockIsCurrent(conf, expectedBlockAppend));
+
+    /// <summary>
+    /// True when the LAST v8 block in <paramref name="conf"/> is, line for line, the text
+    /// <see cref="BuildHardwareSizingConfAppend"/> would write for the current inputs (#4207) — the
+    /// stale-CONTENT half of <see cref="ShouldAppendHardwareSizing"/>'s decision, checked even when the
+    /// fingerprint line itself already matches (see that method's remarks for why fingerprint-only misses a
+    /// block written by an older formula).
+    ///
+    /// <para>False when there is no v8 block at all: that reads as "not current" and defers to
+    /// <see cref="ReplaceOrAppendHardwareSizingBlock"/>'s plain-append fallback, the same v2-v7 shape as
+    /// before.</para>
+    ///
+    /// <para>Line endings are normalised before comparing. <paramref name="conf"/> can be CRLF — this file
+    /// is written and hand-edited on Windows — while every <c>Build*ConfAppend</c> in this class emits LF
+    /// only, so a byte comparison would read every CRLF conf as permanently stale and rewrite it on every
+    /// single start.</para>
+    /// </summary>
+    internal static bool NewestHardwareSizingBlockIsCurrent(string conf, string expectedBlockAppend)
+    {
+        var spans = FindHardwareSizingBlockSpans(conf);
+        if (spans.Count == 0)
+        {
+            return false;
+        }
+
+        var (start, end) = spans[^1];
+        var actual = conf[start..end];
+
+        /* expectedBlockAppend carries the same leading blank-line separator BuildHardwareSizingConfAppend
+           always does; a block SPAN never includes that separator (see FindHardwareSizingBlockEnd), so it
+           is stripped here to compare like with like. */
+        var expected = expectedBlockAppend.StartsWith('\n') ? expectedBlockAppend[1..] : expectedBlockAppend;
+
+        return string.Equals(
+            actual.Replace("\r\n", "\n", StringComparison.Ordinal),
+            expected.Replace("\r\n", "\n", StringComparison.Ordinal),
+            StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// The v8 hardware-sizing block (#2845): re-states the settings that are a pure function of the
@@ -3029,32 +3090,47 @@ public sealed class DarlingManagedPostgres
             _logger.LogWarning(
                 "Skipped the v8 hardware-sizing check: total physical memory could not be read authoritatively, so a hardware change cannot be distinguished from a failed reading. The existing sizing block stays in force.");
         }
-        else if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint))
+        else
         {
             /* Quantize ONCE here and pass the result down, so the values logged are necessarily the values
                written. Deriving the log line separately from the raw reading made them disagree near a GB
                boundary — a 31.5 GB host writes effective_cache_size 24576MB but logged 24192MB, a number that
                appears nowhere in the file. QuantizeRam is idempotent, so the call below still quantizes and
-               still gets the same answer. */
+               still gets the same answer. Built unconditionally (not only once ShouldAppendHardwareSizing
+               says yes): #4207's stale-content condition needs the text THIS build would write to compare
+               against what is already there, so the decision itself depends on this value. */
             var v8QuantizedRam = QuantizeRam(v8RamBytes);
             var v8Append = BuildHardwareSizingConfAppend(v8QuantizedRam, hypertableCount);
 
-            /* Re-read rather than reuse the `conf` snapshot from the top of this method: v1-v7 above may
-               have just appended their own healing blocks straight to disk (File.AppendAllText, bypassing
-               `conf` entirely), and rewriting the whole file from the stale snapshot would silently drop
-               them. None of v1-v7 can itself contain a v8 span, so this re-read cannot move or hide one. */
-            var v8CurrentConf = File.ReadAllText(confPath);
-            var v8PriorCopies = FindHardwareSizingBlockSpans(v8CurrentConf).Count;
-            File.WriteAllText(confPath, ReplaceOrAppendHardwareSizingBlock(v8CurrentConf, v8Append));
+            if (ShouldAppendHardwareSizing(conf, v8Authoritative, v8Fingerprint, v8Append))
+            {
+                /* Which of #4207's three conditions fired, for the log line below. Classified against the
+                   same `conf` snapshot ShouldAppendHardwareSizing just decided on, in the same priority
+                   order that function checks them in — not against the re-read below, though the answer is
+                   identical either way (see the INVARIANT comment above: none of v1-v7 can introduce, remove
+                   or move a v8 span). */
+                var v8Reason =
+                    !ConfHasCurrentHardwareFingerprint(conf, v8Fingerprint) ? "hardware fingerprint changed"
+                    : FindHardwareSizingBlockSpans(conf).Count > 1 ? "duplicate v8 blocks found, #4207"
+                    : "existing block content is stale, #4207";
 
-            var v8Settings = DeriveMemorySettings(v8QuantizedRam);
-            var v8Workers = DeriveWorkerSettings(hypertableCount);
-            _logger.LogInformation(
-                "{Action} v8 hardware sizing in postgresql.conf (host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, work_mem {WorkMem}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers deliberately NOT re-derived, see #2845){CollapseNote}",
-                v8PriorCopies == 0 ? "Appended" : "Rewrote", v8QuantizedRam / (1024L * 1024L), hypertableCount,
-                v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Settings.WorkMemMb,
-                v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses,
-                v8PriorCopies > 1 ? $" (collapsed {v8PriorCopies} copies into 1, #4207)" : string.Empty);
+                /* Re-read rather than reuse the `conf` snapshot from the top of this method: v1-v7 above may
+                   have just appended their own healing blocks straight to disk (File.AppendAllText, bypassing
+                   `conf` entirely), and rewriting the whole file from the stale snapshot would silently drop
+                   them. None of v1-v7 can itself contain a v8 span, so this re-read cannot move or hide one. */
+                var v8CurrentConf = File.ReadAllText(confPath);
+                var v8PriorCopies = FindHardwareSizingBlockSpans(v8CurrentConf).Count;
+                File.WriteAllText(confPath, ReplaceOrAppendHardwareSizingBlock(v8CurrentConf, v8Append));
+
+                var v8Settings = DeriveMemorySettings(v8QuantizedRam);
+                var v8Workers = DeriveWorkerSettings(hypertableCount);
+                _logger.LogInformation(
+                    "{Action} v8 hardware sizing in postgresql.conf ({Reason}; host RAM {RamMb} MB, {Hypertables} hypertables -> effective_cache_size {EffectiveCache}MB, maintenance_work_mem {Maintenance}MB, work_mem {WorkMem}MB, timescaledb.max_background_workers {BgWorkers}, max_worker_processes {WorkerProcesses}; shared_buffers deliberately NOT re-derived, see #2845){CollapseNote}",
+                    v8PriorCopies == 0 ? "Appended" : "Rewrote", v8Reason, v8QuantizedRam / (1024L * 1024L), hypertableCount,
+                    v8Settings.EffectiveCacheSizeMb, v8Settings.MaintenanceWorkMemMb, v8Settings.WorkMemMb,
+                    v8Workers.MaxBackgroundWorkers, v8Workers.MaxWorkerProcesses,
+                    v8PriorCopies > 1 ? $" (collapsed {v8PriorCopies} copies into 1, #4207)" : string.Empty);
+            }
         }
 
         /* Checked independently of v1-v8, and placed AFTER v8 on purpose: v8 keys on the last fingerprint
