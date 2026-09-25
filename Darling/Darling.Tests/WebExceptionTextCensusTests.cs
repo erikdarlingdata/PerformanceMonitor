@@ -107,8 +107,9 @@ public sealed class WebExceptionTextCensusTests
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "snapshot.Detail",
-            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — never " +
-            "PostgresException.Detail."
+            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — today it is the raw " +
+            "ex.Message of a startup failure, verbatim (round-1 H4, tracked in #4316, fixed by PR #4326); " +
+            "remove this entry once #4326 lands."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebFailureLog.cs"),
@@ -149,16 +150,38 @@ public sealed class WebExceptionTextCensusTests
     /// actually satisfy). The third alternation catches a bare <c>{ex}</c>/<c>{pgEx}</c>/<c>{exception}</c>/
     /// <c>{e}</c> inside a <c>$"..."</c> interpolation — gated on the same ex-shaped fragment so it does not
     /// also match a structured-logging <c>{Name}</c> template placeholder (capitalized, never ex-shaped) or a
-    /// route template segment like <c>{id}</c>.</summary>
+    /// route template segment like <c>{id}</c>.
+    /// #4293 round 2 (R2-L4) widens four more ways. (1) A <c>?</c>, <c>!</c> or a closing <c>)</c> may now sit
+    /// before the dot on the first alternation's generic receiver: <c>ex?.Message</c>, <c>(ex as
+    /// PostgresException)?.MessageText</c>, <c>ex.GetBaseException().Message</c>. (2) A SECOND property list
+    /// (<c>StackTrace</c>/<c>InternalQuery</c>/<c>TableName</c>/<c>SchemaName</c>/<c>ColumnName</c>/
+    /// <c>ConstraintName</c>/<c>Routine</c>) gated on an exception-shaped receiver ONLY — <c>ex</c>/
+    /// <c>exception</c>/<c>e</c>/<c>pgEx</c>/<c>fault</c>/<c>Fault</c>, bare or at the end of a dotted path like
+    /// <c>outcome.Fault</c> — unlike the first list, <c>TableName</c>/<c>ColumnName</c> are common, harmless
+    /// names on a non-exception receiver elsewhere in the codebase (see
+    /// <c>DarlingObjectStatsReader</c>/<c>DarlingMcpPgIndexTools</c> etc., neither on the roster, but the same
+    /// shape could land there), so this list cannot reuse the generic-receiver alternation. (3)
+    /// <see cref="ExOrFaultName"/> (the <c>.ToString()</c> and <c>{...}</c> arms' shared name fragment) now also
+    /// accepts <c>Fault</c>/<c>fault</c>, bare or dotted (<c>{outcome.Fault}</c>). (4) A fourth alternation
+    /// catches a string literal concatenated onto an exception-shaped name — <c>"Query failed: " + ex</c> —
+    /// gated by a negative lookahead so it defers to the other alternations when the name is ITSELF further
+    /// accessed (<c>.</c>/<c>(</c>/<c>[</c> follows immediately).</summary>
+    private const string ExOrFaultName = @"(?:[A-Za-z_]*[Ee]x(?:ception)?|e|(?:[A-Za-z_]\w*\.)*[Ff]ault)";
+
     private static readonly Regex s_exMessagePattern = new(
-        @"\b[A-Za-z_]\w*\.(Message\b|MessageText\b|InnerException\b|Detail\b|Hint\b|Where\b(?!\s*\())"
-        + @"|\b(?:[A-Za-z_]*[Ee]x(?:ception)?|e)\.ToString\(\)"
-        + @"|\{(?:[A-Za-z_]*[Ee]x(?:ception)?|e)\}",
+        @"(?:\b[A-Za-z_]\w*|\))[?!]?\.(Message\b|MessageText\b|InnerException\b|Detail\b|Hint\b|Where\b(?!\s*\())"
+        + @"|\b(?:[A-Za-z_]\w*\.)*(?:ex|exception|e|pgEx|fault|Fault)\b[?!]?\.(StackTrace\b|InternalQuery\b|TableName\b|SchemaName\b|ColumnName\b|ConstraintName\b|Routine\b)"
+        + @"|\b" + ExOrFaultName + @"\.ToString\(\)"
+        + @"|\{" + ExOrFaultName + @"\}"
+        + @"|""(?:[^""\\]|\\.)*""\s*\+\s*" + ExOrFaultName + @"\b(?![.(\[])",
         RegexOptions.Compiled);
 
     /// <summary>#4283 review round 1 (L2): the widened pattern itself, independent of what any roster file
     /// contains — a reintroduced <c>pgEx.MessageText</c> or <c>$"{e}"</c> must always be caught, and the LINQ
-    /// <c>.Where(</c>/non-exception <c>.ToString()</c>/structured-logging-template cases must never be.</summary>
+    /// <c>.Where(</c>/non-exception <c>.ToString()</c>/structured-logging-template cases must never be.
+    /// #4293 round 2 (R2-L4) adds the ?/!/) receiver tail, the exception-shaped-receiver-only new property
+    /// names (plus a non-exception-receiver negative for the same two names, since that gating is the whole
+    /// point), Fault/fault (bare and dotted), and the string-literal concatenation arm.</summary>
     [Fact]
     public void ExMessagePattern_MatchesEveryKnownExceptionTextShape_AndNothingElse()
     {
@@ -166,6 +189,10 @@ public sealed class WebExceptionTextCensusTests
         {
             "pgEx.MessageText", "e.Message", "ex.InnerException", "ex.ToString()", "$\"{e}\"", "ex.Detail",
             "ex.Hint", "ex.Where",
+            // #4293 round 2 (R2-L4):
+            "ex?.Message", "(ex as PostgresException)?.MessageText", "ex.GetBaseException().Message",
+            "ex.StackTrace", "pgEx.InternalQuery", "outcome.Fault.TableName", "outcome.Fault.ToString()",
+            "$\"{outcome.Fault}\"", "\"Query failed: \" + ex",
         })
         {
             Assert.True(s_exMessagePattern.IsMatch(positive), $"expected a match in: {positive}");
@@ -175,6 +202,9 @@ public sealed class WebExceptionTextCensusTests
         {
             "servers.Where(s => s.Enabled)", "count.ToString()", "$\"{route}\"",
             "logger.LogError(\"{Route} failed\", route)",
+            // #4293 round 2 (R2-L4): TableName/ColumnName are common, harmless names on a NON-exception
+            // receiver — the whole reason the new property list is gated on an exception-shaped one.
+            "widget.TableName", "row.ColumnName",
         })
         {
             Assert.False(s_exMessagePattern.IsMatch(negative), $"expected no match in: {negative}");
@@ -194,6 +224,32 @@ public sealed class WebExceptionTextCensusTests
 
         Assert.False(old.IsMatch("pgEx.MessageText"), "the pre-L2 pattern was expected to miss a differently-named exception identifier");
         Assert.False(old.IsMatch("$\"{e}\""), "the pre-L2 pattern was expected to miss a bare interpolated exception with no property access");
+    }
+
+    /// <summary>Revert-proof for the round-2 widening (#4293 R2-L4): the pre-round-2 pattern would have missed
+    /// every new shape this round adds — the ?/!/) receiver tail, the exception-shaped-receiver-only new
+    /// property names, Fault/fault (bare and dotted), and the string-literal concatenation arm. Proven by
+    /// running the round-1 pattern against the same cases here, once, rather than by hand-reverting
+    /// <see cref="s_exMessagePattern"/> and re-running the suite (as the L2 revert-proof above already does for
+    /// round 1).</summary>
+    [Fact]
+    public void ExMessagePattern_Round1Pattern_WouldHaveMissedTheRound2WidenedCases()
+    {
+        var round1 = new Regex(
+            @"\b[A-Za-z_]\w*\.(Message\b|MessageText\b|InnerException\b|Detail\b|Hint\b|Where\b(?!\s*\())"
+            + @"|\b(?:[A-Za-z_]*[Ee]x(?:ception)?|e)\.ToString\(\)"
+            + @"|\{(?:[A-Za-z_]*[Ee]x(?:ception)?|e)\}",
+            RegexOptions.Compiled);
+
+        foreach (var missed in new[]
+        {
+            "ex?.Message", "(ex as PostgresException)?.MessageText", "ex.GetBaseException().Message",
+            "ex.StackTrace", "pgEx.InternalQuery", "outcome.Fault.TableName", "outcome.Fault.ToString()",
+            "$\"{outcome.Fault}\"", "\"Query failed: \" + ex",
+        })
+        {
+            Assert.False(round1.IsMatch(missed), $"the pre-round-2 pattern was expected to miss: {missed}");
+        }
     }
 
     /// <summary>#4293 round 2 (R2-L3): an allow-list snippet vouches only for the MATCH it actually contains on
