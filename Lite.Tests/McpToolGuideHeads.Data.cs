@@ -41,7 +41,11 @@ public sealed class McpToolGuideHeadsDataTests
         ("get_perfmon_stats", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_server_properties", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_top_procedures_by_cpu", "LIFETIME extremes, not windowed"),
+        ("get_top_procedures_by_cpu", "window_truncated"),
+        ("get_top_procedures_by_cpu", "not a page cut"),
         ("get_top_queries_by_cpu", "LIFETIME extremes, not windowed"),
+        ("get_top_queries_by_cpu", "window_truncated"),
+        ("get_top_queries_by_cpu", "not a page cut"),
         ("get_wait_stats", "Bounded by limit"),
         ("list_servers", "Lite's status IS a live connection check"),
     ];
@@ -64,6 +68,9 @@ public sealed class McpToolGuideHeadsDataTests
         }
     }
 
+    /// <summary>#4231: the shared cpu-extremes/attribution topic is the last thing appended to both tails again
+    /// (McpHelpers.WindowTruncatedDescription now sits before it, not after), so this is back to checking
+    /// position, matching Darling's twin.</summary>
     [Fact]
     public void CpuTimeExtremesTopic_RidesOnBothTopByCpuTools()
     {

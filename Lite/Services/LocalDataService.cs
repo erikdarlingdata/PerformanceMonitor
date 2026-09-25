@@ -253,6 +253,27 @@ public partial class LocalDataService
     }
 
     /// <summary>
+    /// #4279: the exact UTC window GetTopQueriesByCpuAsync / GetTopProceduresByCpuAsync /
+    /// GetQueryStoreTopQueriesAsync read for the Queries tab's three grids -- the SAME <see cref="GetTimeRange"/>
+    /// call those three make internally. <c>internal</c> (not private) so <c>ServerTab.RefreshWindowTruncatedBannerAsync</c>
+    /// (ServerTab.Refresh.cs) can probe this exact window instead of recomputing its own copy: before this
+    /// existed, the banner's custom-range window came from server-local cStart/cEnd
+    /// (<c>toDate ?? DateTime.UtcNow</c> / <c>fromDate ?? ...</c>, with fromDate/toDate already converted to
+    /// server time by ServerTab.GetCurrentWindow) while GetTopQueriesByCpuAsync's own window went through
+    /// GetTimeRange's custom-range branch and came out UTC -- the grid and its banner silently disagreed on
+    /// any server not on UTC (#4279).
+    /// </summary>
+    /// <param name="utcOffsetMinutes">
+    /// The SAME offset the caller's ServerTab.GetCurrentWindow used to produce <paramref name="fromDate"/>/
+    /// <paramref name="toDate"/> -- the selected tab's <c>ServerTimeHelper.UtcOffsetMinutes</c>, not
+    /// necessarily this tab's own. GetTimeRange's custom-range branch subtracts this same value back out, so
+    /// a mismatched offset here breaks the round trip the same way a mismatched one breaks it inside
+    /// GetTopQueriesByCpuAsync.
+    /// </param>
+    internal static (DateTime startUtc, DateTime endUtc) GetQueriesTabWindowUtc(int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes)
+        => GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, utcOffsetMinutes);
+
+    /// <summary>
     /// Gets the time range in server local time (for tables like cpu_utilization_stats.sample_time).
     /// </summary>
     /// <param name="utcOffsetMinutes">
