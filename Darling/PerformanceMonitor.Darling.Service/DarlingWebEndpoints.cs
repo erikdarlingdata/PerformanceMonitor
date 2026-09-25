@@ -2974,8 +2974,10 @@ public static class DarlingWebEndpoints
                routes, and the 1:1 read surface carries the tool like every other read. The captured
                logger is the tool's logger seat — the web host's SERVICE logger when MapAll built this
                dispatch, the same instance the MCP host injects with AddSingleton<ILogger> (#3473
-               review) — so the mirror's child reads log-and-degrade into the same service log both
-               hosts' other paths use, instead of the hardcoded null this entry carried while the
+               review) — so on a store fault the mirror's child reads throw (#4315), the tool's own
+               catch logs the exception once and answers the error envelope, and this entry's
+               ToHttpResult classifies that envelope and answers the fixed body through
+               ServerErrorResult, instead of the hardcoded null this entry carried while the
                dashboard app's provider-less factory was the only alternative. Closure, not a fourth
                ReadToolHandler seat: widening the shared delegate would touch every entry in this
                table for the one tool that logs. */

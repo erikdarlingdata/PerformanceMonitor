@@ -513,8 +513,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                clears its logging providers two blocks up, so anything resolved from the app's logging
                would be a logger with nowhere to write — the host's is the one wired to the service's
                real providers, the same instance DarlingAnalysisService already receives. Closes the
-               #3473 review's observation: get_sweep_reports' child reads log-and-degrade, and before
-               this they degraded with no log trace anywhere on the MCP path. */
+               #3473 review's observation: get_sweep_reports' child reads throw on a store fault
+               (#4315) and the tool's own catch logs the exception once, where before this they
+               degraded with no log trace anywhere on the MCP path. */
             builder.Services.AddSingleton<ILogger>(_logger);
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same

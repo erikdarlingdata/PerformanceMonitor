@@ -150,7 +150,12 @@ internal static class DarlingFleetSweepEndpoints
     /// the auth middleware like every other route. Handlers answer through the surface's standard
     /// shapes: data as JSON, refusals as 400 <c>{"error"}</c>, absence as 404, and a store fault as a
     /// 500 <c>{"error"}</c> — the page's own error strip is the degraded rendering, so nothing here
-    /// swallows a fault into an answer that reads healthier than the store.
+    /// swallows a fault into an answer that reads healthier than the store. This was not true before
+    /// #4315: the five presentation reads under these routes used to log-and-degrade a store fault
+    /// into an empty list, which read as a genuinely quiet span or worklist — an empty
+    /// <c>{"sweeps": []}</c> the page rendered as "No sweeps in this span" instead of the error strip.
+    /// Since #4315 those reads throw; since #4293 both routes reach the pipeline's #4276 backstop
+    /// directly, with no local catch, which answers through <see cref="Hosting.DarlingWebFailureLog"/>.
     ///
     /// <para><b>The logger seat is the HOST SERVICE's logger, never <c>app.Logger</c>.</b> The web
     /// host clears the dashboard app's logging providers (the framework-noise decision, stated at its
@@ -178,7 +183,7 @@ internal static class DarlingFleetSweepEndpoints
 
             var startUtc = endUtc.AddHours(-hours);
             var runs = await FleetSweepStore.GetSweepsBySpanAsync(
-                postgres, startUtc, endUtc, logger, context.RequestAborted);
+                postgres, startUtc, endUtc, context.RequestAborted);
 
             return JsonResult(FleetSweepPresentation.BuildTimelineNode(runs, startUtc, endUtc));
         });
@@ -195,7 +200,7 @@ internal static class DarlingFleetSweepEndpoints
             var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
             return run is null
                 ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
-                : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
+                : JsonResult(await BuildDetailAsync(postgres, run, context));
         });
 
         /* One sweep in full, by id — the timeline click-through. 404 means genuinely absent (pruned
@@ -206,7 +211,7 @@ internal static class DarlingFleetSweepEndpoints
             var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
             return run is null
                 ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
-                : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
+                : JsonResult(await BuildDetailAsync(postgres, run, context));
         });
 
         /* The watch-item worklist. Default = open + carried in ONE store read; ?state= narrows to a
@@ -221,8 +226,8 @@ internal static class DarlingFleetSweepEndpoints
             }
 
             var items = state is null
-                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, logger, context.RequestAborted)
-                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, logger, context.RequestAborted);
+                ? await FleetSweepStore.GetOpenAndCarriedWatchItemsAsync(postgres, context.RequestAborted)
+                : await FleetSweepStore.GetWatchItemsByStateAsync(postgres, state, context.RequestAborted);
 
             var names = await ReadWatchItemNamesAsync(postgres, items, logger, context.RequestAborted);
             return JsonResult(FleetSweepPresentation.BuildWatchItemsNode(items, names));
@@ -230,18 +235,20 @@ internal static class DarlingFleetSweepEndpoints
     }
 
     /// <summary>One sweep's full document: the run plus its verdicts and — under master-off — the
-    /// would-have-paged ledger, through the shared builders. The child reads are the store's
-    /// presentation reads (log-and-degrade into the service log via <paramref name="logger"/> —
-    /// the seat <see cref="Map"/>'s doc explains), so a child fault costs its section, not the page.</summary>
+    /// would-have-paged ledger, through the shared builders. THROWS on a store fault (#4315): the
+    /// child reads are the store's presentation reads, and since #4315 they throw rather than
+    /// degrade, so a verdicts or would-have-paged fault now fails the WHOLE document — the pipeline's
+    /// #4276 backstop (see <see cref="Map"/>, no local catch) answers the loud shape instead of
+    /// publishing a document with a section silently missing.</summary>
     private static async Task<JsonObject> BuildDetailAsync(
-        ILogger logger, NpgsqlDataSource postgres, FleetSweepRun run, HttpContext context)
+        NpgsqlDataSource postgres, FleetSweepRun run, HttpContext context)
     {
         var verdicts = await FleetSweepStore.GetServerVerdictsAsync(
-            postgres, run.SweepId, logger, context.RequestAborted);
+            postgres, run.SweepId, context.RequestAborted);
 
         var ledger = run.AlertsEnabled
             ? new List<FleetSweepWouldHavePagedEntry>()
-            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, logger, context.RequestAborted);
+            : await FleetSweepStore.GetWouldHavePagedAsync(postgres, run.SweepId, context.RequestAborted);
 
         return FleetSweepPresentation.BuildSweepDetailNode(run, verdicts, ledger);
     }
