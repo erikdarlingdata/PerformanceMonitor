@@ -97,13 +97,16 @@ public sealed class IntervalHonestHourlyRollupTests
     /// Every successor is a raw-sourced hourly rollup registered where the readers, the coverage probe, the
     /// backfill and the retention ladder look — <see cref="TimescaleSupport.RollupViews"/>,
     /// <see cref="TimescaleSupport.RollupProbeSql"/>, <see cref="RollupBackfill.Targets"/>,
-    /// <see cref="TimescaleSupport.RetentionPolicies"/> — and NOT where the raw purge gates
-    /// (<see cref="TimescaleSupport.RawTierCoverage"/>), which is the #1661 precedent stated on the registry.
+    /// <see cref="TimescaleSupport.RetentionPolicies"/> — and, since #3653's LC froze the legacy trio off the raw
+    /// purge, the two with a <see cref="TimescaleSupport.RawTierCoverage"/> row of their own
+    /// (<c>query_stats</c>, <c>procedure_stats</c>) are there too — the #1661 precedent the registry's summary
+    /// explains is now reversed BY DESIGN. <c>query_stats_db_hourly</c> shares <c>query_stats</c>' raw table
+    /// rather than owning one, so its successor was never a candidate and stays out, same as before LC.
     /// </summary>
     [Fact]
-    public void EverySuccessor_IsInTheCoverageProbe_TheBackfillPlan_AndTheRetentionLadder_ButNotTheRawGate()
+    public void EverySuccessor_IsInTheCoverageProbe_TheBackfillPlan_TheRetentionLadder_AndTheRawGateWhereItHasOne()
     {
-        foreach (var (legacy, successor, dependentDaily) in TimescaleSupport.SupersededHourlyRollups)
+        foreach (var (legacy, successor, _) in TimescaleSupport.SupersededHourlyRollups)
         {
             var legacyRow = TimescaleSupport.RollupViews.Single(r => r.View == legacy);
             var successorRow = TimescaleSupport.RollupViews.Single(r => r.View == successor);
@@ -118,21 +121,38 @@ public sealed class IntervalHonestHourlyRollupTests
             Assert.False(RollupAvailability.WithoutIntervalHourlies.Has(successor));
             Assert.True(RollupAvailability.WithoutIntervalHourlies.Has(legacy));
 
-            /* Depth 0 in the backfill order — raw-sourced — and the probe SQL reads its own name. */
+            /* Depth 0 in the backfill order — raw-sourced — and the probe SQL reads its own name. The legacy's
+               OWN daily left the backfill plan with the rest of the frozen six (#3653 LC: nothing ever advances
+               its watermark again); the successor's consumer there is now its own successor daily (#3653 LB),
+               read through SuccessorDailyOf rather than restated. */
             var target = RollupBackfill.Targets.Single(t => t.View == successor);
             Assert.False(target.IsHierarchical);
-            Assert.True(Array.IndexOf(RollupBackfill.Targets, target) < Array.IndexOf(RollupBackfill.Targets, RollupBackfill.Targets.Single(t => t.View == dependentDaily)),
-                "a raw-sourced successor must be planned before every hierarchical daily");
+            var successorDaily = TimescaleSupport.SuccessorDailyOf(successor)
+                ?? throw new InvalidOperationException($"{successor} must be in {nameof(TimescaleSupport.SupersededDailyRollups)}.");
+            Assert.True(Array.IndexOf(RollupBackfill.Targets, target) < Array.IndexOf(RollupBackfill.Targets, RollupBackfill.Targets.Single(t => t.View == successorDaily)),
+                "a raw-sourced successor must be planned before its own successor daily");
 
-            /* The hourly tier's horizon and the leaf rule: coverage is the sibling daily over the same source. */
+            /* The hourly tier's horizon; coverage is the successor's OWN daily (#3653 LC), not the legacy daily
+               SupersededHourlyRollups' third element still names for FrozenRollupAggregates and the coverage
+               log to read — see RetentionPolicies' summary for why the legacy daily cannot gate this. */
             var policy = TimescaleSupport.RetentionPolicies.Single(p => p.Relation == successor);
             Assert.Equal(TimescaleSupport.HourlyRetentionInterval, policy.DropAfter);
             Assert.Equal("bucket", policy.TimeColumn);
-            Assert.Equal(new[] { dependentDaily }, policy.Coverage);
-
-            /* NOT a raw-purge gate consumer (#1661's precedent; the registry states why). */
-            Assert.All(TimescaleSupport.RawTierCoverage, tier => Assert.DoesNotContain(successor, tier.Coverage));
+            Assert.Equal(new[] { successorDaily }, policy.Coverage);
         }
+
+        /* The raw purge moved onto the two successors with a raw table of their own naming them (#3653 LC).
+           query_stats_db_hourly has no RawTierCoverage row of its own — it shares "query_stats" with
+           query_stats_hourly, already that row's named consumer below — so it was never a raw-gate candidate. */
+        var querySuccessor = TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStatsHourlyView)
+            ?? throw new InvalidOperationException($"{TimescaleSupport.QueryStatsHourlyView} must be in {nameof(TimescaleSupport.SupersededHourlyRollups)}.");
+        var procedureSuccessor = TimescaleSupport.SuccessorOf(TimescaleSupport.ProcedureStatsHourlyView)
+            ?? throw new InvalidOperationException($"{TimescaleSupport.ProcedureStatsHourlyView} must be in {nameof(TimescaleSupport.SupersededHourlyRollups)}.");
+        var dbSuccessor = TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStatsDbHourlyView)
+            ?? throw new InvalidOperationException($"{TimescaleSupport.QueryStatsDbHourlyView} must be in {nameof(TimescaleSupport.SupersededHourlyRollups)}.");
+        Assert.Equal(new[] { querySuccessor }, TimescaleSupport.RawTierCoverage.Single(t => t.Relation == "query_stats").Coverage);
+        Assert.Equal(new[] { procedureSuccessor }, TimescaleSupport.RawTierCoverage.Single(t => t.Relation == "procedure_stats").Coverage);
+        Assert.All(TimescaleSupport.RawTierCoverage, tier => Assert.DoesNotContain(dbSuccessor, tier.Coverage));
 
         Assert.False(RollupAvailability.WithoutIntervalHourlies.AllPresent);
         Assert.True(RollupAvailability.All.AllPresent);

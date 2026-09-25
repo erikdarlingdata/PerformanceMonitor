@@ -1488,6 +1488,37 @@ $do$";
         return null;
     }
 
+    /// <summary>Same as <see cref="SuccessorOf"/>, for a caller (<see cref="RawTierCoverage"/>'s query_stats and
+    /// procedure_stats rows) that already knows <paramref name="legacyHourly"/> must be superseded — a
+    /// <c>null</c> there would only hide <see cref="SupersededHourlyRollups"/> and its caller drifting apart, so
+    /// this throws instead of handing one back.</summary>
+    private static string RequireSuccessorOf(string legacyHourly)
+        => SuccessorOf(legacyHourly) ?? throw new InvalidOperationException($"{legacyHourly} has no successor in {nameof(SupersededHourlyRollups)}.");
+
+    /// <summary>The interval-honest successor DAILY that covers <paramref name="successorHourly"/> once the
+    /// hourly-tier read routes past its own horizon (#3653, A6/LB's three successor dailies) — the coverage
+    /// relation <see cref="RetentionPolicies"/> arms a successor hourly's own drop_chunks against, in place of
+    /// the LEGACY daily <see cref="SupersededHourlyRollups"/> already froze off the refresh grid. <c>null</c> for
+    /// anything that is not a <c>SuccessorHourly</c> in <see cref="SupersededDailyRollups"/>.</summary>
+    public static string? SuccessorDailyOf(string successorHourly)
+    {
+        foreach (var (_, successorDaily, hourly) in SupersededDailyRollups)
+        {
+            if (string.Equals(hourly, successorHourly, StringComparison.Ordinal))
+            {
+                return successorDaily;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Same as <see cref="SuccessorDailyOf"/>, for a caller (<see cref="RetentionPolicies"/>'s three
+    /// successor-hourly rows) that already knows <paramref name="successorHourly"/> must have one — throws
+    /// rather than silently naming a policy's coverage <c>null</c>.</summary>
+    private static string RequireSuccessorDailyOf(string successorHourly)
+        => SuccessorDailyOf(successorHourly) ?? throw new InvalidOperationException($"{successorHourly} has no successor daily in {nameof(SupersededDailyRollups)}.");
+
     /// <summary>
     /// THE SUPPLY RULE (#3653), pure so the tests can walk it, and shared: <c>PgBaselineProvider</c> applies it
     /// per metric against one server's reach into the baseline supplies, and
@@ -5995,8 +6026,15 @@ AND   j.hypertable_name = '{relation}'";
     public static readonly IReadOnlyList<(string Relation, string TimeColumn, IReadOnlyList<string> Coverage)> RawTierCoverage =
         new (string, string, IReadOnlyList<string>)[]
     {
-        ("query_stats", "collection_time", new[] { QueryStatsHourlyView }),
-        ("procedure_stats", "collection_time", new[] { ProcedureStatsHourlyView }),
+        /* LC (#3653): named through RequireSuccessorOf rather than the legacy hourlies directly. A gate still
+           keyed on query_stats_hourly/procedure_stats_hourly would eventually find them EMPTY — their OWN
+           retention policy (RetentionPolicies, unchanged by LC) keeps trimming their chunks at
+           HourlyRetentionInterval while the freeze stops anything from refilling them past that point — and
+           hold the raw purge forever with no self-release. See SupersededHourlyRollups for the full story. */
+        ("query_stats", "collection_time", new[] { RequireSuccessorOf(QueryStatsHourlyView) }),
+        ("procedure_stats", "collection_time", new[] { RequireSuccessorOf(ProcedureStatsHourlyView) }),
+        /* query_store_stats is not one of #3653's legacy six (see FrozenRollupAggregates) — both consumers
+           below go on refreshing, so their coverage is still named directly. */
         ("query_store_stats", "collection_time", new[] { QueryStoreStatsHourlyView, QueryStoreStatsIntervalHourlyView }),
     };
 
@@ -6039,19 +6077,23 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
 
-            /* The interval-honest hourly successors (#3653, Q12) take the hourly tier's horizon and the LEAF RULE
-               (#1757): nothing is hierarchical from them, so their consumer is the routed READ, which past
-               HourlyMaxAge goes to the daily tier — and the daily tier is the LEGACY daily, hierarchical from the
-               legacy hourly over the same raw rows (see SupersededHourlyRollups for why the successors have no
-               daily of their own yet). That is the corrected Query Store hourly's shape exactly: a leaf whose
-               coverage relation is a sibling daily built from a different parent over the same source. What the
-               gate protects here is the coarsened history — a successor bucket purged at 90 days is a day the
-               legacy daily has already summed; what it cannot protect, and does not claim to, is the successor's
-               interval-honest sample_count and min() at the day grain, which no daily carries until one is built
-               from these. */
-            (Relation: QueryStatsIntervalHourlyView,     DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsDailyView }),
-            (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { ProcedureStatsDailyView }),
-            (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsDbDailyView }),
+            /* The interval-honest hourly successors (#3653, Q12) took the LEAF RULE (#1757) at Q12: nothing was
+               hierarchical from them yet, so their consumer was the routed READ, which past HourlyMaxAge went to
+               the LEGACY daily — the same relation SupersededHourlyRollups' legacy hourly fed, over the same raw
+               rows. #3653's LB gave each successor its own successor DAILY, hierarchical from it exactly the way
+               the legacy trio's own daily is hierarchical from the legacy hourly (SupersededDailyRollups); LC's
+               freeze retired the leaf shape along with the legacy trio itself. Coverage now names that successor
+               daily — derived through RequireSuccessorDailyOf rather than the legacy daily, because the legacy
+               daily is the one relation LC already froze off the refresh grid
+               (RemoveFrozenRollupRefreshPolicySql): its own coverage floor stopped advancing at the freeze, so
+               gating the successor's drop_chunks on it would never actually ask whether the RIGHT consumer — the
+               successor daily — has materialized the bucket about to be dropped, which is precisely the "never
+               drop what your consumer has not captured yet" failure this whole list exists to prevent (see the
+               summary above). What the gate protects is unchanged: the coarsened history a successor bucket
+               summarizes once it is purged at 90 days. */
+            (Relation: QueryStatsIntervalHourlyView,     DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsIntervalHourlyView) }),
+            (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(ProcedureStatsIntervalHourlyView) }),
+            (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsDbIntervalHourlyView) }),
 
             /* The corrected Query Store tier (#1849, extended by #1869).
 
