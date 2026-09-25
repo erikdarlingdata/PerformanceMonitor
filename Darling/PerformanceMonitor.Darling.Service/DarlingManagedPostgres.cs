@@ -3808,7 +3808,7 @@ public sealed class DarlingManagedPostgres
     private async Task EnsureDatabaseOnceAsync(string connectionString, CancellationToken cancellationToken)
     {
         var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
-        await using var connection = new NpgsqlConnection(builder.ConnectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
         await connection.OpenAsync(cancellationToken);
 
         using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds })
@@ -4481,7 +4481,7 @@ public sealed class DarlingManagedPostgres
         var exposed = plan.Mode == NetworkMode.Exposed;
         try
         {
-            await using var connection = new NpgsqlConnection(ownerConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString));
             await connection.OpenAsync(cancellationToken);
 
             await using (var errors = new NpgsqlCommand(
@@ -4573,7 +4573,7 @@ public sealed class DarlingManagedPostgres
     {
         try
         {
-            await using var connection = new NpgsqlConnection(ownerConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(ownerConnectionString));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand("SHOW listen_addresses", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
             var liveListen = await command.ExecuteScalarAsync(cancellationToken) as string ?? string.Empty;

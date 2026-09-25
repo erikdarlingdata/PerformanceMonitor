@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Hosting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -457,7 +458,8 @@ internal static class DarlingStoreLogins
         try
         {
             await using var connection = new NpgsqlConnection(
-                new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString));
             await connection.OpenAsync(cancellationToken);
             return true;
         }
