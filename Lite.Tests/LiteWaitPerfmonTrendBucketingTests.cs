@@ -246,42 +246,77 @@ public sealed class LiteTrendBucketingLiveTests : IClassFixture<SharedDuckDbFixt
 
     /// <summary>The ruling's picker test: a second call inside 15 minutes runs no DISTINCT (the store gains a
     /// second wait type, but a within-TTL call still answers with the cached one-type list), and a call past
-    /// the TTL reruns it and picks up the change.</summary>
+    /// the TTL reruns it and picks up the change. Only the picker entry point takes <c>nowUtc</c> / caches at
+    /// all — <see cref="LocalDataService.GetDistinctWaitTypesAsync"/> itself stays uncached for MCP.</summary>
     [Fact]
-    public async Task DistinctWaitTypes_SecondCallInsideTtl_SkipsTheReread_MissesPastTtl()
+    public async Task DistinctWaitTypesForPicker_SecondCallInsideTtl_SkipsTheReread_MissesPastTtl()
     {
         var end = new DateTime(2026, 3, 1, 12, 30, 0);
         await SeedWaitAsync(end.AddMinutes(-5), "CXPACKET", deltaMs: 100, deltaSignal: 10, deltaTasks: 5, interval: 60);
 
-        var first = await _dataService.GetDistinctWaitTypesAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end);
+        var first = await _dataService.GetDistinctWaitTypesForPickerAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end);
         Assert.Equal(new[] { "CXPACKET" }, first);
 
         await SeedWaitAsync(end.AddMinutes(-5), "WRITELOG", deltaMs: 50, deltaSignal: 5, deltaTasks: 2, interval: 60);
 
-        var withinTtl = await _dataService.GetDistinctWaitTypesAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(14));
+        var withinTtl = await _dataService.GetDistinctWaitTypesForPickerAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(14));
         Assert.Equal(new[] { "CXPACKET" }, withinTtl);
 
-        var pastTtl = await _dataService.GetDistinctWaitTypesAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(16));
+        var pastTtl = await _dataService.GetDistinctWaitTypesForPickerAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(16));
         Assert.Equal(2, pastTtl.Count);
     }
 
     /// <summary>The Perfmon picker's same two halves of the ruling's cache pin.</summary>
     [Fact]
-    public async Task DistinctPerfmonCounters_SecondCallInsideTtl_SkipsTheReread_MissesPastTtl()
+    public async Task DistinctPerfmonCountersForPicker_SecondCallInsideTtl_SkipsTheReread_MissesPastTtl()
     {
         var end = new DateTime(2026, 3, 1, 12, 30, 0);
         await SeedPerfmonAsync(end.AddMinutes(-5), "Batch Requests/sec", cntr: 1000, delta: 300, interval: 300);
 
-        var first = await _dataService.GetDistinctPerfmonCountersAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end);
+        var first = await _dataService.GetDistinctPerfmonCountersForPickerAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end);
         Assert.Equal(new[] { "Batch Requests/sec" }, first);
 
         await SeedPerfmonAsync(end.AddMinutes(-5), "Page life expectancy", cntr: 500, delta: null, interval: null);
 
-        var withinTtl = await _dataService.GetDistinctPerfmonCountersAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(14));
+        var withinTtl = await _dataService.GetDistinctPerfmonCountersForPickerAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(14));
         Assert.Equal(new[] { "Batch Requests/sec" }, withinTtl);
 
-        var pastTtl = await _dataService.GetDistinctPerfmonCountersAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(16));
+        var pastTtl = await _dataService.GetDistinctPerfmonCountersForPickerAsync(ServerId, hoursBack: 1, asOfUtc: end, nowUtc: end.AddMinutes(16));
         Assert.Equal(2, pastTtl.Count);
+    }
+
+    /// <summary>MCP's guard: the shared read <see cref="LocalDataService.GetDistinctWaitTypesAsync"/> never
+    /// caches, so two calls back to back — even inside the picker's 15-minute TTL — each re-run the DISTINCT and
+    /// see whatever is in the store at call time, not a memoized snapshot from the first call.</summary>
+    [Fact]
+    public async Task DistinctWaitTypes_SharedMethod_NeverCaches_SecondCallSeesNewlySeededType()
+    {
+        var end = new DateTime(2026, 3, 1, 12, 30, 0);
+        await SeedWaitAsync(end.AddMinutes(-5), "CXPACKET", deltaMs: 100, deltaSignal: 10, deltaTasks: 5, interval: 60);
+
+        var first = await _dataService.GetDistinctWaitTypesAsync(ServerId, hoursBack: 1, asOfUtc: end);
+        Assert.Equal(new[] { "CXPACKET" }, first);
+
+        await SeedWaitAsync(end.AddMinutes(-5), "WRITELOG", deltaMs: 50, deltaSignal: 5, deltaTasks: 2, interval: 60);
+
+        var second = await _dataService.GetDistinctWaitTypesAsync(ServerId, hoursBack: 1, asOfUtc: end);
+        Assert.Equal(2, second.Count);
+    }
+
+    /// <summary>The Perfmon twin: <see cref="LocalDataService.GetDistinctPerfmonCountersAsync"/> never caches.</summary>
+    [Fact]
+    public async Task DistinctPerfmonCounters_SharedMethod_NeverCaches_SecondCallSeesNewlySeededCounter()
+    {
+        var end = new DateTime(2026, 3, 1, 12, 30, 0);
+        await SeedPerfmonAsync(end.AddMinutes(-5), "Batch Requests/sec", cntr: 1000, delta: 300, interval: 300);
+
+        var first = await _dataService.GetDistinctPerfmonCountersAsync(ServerId, hoursBack: 1, asOfUtc: end);
+        Assert.Equal(new[] { "Batch Requests/sec" }, first);
+
+        await SeedPerfmonAsync(end.AddMinutes(-5), "Page life expectancy", cntr: 500, delta: null, interval: null);
+
+        var second = await _dataService.GetDistinctPerfmonCountersAsync(ServerId, hoursBack: 1, asOfUtc: end);
+        Assert.Equal(2, second.Count);
     }
 
     /* ---- seeding ---------------------------------------------------------------------------------------- */

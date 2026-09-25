@@ -14,13 +14,17 @@ namespace PerformanceMonitorLite.Services;
 
 /// <summary>
 /// #4234: TTL memoization for the Wait Stats and Perfmon picker's name-list reads
-/// (<see cref="LocalDataService.GetDistinctWaitTypesAsync"/>, <see cref="LocalDataService.GetDistinctPerfmonCountersAsync"/>),
-/// each a full-window <c>DISTINCT</c> that used to run on every 1-minute auto-refresh. A server's set of
-/// collected names barely moves inside its own window, so this caches the list per (server, window length)
-/// for <see cref="Ttl"/> and lets a refresh inside that window reuse it — window LENGTH, not bounds, because a
-/// sliding preset's start/end both move every tick while the length stays constant, and keying on the moving
-/// bounds would never hit. The Darling twin is <c>ViewerNameListCache</c> (#4234, PR #4304); this port keeps
-/// its rules so the two SKUs cache the same way.
+/// (<see cref="LocalDataService.GetDistinctWaitTypesForPickerAsync"/>,
+/// <see cref="LocalDataService.GetDistinctPerfmonCountersForPickerAsync"/>), each a full-window <c>DISTINCT</c>
+/// that used to run on every 1-minute auto-refresh. MCP shares the same underlying reads
+/// (<see cref="LocalDataService.GetDistinctWaitTypesAsync"/>, <see cref="LocalDataService.GetDistinctPerfmonCountersAsync"/>)
+/// but calls them directly, uncached, so an MCP answer is never stale by <see cref="Ttl"/> — only the picker
+/// trades that freshness for fewer full-window scans. A server's set of collected names barely moves inside
+/// its own window, so this caches the list per (server, window length) for <see cref="Ttl"/> and lets a
+/// refresh inside that window reuse it — window LENGTH, not bounds, because a sliding preset's start/end both
+/// move every tick while the length stays constant, and keying on the moving bounds would never hit. The
+/// Darling twin is <c>ViewerNameListCache</c> (#4234, PR #4304); this port keeps its rules so the two SKUs
+/// cache the same way.
 ///
 /// <para><b>The key is (server, length) alone, but a hit ALSO needs the cached window's END to still be
 /// recent.</b> Keying on length alone would let a stale entry answer for a window it never fetched: a user

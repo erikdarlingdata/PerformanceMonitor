@@ -215,7 +215,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var waitTypesTask = Task.Run(() => _dataService.GetDistinctWaitTypesAsync(_serverId, hoursBack, fromDate, toDate));
+            var waitTypesTask = Task.Run(() => _dataService.GetDistinctWaitTypesForPickerAsync(_serverId, hoursBack, fromDate, toDate));
             await waitTypesTask;
             PopulateWaitTypePicker(waitTypesTask.Result);
             await UpdateWaitStatsChartFromPickerAsync();
@@ -749,7 +749,7 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var perfmonCountersTask = Task.Run(() => _dataService.GetDistinctPerfmonCountersAsync(_serverId, hoursBack, fromDate, toDate));
+            var perfmonCountersTask = Task.Run(() => _dataService.GetDistinctPerfmonCountersForPickerAsync(_serverId, hoursBack, fromDate, toDate));
             await perfmonCountersTask;
             PopulatePerfmonPicker(perfmonCountersTask.Result);
             await UpdatePerfmonChartFromPickerAsync();

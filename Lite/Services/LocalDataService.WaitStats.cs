@@ -18,7 +18,7 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
-    /// <summary>#4234: TTL memoization for <see cref="GetDistinctWaitTypesAsync"/> — see <see cref="LiteNameListCache"/>.</summary>
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctWaitTypesForPickerAsync"/> — see <see cref="LiteNameListCache"/>.</summary>
     private readonly LiteNameListCache _distinctWaitTypesCache = new();
 
     /* #1240: the wait-stats tab shares the collector's ignored-wait list and excludes those types at
@@ -114,25 +114,16 @@ LIMIT 1";
 
     /// <summary>
     /// Gets the distinct wait types that have been collected for a server.
-    /// <para>#4234: memoized through <see cref="_distinctWaitTypesCache"/> — keyed on (server, window length)
-    /// for <see cref="LiteNameListCache.Ttl"/>, so the full-window read behind this runs at most once per 15
-    /// minutes rather than on every 1-minute auto-refresh. <paramref name="nowUtc"/> is the cache's clock
-    /// seam — null uses the wall clock; a test passes an explicit time to fast-forward past the TTL without
-    /// sleeping.</para>
+    /// <para>Uncached: MCP's wait-type tools call this directly so an MCP answer is never stale by
+    /// <see cref="LiteNameListCache.Ttl"/>. The picker's memoized entry point is
+    /// <see cref="GetDistinctWaitTypesForPickerAsync"/>.</para>
     /// </summary>
-    public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
+    public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-
-        var effectiveNow = nowUtc ?? DateTime.UtcNow;
-        var windowLength = endTime - startTime;
-        if (_distinctWaitTypesCache.TryGet(serverId, windowLength, endTime, effectiveNow, out var cached))
-        {
-            return cached;
-        }
-
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -157,6 +148,32 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         {
             items.Add(reader.GetString(0));
         }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Picker-only entry point for <see cref="GetDistinctWaitTypesAsync"/>: checks
+    /// <see cref="_distinctWaitTypesCache"/> first, falls back to the shared uncached read, then memoizes it.
+    /// <para>#4234: keyed on (server, window length) for <see cref="LiteNameListCache.Ttl"/>, so the
+    /// full-window read behind this runs at most once per 15 minutes rather than on every 1-minute
+    /// auto-refresh. Only <c>ServerTab</c>'s picker goes through this cache — MCP shares the same underlying
+    /// read but calls <see cref="GetDistinctWaitTypesAsync"/> directly so it never sees a cached answer.
+    /// <paramref name="nowUtc"/> is the cache's clock seam — null uses the wall clock; a test passes an
+    /// explicit time to fast-forward past the TTL without sleeping.</para>
+    /// </summary>
+    public async Task<List<string>> GetDistinctWaitTypesForPickerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endTime - startTime;
+        if (_distinctWaitTypesCache.TryGet(serverId, windowLength, endTime, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
+        var items = await GetDistinctWaitTypesAsync(serverId, hoursBack, fromDate, toDate, asOfUtc);
 
         _distinctWaitTypesCache.Set(serverId, windowLength, endTime, items, effectiveNow);
         return items;
