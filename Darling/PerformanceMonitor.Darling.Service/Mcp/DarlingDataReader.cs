@@ -1604,6 +1604,14 @@ internal static class DarlingDataReader
         return rows;
     }
 
+    /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
+    /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
+    /// two-argument <c>NpgsqlCommand(sqlIdentifier, connection)</c> with <c>Transaction</c> set through the
+    /// object initializer rather than threaded positionally. A three-argument
+    /// <c>NpgsqlCommand(sql, connection, transaction)</c> is also the shape the HypoPG experiment's
+    /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
+    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
+
     /// <summary>
     /// #3953's gate and table read for the MCP/web top-queries surface, on ONE connection in ONE read-only
     /// REPEATABLE READ transaction (M1, ruling issuecomment-5836972848), mirroring the viewer's
@@ -1614,14 +1622,6 @@ internal static class DarlingDataReader
     /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
     /// and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
-    /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
-    /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
-    /// two-argument <c>NpgsqlCommand(sqlIdentifier, connection)</c> with <c>Transaction</c> set through the
-    /// object initializer rather than threaded positionally. A three-argument
-    /// <c>NpgsqlCommand(sql, connection, transaction)</c> is also the shape the HypoPG experiment's
-    /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
-    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
-
     private static async Task<List<QueryStoreRow>?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken)
