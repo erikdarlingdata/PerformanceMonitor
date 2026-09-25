@@ -678,6 +678,103 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     /// <summary>
+    /// Item 3 (#4280), live — the round-1 security review's Medium 2 case: a carried <c>ssl_ca_file</c>
+    /// naming a missing file passes its own per-setting <c>-C</c> probe (that check only reads the config,
+    /// never touches SSL/certificate setup), so an SSL-off trial starts fine and wrongly keeps it — a
+    /// landmine for the operator's next SSL-on start. <see cref="DarlingStoreUpgrade.CarryAutoConfAsync(string, string, string, CancellationToken, Func{string})"/>'s
+    /// <c>sslServerOptions</c> parameter rides the SAME trial start, so calling it with a real SSL delegate
+    /// here makes the combined trial actually turn SSL on and catch it. The cert/key come from the product's
+    /// own <see cref="DarlingManagedPostgres.EnsureServerCertificate"/>, not a hand-made file, through
+    /// <see cref="DarlingManagedPostgres.BuildSslServerOptions"/> — the same pairing a real store's network
+    /// exposure uses.
+    /// </summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_CarriedSslCaFileNamesAMissingFile_SslOnTrialDropsIt_NeverLogsItsValue()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime and cert key hardening are Windows-only.");
+        var bin = Path.Combine(runtimeRoot!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-sslca-");
+        var oldDataDirectory = Path.Combine(root.FullName, "old");
+        var newDataDirectory = Path.Combine(root.FullName, "new");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        string? runningDataDirectory = null;
+        var missingCaPath = Path.Combine(root.FullName, "does-not-exist-ca.pem").Replace('\\', '/');
+
+        try
+        {
+            var (oldInitExit, oldInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{oldDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(oldInitExit == 0, $"initdb (old) failed: {oldInitOutput}");
+
+            var oldPort = FindFreeTcpPort();
+            runningDataDirectory = oldDataDirectory;
+            await StartDirectAsync(bin, oldDataDirectory, oldPort, quiesced: false, timeout.Token);
+            var oldOwner = $"Host=127.0.0.1;Port={oldPort};Username=darling;Database=postgres;Pooling=false";
+            await ExecuteOnAsync(oldOwner, $"ALTER SYSTEM SET ssl_ca_file = '{missingCaPath}'", timeout.Token);
+            await StopDirectAsync(bin, oldDataDirectory, timeout.Token);
+            runningDataDirectory = null;
+
+            var (newInitExit, newInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{newDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
+
+            /* The product's own certificate code (#4280 item 3), not a hand-made cert file — the same call
+               BuildNetworkPlan makes for a real store's exposure. */
+            var certPath = Path.Combine(root.FullName, DarlingManagedPostgres.ServerCertFileName);
+            var keyPath = Path.Combine(root.FullName, DarlingManagedPostgres.ServerKeyFileName);
+            var certConfig = new PostgresConfig { Managed = true, Port = oldPort, DataDirectory = oldDataDirectory };
+            new DarlingManagedPostgres(certConfig, NullLogger.Instance).EnsureServerCertificate(IPAddress.Parse("127.0.0.1"), certPath, keyPath);
+
+            var log = new CapturingLogger();
+            var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, bin, timeout.Token,
+                sslServerOptions: () => DarlingManagedPostgres.BuildSslServerOptions(certPath, keyPath));
+
+            /* The per-setting -C probe alone cannot see this: ssl_ca_file only fails once the combined trial
+               actually turns SSL on, which drops everything that trial carried (there was only this one
+               setting), never a partial "carried but flagged" state. */
+            Assert.Empty(result.CarriedNames);
+            Assert.Contains("ssl_ca_file", result.RejectedNames);
+
+            var logText = log.ToString();
+            Assert.Contains("Dropped: ssl_ca_file", logText, StringComparison.Ordinal);
+            /* Round-1 security review, #4280 Medium 1: the dropped-name log line names the setting, never
+               the missing path it pointed at. */
+            Assert.DoesNotContain(missingCaPath, logText, StringComparison.Ordinal);
+
+            var newAutoConf = await File.ReadAllTextAsync(Path.Combine(newDataDirectory, "postgresql.auto.conf"), timeout.Token);
+            Assert.DoesNotContain("ssl_ca_file", newAutoConf, StringComparison.Ordinal);
+
+            /* The store starts (SSL off — proving the drop, not just a returned result object, actually
+               left a bootable cluster), and ssl_ca_file is back at its unset default. */
+            var newPort = FindFreeTcpPort();
+            runningDataDirectory = newDataDirectory;
+            await StartDirectAsync(bin, newDataDirectory, newPort, quiesced: false, timeout.Token);
+            var newOwner = $"Host=127.0.0.1;Port={newPort};Username=darling;Database=postgres;Pooling=false";
+            Assert.Equal(string.Empty, await ScalarOnAsync(newOwner, "SHOW ssl_ca_file", timeout.Token));
+        }
+        finally
+        {
+            if (runningDataDirectory is not null)
+            {
+                await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
     /// Medium 1, live: the trial's real start (round-2 review) used to run on the store's own configured
     /// port, on the assumption that port is free because the old cluster on it was already stopped. Proves
     /// that assumption no longer matters — a listener held on that exact port for the whole call, simulating
