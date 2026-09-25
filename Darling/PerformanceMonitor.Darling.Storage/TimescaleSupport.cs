@@ -2165,17 +2165,18 @@ WITH NO DATA";
 
        WITH NO DATA: these start empty and are filled by --backfill-rollups (see
        docs/runbooks/a6-successor-daily-backfill.md) or by their own refresh policy reaching forward from
-       creation. EXCLUDED from aggregate compression for now (see CompressionDeferredUntilFreeze) — the daily
-       compression band is full at 23 members, and freeing three slots for these is #3653 A6 lane LC's job,
-       not this one's. Registered in DailyAggregates, RollupViews and the availability probe so the ensure
-       sweep creates them, the backfill verb and coverage probe see them, and SupersededDailyRollups records
-       which legacy daily each will eventually replace. */
+       creation. Compression-registered like any other member of DailyAggregates since #3653 A6 lane LC's
+       freeze retired the legacy trio's own daily-band membership and freed the three slots these take in
+       AggregateCompressionTargets (see that list's own note). Registered in DailyAggregates, RollupViews and
+       the availability probe so the ensure sweep creates them, the backfill verb and coverage probe see them,
+       and SupersededDailyRollups records which legacy daily each replaced. */
 
     /// <summary>The INTERVAL-HONEST successor of <see cref="CreateQueryStatsDailySql"/> (#3653, A6) —
     /// hierarchical from <see cref="CreateQueryStatsIntervalHourlySql"/>, not from the legacy
     /// <see cref="QueryStatsHourlyView"/> its sibling reads. Same dims and re-aggregated columns as the
     /// legacy daily, plus <c>sum(sample_interval_seconds_sum)</c> carried forward from the successor hourly.
-    /// <c>WITH NO DATA</c>; excluded from compression until the freeze (<see cref="CompressionDeferredUntilFreeze"/>).</summary>
+    /// <c>WITH NO DATA</c>; compression-registered like any other <see cref="DailyAggregates"/> member since
+    /// #3653 A6 lane LC's freeze (<see cref="AggregateCompressionTargets"/>).</summary>
     public const string CreateQueryStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_interval_daily
 WITH (timescaledb.continuous) AS
 SELECT
@@ -6767,25 +6768,6 @@ AND   j.hypertable_name = '{relation}'";
     public const string AggregateCompressionSegmentBy = "server_id";
 
     /// <summary>
-    /// The three interval-honest successor DAILIES (#3653, A6), held OUT of
-    /// <see cref="AggregateCompressionTargets"/> so the daily compression band — full at 23 members — does not
-    /// overflow to 26. They are still created (registered in <see cref="DailyAggregates"/>), refreshed, and
-    /// backfillable; they simply carry no compression policy YET. #3653 A6 lane LC's freeze retires the legacy
-    /// trio's own daily-band membership, which is what frees the three slots this set holds these back for;
-    /// once that lands, LC removes this set (or these three names from it) and the ensure sweep enables their
-    /// compression on the next start, the same as any newly-registered aggregate.
-    ///
-    /// <para><b>MUST stay declared before <see cref="AggregateCompressionTargets"/></b>: static field
-    /// initializers run in declaration order, and that list reads this set.</para>
-    /// </summary>
-    public static readonly IReadOnlySet<string> CompressionDeferredUntilFreeze = new HashSet<string>(StringComparer.Ordinal)
-    {
-        QueryStatsIntervalDailyView,
-        ProcedureStatsIntervalDailyView,
-        QueryStatsDbIntervalDailyView,
-    };
-
-    /// <summary>
     /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
     /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
     /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
@@ -6795,15 +6777,22 @@ AND   j.hypertable_name = '{relation}'";
     /// — rather than hand-listed, so an aggregate registered for creation is compression-registered the same
     /// moment, with its tier decided by which list it came from. There is no fourth list to forget.</para>
     ///
+    /// <para><b>Twenty, not twenty-three (#3653, LC).</b> A set once named <c>CompressionDeferredUntilFreeze</c>
+    /// held the three interval-honest successor dailies (<see cref="QueryStatsIntervalDailyView"/>,
+    /// <see cref="ProcedureStatsIntervalDailyView"/>, <see cref="QueryStatsDbIntervalDailyView"/>) out of this
+    /// list from A6 until LC's freeze — the daily band was full at 23 members with the legacy trio still on it,
+    /// so the successors joining unconditionally would have overflowed it. LC moved the legacy trio itself out
+    /// of <see cref="HourlyAggregates"/> and <see cref="DailyAggregates"/> (into
+    /// <see cref="FrozenRollupAggregates"/>), which is what frees the three slots the successors take here — so
+    /// this list is declared straight from the three source lists, with no deferral to subtract.</para>
+    ///
     /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
     /// order, and this one reads all three.</para>
     /// </summary>
-
     public static readonly IReadOnlyList<(string CreateSql, string View, bool Hourly)> AggregateCompressionTargets =
         HourlyAggregates.Select(a => (a.CreateSql, a.View, Hourly: true))
             .Concat(DailyAggregates.Select(a => (a.CreateSql, a.View, Hourly: false)))
             .Concat(BaselineAggregates.Select(a => (a.CreateSql, a.View, Hourly: true)))
-            .Where(a => !CompressionDeferredUntilFreeze.Contains(a.View))
             .ToArray();
 
     /// <summary>
@@ -7912,6 +7901,11 @@ ORDER BY i.indexname";
             AggregateCompressionBandMinute, AggregateCompressionBandFirstHour,
             stagedLines.Count == 0 ? "none this start" : string.Join("; ", stagedLines));
 
+        /* #3653 LC point 7, the drain: a separate concern from everything above — these three are never
+           AggregateCompressionTargets, so the states/needingPolicy/converge loops above never see them and
+           this call never sees what they did. Runs last so it costs no target its own progress if it fails. */
+        await DrainFrozenDailyCompressionPoliciesAsync(connection, logger, cancellationToken);
+
         return inPlace;
     }
 
@@ -7919,6 +7913,169 @@ ORDER BY i.indexname";
     /// are stated in.</summary>
     private static string FormatGiB(long bytes)
         => (bytes / 1073741824d).ToString("0.0", CultureInfo.InvariantCulture) + " GiB";
+
+    /* ─────────────── the frozen dailies' compression drain (#3653, LC point 7) ─────────────── */
+
+    /// <summary>
+    /// One of the three frozen legacy dailies' (<see cref="SupersededDailyRollups"/>'s <c>LegacyDaily</c>
+    /// members) own compression drain state, as <see cref="FrozenDailyCompressionDrainStateSql"/> reads it —
+    /// its compression job if any, and how many of its materialization's chunks are uncompressed.
+    /// </summary>
+    public sealed record FrozenDailyCompressionDrainState(string View, int? JobId, long UncompressedChunks);
+
+    /// <summary>
+    /// The three frozen legacy dailies' own compression drain state in one read: whether each still carries a
+    /// compression job, and how many of its materialization's chunks are uncompressed — EVERY uncompressed
+    /// chunk, of any age, not the age-gated <c>eligible_under_hourly_rule</c> / <c>eligible_under_daily_rule</c>
+    /// columns <see cref="AggregateCompressionStateSql"/> reads for the registered targets.
+    ///
+    /// <para><b>Why not those columns.</b> They answer "how many chunks would this policy's NEXT run compress",
+    /// which is gated on a tier's <c>compress_after</c> — a chunk younger than that window is not eligible YET
+    /// but is still uncompressed. <see cref="ShouldDrainFrozenDailyCompression"/> asks a different question:
+    /// has this aggregate finished compressing everything it will ever hold. A young uncompressed chunk must
+    /// still count toward that, or the drain would remove the policy while a chunk was still waiting its turn
+    /// to compress, and nothing would ever compress it afterward.</para>
+    ///
+    /// <para>Scoped BY NAME to exactly <see cref="SupersededDailyRollups"/>'s three <c>LegacyDaily</c> members
+    /// — the only three this rule ever drains — rather than reading every non-target aggregate under
+    /// <c>collect</c>, so an unrelated off-grid or newly-registered-but-not-yet-enabled aggregate can never be
+    /// swept in by a broadened <c>WHERE</c> later. Same join shape as <see cref="AggregateCompressionStateSql"/>
+    /// (job resolved on either the view or the materialization identity) for the same measured reason.</para>
+    /// </summary>
+    public static string FrozenDailyCompressionDrainStateSql
+    {
+        get
+        {
+            var views = string.Join(", ", SupersededDailyRollups.Select(s => $"'{s.LegacyDaily}'"));
+            return $@"
+SELECT
+    ca.view_name,
+    j.job_id,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+    ) AS uncompressed_chunks
+FROM timescaledb_information.continuous_aggregates AS ca
+LEFT JOIN timescaledb_information.jobs AS j
+  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+  AND (
+        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
+      )
+WHERE ca.view_schema = 'collect'
+AND   ca.view_name IN ({views})";
+        }
+    }
+
+    /// <summary>
+    /// THE DRAIN RULE (#3653, LC point 7), pure so the truth table pins directly: does
+    /// <paramref name="state"/>'s frozen daily lose its compression policy now? Only once there is a policy to
+    /// lose — <c>JobId</c> not null; a store that never enabled compression on it, or has already been
+    /// drained, changes nothing — AND every one of its materialization's chunks is already compressed
+    /// (<c>UncompressedChunks == 0</c>). Any uncompressed chunk, however old or young, holds the policy in
+    /// place, because compression still has a chunk left to do; once that count reaches zero it can only ever
+    /// STAY zero, since nothing refreshes a frozen daily past the freeze to create another one
+    /// (<see cref="FrozenRollupAggregates"/>).
+    /// </summary>
+    public static bool ShouldDrainFrozenDailyCompression(FrozenDailyCompressionDrainState state)
+    {
+        if (state is null)
+        {
+            throw new ArgumentNullException(nameof(state));
+        }
+
+        return state.JobId is not null && state.UncompressedChunks == 0;
+    }
+
+    /// <summary>Removes a DRAINED frozen daily's compression policy (<see cref="ShouldDrainFrozenDailyCompression"/>)
+    /// — <c>if_exists</c>, so a policy already removed on a prior start, or never created, changes nothing. The
+    /// chunks it already compressed keep their compression (this removes the JOB, not the columnstore data);
+    /// it only stops a future run from firing on an aggregate that will never materialize another chunk.</summary>
+    public static string RemoveFrozenDailyCompressionPolicySql(string view)
+        => $"SELECT remove_compression_policy('collect.{view}', if_exists => true)";
+
+    /// <summary>
+    /// THE DRAIN (#3653, LC point 7): walks the three frozen legacy dailies and removes a compression policy
+    /// that has nothing left to compress (<see cref="ShouldDrainFrozenDailyCompression"/>), via
+    /// <see cref="RemoveFrozenDailyCompressionPolicySql"/>. Called once, at the end of
+    /// <see cref="EnsureAggregateCompressionAsync"/> — a separate concern from that function's own
+    /// enable/stage/converge loops, which never see these three (<see cref="IsAggregateCompressionTarget"/>
+    /// excludes them) the way this method's own scoped probe never sees a registered target.
+    ///
+    /// <para><b>Why these three ever HAD a policy to drain.</b> Every store that took a build before LC's
+    /// freeze enabled compression and attached a policy on these three the same as any other daily-tier
+    /// aggregate; the freeze stopped their REFRESH (<see cref="RemoveFrozenRollupRefreshPolicySql"/>) but left
+    /// the existing compression policy running, because a policy already converged onto the shipped window
+    /// is not itself wrong — it is aimed at an aggregate that will, from the freeze on, only ever gain MORE
+    /// compressed chunks and never another uncompressed one. This is what eventually turns that policy off,
+    /// once there is truly nothing left for it to do — never on a fresh store past the freeze, which creates
+    /// these three with no compression policy at all (<see cref="FrozenRollupAggregates"/> carries no policy
+    /// builder), so there is nothing here to drain and <see cref="ShouldDrainFrozenDailyCompression"/> reads a
+    /// null <c>JobId</c> forever.</para>
+    ///
+    /// <para>Failure-isolated per aggregate and per statement, the same as every other step in
+    /// <see cref="EnsureAggregateCompressionAsync"/>: a read or removal that fails costs a warning and the
+    /// others still run.</para>
+    /// </summary>
+    public static async Task<int> DrainFrozenDailyCompressionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var states = new List<FrozenDailyCompressionDrainState>();
+        try
+        {
+            using var probe = new NpgsqlCommand(FrozenDailyCompressionDrainStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                states.Add(new FrozenDailyCompressionDrainState(
+                    View: reader.GetString(0),
+                    JobId: reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+                    UncompressedChunks: Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "TimescaleDB: could not read the frozen dailies' compression drain state, so none was drained this start: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var drained = 0;
+        foreach (var state in states)
+        {
+            if (!ShouldDrainFrozenDailyCompression(state))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var remove = new NpgsqlCommand(RemoveFrozenDailyCompressionPolicySql(state.View), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await remove.ExecuteNonQueryAsync(cancellationToken);
+                drained++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: removed frozen daily {View}'s compression policy (job {JobId}) — every chunk it will ever hold is already compressed, and nothing refreshes it past the freeze to make another (#3653).",
+                    state.View, state.JobId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not remove frozen daily {View}'s drained compression policy (job {JobId}) — it stays, harmlessly, since it has nothing left to compress: {Message}",
+                    state.View, state.JobId, ex.Message);
+            }
+        }
+
+        return drained;
+    }
 
     /* ─────────────── rollup availability (the plain-PostgreSQL guard, #1664) ─────────────── */
 
