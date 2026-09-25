@@ -99,7 +99,11 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
-    private const int TotalCeilingBytes = 172_220;
+    /* #4198 (lane TC): +472 bytes for describe_custom_view_catalog's default-is-compact note in its served
+       description and its two new opt-ins, source and full_detail (the catalog, 98,173 bytes at default
+       arguments, is now grouped-by-source with most per-measure fields dropped by default; source drills
+       into one source's full detail, full_detail returns the original shape). */
+    private const int TotalCeilingBytes = 172_692;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

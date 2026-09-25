@@ -2216,6 +2216,126 @@ public static class DarlingWebEndpoints
         };
     }
 
+    /// <summary>
+    /// The MCP <c>describe_custom_view_catalog</c> tool's DEFAULT shape (#4198 — the full catalog measured 98,173
+    /// bytes at default arguments, three times the tool's 32 KB response budget). Re-groups
+    /// <see cref="BuildComposeCatalogNode"/>'s flat <c>measures</c> by <c>source</c> (collector table) and keeps
+    /// only the fields an author needs to pick a measure and know its legal vocabulary: <c>key</c>,
+    /// <c>displayName</c> (the one-line purpose), <c>kind</c>, <c>unitFamily</c>, <c>validAggregates</c> (this one
+    /// VARIES within a source — e.g. a ratio measure's is empty where its source's scalars allow sum/avg/min/max —
+    /// so, unlike <c>allowedDimensions</c>, it cannot be hoisted to the source level without hiding a real
+    /// restriction). Left out: <c>category</c>/<c>archetype</c> (neither is part of the vocabulary a panel spec
+    /// names — <see cref="ComposeSpec"/>'s required panel fields are measure/aggregate/unit, never these),
+    /// <c>nativeUnit</c>/<c>defaultUnit</c>/<c>defaultAggregate</c> (suggestions, not requirements — any unit in
+    /// the measure's family and any aggregate in its validAggregates is legal), <c>allowedDimensions</c> (uniform
+    /// across every measure of a source — pinned by <c>DarlingComposeTests</c> — so it is the source's dimension
+    /// list, one <see cref="FilterComposeCatalogNodeBySource"/> call away), and <c>appliesTo</c> (server-type
+    /// availability is a UI greying hint for the web composer, per design D4 — it gates nothing at compose time).
+    /// Every dropped field is reachable per-source via <c>source=&lt;name&gt;</c>
+    /// (<see cref="FilterComposeCatalogNodeBySource"/>) or for the whole catalog via <c>full_detail=true</c>
+    /// (this method's own return, unfiltered).
+    ///
+    /// <para>Takes the ALREADY-BUILT full node so the compact view is a pure re-shape of it, never a second read
+    /// of <see cref="MeasureCatalog"/> — it can't drift from what <c>full_detail=true</c> and <c>/api/catalog</c>
+    /// (which never compacts; the web Custom Views editor needs the fields this trims) both serve.</para>
+    /// </summary>
+    internal static JsonObject BuildComposeCatalogCompactNode(JsonObject full)
+    {
+        var sources = new JsonArray();
+        foreach (var sourceGroup in full["measures"]!.AsArray()
+                     .Select(m => m!.AsObject())
+                     .GroupBy(m => m["source"]!.GetValue<string>(), StringComparer.Ordinal))
+        {
+            var measures = new JsonArray();
+            foreach (var m in sourceGroup)
+            {
+                measures.Add(new JsonObject
+                {
+                    ["key"] = m["key"]!.GetValue<string>(),
+                    ["displayName"] = m["displayName"]!.GetValue<string>(),
+                    ["kind"] = m["kind"]!.GetValue<string>(),
+                    ["unitFamily"] = m["unitFamily"]!.GetValue<string>(),
+                    ["validAggregates"] = JsonNode.Parse(m["validAggregates"]!.ToJsonString()),
+                });
+            }
+
+            sources.Add(new JsonObject { ["source"] = sourceGroup.Key, ["measures"] = measures });
+        }
+
+        var annotationSources = new JsonArray();
+        foreach (var a in full["annotationSources"]!.AsArray())
+        {
+            var ao = a!.AsObject();
+            annotationSources.Add(new JsonObject
+            {
+                ["key"] = ao["key"]!.GetValue<string>(),
+                ["displayName"] = ao["displayName"]!.GetValue<string>(),
+                ["category"] = ao["category"]!.GetValue<string>(),
+            });
+        }
+
+        return new JsonObject
+        {
+            ["sources"] = sources,
+            ["annotationSources"] = annotationSources,
+            ["universalDimensions"] = JsonNode.Parse(full["universalDimensions"]!.ToJsonString()),
+            ["unitFamilies"] = JsonNode.Parse(full["unitFamilies"]!.ToJsonString()),
+            ["aggregates"] = JsonNode.Parse(full["aggregates"]!.ToJsonString()),
+            ["timeBuckets"] = JsonNode.Parse(full["timeBuckets"]!.ToJsonString()),
+            ["filterOps"] = JsonNode.Parse(full["filterOps"]!.ToJsonString()),
+            ["viz"] = JsonNode.Parse(full["viz"]!.ToJsonString()),
+            ["compact"] = true,
+            ["note"] = "Compact by default (#4198): each source lists its measures' key/displayName/kind/unitFamily/validAggregates " +
+                "only. Call describe_custom_view_catalog(source=\"<name>\") for that source's FULL per-measure detail " +
+                "(category, archetype, nativeUnit, defaultUnit, defaultAggregate, allowedDimensions, appliesTo) plus its own " +
+                "dimensions, or full_detail=true for the complete catalog (measures/dimensions/annotationSources as flat arrays, " +
+                "every field, exactly like this tool returned before #4198).",
+        };
+    }
+
+    /// <summary>
+    /// The MCP <c>describe_custom_view_catalog</c> tool's <c>source=&lt;name&gt;</c> drill-down (#4198): the FULL
+    /// per-entry detail <see cref="BuildComposeCatalogNode"/> serves, filtered to one source (collector table)'s
+    /// measures and dimensions. <c>annotationSources</c> rides along whole either way — five entries total, cheap
+    /// regardless of the filter, and its underlying source table is not itself a served field to filter on. An
+    /// unmatched <paramref name="source"/> comes back with empty <c>measures</c>/<c>dimensions</c> and a
+    /// <c>note</c> pointing at the default (unfiltered) call for the real source names, rather than an error
+    /// envelope — this tool has never returned one, and a typo should not change the shape the caller parses.
+    /// </summary>
+    internal static JsonObject FilterComposeCatalogNodeBySource(JsonObject full, string source)
+    {
+        var measures = new JsonArray(full["measures"]!.AsArray()
+            .Where(m => string.Equals(m!["source"]!.GetValue<string>(), source, StringComparison.Ordinal))
+            .Select(m => JsonNode.Parse(m!.ToJsonString())!)
+            .ToArray());
+
+        var dimensions = new JsonArray(full["dimensions"]!.AsArray()
+            .Where(d => string.Equals(d!["source"]!.GetValue<string>(), source, StringComparison.Ordinal))
+            .Select(d => JsonNode.Parse(d!.ToJsonString())!)
+            .ToArray());
+
+        var result = new JsonObject
+        {
+            ["source"] = source,
+            ["measures"] = measures,
+            ["dimensions"] = dimensions,
+            ["annotationSources"] = JsonNode.Parse(full["annotationSources"]!.ToJsonString()),
+            ["universalDimensions"] = JsonNode.Parse(full["universalDimensions"]!.ToJsonString()),
+            ["unitFamilies"] = JsonNode.Parse(full["unitFamilies"]!.ToJsonString()),
+            ["aggregates"] = JsonNode.Parse(full["aggregates"]!.ToJsonString()),
+            ["timeBuckets"] = JsonNode.Parse(full["timeBuckets"]!.ToJsonString()),
+            ["filterOps"] = JsonNode.Parse(full["filterOps"]!.ToJsonString()),
+            ["viz"] = JsonNode.Parse(full["viz"]!.ToJsonString()),
+        };
+
+        if (measures.Count == 0)
+        {
+            result["note"] = $"No measures found for source '{source}'. Call describe_custom_view_catalog() with no arguments to list the valid source names.";
+        }
+
+        return result;
+    }
+
     /// <summary>Collector definition by its destination table, for the per-measure availability lookup (a
     /// measure's <c>SourceTable</c> is a collector <c>TargetTable</c>, pinned by <c>DarlingComposeTests</c>).</summary>
     private static readonly Dictionary<string, ICollectorSchemaInfo> s_collectorByTable =
