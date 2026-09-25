@@ -1723,8 +1723,9 @@ internal sealed class DarlingStoreUpgrade
     /* ---- the quiesced update ---- */
 
     /// <summary>
-    /// The file that exists while <see cref="UpdateTimescaleQuiescedAsync"/> may have a server running on its
-    /// private port, holding that port. See <see cref="StopQuiescedUpdateOrphanAsync"/>.
+    /// The file that exists while a quiesced start (<see cref="UpdateTimescaleQuiescedAsync"/>'s TimescaleDB
+    /// update, or <see cref="CarryAutoConfAsync"/>'s auto.conf trial) may have a server running on its private
+    /// port, holding that port. See <see cref="StopQuiescedUpdateOrphanAsync"/>.
     /// </summary>
     internal const string QuiescedUpdateMarkerFileName = "darling-timescaledb-update.port";
 
@@ -1877,12 +1878,13 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
-    /// Stops a server <see cref="UpdateTimescaleQuiescedAsync"/> left on its private port (#3908), which happens
-    /// only when the process died, or the stop failed, between that start and its confirmed stop. The marker
-    /// holds the port, and the running postmaster must be on it (<c>postmaster.pid</c>'s fourth line): a server
-    /// on any other port was started by someone else after the marker was left, and is adopted as usual. Without
-    /// this the normal start would adopt the orphan (<c>pg_ctl status</c> answers "running" for a postmaster on
-    /// any port), then fail to reach it on the configured port, and every runtime update would be deferred behind
+    /// Stops a server a quiesced start (<see cref="UpdateTimescaleQuiescedAsync"/>'s TimescaleDB update, or
+    /// <see cref="CarryAutoConfAsync"/>'s auto.conf trial) left on its private port, which happens only when the
+    /// process died, or the stop failed, between that start and its confirmed stop. The marker holds the port,
+    /// and the running postmaster must be on it (<c>postmaster.pid</c>'s fourth line): a server on any other
+    /// port was started by someone else after the marker was left, and is adopted as usual. Without this the
+    /// normal start would adopt the orphan (<c>pg_ctl status</c> answers "running" for a postmaster on any
+    /// port), then fail to reach it on the configured port, and every runtime update would be deferred behind
     /// it. Returns false only when such an orphan is running and will not stop.
     /// </summary>
     internal async Task<bool> StopQuiescedUpdateOrphanAsync(string binDirectory, string dataDirectory)
@@ -1897,7 +1899,7 @@ internal sealed class DarlingStoreUpgrade
         if (string.Equals(TryReadPostmasterPort(dataDirectory), markedPort, StringComparison.Ordinal))
         {
             _logger.LogWarning(
-                "Found the store on private port {Port}, where a TimescaleDB update this service started left it (#3908). Stopping it before the normal start.",
+                "Found the store on private port {Port}, where a quiesced start (TimescaleDB update or auto.conf trial) this service started left it. Stopping it before the normal start.",
                 markedPort);
             if (!await StopClusterConfirmedAsync(binDirectory, dataDirectory))
             {
@@ -2831,26 +2833,24 @@ internal sealed class DarlingStoreUpgrade
         string oldDataDirectory,
         string newDataDirectory,
         string newBinDirectory,
-        int port,
         CancellationToken cancellationToken)
         => CarryAutoConfAsync(
-            oldDataDirectory, newDataDirectory, newBinDirectory, port,
+            oldDataDirectory, newDataDirectory, newBinDirectory,
             (exePath, arguments, timeout, token) => DarlingManagedPostgres.RunToolAsync(exePath, arguments, timeout, token),
             cancellationToken);
 
     /// <summary>
-    /// <see cref="CarryAutoConfAsync(string, string, string, int, CancellationToken)"/> with the per-setting
+    /// <see cref="CarryAutoConfAsync(string, string, string, CancellationToken)"/> with the per-setting
     /// <c>postgres -C</c> probe substitutable, so a test can make one throw without a real postgres.exe or a
-    /// real 30-second wait. Production always uses the five-argument overload above, which wires
-    /// <see cref="DarlingManagedPostgres.RunToolAsync"/> unchanged. <paramref name="port"/> is only for the
-    /// belt-and-braces real start near the end — loopback-only, and free at this step: the OLD cluster this
-    /// class started on it earlier in the same upgrade was stopped well before this runs.
+    /// real 30-second wait. Production always uses the four-argument overload above, which wires
+    /// <see cref="DarlingManagedPostgres.RunToolAsync"/> unchanged. The belt-and-braces real start near the end
+    /// (round-2 review, #4280 Medium 1) uses its own private loopback port from <see cref="FindFreeLoopbackPort"/>,
+    /// never the store's eventual configured port, which this call cannot assume is free.
     /// </summary>
     internal async Task<AutoConfCarryResult> CarryAutoConfAsync(
         string oldDataDirectory,
         string newDataDirectory,
         string newBinDirectory,
-        int port,
         Func<string, string, TimeSpan, CancellationToken, Task<(int ExitCode, string Output)>> probe,
         CancellationToken cancellationToken)
     {
@@ -2971,44 +2971,69 @@ internal sealed class DarlingStoreUpgrade
                    -C probe: -C exits right after it reads the config files, before the checks between
                    settings, shared_preload_libraries, and SSL/certificate setup a real start also runs
                    (round-1 security review, #4280 Medium 2 — ssl = on with no certificate files is the
-                   concrete case: it passes -C ssl fine and then stops the very next start). */
-                try
+                   concrete case: it passes -C ssl fine and then stops the very next start). A private port,
+                   never the store's configured one (round-2 review, #4280 Medium 1): the configured port may
+                   still be held by whatever this upgrade is replacing, and a trial proving only the SETTINGS
+                   must not fail over a port collision that says nothing about them. */
+                if (!await TryStartTrialAsync())
                 {
-                    await StartClusterAsync(newBinDirectory, newDataDirectory, port, cancellationToken, QuiescedUpdateServerOptions);
-                }
-                catch (Exception)
-                {
-                    /* The store must still start — the safer empty file wins over the fuller one. Header
-                       first, so a failure in the best-effort stop just below can never leave a candidate on
-                       disk. Never the exception's own message: it can embed the server log tail, and
-                       PostgreSQL's own startup error can echo a failing setting's value — logging it here
-                       would reopen Medium 1 through this new path. Names and a pointer to the original only. */
-                    await File.WriteAllTextAsync(newAutoConfPath, header, cancellationToken);
+                    /* The store must still start — the safer empty file wins over the fuller one.
+                       CancellationToken.None: this write is what keeps the store bootable, and a cancellation
+                       landing right here must not be able to skip it. Never the trial's own exception message:
+                       it can embed the server log tail, and PostgreSQL's own startup error can echo a failing
+                       setting's value — logging it here would reopen Medium 1 through this new path (TryStartTrialAsync
+                       already swallows it for exactly this reason). Names and a pointer to the original only. */
+                    await File.WriteAllTextAsync(newAutoConfPath, header, CancellationToken.None);
                     _logger.LogWarning(
                         "The carried settings did not let the new cluster start, even though each passed " +
                         "alone — leaving postgresql.auto.conf EMPTY rather than risk the store not starting. " +
                         "Dropped: {Names}. The originals are kept at {Path}.",
                         string.Join(", ", carried), preUpgradeCopy);
 
-                    /* Best-effort only: pg_ctl start -w can time out with the postmaster still coming up
-                       behind it, and the header is already safely written above regardless of whether this
-                       stop succeeds. */
-                    try
-                    {
-                        await StopClusterAsync(newBinDirectory, newDataDirectory, CancellationToken.None);
-                    }
-                    catch (Exception)
-                    {
-                        /* Swallowed on purpose — see the comment above. */
-                    }
-
                     return new AutoConfCarryResult(Array.Empty<string>(), settings.Select(s => s.Name).ToList());
                 }
+            }
 
-                /* CancellationToken.None: a cancellation landing between the successful start above and this
-                   stop must not be able to skip it and leave a live postmaster holding the data directory —
-                   the same reasoning as the catch block's own reset write below. */
-                await StopClusterAsync(newBinDirectory, newDataDirectory, CancellationToken.None);
+            /* One private-port start, confirmed-stopped, using the SAME marker/orphan lifecycle
+               UpdateTimescaleQuiescedAsync uses (:1769, #3908) — so a trial this call cannot stop is picked up
+               and stopped by the next start's StopQuiescedUpdateOrphanAsync call, the same as an interrupted
+               TimescaleDB update, rather than left running under a data directory nothing else expects a live
+               server on. The marker is written BEFORE the start, so a crash between them still leaves a
+               record. A failed stop after a SUCCESSFUL start is never rethrown and never reaches the outer
+               catch below: that catch drops the settings this trial just verified, and the leftover marker
+               is what carries the failure instead (round-2 review, #4280 Medium 1). A local function, not a
+               private method, so a caller that needs to try it more than once still gets one attempt's state
+               (trialPort, marker) fully scoped to that attempt. */
+            async Task<bool> TryStartTrialAsync()
+            {
+                var trialPort = FindFreeLoopbackPort();
+                var marker = Path.Combine(newDataDirectory, QuiescedUpdateMarkerFileName);
+                var started = false;
+                try
+                {
+                    File.WriteAllText(marker, trialPort.ToString(CultureInfo.InvariantCulture));
+                    await StartClusterAsync(newBinDirectory, newDataDirectory, trialPort, cancellationToken, QuiescedUpdateServerOptions);
+                    started = true;
+                }
+                catch (Exception)
+                {
+                    started = false;
+                }
+                finally
+                {
+                    if (await StopClusterConfirmedAsync(newBinDirectory, newDataDirectory))
+                    {
+                        TryDeleteFile(marker);
+                    }
+                    else
+                    {
+                        _logger.LogCritical(
+                            "The server started on private port {Port} to verify carried postgresql.auto.conf settings would not stop. {Marker} is kept, so the next start recognizes it and stops it rather than adopting it as the store.",
+                            trialPort, marker);
+                    }
+                }
+
+                return started;
             }
         }
         catch (Exception original)
@@ -3285,7 +3310,7 @@ internal sealed class DarlingStoreUpgrade
                     already moved it. Any failure here is caught by the post-commit handler below, which
                     keeps the store running on the new major regardless — never a reason to brick it. */
             step = "carry-auto-conf";
-            await CarryAutoConfAsync(retained, context.DataDirectory, context.NewBinDirectory, context.Port, cancellationToken);
+            await CarryAutoConfAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken);
 
             if (mode == FileTransferMode.Link)
             {

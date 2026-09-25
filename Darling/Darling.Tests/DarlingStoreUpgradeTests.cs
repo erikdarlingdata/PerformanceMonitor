@@ -600,10 +600,9 @@ public sealed class DarlingStoreUpgradeTests
                 TimeSpan.FromMinutes(3), timeout.Token);
             Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
 
-            var carryPort = FindFreeTcpPort();
             var log = new CapturingLogger();
             var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, bin, carryPort, timeout.Token);
+                oldDataDirectory, newDataDirectory, bin, timeout.Token);
 
             Assert.Contains("work_mem", result.CarriedNames);
             Assert.Contains("darling_4253_unknown_setting", result.RejectedNames);
@@ -629,6 +628,87 @@ public sealed class DarlingStoreUpgradeTests
         }
         finally
         {
+            if (runningDataDirectory is not null)
+            {
+                await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// Medium 1, live: the trial's real start (round-2 review) used to run on the store's own configured
+    /// port, on the assumption that port is free because the old cluster on it was already stopped. Proves
+    /// that assumption no longer matters — a listener held on that exact port for the whole call, simulating
+    /// anything (a slow TIME_WAIT teardown, an unrelated process) still sitting on it, must not cost the
+    /// trial: it starts on its own private port from <see cref="DarlingStoreUpgrade.FindFreeLoopbackPort"/>,
+    /// which the OS cannot also hand out for the held listener's port.
+    /// </summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_TheStoreConfiguredPortIsStillHeld_TheTrialStartsOnItsOwnPrivatePort()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        var bin = Path.Combine(runtimeRoot!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-portheld-");
+        var oldDataDirectory = Path.Combine(root.FullName, "old");
+        var newDataDirectory = Path.Combine(root.FullName, "new");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        string? runningDataDirectory = null;
+        TcpListener? heldListener = null;
+
+        try
+        {
+            var (oldInitExit, oldInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{oldDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(oldInitExit == 0, $"initdb (old) failed: {oldInitOutput}");
+
+            var configuredPort = FindFreeTcpPort();
+            runningDataDirectory = oldDataDirectory;
+            await StartDirectAsync(bin, oldDataDirectory, configuredPort, quiesced: false, timeout.Token);
+            var oldOwner = $"Host=127.0.0.1;Port={configuredPort};Username=darling;Database=postgres;Pooling=false";
+            await ExecuteOnAsync(oldOwner, "ALTER SYSTEM SET work_mem = '199MB'", timeout.Token);
+            await StopDirectAsync(bin, oldDataDirectory, timeout.Token);
+            runningDataDirectory = null;
+
+            /* Stands in for "the configured port is not actually free at this step" — held on the exact
+               port the old cluster just vacated, which is the port a pre-fix trial would have reused. */
+            heldListener = new TcpListener(IPAddress.Loopback, configuredPort);
+            heldListener.Start();
+
+            var (newInitExit, newInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{newDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
+
+            var log = new CapturingLogger();
+            var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, bin, timeout.Token);
+
+            Assert.Contains("work_mem", result.CarriedNames);
+
+            heldListener.Stop();
+            heldListener = null;
+
+            var newPort = FindFreeTcpPort();
+            runningDataDirectory = newDataDirectory;
+            await StartDirectAsync(bin, newDataDirectory, newPort, quiesced: false, timeout.Token);
+            var newOwner = $"Host=127.0.0.1;Port={newPort};Username=darling;Database=postgres;Pooling=false";
+            Assert.Equal("199MB", await ScalarOnAsync(newOwner, "SHOW work_mem", timeout.Token));
+        }
+        finally
+        {
+            heldListener?.Stop();
+
             if (runningDataDirectory is not null)
             {
                 await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
@@ -669,7 +749,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             await Assert.ThrowsAsync<TimeoutException>(() => upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0 /* unused: throws before the port is read */, Probe, CancellationToken.None));
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None));
 
             Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(newAutoConfPath));
         }
@@ -711,7 +791,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             await Assert.ThrowsAsync<OperationCanceledException>(() => upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0 /* unused: throws before the port is read */, Probe, cts.Token));
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, cts.Token));
 
             Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(newAutoConfPath, CancellationToken.None));
         }
@@ -772,7 +852,7 @@ public sealed class DarlingStoreUpgradeTests
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
             var result = await upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
 
             Assert.Empty(result.CarriedNames);
             Assert.Contains("primary_conninfo", result.RejectedNames);
@@ -813,7 +893,7 @@ public sealed class DarlingStoreUpgradeTests
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
             await upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
 
             var logText = log.ToString();
             Assert.Contains("Carried primary_conninfo", logText, StringComparison.Ordinal);
@@ -850,7 +930,7 @@ public sealed class DarlingStoreUpgradeTests
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
             var result = await upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0,
+                oldDataDirectory, newDataDirectory, "unused-bin-dir",
                 (exePath, arguments, timeout, token) => Task.FromResult((0, string.Empty)),
                 CancellationToken.None);
 
@@ -896,7 +976,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None));
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None));
 
             Assert.Contains(newAutoConfPath, ex.Message, StringComparison.Ordinal);
             Assert.IsType<TimeoutException>(ex.InnerException);
@@ -956,10 +1036,9 @@ public sealed class DarlingStoreUpgradeTests
                 TimeSpan.FromMinutes(3), timeout.Token);
             Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
 
-            var carryPort = FindFreeTcpPort();
             var log = new CapturingLogger();
             var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, bin, carryPort, timeout.Token);
+                oldDataDirectory, newDataDirectory, bin, timeout.Token);
 
             Assert.Empty(result.CarriedNames);
             Assert.Contains("ssl", result.RejectedNames);
@@ -1031,7 +1110,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             await Assert.ThrowsAsync<TimeoutException>(() => upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, bin, 0, Probe, timeout.Token));
+                oldDataDirectory, newDataDirectory, bin, Probe, timeout.Token));
 
             File.Delete(Path.Combine(newDataDirectory, "postgresql.auto.conf"));
 

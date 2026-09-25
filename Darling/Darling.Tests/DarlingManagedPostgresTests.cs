@@ -3170,6 +3170,36 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains(": string.Empty;", source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4280: a server <see cref="DarlingStoreUpgrade.CarryAutoConfAsync(string, string, string, CancellationToken)"/>'s
+    /// auto.conf trial left on a private port must be stopped BEFORE <c>IsRunningAsync</c> below — <c>pg_ctl
+    /// status</c> cannot tell that orphan apart from the store's own postmaster (it answers "running" for a
+    /// postmaster on ANY port), so checking first would read a leftover trial as the store already being up.
+    /// Pinned at the source: the whole point is the ORDER of two calls inside one method, which no
+    /// behavioral test can isolate without a live cluster and a trial deliberately made un-stoppable.
+    /// </summary>
+    [Fact]
+    public void EnsureRunningAsync_StopsAQuiescedOrphan_BeforeItChecksIfAlreadyRunning()
+    {
+        var source = ReadManagedPostgresSource();
+
+        var methodStart = source.IndexOf(
+            "public async Task<string> EnsureRunningAsync(CancellationToken cancellationToken)", StringComparison.Ordinal);
+        Assert.True(methodStart >= 0, "could not find EnsureRunningAsync's declaration");
+
+        var methodEnd = source.IndexOf(
+            "public async Task StopIfStartedByThisProcessAsync()", methodStart, StringComparison.Ordinal);
+        Assert.True(methodEnd > methodStart, "could not find the next method, to bound the search to EnsureRunningAsync alone");
+
+        var method = source[methodStart..methodEnd];
+
+        var orphanStop = method.IndexOf("StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory)", StringComparison.Ordinal);
+        var runningCheck = method.IndexOf("await IsRunningAsync(binDirectory, cancellationToken)", StringComparison.Ordinal);
+
+        Assert.True(orphanStop >= 0, "EnsureRunningAsync must stop a quiesced-start orphan before it does anything else with the data directory");
+        Assert.True(runningCheck > orphanStop, "the orphan stop must run BEFORE IsRunningAsync, or a leftover trial server is read as the store already running");
+    }
+
     private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")
     {
         var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs");

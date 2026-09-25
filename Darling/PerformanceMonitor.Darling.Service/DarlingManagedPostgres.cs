@@ -2538,6 +2538,16 @@ public sealed class DarlingManagedPostgres
             await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);
         }
 
+        /* #4280: a server CarryAutoConfAsync's auto.conf trial left on a private port (the confirmed stop in
+           its own try/finally failed) must be stopped before IsRunningAsync below, which cannot tell it apart
+           from the store's own postmaster — pg_ctl status answers "running" for a postmaster on ANY port.
+           Unconditional: an absent marker (the overwhelmingly common case — the trial confirms its own stop)
+           is a no-op read, same as the existing post-Timescale-update call further down. */
+        if (!await _storeUpgrade.StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory))
+        {
+            throw new InvalidOperationException(QuiescedOrphanMessage(binDirectory));
+        }
+
         EnsureConfAppended(_dataDirectory);
 
         var password = ReadStoredPassword();
@@ -3537,9 +3547,10 @@ public sealed class DarlingManagedPostgres
         }
     }
 
-    /// <summary>The refusal when a server the quiesced TimescaleDB update started will not stop (#3908).</summary>
+    /// <summary>The refusal when a server a quiesced start (TimescaleDB update or auto.conf trial) left running
+    /// on its private port will not stop (#3908, #4280).</summary>
     private string QuiescedOrphanMessage(string binDirectory)
-        => $"The store at {_dataDirectory} is running on a private port, left there by a TimescaleDB update this service started, and it would not stop. " +
+        => $"The store at {_dataDirectory} is running on a private port, left there by a quiesced start (a TimescaleDB update or an auto.conf carry-forward trial) this service started, and it would not stop. " +
            $"Stop it with \"{Path.Combine(binDirectory, "pg_ctl.exe")}\" stop -D \"{_dataDirectory}\" -m immediate, then restart the service. The store's data is not affected.";
 
     [SupportedOSPlatform("windows")]
