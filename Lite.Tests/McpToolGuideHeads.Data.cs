@@ -64,11 +64,16 @@ public sealed class McpToolGuideHeadsDataTests
         }
     }
 
+    /// <summary>
+    /// #4231: the topic no longer ends either tail -- McpHelpers.WindowTruncatedDescription now trails it on
+    /// both tools (both raw-tier reads gained the window-floor disclosure), so this checks presence, not
+    /// position.
+    /// </summary>
     [Fact]
     public void CpuTimeExtremesTopic_RidesOnBothTopByCpuTools()
     {
-        Assert.EndsWith(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_procedures_by_cpu").Tail!, StringComparison.Ordinal);
-        Assert.EndsWith(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_queries_by_cpu").Tail!, StringComparison.Ordinal);
+        Assert.Contains(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_procedures_by_cpu").Tail!, StringComparison.Ordinal);
+        Assert.Contains(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_queries_by_cpu").Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>Lite's list_servers has no fleet/engine concept; its tail is just the original "use this first"

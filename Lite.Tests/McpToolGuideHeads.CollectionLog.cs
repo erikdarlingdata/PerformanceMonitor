@@ -32,7 +32,7 @@ public sealed class McpToolGuideHeadsCollectionLogTests
         ("get_collection_log", "an unknown value is refused, never silently empty"),
         ("get_query_store_top", "window_truncated"),
         ("get_query_store_top", "not a page cut"),
-        ("get_query_store_top", "Lite: no such floor"),
+        ("get_query_store_top", "raw-tier retention floor"),
     ];
 
     [Fact]
@@ -73,11 +73,15 @@ public sealed class McpToolGuideHeadsCollectionLogTests
         Assert.Contains("this SKU never enables the deferred plan-XML or statement-text fetches", tail, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4231: Lite gained the same raw-tier window floor Darling already had, so the head no longer splits
+    /// "Darling: has one. Lite: does not" -- it names the same disclosure both SKUs now carry.
+    /// </summary>
     [Fact]
-    public void QueryStoreTop_WindowFloorClause_IsScopedToDarlingInTheHead()
+    public void QueryStoreTop_HeadNamesTheSameDisclosureAsDarling()
     {
         var served = McpToolGuideTests.Served("get_query_store_top");
-        Assert.Contains("Darling: window_truncated", served.Served, StringComparison.Ordinal);
-        Assert.Contains("Lite: no such floor", served.Served, StringComparison.Ordinal);
+        Assert.Contains("window_truncated", served.Served, StringComparison.Ordinal);
+        Assert.Contains("Same disclosure as Darling's get_query_store_top", served.Served, StringComparison.Ordinal);
     }
 }
