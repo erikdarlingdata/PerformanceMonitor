@@ -94,8 +94,11 @@ public sealed class DarlingMcpStoreHostTools
             /* Round-1 review, Medium 1: resolved once, reused for every settings row below rather than
                re-resolved per row — same managed data directory GatherSettingProfilesAsync itself resolved
                for this call, so FormatSourceForMcp's containment test agrees with what actually attributed
-               each row. */
-            var mcpDataDirectory = postgresConfig.Managed ? DarlingManagedPostgres.ResolveDataDirectory(postgresConfig) : null;
+               each row. Round-1 review, Medium 1 follow-up: calls TryResolveProfileDataDirectory (not the
+               raw ResolveDataDirectory) so a UNC-configured managed store agrees with
+               GatherSettingProfilesAsync's own refusal (Low 4) instead of silently resolving a path
+               GatherSettingProfilesAsync never used. */
+            var mcpDataDirectory = postgresConfig.Managed ? DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgresConfig) : null;
 
             return JsonSerializer.Serialize(new
             {
