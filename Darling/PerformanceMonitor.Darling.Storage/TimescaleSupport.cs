@@ -477,6 +477,15 @@ public static partial class TimescaleSupport
     /// <para>Once the fleet has passed the condition these names can move to <see cref="RetiredBaselineRelations"/>
     /// as pure hygiene (so no future aggregate reuses them); nothing depends on that move, because a dropped
     /// legacy relation is never re-created — the ensure sweep no longer knows its name.</para>
+    ///
+    /// <para><b>The wait is for HISTORY, and an empty legacy aggregate has none (#4289).</b> A store where
+    /// nothing ever fed the legacy aggregate's source (no <c>wait_stats</c> or <c>perfmon_stats</c> rows for
+    /// this collector) leaves it holding zero rows forever, and its successor — backfilled from the same empty
+    /// source — empty too. The coverage condition above can never resolve against a <c>NULL</c> successor
+    /// oldest bucket, so without a separate check the legacy relation, its refresh job, its retention job and
+    /// its compression job would all outlive every store that has data. <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// therefore asks whether the legacy relation holds any rows of its own BEFORE it asks about coverage: an
+    /// empty one drops on sight, whatever the successor holds, because there is nothing in it to protect.</para>
     /// </summary>
     public static readonly (string Legacy, string Successor)[] SupersededBaselineRelations =
     {
@@ -1140,11 +1149,13 @@ $do$";
 
                 dropped++;
                 logger?.LogInformation(
-                    "Dropped superseded baseline relation {Legacy} (#3653) — its interval-honest successor {Successor} {Reason}, so nothing reads it any more; its refresh, retention and compression jobs went with it.",
-                    legacy, successor,
+                    "Dropped superseded baseline relation {Legacy} (#3653) — {Reason}, so nothing reads it any more; its refresh, retention and compression jobs went with it.",
+                    legacy,
                     verdict.LegacyIsContinuousAggregate
-                        ? $"covers the baseline tier (from {verdict.SuccessorOldest:O}, horizon {verdict.Horizon:O})"
-                        : "exists and, like this plain view, reads raw directly");
+                        ? verdict.LegacyHoldsRows
+                            ? $"its interval-honest successor {successor} covers the baseline tier (from {verdict.SuccessorOldest:O}, horizon {verdict.Horizon:O})"
+                            : "it held no rows through its own view (#4289) — an empty aggregate has no baseline history to protect, whatever its successor holds"
+                        : $"its interval-honest successor {successor} exists and, like this plain view, reads raw directly");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1210,21 +1221,29 @@ $do$";
         Drop,
     }
 
-    /// <summary>The superseded pass's evidence for one legacy relation: the decision plus the three facts it
-    /// rests on, so the log line can show its working and the live test can assert each fact.</summary>
+    /// <summary>The superseded pass's evidence for one legacy relation: the decision plus the four facts it
+    /// rests on, so the log line can show its working and the live test can assert each fact.
+    /// <see cref="LegacyHoldsRows"/> is meaningful only when <see cref="LegacyIsContinuousAggregate"/> is
+    /// true (#4289) — a plain view is never asked, so it reads <c>true</c> (the neutral, non-triggering
+    /// value) on that path and on <see cref="SupersededBaselineDecision.LegacyAbsent"/> /
+    /// <see cref="SupersededBaselineDecision.SuccessorAbsent"/>, where nothing asked it either.</summary>
     public readonly record struct SupersededBaselineVerdict(
         SupersededBaselineDecision Decision,
         bool LegacyIsContinuousAggregate,
+        bool LegacyHoldsRows,
         DateTime? SuccessorOldest,
         DateTime Horizon);
 
     /// <summary>
-    /// THE RETIREMENT CONDITION (#3653), as a pure predicate so the tests can walk it across time without a
-    /// store: a legacy CONTINUOUS AGGREGATE drops once its successor's oldest bucket is at or before the tier
-    /// horizon (<paramref name="utcNow"/> minus <see cref="BaselineRetentionSpan"/>); a legacy PLAIN VIEW drops as
-    /// soon as a successor exists (<paramref name="successorOldest"/> is not consulted — a raw-backed view has
-    /// nothing of its own to hand over). An EMPTY successor (<c>null</c> oldest) never releases a legacy
-    /// aggregate: an un-backfilled successor covers nothing, whatever the clock says.
+    /// THE RETIREMENT CONDITION (#3653, #4289), as a pure predicate so the tests can walk it across time without
+    /// a store: a legacy CONTINUOUS AGGREGATE that holds no rows of its own (<paramref name="legacyHoldsRows"/>
+    /// false) drops on sight, whatever the successor holds — it has no history to protect. A legacy CONTINUOUS
+    /// AGGREGATE that DOES hold rows drops once its successor's oldest bucket is at or before the tier horizon
+    /// (<paramref name="utcNow"/> minus <see cref="BaselineRetentionSpan"/>); an EMPTY successor (<c>null</c>
+    /// oldest) never releases it: an un-backfilled successor covers nothing, whatever the clock says. A legacy
+    /// PLAIN VIEW drops as soon as a successor exists (<paramref name="legacyHoldsRows"/> and
+    /// <paramref name="successorOldest"/> are both ignored — a raw-backed view has nothing of its own to hand
+    /// over, empty or not).
     ///
     /// <para><b>Why the TIER horizon and not the provider's 30-day window.</b> The window is the weaker sufficient
     /// condition — once the successor reaches it, nothing reads the legacy relation — but "covers the tier" is
@@ -1240,9 +1259,14 @@ $do$";
     /// on any start is enough. <c>&lt;=</c> rather than <c>&lt;</c> so a bucket that lands exactly on the horizon
     /// counts as coverage.</para>
     /// </summary>
-    public static bool SupersededBaselineRelationDropsAt(bool legacyIsContinuousAggregate, DateTime? successorOldest, DateTime utcNow)
+    public static bool SupersededBaselineRelationDropsAt(bool legacyIsContinuousAggregate, bool legacyHoldsRows, DateTime? successorOldest, DateTime utcNow)
     {
         if (!legacyIsContinuousAggregate)
+        {
+            return true;
+        }
+
+        if (!legacyHoldsRows)
         {
             return true;
         }
@@ -1251,10 +1275,12 @@ $do$";
     }
 
     /// <summary>
-    /// Reads the three facts <see cref="SupersededBaselineRelationDropsAt"/> needs off the store and returns the
-    /// verdict. Four small catalog reads at most, once per start; the only one that touches data is the
-    /// successor's <c>min(bucket)</c>, the same probe <see cref="BaselineBackfillProbeSql"/> already runs for
-    /// every registered aggregate on every start.
+    /// Reads the four facts <see cref="SupersededBaselineRelationDropsAt"/> needs off the store and returns the
+    /// verdict. Five small catalog reads at most, once per start; the two that touch data are the legacy's own
+    /// <c>EXISTS</c> probe (<see cref="BaselineRelationHasRowsSql"/>, #4289) and the successor's <c>min(bucket)</c>
+    /// — the same probe <see cref="BaselineBackfillProbeSql"/> already runs for every registered aggregate on
+    /// every start — and the second runs ONLY when the first found rows: an empty legacy aggregate drops before
+    /// the coverage read, so that read (and the query plan it costs) never fires for it.
     ///
     /// <para>The continuous-aggregate question is asked in two statements on purpose:
     /// <c>timescaledb_information</c> does not exist on a store that never created the extension, and a
@@ -1277,7 +1303,7 @@ $do$";
         {
             if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
             {
-                return new SupersededBaselineVerdict(SupersededBaselineDecision.LegacyAbsent, false, null, horizon);
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.LegacyAbsent, false, true, null, horizon);
             }
         }
 
@@ -1285,7 +1311,7 @@ $do$";
         {
             if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
             {
-                return new SupersededBaselineVerdict(SupersededBaselineDecision.SuccessorAbsent, false, null, horizon);
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.SuccessorAbsent, false, true, null, horizon);
             }
         }
 
@@ -1296,18 +1322,27 @@ $do$";
             legacyIsContinuousAggregate = await probe.ExecuteScalarAsync(cancellationToken) is true;
         }
 
-        DateTime? successorOldest = null;
+        /* #4289: asked BEFORE the coverage read, and only for a CAGG — a plain view has nothing of its own to
+           lose either way, so SupersededBaselineRelationDropsAt never consults this for one. */
+        var legacyHoldsRows = true;
         if (legacyIsContinuousAggregate)
+        {
+            using var probe = new NpgsqlCommand(BaselineRelationHasRowsSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds };
+            legacyHoldsRows = await probe.ExecuteScalarAsync(cancellationToken) is true;
+        }
+
+        DateTime? successorOldest = null;
+        if (legacyIsContinuousAggregate && legacyHoldsRows)
         {
             using var probe = new NpgsqlCommand(BaselineCoverageOldestSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds };
             successorOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
         }
 
-        var decision = SupersededBaselineRelationDropsAt(legacyIsContinuousAggregate, successorOldest, utcNow)
+        var decision = SupersededBaselineRelationDropsAt(legacyIsContinuousAggregate, legacyHoldsRows, successorOldest, utcNow)
             ? SupersededBaselineDecision.Drop
             : SupersededBaselineDecision.SuccessorShort;
 
-        return new SupersededBaselineVerdict(decision, legacyIsContinuousAggregate, successorOldest, horizon);
+        return new SupersededBaselineVerdict(decision, legacyIsContinuousAggregate, legacyHoldsRows, successorOldest, horizon);
     }
 
     /// <summary>Is this baseline relation a CONTINUOUS AGGREGATE (as opposed to the plain fallback view a
@@ -1321,6 +1356,16 @@ $do$";
     /// materialization is non-empty, which is the coverage question the superseded pass asks.</summary>
     public static string BaselineCoverageOldestSql(string view)
         => $"SELECT min(bucket) FROM collect.{view}";
+
+    /// <summary>Does this baseline relation hold any rows through its own view (#4289)? Read through the VIEW
+    /// rather than the materialization hypertable, so on a legacy aggregate's <c>timescaledb.materialized_only =
+    /// false</c> shape this sees the same real-time-aggregated rows a reader — <see cref="PgBaselineProvider"/>
+    /// included — would see, not just what has materialized so far. <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// asks this ONLY of a legacy relation already known to be a CONTINUOUS AGGREGATE, before it ever reads the
+    /// successor's coverage: an empty legacy aggregate holds no history to protect, so the successor's coverage
+    /// is moot and the drop does not wait on it.</summary>
+    public static string BaselineRelationHasRowsSql(string view)
+        => $"SELECT EXISTS (SELECT 1 FROM collect.{view})";
 
     /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
     public static string SourceTableFor(string view) => view switch
