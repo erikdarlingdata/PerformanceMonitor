@@ -8,15 +8,18 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -558,7 +561,7 @@ internal static class DarlingTriageEndpoint
     /// middleware like every sibling route; <paramref name="analysis"/> is the same shared instance the read
     /// dispatch receives (none of the mapped sections currently need it, but the dispatch signature does).
     /// </summary>
-    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis)
+    public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger)
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
 
@@ -588,6 +591,7 @@ internal static class DarlingTriageEndpoint
             string? serverName = serverQuery;
             if (!fleetLevelStore && !string.IsNullOrWhiteSpace(serverQuery))
             {
+                var resolveStopwatch = Stopwatch.StartNew();
                 try
                 {
                     var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, serverQuery);
@@ -599,13 +603,19 @@ internal static class DarlingTriageEndpoint
                     else
                     {
                         /* The resolver's miss is the `invalid` envelope since #3739; a note on this page is TEXT,
-                           so the sentence is read back out of it rather than the JSON being shown as prose. */
+                           so the sentence is read back out of it rather than the JSON being shown as prose. This
+                           is a client-correctable refusal, not a caught exception, so it is NOT #4283's target —
+                           the resolver's own validator sentence, never ex.Message. */
                         notes.Add((JsonNode)McpHelpers.ErrorMessageOf(error));
                     }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    notes.Add((JsonNode)$"Server resolution failed: {ex.Message}");
+                    /* #4283: a fixed note, never ex.Message — the real text still reaches the service log. This
+                       page answers 200 regardless (a degraded note, not a failed response), so only the TEXT
+                       changes, not the status. */
+                    DarlingWebFailureLog.Report(logger, "/api/triage:resolve-server", resolveStopwatch.ElapsedMilliseconds, ex);
+                    notes.Add((JsonNode)"Server resolution failed. The service log names what failed.");
                 }
             }
 
@@ -613,6 +623,7 @@ internal static class DarlingTriageEndpoint
                the delivery instant, so the nearest row at the top IS this firing whenever the row survived. */
             JsonNode? alert = null;
             var related = new JsonArray();
+            var alertHistoryStopwatch = Stopwatch.StartNew();
             try
             {
                 var until = anchor + AnchorSlack;
@@ -660,7 +671,9 @@ internal static class DarlingTriageEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                notes.Add((JsonNode)$"Alert-history lookup failed: {ex.Message}");
+                /* #4283: fixed note, real text to the service log — same reasoning as the resolver catch above. */
+                DarlingWebFailureLog.Report(logger, "/api/triage:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
+                notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
             /* The alert-type-relevant sections + the standing collection log, each through the SAME
@@ -668,7 +681,7 @@ internal static class DarlingTriageEndpoint
             var sections = new JsonArray();
             foreach (var section in SectionsFor(metric))
             {
-                sections.Add(await RunSectionAsync(section, dispatch, context, postgres, analysis, serverName, asOf));
+                sections.Add(await RunSectionAsync(section, dispatch, context, postgres, analysis, serverName, asOf, logger));
             }
 
             /* The standing per-server collection log rides along on every per-server page. It is SKIPPED for a
@@ -676,7 +689,7 @@ internal static class DarlingTriageEndpoint
                label it could only ever answer with the resolver error this fix exists to remove. */
             if (!fleetLevelStore)
             {
-                sections.Add(await RunSectionAsync(CollectionLogSection, dispatch, context, postgres, analysis, serverName, asOf));
+                sections.Add(await RunSectionAsync(CollectionLogSection, dispatch, context, postgres, analysis, serverName, asOf, logger));
             }
             else
             {
@@ -707,11 +720,13 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>Runs one section through its <c>/api/read</c> dispatch handler (a synthetic query string over
     /// the REAL binding + tool code), returning <c>{title, read, data}</c> on success — <c>data</c> is the
-    /// tool's own JSON, miss envelope included — or <c>{title, read, error}</c> when the tool caught an
-    /// exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11), refused the request (its
-    /// <c>{"status":"invalid", ...}</c> envelope since #3739), answered with a bare message, or threw — each
-    /// reduced to its sentence here because <c>error</c> on this page is TEXT the card renders. Never throws: a
-    /// broken section is one card on the page, not a dead page.</summary>
+    /// tool's own JSON, miss envelope included — or <c>{title, read, error}</c> when the tool refused the
+    /// request (its <c>{"status":"invalid", ...}</c> envelope since #3739) or answered with a bare message,
+    /// each reduced to its OWN sentence here because <c>error</c> on this page is TEXT the card renders. A tool
+    /// that caught an exception (its <c>{"status":"error", ...}</c> envelope since #3653 Q11) or a
+    /// binding-layer throw instead gets a fixed sentence (#4283: never <c>ex.Message</c>), and the real text
+    /// goes to the service log once through <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/>.
+    /// Never throws: a broken section is one card on the page, not a dead page.</summary>
     private static async Task<JsonObject> RunSectionAsync(
         TriageSection section,
         IReadOnlyDictionary<string, DarlingWebEndpoints.ReadToolHandler> dispatch,
@@ -719,7 +734,8 @@ internal static class DarlingTriageEndpoint
         NpgsqlDataSource postgres,
         DarlingAnalysisService analysis,
         string? serverName,
-        string? asOf)
+        string? asOf,
+        ILogger logger)
     {
         var result = new JsonObject { ["title"] = section.Title, ["read"] = section.Read };
 
@@ -730,6 +746,8 @@ internal static class DarlingTriageEndpoint
             return result;
         }
 
+        var stopwatch = Stopwatch.StartNew();
+        var route = "/api/triage:" + section.Read;
         try
         {
             var toolContext = new DefaultHttpContext
@@ -744,16 +762,34 @@ internal static class DarlingTriageEndpoint
                 case DarlingWebEndpoints.ToolResponseKind.JsonPassthrough:
                     result["data"] = JsonNode.Parse(raw);
                     break;
+                case DarlingWebEndpoints.ToolResponseKind.ServerError:
+                    /* #4283: the tool caught its own exception; the envelope's sentence carries ex.Message and
+                       is never shown on this card — logged once instead, same fixed wording ToHttpResult's
+                       ServerError arm answers with (this page still answers 200 overall; only the card's text
+                       degrades). */
+                    var sentence = McpHelpers.ErrorMessageOf(raw);
+                    DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, sentence);
+                    result["error"] = DarlingWebFailureLog.IsStatementTimeoutSentence(sentence)
+                        ? DarlingWebFailureLog.TimeoutMessage
+                        : DarlingWebFailureLog.GenericMessage;
+                    break;
                 default:
+                    /* Refusal / ClientError: a validator's or resolver's own sentence, client-correctable and
+                       never ex.Message — shown as-is, same as the read surface's 400 body. */
                     result["error"] = McpHelpers.ErrorMessageOf(raw);
                     break;
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* The binding-layer backstop, in the tools' own grammar (the sentence FormatError wraps), so the
-               card reads the same words whether the tool caught the exception or this seam did. */
-            result["error"] = McpHelpers.ErrorSentence(section.Read, ex);
+            /* #4283: the binding-layer backstop (a throw, not a tool's own catch) — the real Exception is
+               still here, so reported and answered from it directly rather than through the sentence
+               classifier, exactly as the /api/read/* loop's own binding-layer catch does. */
+            DarlingWebFailureLog.Report(logger, route, stopwatch.ElapsedMilliseconds, ex);
+            result["error"] = DarlingWebFailureLog.IsStatementTimeout(ex)
+                ? DarlingWebFailureLog.TimeoutMessage
+                : DarlingWebFailureLog.GenericMessage;
+            return result;
         }
 
         return result;

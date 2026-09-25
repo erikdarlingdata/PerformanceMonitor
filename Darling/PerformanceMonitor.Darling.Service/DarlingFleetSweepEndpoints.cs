@@ -188,36 +188,25 @@ internal static class DarlingFleetSweepEndpoints
            renders as its empty state rather than an error. */
         app.MapGet("/api/sweeps/latest", async (HttpContext context) =>
         {
-            try
-            {
-                var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
-                return run is null
-                    ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
-                    : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                /* The latest-sweep read throws on a store fault (the engine-seam posture); here the
-                   loud shape is a 500 the page renders red — never a 404 that reads as "no sweeps". */
-                return SweepError($"Error reading the latest sweep: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch. A store-fault throw here used to answer 500 with ex.Message; the #4281
+               top-of-pipeline backstop (MapAll wires this route after it) now answers it — the loud shape is
+               still a 500 (503 for a caught statement_timeout) the page renders red, never a 404 that reads
+               as "no sweeps", because a store fault is never the null BuildDetailAsync sees on a genuine miss. */
+            var run = await FleetSweepStore.GetLatestSweepAsync(postgres, context.RequestAborted);
+            return run is null
+                ? SweepError("No sweep has been recorded yet.", StatusCodes.Status404NotFound)
+                : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
         });
 
         /* One sweep in full, by id — the timeline click-through. 404 means genuinely absent (pruned
            by retention, or never recorded); a store fault is the 500 arm, per the store read's doc. */
         app.MapGet("/api/sweeps/{id:long}", async (HttpContext context, long id) =>
         {
-            try
-            {
-                var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
-                return run is null
-                    ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
-                    : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return SweepError($"Error reading sweep {id}: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch — see /api/sweeps/latest's comment above. */
+            var run = await FleetSweepStore.GetSweepAsync(postgres, id, context.RequestAborted);
+            return run is null
+                ? SweepError("Sweep not found.", StatusCodes.Status404NotFound)
+                : JsonResult(await BuildDetailAsync(logger, postgres, run, context));
         });
 
         /* The watch-item worklist. Default = open + carried in ONE store read; ?state= narrows to a
