@@ -477,6 +477,81 @@ public sealed class RollupCoverageRoutingTests
     }
 
     /// <summary>
+    /// #3653 A6, lane LA-8: no reader outside <c>TimescaleSupport.cs</c> (the builder) may splice a DAILY
+    /// rollup's name directly into a FROM clause by string interpolation — <c>$"collect.{...DailyView} AS f"</c>
+    /// or similar — instead of going through <see cref="RollupCoverage.StitchedRelationSql"/>. A bare splice
+    /// like that can never grow a stitch: it will read only the legacy daily forever, even once a successor
+    /// daily exists and is backfilled, which is exactly the shape the three FinOps splices and
+    /// <c>ComposeSourceRouter</c>'s daily arm were in before this lane routed them.
+    ///
+    /// <para>Matched over comment-stripped text against three regex shapes, so a splice cannot dodge the scan
+    /// merely by moving the constant reference inside a ternary or a string concatenation:
+    /// <list type="bullet">
+    /// <item>an interpolation hole naming a legacy daily constant ANYWHERE in its expression — so
+    /// <c>collect.{(tier == RetentionTier.Hourly ? ... : TimescaleSupport.QueryStatsDbDailyView)} AS f</c> is
+    /// caught, not just the bare <c>collect.{TimescaleSupport.X} AS f</c> shape;</item>
+    /// <item>a <c>"collect." + TimescaleSupport.&lt;X&gt;DailyView</c> (or unqualified) concatenation; and</item>
+    /// <item>the legacy view NAME itself written straight after <c>collect.</c>, for a caller that already
+    /// resolved the constant into a local.</item>
+    /// </list></para>
+    ///
+    /// <para><see cref="IsExcludedFromScan"/> keeps the test project and build output out of the walk, same
+    /// carve-out as <see cref="NoReaderOutsideTheBuilder_CallsHourlyRelationForDirectly"/> above;
+    /// <c>TimescaleSupport.cs</c> is excluded the same way — it is the builder, and
+    /// <c>s_stitchColumnsByLegacy</c>'s doc comments and the registry itself necessarily say these names beside
+    /// <c>collect.</c> text.</para>
+    /// </summary>
+    [Fact]
+    public void NoReaderOutsideTheBuilder_SplicesADailyViewNameBySubstitution()
+    {
+        var root = FindRepoRoot();
+
+        Assert.True(root is not null,
+            "Could not locate the repository root (walked up from the test binary looking for " +
+            "PerformanceMonitor.sln). This test scans the source tree, so it cannot run without it — fix the " +
+            "walk-up rather than skipping.");
+
+        const string constants = @"(?:QueryStatsDailyView|ProcedureStatsDailyView|QueryStatsDbDailyView)";
+        var viewNames = "(?:" + string.Join("|", TimescaleSupport.SupersededDailyRollups.Select(p => Regex.Escape(p.LegacyDaily))) + ")";
+        var patterns = new[]
+        {
+            new Regex(@"collect\.\{[^{}]*\b" + constants + @"\b[^{}]*\}", RegexOptions.CultureInvariant),
+            new Regex(@"collect\.""\s*\+\s*(?:TimescaleSupport\.)?" + constants + @"\b", RegexOptions.CultureInvariant),
+            new Regex(@"collect\." + viewNames + @"\b", RegexOptions.CultureInvariant),
+        };
+
+        var offenders = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(Path.Combine(root!, "Darling"), "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(root!, file);
+            if (IsExcludedFromScan(relative)
+                || string.Equals(Path.GetFileName(relative), "TimescaleSupport.cs", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = StripComments(File.ReadAllText(file));
+            foreach (var pattern in patterns)
+            {
+                foreach (Match match in pattern.Matches(text))
+                {
+                    var line = text.AsSpan(0, match.Index).Count('\n') + 1;
+                    offenders.Add($"{relative}:{line} ({match.Value})");
+                }
+            }
+        }
+
+        Assert.True(offenders.Count == 0,
+            "These call sites splice a legacy DAILY rollup's name directly into a FROM clause by string " +
+            "interpolation instead of routing through RollupCoverage.StitchedRelationSql (#3653 A6, lane " +
+            "LA-8). A reader built this way can never read an interval-honest successor daily once one exists " +
+            "and is backfilled — it is stuck on the frozen legacy forever, invisibly. Route through " +
+            "StitchedRelationSql(legacyDaily, alias, windowStartUtc, RollupCoverage.StitchTier.Daily) instead; " +
+            "the daily view constants stay reserved for probes, logs, and the registry itself.\n\n" +
+            string.Join("\n", offenders));
+    }
+
+    /// <summary>
     /// True when a path is generated build output, or the test project's own source. Compared as whole
     /// path SEGMENTS against BOTH separator characters, so the scanned set is the same wherever this runs
     /// and a directory merely named <c>Objects</c> stays in it.

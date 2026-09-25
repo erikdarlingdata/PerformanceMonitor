@@ -118,11 +118,42 @@ public sealed class DailySummaryStitchedRangeTests
         Assert.Equal(boundaryDay, successorFloor.Date.AddDays(1));
     }
 
+    /* ─────────────────────────── daily tier (#3653 A6, lane LA-8) ─────────────────────────── */
+
+    private const string DailyLegacy = TimescaleSupport.QueryStatsDailyView;
+    private const string DailySuccessor = "query_stats_interval_daily";
+
     [Fact]
-    public void DailyTier_IgnoresTheStitch_ReadsExactlyAsTheTwoArgumentFormDoes()
+    public void DailyTier_NoSuccessorInAvailability_IsByteIdenticalToTheTwoArgumentForm()
     {
+        /* Pre-LB shape: the successor daily is not in RollupAvailability at all, even with hourly floors
+           cached for the OTHER (hourly-tier) pair — the daily tier's own StitchFloor must gate on its own
+           registry/availability, never leak the hourly tier's state. */
         var coverage = new RollupCoverage(
-            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [Legacy] = DaysAgo(80), [Successor] = DaysAgo(5) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [DailyLegacy] = DaysAgo(200),
+                [Legacy] = DaysAgo(80),
+                [Successor] = DaysAgo(5),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.WithoutIntervalDailies);
+
+        var stitched = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, DaysAgo(10));
+        var plain = DailySummarySql.RangeSqlFor(RetentionTier.Daily);
+
+        Assert.Equal(plain, stitched);
+        Assert.Contains("queries_ceiling AS (", stitched, StringComparison.Ordinal);
+        Assert.DoesNotContain("queries_ceiling_legacy", stitched, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DailyTier_SuccessorEmpty_IsByteIdenticalToTheTwoArgumentForm()
+    {
+        /* The successor daily is registered and available but has never refreshed (no floor) — legacy-only,
+           same text as today. */
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [DailyLegacy] = DaysAgo(200) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
             RollupAvailability.All);
 
@@ -130,6 +161,61 @@ public sealed class DailySummaryStitchedRangeTests
         var plain = DailySummarySql.RangeSqlFor(RetentionTier.Daily);
 
         Assert.Equal(plain, stitched);
+    }
+
+    [Fact]
+    public void DailyTier_SuccessorReachesBeforeWindowStart_RoutesSuccessorOnly_NeverNamesTheLegacy()
+    {
+        var successorHourlyFloor = DaysAgo(90);
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [DailyLegacy] = DaysAgo(200),
+                [DailySuccessor] = DaysAgo(90),
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = successorHourlyFloor,
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All);
+
+        var sql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, DaysAgo(10));
+
+        Assert.Contains($"FROM collect.{DailySuccessor}", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(DailyLegacy, sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DailyTier_StitchedPair_SplitsTheNotCarriedProbeOnceEachSide_AtF_d()
+    {
+        /* Successor hourly's first bucket is mid-day, so F_d (ceiling-of-day) lands on the NEXT calendar day —
+           the same day-alignment rule QueriesCteForStitchedCagg documents for the hourly pair. */
+        var successorHourlyFloor = new DateTime(2026, 9, 19, 14, 0, 0, DateTimeKind.Utc);
+        var successorDailyFloor = new DateTime(2026, 9, 19, 0, 0, 0, DateTimeKind.Utc);
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [DailyLegacy] = DaysAgo(200),
+                [DailySuccessor] = successorDailyFloor,
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = successorHourlyFloor,
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All);
+
+        var sql = DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverage, DaysAgo(60));
+
+        var boundaryDay = new DateTime(2026, 9, 20, 0, 0, 0, DateTimeKind.Unspecified);
+        var literal = $"TIMESTAMP '{boundaryDay:yyyy-MM-dd HH:mm:ss.ffffff}'";
+
+        Assert.Contains($"FROM collect.{DailyLegacy}", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{DailySuccessor}", sql, StringComparison.Ordinal);
+        Assert.Contains($"bucket >= $2 AND bucket < $3 AND bucket < {literal}", sql, StringComparison.Ordinal);
+        Assert.Contains($"bucket >= $2 AND bucket < $3 AND bucket >= {literal}", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "NOT EXISTS").Count);
+        Assert.Contains("queries_ceiling_legacy", sql, StringComparison.Ordinal);
+        Assert.Contains("queries_ceiling_successor", sql, StringComparison.Ordinal);
+
+        /* The not-carried probe's source for the successor SIDE is the successor HOURLY (MaterializationHoleTargets,
+           RollupViews), not raw query_stats directly — the daily's hierarchical source. */
+        Assert.Contains($"SELECT 1 FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} AS s", sql, StringComparison.Ordinal);
     }
 
     [Fact]

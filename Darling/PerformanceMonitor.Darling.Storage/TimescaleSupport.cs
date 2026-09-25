@@ -11746,20 +11746,6 @@ public sealed class RollupCoverage
     /// <see cref="StitchedRelationSql"/> for <see cref="Daily"/>.</summary>
     public enum StitchTier { Hourly, Daily }
 
-    /// <summary>
-    /// LA's local stub of the daily-pair registry LB owns (#3653 A6 design v2 §2): each superseded LEGACY daily,
-    /// its interval-honest successor daily, and the successor HOURLY it is hierarchical from (needed for F_d).
-    /// LB replaces this with <c>TimescaleSupport.SupersededDailyRollups</c>. Until then, on any store built
-    /// before LB ships, the successor daily name is absent from <see cref="RollupAvailability"/> and
-    /// <see cref="StitchedRelationSql"/> answers legacy-only — inert, as designed.
-    /// </summary>
-    private static readonly (string LegacyDaily, string SuccessorDaily, string SuccessorHourly)[] s_supersededDailyRollupsStub =
-    {
-        (TimescaleSupport.QueryStatsDailyView,     "query_stats_interval_daily",     TimescaleSupport.QueryStatsIntervalHourlyView),
-        (TimescaleSupport.ProcedureStatsDailyView,  "procedure_stats_interval_daily", TimescaleSupport.ProcedureStatsIntervalHourlyView),
-        (TimescaleSupport.QueryStatsDbDailyView,    "query_stats_db_interval_daily",  TimescaleSupport.QueryStatsDbIntervalHourlyView),
-    };
-
     /// <summary>Each stitched pair's explicit column list (#3653 A6 design v2 §2): the LEGACY's own columns,
     /// with no <c>sample_interval_seconds_sum</c> — no reader selects that column, and the legacy side of the
     /// UNION does not carry it. Pinned as a subset of both sides' CREATE text by
@@ -11872,16 +11858,17 @@ public sealed class RollupCoverage
         }
         else
         {
-            /* Daily names are LB's registry (SupersededDailyRollups); this is LA's local stub, and
-               RollupAvailability has no field for them yet. "Does the store have the relation" therefore
-               collapses to "did the probe report a floor for it" — the SAME null-floor test that "empty"
-               already uses below, which is exactly the design's daily rule: absent or empty is legacy-only,
-               either way (lane-3653-A6-LA.md). */
-            var pair = s_supersededDailyRollupsStub.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            /* Daily names are LB's registry (SupersededDailyRollups, #4181), and RollupAvailability now maps
+               them (Has), so the daily branch gates on availability exactly like the hourly branch above — an
+               absent successor daily must NEVER be named in SQL, even when a stale floor happens to be cached
+               for it (a store whose probe ran before the successor daily was created, then the successor
+               daily's name got reused — belt and suspenders, since Has() is the authoritative "does this store
+               have the relation" answer, not the floor dictionary). */
+            var pair = TimescaleSupport.SupersededDailyRollups.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
             successor = pair.SuccessorDaily;
             successorHourly = pair.SuccessorHourly;
 
-            if (successor is null)
+            if (successor is null || !_availability.Has(successor))
             {
                 return legacyOnly;
             }
@@ -11972,10 +11959,10 @@ public sealed class RollupCoverage
         }
         else
         {
-            var pair = s_supersededDailyRollupsStub.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
+            var pair = TimescaleSupport.SupersededDailyRollups.FirstOrDefault(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal));
             successor = pair.SuccessorDaily;
             successorHourly = pair.SuccessorHourly;
-            if (successor is null)
+            if (successor is null || !_availability.Has(successor))
             {
                 return null;
             }

@@ -545,10 +545,13 @@ public static class DailySummarySql
     /// <paramref name="hourlyRelation"/> is <c>query_stats_hourly</c> or its interval-honest successor
     /// <c>query_stats_interval_hourly</c>, by <see cref="RollupCoverage.HourlyRelationFor"/> over the window's
     /// start. The successor carries the same <c>query_hash</c> and <c>bucket</c> the queries CTE reads, and
-    /// leaves out the restart row the legacy counted as a query seen that day. The daily tier is not
-    /// parameterised: the daily has no successor (it is hierarchical from the legacy hourly —
-    /// <see cref="TimescaleSupport.SupersededHourlyRollups"/>). The one-argument form keeps the legacy for
-    /// callers that have not probed, which is what every pre-#3653 pin reads.
+    /// leaves out the restart row the legacy counted as a query seen that day. This overload's OWN daily tier is
+    /// not parameterised — it always reads the legacy <c>query_stats_daily</c> unstitched, whatever
+    /// <paramref name="hourlyRelation"/> carries; the daily's own stitch lives in the three-argument overload
+    /// below, which does not call this one for that case at all — it builds its own queries CTE directly off
+    /// <see cref="QueriesCteForCagg"/>, so a successor-only daily keeps its own name instead of being downgraded
+    /// back to the legacy here. The one-argument form keeps the legacy for callers that have not probed, which
+    /// is what every pre-#3653 pin reads.
     ///
     /// <para>#3653 A6: the routed text differs between the legacy and the successor in the relation name AND in
     /// the not-carried probe's source filter — the successor's own <c>WHERE</c>, read off its CREATE — so the
@@ -582,42 +585,61 @@ public static class DailySummarySql
     }
 
     /// <summary>
-    /// #3653 A6, lane LA-3b2: <see cref="RangeSqlFor(RetentionTier, string)"/>, stitch-aware. When
-    /// <paramref name="coverage"/> reports a stitch boundary for the legacy hourly rollup over
-    /// <paramref name="windowStartUtc"/> (<see cref="RollupCoverage.StitchFloor"/>), the not-carried probe runs
-    /// TWICE, once per relation name split at that boundary (decision 3); with no boundary — no successor, an
+    /// #3653 A6, lane LA-3b2 (hourly) / lane LA-8 (daily): <see cref="RangeSqlFor(RetentionTier, string)"/>,
+    /// stitch-aware, on EITHER rollup tier. When <paramref name="coverage"/> reports a stitch boundary for the
+    /// tier's own legacy rollup over <paramref name="windowStartUtc"/> (<see cref="RollupCoverage.StitchFloor"/>
+    /// — F for hourly, F_d for daily), the not-carried probe runs TWICE, once per relation name split at that
+    /// boundary (decision 3, <see cref="QueriesCteForStitchedCagg"/>); with no boundary — no successor, an
     /// empty one, or one that already covers the whole window — this is byte-identical to
     /// <see cref="RangeSqlFor(RetentionTier, string)"/> over the legacy name, because <c>StitchFloor</c> answers
-    /// null in exactly the cases <see cref="RollupCoverage.HourlyRelationFor"/> would also answer legacy. The
-    /// daily tier ignores the stitch (LB's daily pair registry is a separate lane) and reads exactly as
-    /// <see cref="RangeSqlFor(RetentionTier, string)"/> does today.
+    /// null in exactly the cases <see cref="RollupCoverage.StitchedRelationSql"/> would also answer legacy-only.
+    /// The daily tier's successor name comes off <see cref="TimescaleSupport.SupersededDailyRollups"/>, the same
+    /// registry <see cref="RollupCoverage.StitchedRelationSql"/> reads, rather than a second lookup that could
+    /// drift from it.
     /// </summary>
     public static string RangeSqlFor(RetentionTier tier, RollupCoverage coverage, DateTime windowStartUtc)
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
-        if (tier != RetentionTier.Hourly)
+        if (tier != RetentionTier.Hourly && tier != RetentionTier.Daily)
         {
             return RangeSqlFor(tier);
         }
 
-        var legacy = TimescaleSupport.QueryStatsHourlyView;
-        var successorFloor = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, windowStartUtc);
+        var stitchTier = tier == RetentionTier.Hourly ? RollupCoverage.StitchTier.Hourly : RollupCoverage.StitchTier.Daily;
+        var legacy = tier == RetentionTier.Hourly ? TimescaleSupport.QueryStatsHourlyView : TimescaleSupport.QueryStatsDailyView;
+
+        var successorFloor = coverage.StitchFloor(legacy, stitchTier, windowStartUtc);
         if (successorFloor is null)
         {
             /* #3653 A6, lane LA-6 (coordinator ruling on #4182): this branch already runs only when
-               StitchFloor answered null, which per StitchedRelationSql's own remarks is exactly the case where
-               it would splice "collect.{legacy} AS f" — legacy-only, the SAME name HourlyRelationFor would
-               have answered here. Reading the name back off the builder's own splice (rather than calling
-               HourlyRelationFor directly) keeps every SQL splice on the one path (decision 1) with no change
-               to the byte-identical pins: the two calls agree on this branch by construction. */
-            var legacyOnlySplice = coverage.StitchedRelationSql(legacy, "f", windowStartUtc, RollupCoverage.StitchTier.Hourly);
+               StitchFloor answered null, which per StitchedRelationSql's own remarks means it would splice a
+               SINGLE relation — "collect.{legacy} AS f" (no successor, empty successor) or
+               "collect.{successor} AS f" (successor covers the whole window) — never a stitch. Reading the name
+               back off the builder's own splice (rather than re-deriving "which one won" here) keeps every SQL
+               splice on the one path (decision 1): this call and StitchedRelationSql agree by construction.
+               Built with QueriesCteForCagg directly (not the two-argument overload above, whose OWN daily
+               branch always names the legacy — it exists for callers with no coverage to probe a successor
+               with) so a successor-only daily answer is not silently downgraded back to the legacy. */
+            var singleSplice = coverage.StitchedRelationSql(legacy, "f", windowStartUtc, stitchTier);
             var relationStart = "collect.".Length;
-            var relationEnd = legacyOnlySplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
-            return RangeSqlFor(tier, legacyOnlySplice[relationStart..relationEnd]);
+            var relationEnd = singleSplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
+            var relationName = singleSplice[relationStart..relationEnd];
+
+            var singleRouted = RangeSql.Replace(
+                QueriesCteRaw, QueriesCteForCagg(relationName), StringComparison.Ordinal);
+            if (string.Equals(singleRouted, RangeSql, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Daily-summary CAGG routing found no queries CTE to replace — QueriesCteRaw has drifted from RangeSql (#1661).");
+            }
+
+            return singleRouted;
         }
 
-        var successor = TimescaleSupport.SuccessorOf(legacy)!;
+        var successor = tier == RetentionTier.Hourly
+            ? TimescaleSupport.SuccessorOf(legacy)!
+            : TimescaleSupport.SupersededDailyRollups.First(p => string.Equals(p.LegacyDaily, legacy, StringComparison.Ordinal)).SuccessorDaily;
         var routed = RangeSql.Replace(
             QueriesCteRaw, QueriesCteForStitchedCagg(legacy, successor, successorFloor.Value), StringComparison.Ordinal);
 
