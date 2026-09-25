@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
@@ -48,9 +49,18 @@ public partial class ServerTab : UserControl
             case QuerySnapshotRow snapshot:
                 queryText = snapshot.QueryText;
                 databaseName = snapshot.DatabaseName;
-                planXml = snapshot.QueryPlan;
                 isolationLevel = snapshot.TransactionIsolationLevel;
                 source = "Active Queries";
+                /* #4239: the grid no longer carries the payload in-row — fetch it by capture key,
+                   same enrichment-on-demand shape as the QueryStatsRow/QueryStoreRow arms above. */
+                if (snapshot.HasQueryPlan)
+                {
+                    try
+                    {
+                        planXml = await Task.Run(() => _dataService.ResolveSnapshotEstimatedPlanAsync(_serverId, snapshot));
+                    }
+                    catch { /* Plan fetch failed — continue without plan */ }
+                }
                 break;
 
             case QueryStatsRow stats:

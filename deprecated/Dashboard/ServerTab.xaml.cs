@@ -521,9 +521,8 @@ namespace PerformanceMonitorDashboard
                 // Feed comparison to Resource Metrics (Server Trends overlay). #4305: the index, not
                 // GetComparisonRange()'s resolved (From, To) -- ResourceMetricsContent.RefreshServerTrendsAsync
                 // derives the range itself, server-local, via CorrelatedTimelineLanesControl.GetOverviewComparisonRange.
-                // GetComparisonRange()'s own preset-range fallback (DateTime.UtcNow) is untouched here: it still
-                // feeds the Query Performance grids below, unchanged (#4305's scope is the Server Trends ghost
-                // line only; the grids' likely-matching bug is tracked separately as #4313).
+                // GetComparisonRange() below now derives its (From, To) the same server-local way (#4313), so
+                // both paths share one current-window definition; only the resample site differs.
                 await ResourceMetricsContent.SetComparisonRangeAsync(CompareToCombo.SelectedIndex);
 
                 // Feed comparison to Query Performance grids
@@ -540,16 +539,15 @@ namespace PerformanceMonitorDashboard
         {
             if (CompareToCombo == null || CompareToCombo.SelectedIndex <= 0) return null;
 
-            var currentEnd = _globalToDate ?? DateTime.UtcNow;
-            var currentStart = _globalFromDate ?? currentEnd.AddHours(-_globalHoursBack);
+            // #4313: reuses #4305's server-local window/comparison logic (GetOverviewComparisonRange)
+            // instead of a second, independently-UTC-anchored resample -- GetQueryStatsComparisonAsync,
+            // GetProcedureStatsComparisonAsync and GetQueryStoreComparisonAsync (fed by this method's
+            // result, below) all filter on collection_time, which is server-local (SYSDATETIME()).
+            var range = Controls.CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
+                CompareToCombo.SelectedIndex, _globalHoursBack, _globalFromDate, _globalToDate,
+                DateTime.UtcNow, UtcOffsetMinutes);
 
-            return CompareToCombo.SelectedIndex switch
-            {
-                1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1)),   // Yesterday
-                2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Last week
-                3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7)),   // Same day last week
-                _ => null
-            };
+            return range is null ? null : (range.Value.From, range.Value.To);
         }
 
         private bool IsComparisonSupportedOnCurrentTab()

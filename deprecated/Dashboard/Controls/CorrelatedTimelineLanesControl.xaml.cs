@@ -144,10 +144,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     /// <summary>
     /// #4305 (mirrors Lite's #4296): the Server Trends tab's comparison range for the Resource Metrics
-    /// correlated-lanes ghost-line overlay. NOT ServerTab.xaml.cs's GetComparisonRange -- that one's preset-
-    /// range fallback stays a raw UTC now, which is also what the Query Performance grids' own comparison
-    /// (QueryPerformanceContent.Comparison.cs) independently resamples, and neither is touched here (#4305's
-    /// scope is the Overview/Server-Trends ghost line only; the grids' likely-matching bug is #4313).
+    /// correlated-lanes ghost-line overlay. #4313 reuses this same server-local window logic for
+    /// ServerTab.xaml.cs's GetComparisonRange (Query Stats / Proc Stats / Query Store comparison grids)
+    /// and for QueryPerformanceContent.Comparison.cs's RefreshComparisonAsync (via GetCurrentWindowServerLocal),
+    /// so every comparison consumer -- Server Trends ghost line and the three grids -- now derives its
+    /// current window from the same server-local basis instead of independently resampling a raw UTC now.
     /// CurrentFrom rides along in the return tuple so RefreshAsync's timeShift and ComparisonLabel
     /// reuse the SAME current-window start this built refFrom/refTo from, rather than resampling utcNow a
     /// second time (which, even on the corrected server-local basis, would not generally equal this call's
@@ -187,8 +188,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var memoryTask = _dataService.GetMemoryStatsAsync(hoursBack, fromDate, toDate);
         var fileIoTask = _dataService.GetFileIoLatencyTimeSeriesAsync(false, hoursBack, fromDate, toDate);
 
-        // Fetch baselines for band rendering if provider is available
-        var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+        // Fetch baselines for band rendering if provider is available. #4313: server-local window
+        // start (GetCurrentWindowServerLocal's Start), not a UTC-anchored one -- GetBaselineAsync
+        // buckets by analysisTime.Hour/DayOfWeek against collection_time (server-local, SYSDATETIME()),
+        // so a UTC-basis referenceTime picked the wrong hour/day-of-week bucket on any server not on UTC.
+        var referenceTime = GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.UtcOffsetMinutes).Start;
         Task<BaselineBucket?>? cpuBaselineTask = null;
         Task<BaselineBucket?>? waitBaselineTask = null;
         Task<BaselineBucket?>? ioBaselineTask = null;

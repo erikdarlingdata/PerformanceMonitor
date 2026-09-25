@@ -112,8 +112,10 @@ function serverRoute(rest) {
 
 /**
  * @param {object} [opts] — forwarded to renderServer; `{ poll: true }` marks this call as the 60s poll's own
- * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Not meaningful
- * to any other page today, so every other renderX() call below ignores it.
+ * refresh rather than a hashchange (sub-tab click, deep link) or the first paint (#4190/#4191). Also forwarded
+ * to renderSweeps (#4214 round-1 review), which threads it into the store host card so a poll tick replays
+ * that card's last-fetched payload instead of re-fetching (the profile it reports changes rarely — a hardware
+ * or version change, never per-tick). Every other renderX() call below still ignores it.
  */
 function route(opts) {
   /* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
@@ -126,7 +128,7 @@ function route(opts) {
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
   else if (r.name === "ag") renderAg(main);
-  else if (r.name === "sweeps") renderSweeps(main);
+  else if (r.name === "sweeps") renderSweeps(main, opts);
   else if (r.name === "alerts") renderAlerts(main);
   else if (r.name === "alertRules") renderAlertRuleList(main);
   else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
