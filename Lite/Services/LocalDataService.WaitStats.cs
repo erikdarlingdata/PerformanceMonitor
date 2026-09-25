@@ -11,12 +11,16 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctWaitTypesAsync"/> — see <see cref="LiteNameListCache"/>.</summary>
+    private readonly LiteNameListCache _distinctWaitTypesCache = new();
+
     /* #1240: the wait-stats tab shares the collector's ignored-wait list and excludes those types at
        DISPLAY time, so benign waits already in the DuckDB (collected before the filter was active) don't
        surface in the tab/picker — copying the JSON only stops new collection, not existing rows. */
@@ -110,13 +114,25 @@ LIMIT 1";
 
     /// <summary>
     /// Gets the distinct wait types that have been collected for a server.
+    /// <para>#4234: memoized through <see cref="_distinctWaitTypesCache"/> — keyed on (server, window length)
+    /// for <see cref="LiteNameListCache.Ttl"/>, so the full-window read behind this runs at most once per 15
+    /// minutes rather than on every 1-minute auto-refresh. <paramref name="nowUtc"/> is the cache's clock
+    /// seam — null uses the wall clock; a test passes an explicit time to fast-forward past the TTL without
+    /// sleeping.</para>
     /// </summary>
-    public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    public async Task<List<string>> GetDistinctWaitTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
     {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endTime - startTime;
+        if (_distinctWaitTypesCache.TryGet(serverId, windowLength, endTime, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -141,6 +157,8 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         {
             items.Add(reader.GetString(0));
         }
+
+        _distinctWaitTypesCache.Set(serverId, windowLength, endTime, items, effectiveNow);
         return items;
     }
 
@@ -216,10 +234,21 @@ ORDER BY collection_time";
     /// Batched sibling of <see cref="GetWaitStatsTrendAsync"/>: fetches the per-second trend for
     /// ALL selected wait types in ONE query (replacing an N+1 query-per-type loop), grouped by type.
     /// The LAG window is partitioned by wait_type so each type's per-second rate is computed independently.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (the ruling's own
+    /// wording, not the MCP convention of dividing one shared budget across every line a call draws), so the
+    /// pin is rows &lt;= budget * series count; <c>seriesCount</c> is therefore always 1 into
+    /// <see cref="TrendBuckets.AutoMinutes"/>. A bucket's rate is its summed wait over its summed rated
+    /// seconds (time-weighted, never an average of per-collection rates), and a bucket with no rated
+    /// collection is dropped (<c>HAVING</c>), same as the per-collection read always dropped that collection.
+    /// When EVERY bucket the whole call returned holds exactly one physical collection, each point is stamped
+    /// at its bucket's <c>first_collection_time</c> (that one collection's own raw time) instead of
+    /// <c>bucket_start</c>, a <c>time_bucket</c> grid line; a single merged bucket anywhere (any wait type)
+    /// keeps <c>bucket_start</c> throughout. Darling's twin is <c>ViewerDataService.WaitTrendsSql</c> /
+    /// <c>GetWaitStatsTrendsByTypesAsync</c> (#4234, PR #4304).</para>
     /// </summary>
     public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(int serverId, List<string> waitTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
-        using var _q = TimeQuery("GetWaitStatsTrendsByTypesAsync", "v_wait_stats trends batched by type");
+        using var _q = TimeQuery("GetWaitStatsTrendsByTypesAsync", "v_wait_stats trends batched by type, bucketed");
         var result = new Dictionary<string, List<WaitStatsTrendPoint>>();
         if (waitTypes.Count == 0) return result;
 
@@ -228,6 +257,10 @@ ORDER BY collection_time";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
         var typeParams = string.Join(", ", waitTypes.Select((_, i) => "$" + (i + 4)));
+        var widthParam = "$" + (waitTypes.Count + 4);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         command.CommandText = $@"
 WITH raw AS
@@ -248,43 +281,78 @@ WITH raw AS
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   wait_type IN ({typeParams})
+),
+rated AS
+(
+    SELECT
+        wait_type,
+        collection_time,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) END AS rated_wait_ms,
+        CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) END AS rated_signal_ms,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+        CASE WHEN interval_seconds > 0 THEN delta_waiting_tasks END AS rated_tasks
+    FROM raw
 )
 SELECT
     wait_type,
-    collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second,
-    CASE WHEN interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks WHEN interval_seconds > 0 THEN 0 END AS avg_ms_per_wait
-FROM raw
-ORDER BY wait_type, collection_time";
+    GREATEST(time_bucket(to_minutes(CAST({widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+    SUM(rated_signal_ms) / SUM(rated_seconds) AS signal_wait_time_ms_per_second,
+    CASE WHEN SUM(rated_tasks) > 0 THEN SUM(rated_wait_ms) / SUM(rated_tasks) ELSE 0 END AS avg_ms_per_wait,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY wait_type, 2
+HAVING COUNT(rated_seconds) > 0
+ORDER BY wait_type, 2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var wt in waitTypes)
             command.Parameters.Add(new DuckDBParameter { Value = wt });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate, double Signal, double Avg)>();
+        var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
+            /* A NULL rate is a bucket with no rated collection; HAVING already excludes it. */
             if (reader.IsDBNull(2))
             {
                 continue;
             }
 
-            var wt = reader.GetString(0);
-            if (!result.TryGetValue(wt, out var list))
+            if (reader.GetInt64(6) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(5),
+                reader.GetDouble(2),
+                reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
+                reader.IsDBNull(4) ? 0 : reader.GetDouble(4)));
+        }
+
+        foreach (var row in rows)
+        {
+            if (!result.TryGetValue(row.WaitType, out var list))
             {
                 list = new List<WaitStatsTrendPoint>();
-                result[wt] = list;
+                result[row.WaitType] = list;
             }
+
             list.Add(new WaitStatsTrendPoint
             {
-                CollectionTime = reader.GetDateTime(1),
-                WaitTimeMsPerSecond = reader.GetDouble(2),
-                SignalWaitTimeMsPerSecond = reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
-                AvgMsPerWait = reader.IsDBNull(4) ? 0 : reader.GetDouble(4)
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                WaitTimeMsPerSecond = row.Rate,
+                SignalWaitTimeMsPerSecond = row.Signal,
+                AvgMsPerWait = row.Avg
             });
         }
 
