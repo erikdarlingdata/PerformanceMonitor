@@ -110,6 +110,10 @@ public sealed class RepoFileAdoptionTests
     /// </summary>
     private static readonly string[] s_lfReaders =
     {
+        /* #4194: its live-mount-guard pin anchors the `if (live …) { … return; }` block in renderAlerts across
+           its four source lines as one literal, so the guard's return is told apart from just those words
+           appearing somewhere else in the file. */
+        "AlertHistoryLazyRenderTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",
