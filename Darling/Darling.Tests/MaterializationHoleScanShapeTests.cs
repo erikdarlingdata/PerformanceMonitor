@@ -165,7 +165,14 @@ ORDER BY b.bucket";
         Assert.Equal(48, LoopsOfTheOnlySubPlanUnder(buckets));
 
         var candidates = nodes.Single(n => NodeType(n) == "Subquery Scan" && n.GetProperty("Alias").GetString()!.StartsWith('c'));
-        Assert.Equal(6, LoopsOfTheOnlySubPlanUnder(candidates));
+        /* #3653 LC: the test switched from query_stats_hourly (legacy, which admitted the H20 restart row and
+           created a bucket for it) to query_stats_interval_hourly (successor, which filters restart rows in its
+           WHERE and therefore creates NO bucket for H20). H20 is now a candidate (missing from the aggregate)
+           even though the source check rejects it (restart row filtered). Candidates = H3, H4, H5, H6, H7, H8,
+           H20 = 7. The "source only where the materialization is empty" shape is unchanged: the outer EXISTS
+           filters H5-H8 (no raw data) and H20 (only a restart row, filtered by the source filter), leaving H3
+           and H4 as the actual holes repaired. */
+        Assert.Equal(7, LoopsOfTheOnlySubPlanUnder(candidates));
     }
 
     /* ───────────────────────────── seed ───────────────────────────── */

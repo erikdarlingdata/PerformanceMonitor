@@ -179,6 +179,23 @@ public sealed class RollupBackfillLiveTests
                — with no manual step and nothing armed by the backfill. Run
                through EnsureRetentionPoliciesAsync — the real seam — rather than re-evaluating its predicate,
                because "the gate would say yes" and "the gate DID arm the policy" are different claims. ── */
+
+        /* #3653 LC: RawTierCoverage now requires BOTH query_stats_interval_hourly AND
+           query_stats_db_interval_hourly to cover the raw data before arming the purge gate. The test
+           only backfilled the former. The db-grain companion must be force-refreshed: the backfill slices
+           above consumed query_stats' shared invalidation log, so a plain refresh finds no entries and
+           leaves query_stats_db_interval_hourly empty. force=true bypasses the log and scans the source. */
+        /* Floor rawOldest to the hourly bucket boundary: refresh_continuous_aggregate interprets window_start
+           as "only refresh buckets whose START >= window_start", so passing a sub-hour timestamp skips the
+           first bucket (whose start is rawOldest.Truncate(hour)) and leaves query_stats_db_interval_hourly
+           one bucket short of raw's oldest row, causing the coverage gate to remain Short. */
+        var dbRefreshFrom = new DateTime(rawOldest.Year, rawOldest.Month, rawOldest.Day, rawOldest.Hour, 0, 0, DateTimeKind.Unspecified);
+        using (var dbRefresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsDbIntervalHourlyView, force: true), connection))
+        {
+            dbRefresh.Parameters.AddWithValue(dbRefreshFrom);
+            await dbRefresh.ExecuteNonQueryAsync(ct);
+        }
+
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
 
         var armed = await CountAsync(connection, @"
@@ -774,6 +791,20 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
 
         /* (5) And only NOW does the gate arm — coverage genuinely reaches raw. */
         Assert.True(await RollupBackfill.ReadCoverageFloorAsync(connection, view, ct) <= probe.SourceOldestUtc);
+
+        /* #3653 LC: RawTierCoverage for query_stats now requires BOTH query_stats_interval_hourly AND
+           query_stats_db_interval_hourly. Force-refresh the db-grain companion so the gate can arm; the
+           force is needed because the backfill slices above consumed query_stats' shared invalidation log,
+           leaving the db-grain companion with no entries to process on a plain refresh. Floor to the hourly
+           bucket boundary: refresh_continuous_aggregate window_start excludes buckets whose START < start,
+           so a sub-hour timestamp would skip the first bucket and leave coverage one bucket short of raw. */
+        var dbRefreshFrom = new DateTime(plan.FromUtc.Year, plan.FromUtc.Month, plan.FromUtc.Day, plan.FromUtc.Hour, 0, 0, DateTimeKind.Unspecified);
+        using (var dbRefresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsDbIntervalHourlyView, force: true), connection))
+        {
+            dbRefresh.Parameters.AddWithValue(dbRefreshFrom);
+            await dbRefresh.ExecuteNonQueryAsync(ct);
+        }
+
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
         Assert.Equal(1L, await CountAsync(connection, ArmedRawPolicySql, ct));
 

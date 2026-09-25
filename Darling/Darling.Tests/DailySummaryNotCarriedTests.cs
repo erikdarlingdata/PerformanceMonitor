@@ -305,6 +305,8 @@ public sealed class DailySummaryNotCarriedLiveTests
         var hourly = TimescaleSupport.QueryStatsHourlyView;
         var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
         var daily = TimescaleSupport.QueryStatsDailyView;
+        // #3653 LC: the repair now targets the successor daily (legacy frozen); used below in the repair assertions.
+        var successorDaily = TimescaleSupport.QueryStatsIntervalDailyView;
 
         /* One layout, planted twice. Five whole UTC days, D0 the oldest, window [D0, D5). D0: 3 hashes. D1:
            NOTHING — the control, a day the server genuinely had no rows for. D2: 5 hashes, the day the daily
@@ -417,17 +419,31 @@ public sealed class DailySummaryNotCarriedLiveTests
             Assert.Equal("purged", root.GetProperty("hints").GetProperty("data_state").GetString());
         }
 
-        /* THE REPAIR: the start-up pass scans the daily from its floor (the recent D0 is inside the hourly source's
-           90-day horizon) and finds exactly the recent D2 — its source, the hourly, holds the day and the daily
-           never materialized it — and closes it. The old cluster is past the scan horizon and stands (the
-           disclosure above did not depend on the repair). The same calendar read then prints 5 where it printed
-           NULL, D2 counts as a source again, and the recent server's DaysMissing at the daily tier is empty. */
+        /* #3653 LC: the repair now operates on query_stats_interval_daily (the successor), not the frozen
+           query_stats_daily. Set up a hole in the successor daily by refreshing the successor hourly for D2
+           (giving it a source), then materializing the successor daily for D0 and D3 only.
+           The old server's successor hourly is left untouched so its cluster stays past the repair's scan
+           horizon and oldAfter.DaysMissing remains [O(2)]. */
+        await RefreshAsync(connection, successor, R(2), R(3), ct);
+        await RefreshAsync(connection, successorDaily, R(0), R(1), ct);
+        await RefreshAsync(connection, successorDaily, R(3), R(4), ct);
+        Assert.Equal(new[] { R(0), R(3) }, await BucketDaysAsync(connection, successorDaily, RecentServerId, ct));
+
+        /* THE REPAIR: the start-up pass scans the successor daily from its floor (the recent D0 is inside the
+           hourly source's 90-day horizon) and finds exactly the recent D2 — its source, the successor hourly,
+           holds the day and the successor daily never materialized it — and closes it. The old cluster is past
+           the scan horizon and stands. The stitch-aware calendar read then prints 5 where it printed NULL. */
         var log = new CapturingTestLogger();
         var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.UtcNow, ct);
         Assert.Equal(0, summary.Failures);
-        Assert.Contains($"{daily} had 1 bucket(s) in [{R(2):O}, {R(3):O})", log.Joined, StringComparison.Ordinal);
+        Assert.Contains($"{successorDaily} had 1 bucket(s) in [{R(2):O}, {R(3):O})", log.Joined, StringComparison.Ordinal);
 
-        var repaired = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily), RecentServerId, R(0), R(5), ct);
+        /* Read the repaired result via the stitch-aware router. The successor daily's floor is now R(0), so
+           StitchFloor returns null (successor covers the whole window) and RangeSqlFor picks the successor
+           daily for the whole window. D4 still falls through to raw (past ceiling). */
+        var coverageForRepair = await TimescaleSupport.DetectRollupCoverageAsync(
+            postgres, await TimescaleSupport.DetectRollupsAsync(postgres, ct), ct);
+        var repaired = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverageForRepair, R(0)), RecentServerId, R(0), R(5), ct);
         Assert.Equal(new[] { R(0), R(2), R(3), R(4) }, repaired.Select(r => r.Day).ToArray());
         Assert.Equal(new long?[] { 3L, 5L, 7L, 2L }, repaired.Select(r => r.UniqueQueries).ToArray());
         Assert.Equal(new[] { 1, 1, 1, 1 }, repaired.Select(r => r.SignalSourcesPresent).ToArray());
