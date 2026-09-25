@@ -368,7 +368,7 @@ public static class DarlingCliCommands
             return config.Servers;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -474,7 +474,7 @@ public static class DarlingCliCommands
             return CheckSettingsExitCode.StoreUnreachable;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -3004,7 +3004,7 @@ public static class DarlingCliCommands
         object? returnedPort;
         try
         {
-            await using var connection = new NpgsqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
             returnedPort = await command.ExecuteScalarAsync(cancellationToken);
@@ -4173,7 +4173,7 @@ public static class DarlingCliCommands
 
         try
         {
-            await using var connection = new NpgsqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
             await connection.OpenAsync(budget.Token);
             await using var command = new NpgsqlCommand(ReadEndpointTogglesSql, connection)
             {
@@ -4317,7 +4317,7 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -4702,7 +4702,7 @@ public static class DarlingCliCommands
             return 1;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
         try
         {
             await connection.OpenAsync(cancellationToken);
@@ -5154,7 +5154,7 @@ public static class DarlingCliCommands
         string resultJson;
         try
         {
-            await using var dataSource = NpgsqlDataSource.Create(connectionString);
+            await using var dataSource = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
             resultJson = await DarlingMcpServerAdminTools.AddServers(dataSource, json);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -5573,7 +5573,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         output.WriteLine($"PerformanceMonitor Darling — {(enable ? "enable" : "disable")} a collector ({verb})");
         output.WriteLine();
 
-        await using var dataSource = NpgsqlDataSource.Create(connectionString);
+        await using var dataSource = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
 
         int? serverId = null;
         var scopeLabel = "fleet-wide";
@@ -5722,7 +5722,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             return 1;
         }
 
-        await using var connection = new NpgsqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
         try
         {
             await connection.OpenAsync(cancellationToken);

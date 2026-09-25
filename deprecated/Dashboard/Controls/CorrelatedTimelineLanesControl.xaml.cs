@@ -121,10 +121,58 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
+    /// #4305 (mirrors Lite's #4296): the server-local "current window" the ghost-line comparison is built
+    /// from and aligned to. Under a custom range, fromDate/toDate already are server-local (ServerTab's
+    /// pickers convert them via ServerTimeHelper.DisplayTimeToServerTime before calling RefreshAsync).
+    /// Under a preset range (fromDate/toDate both null), this is the server's own local now --
+    /// utcNow.AddMinutes(utcOffsetMinutes), i.e. ServerTimeHelper.ServerNow without reading that class's
+    /// ambient static state directly -- NOT a raw UTC now: the correlated lanes' reads
+    /// (GetCpuUtilizationAsync, GetTotalWaitStatsTrendAsync, etc.) treat a supplied fromDate/toDate as
+    /// SERVER-LOCAL (their preset-range SQL branch filters on collection_time against SYSDATETIME(), not
+    /// SYSUTCDATETIME()), so a UTC fallback shifted the reference window by the server's UTC offset on any
+    /// server not on UTC. utcNow/utcOffsetMinutes are explicit parameters (not DateTime.UtcNow/
+    /// ServerTimeHelper.UtcOffsetMinutes read directly) so a test can drive this deterministically for a
+    /// server on either side of UTC, under a preset or a custom range.
+    /// </summary>
+    internal static (DateTime Start, DateTime End) GetCurrentWindowServerLocal(
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, int utcOffsetMinutes)
+    {
+        var end = toDate ?? utcNow.AddMinutes(utcOffsetMinutes);
+        var start = fromDate ?? end.AddHours(-hoursBack);
+        return (start, end);
+    }
+
+    /// <summary>
+    /// #4305 (mirrors Lite's #4296): the Server Trends tab's comparison range for the Resource Metrics
+    /// correlated-lanes ghost-line overlay. #4313 reuses this same server-local window logic for
+    /// ServerTab.xaml.cs's GetComparisonRange (Query Stats / Proc Stats / Query Store comparison grids)
+    /// and for QueryPerformanceContent.Comparison.cs's RefreshComparisonAsync (via GetCurrentWindowServerLocal),
+    /// so every comparison consumer -- Server Trends ghost line and the three grids -- now derives its
+    /// current window from the same server-local basis instead of independently resampling a raw UTC now.
+    /// CurrentFrom rides along in the return tuple so RefreshAsync's timeShift and ComparisonLabel
+    /// reuse the SAME current-window start this built refFrom/refTo from, rather than resampling utcNow a
+    /// second time (which, even on the corrected server-local basis, would not generally equal this call's
+    /// utcNow and so would not produce an EXACT 1-day/7-day shift).
+    /// </summary>
+    internal static (DateTime From, DateTime To, DateTime CurrentFrom)? GetOverviewComparisonRange(
+        int selectedIndex, int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, int utcOffsetMinutes)
+    {
+        var (currentStart, currentEnd) = GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, utcNow, utcOffsetMinutes);
+
+        return selectedIndex switch
+        {
+            1 => (currentStart.AddDays(-1), currentEnd.AddDays(-1), currentStart),   // Yesterday
+            2 => (currentStart.AddDays(-7), currentEnd.AddDays(-7), currentStart),   // Last week
+            3 => (currentStart.AddDays(-7), currentEnd.AddDays(-7), currentStart),   // Same day last week
+            _ => null
+        };
+    }
+
+    /// <summary>
     /// Refreshes all lane data for the given time range.
     /// </summary>
     public async Task RefreshAsync(int hoursBack, DateTime? fromDate, DateTime? toDate,
-        (DateTime From, DateTime To)? comparisonRange = null)
+        (DateTime From, DateTime To, DateTime CurrentFrom)? comparisonRange = null)
     {
         if (_dataService == null) return;
 
@@ -140,8 +188,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         var memoryTask = _dataService.GetMemoryStatsAsync(hoursBack, fromDate, toDate);
         var fileIoTask = _dataService.GetFileIoLatencyTimeSeriesAsync(false, hoursBack, fromDate, toDate);
 
-        // Fetch baselines for band rendering if provider is available
-        var referenceTime = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
+        // Fetch baselines for band rendering if provider is available. #4313: server-local window
+        // start (GetCurrentWindowServerLocal's Start), not a UTC-anchored one -- GetBaselineAsync
+        // buckets by analysisTime.Hour/DayOfWeek against collection_time (server-local, SYSDATETIME()),
+        // so a UTC-basis referenceTime picked the wrong hour/day-of-week bucket on any server not on UTC.
+        var referenceTime = GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.UtcOffsetMinutes).Start;
         Task<BaselineBucket?>? cpuBaselineTask = null;
         Task<BaselineBucket?>? waitBaselineTask = null;
         Task<BaselineBucket?>? ioBaselineTask = null;
@@ -244,7 +295,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         {
             var refFrom = comparisonRange.Value.From;
             var refTo = comparisonRange.Value.To;
-            var timeShift = (fromDate ?? DateTime.UtcNow.AddHours(-hoursBack)) - refFrom;
+            // Time shift: offset to align reference data with current chart X axis. #4305: CurrentFrom
+            // is the SAME server-local current-window start GetOverviewComparisonRange built refFrom
+            // from, so this is exact arithmetic (currentStart - (currentStart - Ndays) = Ndays) rather
+            // than a second, possibly UTC-basis, DateTime.UtcNow sample.
+            var timeShift = comparisonRange.Value.CurrentFrom - refFrom;
 
             var refCpuTask = _dataService.GetCpuUtilizationAsync(0, refFrom, refTo);
             var refWaitTask = _dataService.GetTotalWaitStatsTrendAsync(0, refFrom, refTo);
@@ -288,7 +343,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 AddGhostLine(FileIoChart, refIo, "#81C784");
             }
 
-            _crosshairManager?.SetComparisonLabel(ComparisonLabel(comparisonRange.Value, fromDate, hoursBack));
+            _crosshairManager?.SetComparisonLabel(ComparisonLabel(comparisonRange.Value));
         }
 
         /* VLines must be re-attached before SyncXAxes so they're part of
@@ -628,11 +683,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
         scatter.LinePattern = ScottPlot.LinePattern.Dashed;
     }
 
-    private static string ComparisonLabel((DateTime From, DateTime To) range,
-        DateTime? fromDate, int hoursBack)
+    private static string ComparisonLabel((DateTime From, DateTime To, DateTime CurrentFrom) range)
     {
-        var currentStart = fromDate ?? DateTime.UtcNow.AddHours(-hoursBack);
-        var daysBack = (currentStart - range.From).TotalDays;
+        // #4305: CurrentFrom is the same server-local current-window start the reference range was built
+        // from (GetOverviewComparisonRange) -- not a second, independently-sampled fromDate ?? DateTime.UtcNow.
+        var daysBack = (range.CurrentFrom - range.From).TotalDays;
 
         if (Math.Abs(daysBack - 1) < 0.5) return "yesterday";
         if (Math.Abs(daysBack - 7) < 0.5) return "last week";

@@ -1440,7 +1440,14 @@ public sealed class ViewerCommandTimeoutTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
 
         var publish = code.IndexOf("ViewerStorePool.Publish(effectiveConnectionString)", System.StringComparison.Ordinal);
-        var create = code.IndexOf("NpgsqlDataSource.Create(effectiveConnectionString)", System.StringComparison.Ordinal);
+
+        /* #4277 wraps the argument in DarlingStoreConnection.PinSessionTimeZoneUtc(...) so every STORE data
+           source pins its session timezone to UTC; Publish still runs on the pre-pin string above (the pin
+           only touches the Timezone keyword, never MaxPoolSize, so ViewerStorePool.MaxPoolSizeOf reads the
+           same value either way). */
+        var create = code.IndexOf(
+            "NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(effectiveConnectionString))",
+            System.StringComparison.Ordinal);
 
         Assert.True(
             create >= 0,
