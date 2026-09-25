@@ -619,6 +619,33 @@ WHERE NOT is_compressed";
         }
     }
 
+    /// <summary>The string-valued twin of <see cref="ClassifyVerdict"/>, for <see cref="ValueOnlyKeys"/>
+    /// (#4215 ruling M1's scope-cut item 2): <c>timezone</c>/<c>log_timezone</c> are not numeric, so the
+    /// match/mismatch is plain value equality against what <see cref="AttributeManagedSetting"/> found in the
+    /// file, rather than <see cref="BuildDerivedTargets"/>'s MB/count comparison. The override and unset
+    /// branches are identical to <see cref="ClassifyVerdict"/>'s — neither ever looked at a value either.</summary>
+    internal static (string SourceDescription, HostSettingVerdict Verdict) ClassifyValueVerdict(
+        ConfSettingAttribution attribution, string currentValue)
+    {
+        switch (attribution.Origin)
+        {
+            case ConfSettingOrigin.ManagedBlock:
+                var matches = string.Equals(currentValue, attribution.RawValue, StringComparison.Ordinal);
+                return (
+                    FormattableString.Invariant($"managed block ({attribution.File}:{attribution.Line})"),
+                    matches ? HostSettingVerdict.Matches : HostSettingVerdict.StaleAfterHardwareChange);
+
+            case ConfSettingOrigin.OperatorOverride:
+                var where = attribution.File is null
+                    ? "operator override"
+                    : FormattableString.Invariant($"operator override ({attribution.File}:{attribution.Line})");
+                return (where, HostSettingVerdict.OperatorOverride);
+
+            default:
+                return ("no managed block or override found; PostgreSQL default in force", HostSettingVerdict.OperatorOverride);
+        }
+    }
+
     /// <summary>The MCP/web-safe rendering of one setting's source (round-1 review, Medium 1). The CLI/local
     /// surfaces (<see cref="FormatProfileText"/>, <see cref="FormatStartupProfileText"/>, the stale-setting
     /// warning in <c>DarlingWorker</c>) print <see cref="HostSettingProfile.SourceDescription"/> verbatim,
@@ -1033,9 +1060,35 @@ WHERE NOT is_compressed";
 
     /// <summary>#4215 ruling M1: the keys that ALWAYS ride <c>pg_ctl</c>'s <c>-o</c> runtime override on a
     /// managed store — confirmed empirically in <c>ManagedConfFileLiveTests</c> — so <c>pg_settings.source</c>
-    /// is <c>command line</c> for both, unconditionally, exposed or not. The SSL trio is command-line only on
-    /// an EXPOSED store and is not in this fixed set yet; scoped out of this lane, noted in the PR body.</summary>
+    /// is <c>command line</c> for both, unconditionally, exposed or not. See <see cref="SslTrioKeys"/> for the
+    /// sibling set that only rides it conditionally.</summary>
     internal static readonly string[] CommandLineOnlyKeys = ["port", "listen_addresses"];
+
+    /// <summary>#4215 ruling M1's scope-cut item 1 (lane A1e): <c>ssl</c>, <c>ssl_cert_file</c> and
+    /// <c>ssl_key_file</c> — <see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/>'s <c>-o</c> trio,
+    /// appended ONLY when a cert is present (an exposed store). Unlike <see cref="CommandLineOnlyKeys"/>, a row
+    /// for one of these is stored only when <c>pg_settings.source</c> actually reads <c>command line</c> for it
+    /// — a loopback-only store never passes any of the three on the command line, so it reports nothing for
+    /// them, same as any other key nothing here touches, rather than a fixed row regardless.</summary>
+    internal static readonly string[] SslTrioKeys = ["ssl", "ssl_cert_file", "ssl_key_file"];
+
+    /// <summary>#4215 ruling M1's scope-cut item 2 (lane A1e, lane A1c's finding): <c>timezone</c> (v9's own
+    /// managed block) and <c>log_timezone</c> (deliberately never set by any managed block — see
+    /// <c>DarlingManagedPostgresTests</c>'s "not log_timezone" assertion) both read a NULL
+    /// <c>pg_settings.sourcefile</c> even when a file sets the value actually in force, confirmed empirically
+    /// alongside <c>port</c>/<c>listen_addresses</c> in <c>ManagedConfFileLiveTests</c> — a PostgreSQL
+    /// assign-hook quirk, not a Darling bug. <see cref="AttributeManagedSetting"/> already reads the file
+    /// directly rather than <c>pg_settings.sourcefile</c>, so it is unaffected; only the comparison differs
+    /// from the eight sizing keys' (<see cref="ClassifyValueVerdict"/> is a plain string equality, since
+    /// neither value is numeric — <see cref="NormalizePgSetting"/> would reject both). <c>pg_settings.name</c>
+    /// for the session zone is <c>TimeZone</c> (mixed case, historical) even though the conf file and every
+    /// other surface here spell it <c>timezone</c> — <c>PgSettingsName</c> carries the exact spelling the live
+    /// lookup needs; <c>FileKeyName</c> is what storage, file attribution and display all use instead.</summary>
+    internal static readonly (string PgSettingsName, string FileKeyName)[] ValueOnlyKeys =
+    [
+        ("TimeZone", "timezone"),
+        ("log_timezone", "log_timezone"),
+    ];
 
     internal const string ManagedConfPgFileSettingsErrorSql = @"
 SELECT name, sourcefile, sourceline
@@ -1105,7 +1158,11 @@ ORDER BY setting_name";
     {
         var targets = BuildDerivedTargets(ramBytesForDerivation, freeDiskBytesForDerivation);
         var sizingNames = targets.Select(t => t.Name).ToArray();
-        var allNames = sizingNames.Concat(CommandLineOnlyKeys).ToArray();
+        var allNames = sizingNames
+            .Concat(CommandLineOnlyKeys)
+            .Concat(SslTrioKeys)
+            .Concat(ValueOnlyKeys.Select(k => k.PgSettingsName))
+            .ToArray();
 
         var live = new Dictionary<string, (string Setting, string? Unit, string? Source, string? Context)>(StringComparer.Ordinal);
         await using (var cmd = new NpgsqlCommand(
@@ -1215,6 +1272,40 @@ ORDER BY setting_name";
             rows[name] = new ManagedConfVerdictRow(
                 name, pgValue.Setting, pgValue.Setting, "command line", null, null,
                 HostSettingVerdict.CommandLine, null, computedAtUtc, postmasterStartTimeUtc);
+        }
+
+        foreach (var name in SslTrioKeys)
+        {
+            if (!live.TryGetValue(name, out var pgValue))
+            {
+                continue;
+            }
+
+            /* Conditional, unlike the CommandLineOnlyKeys loop above: only store a row when this key is
+               ACTUALLY command-line-sourced right now (an exposed store). A loopback-only store's ssl/cert/key
+               settings come from the compiled-in default or an unmanaged conf line, and there is nothing #4215
+               owns to report for them — skip rather than store a misleading fixed verdict. */
+            if (string.Equals(pgValue.Source, "command line", StringComparison.Ordinal))
+            {
+                rows[name] = new ManagedConfVerdictRow(
+                    name, pgValue.Setting, pgValue.Setting, "command line", null, null,
+                    HostSettingVerdict.CommandLine, null, computedAtUtc, postmasterStartTimeUtc);
+            }
+        }
+
+        foreach (var (pgSettingsName, fileKeyName) in ValueOnlyKeys)
+        {
+            if (!live.TryGetValue(pgSettingsName, out var pgValue))
+            {
+                continue;
+            }
+
+            var attribution = AttributeManagedSetting(dataDirectory, fileKeyName);
+            var (sourceDescription, verdict) = ClassifyValueVerdict(attribution, pgValue.Setting);
+            rows[fileKeyName] = new ManagedConfVerdictRow(
+                fileKeyName, pgValue.Setting, attribution.RawValue ?? pgValue.Setting, sourceDescription,
+                attribution.File, attribution.Line == 0 ? null : attribution.Line, verdict, null,
+                computedAtUtc, postmasterStartTimeUtc);
         }
 
         if (writeResult is { HandEdited: true } handEdited)
