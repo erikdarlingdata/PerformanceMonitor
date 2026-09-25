@@ -52,32 +52,39 @@ public sealed class IntervalHonestHourlyRollupTests
     /* ─────────────────────────── the registry ─────────────────────────── */
 
     /// <summary>
-    /// Three pairs, each legacy REGISTERED (unlike #3698's pair), each successor registered and appended after
-    /// the corrected Query Store pair, each dependent daily registered and hierarchical from the LEGACY. The
-    /// structural facts the "stays registered" reasoning rests on, asserted against the shipped lists and the
-    /// shipped CREATE text rather than restated.
+    /// Three pairs, each legacy FROZEN off the hourly grid and the daily tier since #3653's LC (unlike Q12,
+    /// when both stayed registered and refreshing), each successor holding the hourly position its legacy
+    /// held, each dependent daily frozen beside its legacy rather than hierarchical from the grid. The
+    /// structural facts the freeze's "off the grid for good, never dropped" reasoning rests on, asserted
+    /// against the shipped lists and the shipped CREATE text rather than restated.
     /// </summary>
     [Fact]
-    public void ThreePairs_LegacyStaysRegistered_SuccessorAppended_DailyHangsOffTheLegacy()
+    public void ThreePairs_LegacyFrozenOffTheGrid_SuccessorTakesItsHourlyPosition_DailyFreezesBesideTheLegacy()
     {
         var hourly = TimescaleSupport.HourlyAggregates.Select(a => a.View).ToArray();
         var daily = TimescaleSupport.DailyAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
+        var frozen = TimescaleSupport.FrozenRollupAggregates.Select(a => a.View).ToHashSet(StringComparer.Ordinal);
 
         Assert.Equal(3, TimescaleSupport.SupersededHourlyRollups.Length);
-        Assert.Equal(9, hourly.Length);
+        Assert.Equal(6, hourly.Length);
+        Assert.Equal(6, TimescaleSupport.FrozenRollupAggregates.Length);
 
         foreach (var (legacy, successor, dependentDaily) in TimescaleSupport.SupersededHourlyRollups)
         {
-            Assert.Contains(legacy, hourly);
+            Assert.DoesNotContain(legacy, hourly);
+            Assert.Contains(legacy, frozen);
             Assert.Contains(successor, hourly);
             Assert.NotEqual(legacy, successor);
             Assert.True(Array.IndexOf(hourly, successor) > Array.IndexOf(hourly, TimescaleSupport.QueryStoreStatsCorrectedHourlyView),
-                $"{successor} must be appended after the corrected Query Store pair, not inserted beside its legacy — an insertion re-deals the bounded band positions");
+                $"{successor} must hold a position after the corrected Query Store pair, the shape the phase grid derives its light-band ordinals from");
             Assert.Equal(successor, TimescaleSupport.SuccessorOf(legacy));
             Assert.Null(TimescaleSupport.SuccessorOf(successor));
 
-            Assert.Contains(dependentDaily, daily);
-            var dailyCreate = TimescaleSupport.DailyAggregates.Single(a => a.View == dependentDaily).CreateSql;
+            /* The dependent daily froze WITH its legacy: both left HourlyAggregates/DailyAggregates and the
+               phase grid together, so the daily is read off FrozenRollupAggregates now, not DailyAggregates. */
+            Assert.DoesNotContain(dependentDaily, daily);
+            Assert.Contains(dependentDaily, frozen);
+            var dailyCreate = TimescaleSupport.FrozenRollupAggregates.Single(a => a.View == dependentDaily).CreateSql;
             Assert.Contains($"FROM collect.{legacy}", dailyCreate, StringComparison.Ordinal);
             Assert.DoesNotContain($"FROM collect.{successor}", dailyCreate, StringComparison.Ordinal);
         }
@@ -87,7 +94,7 @@ public sealed class IntervalHonestHourlyRollupTests
         Assert.Null(TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStoreStatsIntervalHourlyView));
         Assert.Null(TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStoreStatsCorrectedHourlyView));
 
-        /* Neither list's names appear in the other's: a legacy here is registered, a legacy there is not. */
+        /* Neither list's names appear in the other's: a legacy here is frozen, a legacy there is retired on sight. */
         var baselineLegacies = TimescaleSupport.SupersededBaselineRelations.Select(s => s.Legacy).ToHashSet(StringComparer.Ordinal);
         Assert.Empty(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Legacy).Intersect(baselineLegacies));
         Assert.Empty(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Legacy).Intersect(TimescaleSupport.RetiredBaselineRelations));
