@@ -151,16 +151,47 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
         }
 
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
-        /* Bound, not a literal 120 (#4198) — see HeatmapSql_PreviewWidthIsABoundParameter below. */
-        Assert.Contains("LEFT(query_text, $7) AS query_preview", sql, StringComparison.Ordinal);
+
+        /* #4233: base reads the fact table directly, never v_query_stats (#1767's payload-resolving
+           view), so no row in the window pays for the query_text_dim join or a truncation it will never
+           be shown. */
+        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
+
+        /* The preview is resolved for the rn = 1 row of each cell only, at the #4198 bound width - inline
+           text when the row predates #1767, the dimension row when it does not, truncated last. */
+        Assert.Contains(
+            "LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), $7) AS top_query_text",
+            sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LEFT(query_text, 120)", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
 
         /* DuckDB's ARG_MAX has no Postgres equivalent; the viewer's replacement is a top-1 window over the
            cell, with the cell's count carried alongside so one pass yields both. */
         Assert.Contains("ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC)", sql, StringComparison.Ordinal);
         Assert.Contains("COUNT(*) OVER (PARTITION BY time_bin, bucket_index)", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE rn = 1", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4233's source pin: <c>base</c> carries the raw digest and the raw inline text (pre-#1767 rows)
+    /// through the window sorts, never a resolved-and-truncated preview - that resolution happens once,
+    /// in the outer SELECT, only for the row each cell keeps. Fails against the pre-#4233 SQL, which
+    /// computed <c>LEFT(query_text, $7) AS query_preview</c> inside <c>base</c> for every row.
+    /// </summary>
+    [Fact]
+    public void BaseCte_CarriesTheDigestAndInlineText_NeverATruncatedPreview()
+    {
+        foreach (var metric in AllMetrics)
+        {
+            var sql = DarlingQueryHeatmapReader.BuildQueryHeatmapSql(metric);
+            var baseCte = sql[..sql.IndexOf("binned AS (", StringComparison.Ordinal)];
+
+            Assert.DoesNotContain("query_preview", baseCte, StringComparison.Ordinal);
+            Assert.DoesNotContain("LEFT(", baseCte, StringComparison.Ordinal);
+            Assert.Contains("query_text,", baseCte, StringComparison.Ordinal);
+            Assert.Contains("query_text_digest", baseCte, StringComparison.Ordinal);
+            Assert.Contains("FROM query_stats", baseCte, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>
@@ -245,17 +276,19 @@ public sealed class DarlingQueryHeatmapSurfaceAndSqlTests
     /// table: query_stats is PERIODIC, so no rows really does mean nobody looked.
     /// </summary>
     [Fact]
-    public void CoverageSql_ProbesTheSameView_ForEverAndForTheWindow()
+    public void CoverageSql_ProbesTheSameTable_ForEverAndForTheWindow()
     {
         var sql = DarlingQueryHeatmapReader.HeatmapCoverageSql;
-        Assert.Equal(2, CountOf(sql, "FROM v_query_stats"));
+        Assert.Equal(2, CountOf(sql, "FROM query_stats"));
         Assert.Equal(2, CountOf(sql, "EXISTS ("));
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
 
-        /* The read itself is over the view, so the probe must be too - a probe on the base table could say
-           "collected" about rows the read cannot see. */
-        Assert.Contains("FROM v_query_stats", DarlingQueryHeatmapReader.BuildQueryHeatmapSql(HeatmapMetric.Duration), StringComparison.Ordinal);
+        /* #4233 moved the read itself off v_query_stats onto query_stats directly; the probe follows so
+           this stays true by construction, not just by the (still valid) argument that the view's LEFT
+           JOINs never drop a fact row. */
+        Assert.Contains("FROM query_stats", DarlingQueryHeatmapReader.BuildQueryHeatmapSql(HeatmapMetric.Duration), StringComparison.Ordinal);
+        Assert.DoesNotContain("v_query_stats", DarlingQueryHeatmapReader.BuildQueryHeatmapSql(HeatmapMetric.Duration), StringComparison.Ordinal);
 
         /* The "ever" arm is deliberately UNBOUNDED - it is the question "did anyone ever collect this
            server", and bounding it would make a quiet window look like a missing collector. */
