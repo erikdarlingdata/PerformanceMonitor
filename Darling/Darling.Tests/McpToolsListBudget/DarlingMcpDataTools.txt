@@ -61,14 +61,14 @@ param get_tempdb_trend.bucket_minutes 55
 param get_tempdb_trend.hours_back 29
 param get_tempdb_trend.server_name 28
 
-tool get_top_procedures_by_cpu 678
+tool get_top_procedures_by_cpu 406
 param get_top_procedures_by_cpu.as_of 167
 param get_top_procedures_by_cpu.database_name 30
 param get_top_procedures_by_cpu.hours_back 29
 param get_top_procedures_by_cpu.server_name 28
 param get_top_procedures_by_cpu.top 37
 
-tool get_top_queries_by_cpu 742
+tool get_top_queries_by_cpu 474
 param get_top_queries_by_cpu.as_of 167
 param get_top_queries_by_cpu.database_name 30
 param get_top_queries_by_cpu.group_by 167

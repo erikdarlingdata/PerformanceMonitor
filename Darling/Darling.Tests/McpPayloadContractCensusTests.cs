@@ -1994,8 +1994,23 @@ public sealed class McpPayloadContractCensusTests
                is a guardrail and must be served in the head. Unconverted, the head is the whole description. */
             Assert.Contains(clause, description!, StringComparison.Ordinal);
             var head = McpToolGuide.Split(description!).Head;
-            Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
-            Assert.Contains("not a page cut", head, StringComparison.Ordinal);
+            if (tool is "get_top_queries_by_cpu" or "get_top_procedures_by_cpu")
+            {
+                /* #4231: these two are shared with Lite, and D6's twin pin
+                   (McpToolGuideTests.EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads)
+                   requires their served head stay byte-identical to Lite's until Lite's own #4279 ships the
+                   same disclosure — a Darling-only head guardrail would fail that pin regardless of merge
+                   order. Both facts still ride the wire today, in the tail's WindowTruncatedDescription
+                   clause, so read them from the full description here rather than the head. A follow-up PR
+                   can move one identical sentence into both SKUs' heads once #4279 merges. */
+                Assert.Contains(WindowFloorKey, description!, StringComparison.Ordinal);
+                Assert.Contains("not a page cut", description!, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(WindowFloorKey, head, StringComparison.Ordinal);
+                Assert.Contains("not a page cut", head, StringComparison.Ordinal);
+            }
             Assert.DoesNotContain("read truncated", description!, StringComparison.Ordinal);
         }
     }
