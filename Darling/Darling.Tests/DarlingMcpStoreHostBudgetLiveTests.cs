@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// pg_settings.source = ...)"), so it is the more conservative of the two shapes for a byte count, not the
 /// managed one a sized store would actually return.</para>
 /// </summary>
+[Collection("live-postgres")]
 public sealed class DarlingMcpStoreHostBudgetLiveTests
 {
     private readonly ITestOutputHelper _output;
