@@ -155,6 +155,71 @@ VALUES
     }
 
     /// <summary>
+    /// #3953 B4: the legacy-row probe (<see cref="ViewerDataService.QueryStoreSlicerHasLegacyRowSql"/>) isolated
+    /// from every other gate clause, with the same sinkhole technique as
+    /// <see cref="Gate_RefusesPendingAndLiteralEndBeforeAppliedThrough_AndEnforcesItsOwnThresholdSeparately"/>: a
+    /// row planted only in the wide table, never in raw. With no <c>interval_start_time_utc IS NULL</c> row for
+    /// the server, every other clause here already holds (same seed as that test), so the table answers and the
+    /// sinkhole row shows up. Adding exactly one such NULL-start row for the SAME server -- elsewhere, well
+    /// outside the query window, since the probe is deliberately unscoped by window -- must flip the read to
+    /// raw without changing anything else, and the sinkhole row must disappear, because raw never had it.
+    /// <see cref="TheTableRead_EqualsRaw_OpenEndAndLiteralEndAtAppliedThrough_EndToEnd"/> already proves the
+    /// clause does not break correctness once it fires (its base seed is null-interval throughout, so it reads
+    /// raw from the start); this test proves the clause is what MOVES the read, by toggling only it.
+    /// </summary>
+    [Fact]
+    public async Task LegacyRow_SendsTheSlicerReadToRaw_AndItsAbsenceReadsTheTable()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 B4 legacy-row live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        /* Non-null interval_start_time_utc rows only -- SeedSlicerEdgeCasesAsync's own doc says a test that seeds
+           only this helper never trips the legacy clause, and Gate_Refuses... above already proves this exact
+           seed plus ForceFilledSinceAsync makes every other gate clause hold end to end. */
+        await SeedSlicerEdgeCasesAsync(runner, ServerId, ct);
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+
+        /* The sinkhole row: exists ONLY in the wide table, never in raw. */
+        var sinkholeBucket = WindowEnd.AddHours(-2);
+        var sinkholeHour = new DateTime(sinkholeBucket.Year, sinkholeBucket.Month, sinkholeBucket.Day, sinkholeBucket.Hour, 0, 0);
+        await ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+ last_execution_time, execution_count, avg_duration_us, avg_cpu_time_us, runtime_stats_interval_id, interval_start_time_utc)
+VALUES
+(@cutoff, @server_id, 'qsLegacySinkhole', 999998, 999998, 'Regular', @cutoff, @cutoff, 1, 1000, 1000, 999998, @cutoff);",
+            sinkholeBucket, ct);
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+        /* No NULL-start row for this server yet: the probe says "no", the table answers, and the sinkhole row
+           (which raw does not have) shows up. */
+        var beforeLegacyRow = await viewer.GetQueryStoreSlicerDataAsync(ServerId, WindowStart, WindowEnd);
+        Assert.Contains(beforeLegacyRow, b => b.BucketTime == sinkholeHour);
+
+        /* Exactly one NULL-start row for the SAME server, 40 days before the window -- the probe is unscoped by
+           window (QueryStoreSlicerHasLegacyRowSql's own doc), so this alone must flip the read. Nothing else
+           about the seed changes. */
+        await ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_wide
+(collection_time, server_id, database_name, query_id, plan_id, execution_type_desc, first_execution_time,
+ last_execution_time, execution_count, avg_duration_us, avg_cpu_time_us, runtime_stats_interval_id, interval_start_time_utc)
+VALUES
+(@cutoff, @server_id, 'qsLegacyMarker', 999997, 999997, 'Regular', @cutoff, @cutoff, 1, 1000, 1000, 999997, NULL);",
+            WindowStart.AddDays(-40), ct);
+
+        /* Now the probe says "yes": the read falls back to raw, which never had the sinkhole row. */
+        var afterLegacyRow = await viewer.GetQueryStoreSlicerDataAsync(ServerId, WindowStart, WindowEnd);
+        Assert.DoesNotContain(afterLegacyRow, b => b.BucketTime == sinkholeHour);
+    }
+
+    /// <summary>
     /// The clamp (review D4R H3, restated for the slicer's own $4): once raw's oldest chunk is dropped, the wide
     /// table still holds those rows (its own retention is independent of raw's), so an unclamped table read's
     /// collection_time floor would let them through where raw no longer can. Bounding it at
