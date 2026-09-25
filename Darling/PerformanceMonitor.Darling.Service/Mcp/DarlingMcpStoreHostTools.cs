@@ -49,9 +49,9 @@ public sealed class DarlingMcpStoreHostTools
         + "CURRENT RAM/disk would size differently today - the #4207/#4211 class of drift. <<GUIDE>> Reports the "
         + "host PostgreSQL/TimescaleDB runs on and whether the settings in force still match it: platform "
         + "(OS, containerized, processor_count), ram (total_bytes, cgroup_limit_bytes if any, effective_bytes, "
-        + "authoritative, source), data_volume (total_bytes, free_bytes, filesystem; on a bring-your-own store "
-        + "this is the SERVICE's own disk, not necessarily the store's - data_volume_note says so when managed "
-        + "is false), managed, and store (postgres_version, timescale_version, size_bytes, "
+        + "authoritative, source), data_volume (total_bytes, free_bytes, filesystem, ready; on a bring-your-own "
+        + "store this is the SERVICE's own disk, not necessarily the store's - data_volume.note says so when "
+        + "managed is false), managed, and store (postgres_version, timescale_version, size_bytes, "
         + "buffer_hit_ratio_percent, temp_bytes, uncompressed_chunk_bytes, uncompressed_chunk_count, "
         + "uncompressed_chunk_percent_of_ram - the #4211 metric: how much of the store's raw ingest sits "
         + "uncompressed against the RAM budget). settings is one row per sizing-relevant setting (shared_buffers, "
@@ -64,7 +64,9 @@ public sealed class DarlingMcpStoreHostTools
         + "every managed block, is what is actually in force), or not_managed (a bring-your-own store; nothing "
         + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). "
         + "any_stale is true when one or more settings verdict is stale_after_hardware_change, so a caller can "
-        + "act on the summary without walking the whole table. This tool never writes a setting or a conf file.")]
+        + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
+        + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
+        + "of calls costs one live read. This tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(NpgsqlDataSource postgres, PostgresConfig? postgresConfig)
     {
         if (postgresConfig is null)
