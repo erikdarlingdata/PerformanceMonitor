@@ -107,9 +107,13 @@ public sealed class WebExceptionTextCensusTests
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"),
             "snapshot.Detail",
-            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — today it is the raw " +
-            "ex.Message of a startup failure, verbatim (round-1 H4, tracked in #4316, fixed by PR #4326); " +
-            "remove this entry once #4326 lands."
+            "CollectorRuntimeState's own startup-step detail string (the /ping surface) — #4316 (round-1 H4) " +
+            "replaced the raw ex.Message here with a fixed sentence per startup step (FailureDetailFor), the " +
+            "joined DarlingConfig.Validate problem list (PublishConfigurationProblems), or the fixed " +
+            "Windows-only sentence (ManagedStoreNeedsWindowsDetail) — never exception text again. This entry " +
+            "STAYS regardless: the pattern's .Detail alternation matches any identifier.Detail syntactically, " +
+            "whatever the value holds, so snapshot.Detail keeps matching a scan built to catch an exception's " +
+            "own .Detail even though nothing here reads one."
         ),
         (
             Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Hosting", "DarlingWebFailureLog.cs"),
