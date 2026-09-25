@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
 using System.Linq;
@@ -996,13 +997,47 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* Pipeline order: response compression (#4188) runs FIRST of all, ahead of every gate below — it only
            transforms an OUTGOING body (Content-Encoding), never a routing or auth decision, so it costs
-           nothing to wrap the gates' own refusal bodies and the login page in it too. Then the Host-allowlist
-           middleware runs on EVERY request (both modes) as the DNS-rebinding guard, then (network mode only)
-           the auth middleware, then the no-store stamp on /api/* responses, then DarlingWebEndpoints.MapAll ->
-           UseDefaultFiles -> UseStaticFiles. WebApplication auto-inserts UseRouting at the head and
-           UseEndpoints at the tail, so the static-file middleware sits behind these gates and serves the SPA
-           for non-API paths. */
+           nothing to wrap the gates' own refusal bodies and the login page in it too. Then the #4276 failure
+           backstop (below), then the Host-allowlist middleware runs on EVERY request (both modes) as the
+           DNS-rebinding guard, then (network mode only) the auth middleware, then the no-store stamp on
+           /api/* responses, then DarlingWebEndpoints.MapAll -> UseDefaultFiles -> UseStaticFiles. WebApplication
+           auto-inserts UseRouting at the head and UseEndpoints at the tail, so the static-file middleware sits
+           behind these gates and serves the SPA for non-API paths. */
         app.UseResponseCompression();
+
+        /* #4276: one backstop exception handler, ahead of every gate and every route below, so a route with
+           no try/catch of its own (the issue's own examples, /api/ag and /api/fleet, plus any future one)
+           cannot reach ASP.NET Core's own error handling — which writes into the providers ClearProviders
+           silenced above, so the browser got an empty 500 with no trace anywhere. Ahead of the gates too, as
+           a pure backstop: they already handle their own exceptions (HandleAuthFlowAsync's try/catch below),
+           so this only ever fires for an UNANTICIPATED throw from a gate, or an uncaught one from a route
+           MapAll wires. A client that closed the page is not a failure — DarlingWebFailureLog never sees it,
+           and nothing is written to a caller who is gone. */
+        app.Use(async (context, next) =>
+        {
+            var route = context.Request.Path.Value ?? "/";
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                await next(context);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                DarlingWebFailureLog.Report(_logger, route, stopwatch.ElapsedMilliseconds, ex);
+
+                /* Only log, per the ruling, once the response has already started — there is no header or
+                   body left to change at that point. */
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.StatusCode = DarlingWebFailureLog.StatusCode(ex);
+                    context.Response.ContentType = "application/json; charset=utf-8";
+                    await context.Response.WriteAsync(DarlingWebFailureLog.Body(ex).ToJsonString());
+                }
+            }
+        });
 
         /* DNS-rebinding guard — runs in BOTH modes (the #1576 fix: it previously guarded network mode only,
            leaving the tokenless loopback write path reachable cross-origin via a DNS rebind). The loopback
