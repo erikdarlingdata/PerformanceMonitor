@@ -280,6 +280,39 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
     }
 
+    /* ═══════════════════════════ DarlingWebEndpoints.MuteRuleToolResult: the ServerError arm (#4283 H1) ═══════════════════════════ */
+
+    [Fact]
+    public void MuteRuleToolResult_ServerError_MapsTo500_NoExceptionText_OneErrorLog()
+    {
+        var logger = new CapturingTestLogger();
+        var ex = new InvalidOperationException("Host=store.internal;Port=5432 role \"app_rw\" failed");
+        var envelope = McpHelpers.FormatError("create_mute_rule", ex);
+
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, StatusCodes.Status201Created);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status500InternalServerError, statusCode);
+        Assert.Equal(DarlingWebFailureLog.GenericMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.DoesNotContain("store.internal", json.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
+    public void MuteRuleToolResult_ServerErrorTimeout_MapsTo503()
+    {
+        var logger = new CapturingTestLogger();
+        var ex = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
+        var envelope = McpHelpers.FormatError("create_mute_rule", ex);
+
+        var result = DarlingWebEndpoints.MuteRuleToolResult(envelope, "/api/mute-rules", logger, 5, StatusCodes.Status201Created);
+
+        var json = ResultBody(result, out var statusCode);
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, statusCode);
+        Assert.Equal(DarlingWebFailureLog.TimeoutMessage, json.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+    }
+
     /// <summary>Reads an <see cref="IResult"/> built by <c>Results.Json</c>/<c>Results.Text</c> the same way
     /// the pipeline would, via <see cref="DefaultHttpContext"/>'s response body.</summary>
     private static JsonDocument ResultBody(IResult result, out int statusCode)

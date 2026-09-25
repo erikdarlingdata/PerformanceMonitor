@@ -336,7 +336,7 @@ public static class DarlingWebEndpoints
 
         MapCustomViews(app, postgres, logger);
         MapCustomAlerts(app, postgres, logger);
-        MapMuteRules(app, postgres);
+        MapMuteRules(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -784,7 +784,7 @@ public static class DarlingWebEndpoints
     /// <c>{"enabled": bool}</c> sub-resource, the reversible flag flip that never touches another field. The id
     /// is the rule's GUID string from <c>get_mute_rules</c> / create's response.</para>
     /// </summary>
-    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new PgMuteRuleStore(postgres);
 
@@ -799,9 +799,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context)),
-                StatusCodes.Status201Created);
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context));
+            return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
         /* Update — PARTIAL, the merged update_mute_rule semantics verbatim: the body carries ONLY the fields to
@@ -816,8 +816,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context)));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context));
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 
         /* Set-enabled — the reversible flag flip that keeps the rule's id, scope, reason and creation date (the
@@ -850,8 +851,9 @@ public static class DarlingWebEndpoints
                     StatusCodes.Status400BadRequest);
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}/enabled", logger, stopwatch.ElapsedMilliseconds);
         });
 
         /* Delete — 200 with the verb's {status:"deleted", rule_id} envelope rather than the views surface's
@@ -865,8 +867,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -925,13 +928,24 @@ public static class DarlingWebEndpoints
 
     /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
     /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — a refusal (<c>invalid</c>) included, which is the
-    /// shape the read surface adopted from here in #3739 — except an error (the caught-exception envelope or a
-    /// bare non-JSON string), which is wrapped as <c>{"error": sentence}</c> exactly as <see cref="ToHttpResult"/>
-    /// wraps the read surface's.</summary>
-    private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
+    /// shape the read surface adopted from here in #3739.
+    ///
+    /// <para><b>#4283: the ServerError arm never puts the tool's caught-exception text on the wire.</b> Classified
+    /// FIRST, before <see cref="MuteRuleEnvelopeStatus"/> ever runs, and answered through
+    /// <see cref="ServerErrorResult"/> exactly as <see cref="ToHttpResult"/> answers the read surface's — logged
+    /// ONCE, the body a fixed message, 503 when the sentence carries a caught statement_timeout's 57014 token,
+    /// 500 otherwise. Any other error (a bare non-JSON string) is still wrapped as <c>{"error": sentence}</c>.</para>
+    /// </summary>
+    internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
     {
+        var kind = ClassifyToolResponse(result);
+        if (kind is ToolResponseKind.ServerError)
+        {
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs);
+        }
+
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
-        return ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
+        return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
             ? Results.Text(result, "application/json", statusCode: httpStatus)
             : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
     }
