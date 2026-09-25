@@ -261,4 +261,96 @@ public static class DarlingPgCpuUtilizationReader
 
         return samples;
     }
+
+    /// <summary>One bucketed point (#4193 - the TrendBuckets contract #3897 gave the rest of the trend family).
+    /// CPU and ACU are averaged with each bucket's peak kept beside it, so a saturation minute survives a wide
+    /// bucket; the capacity trio stays averaged, on <c>Rounded</c>'s terms; the memory pressure pair
+    /// (<see cref="Memory"/>'s <c>FreeBytes</c>/<c>ActiveBytes</c>) is the bucket's WORST sample - minimum free,
+    /// maximum active - rather than an average, so a brief pressure spike is not smoothed away; the other four
+    /// memory columns stay averaged.</summary>
+    public sealed record CpuBucketPoint(
+        DateTime BucketStartUtc,
+        double CpuPercent,
+        double? PeakCpuPercent,
+        double? AcuUtilizationPercent,
+        double? PeakAcuUtilizationPercent,
+        double? ServerlessCapacityAcu,
+        double? MaxConfiguredAcu,
+        long Samples,
+        long CapacitySamples,
+        HostMemory? Memory,
+        long MemorySamples);
+
+    /// <summary>date_bin buckets on <c>sample_time</c>, windowed on <c>collection_time</c> - the same split
+    /// <see cref="HistorySql"/> takes (see its own doc comment) - and NOT clamped to the window's start, on the
+    /// same terms as the SQL Server CPU trend's own bucketed query
+    /// (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>): a collection can carry a sample from before the
+    /// window, and clamping would move it off the minute it actually landed on. $1 server_id, $2/$3 window
+    /// (naive UTC), $4 bucket width in minutes.</summary>
+    internal static readonly string HistoryBucketedSql = $"""
+        SELECT
+            date_bin(CAST($4 AS integer) * INTERVAL '1 minute', sample_time, {TrendBucketSql.OriginSql}) AS bucket_start,
+            AVG(cpu_percent) AS cpu_percent,
+            MAX(cpu_percent) AS peak_cpu_percent,
+            AVG(acu_utilization_percent) AS acu_utilization_percent,
+            MAX(acu_utilization_percent) AS peak_acu_utilization_percent,
+            AVG(serverless_capacity_acu) AS serverless_capacity_acu,
+            AVG(max_configured_acu) AS max_configured_acu,
+            COUNT(*) AS samples,
+            COUNT(acu_utilization_percent) AS capacity_samples,
+            AVG(memory_total_bytes)::double precision AS memory_total_bytes,
+            MIN(memory_free_bytes) AS memory_free_bytes,
+            AVG(memory_cached_bytes)::double precision AS memory_cached_bytes,
+            AVG(memory_buffers_bytes)::double precision AS memory_buffers_bytes,
+            MAX(memory_active_bytes) AS memory_active_bytes,
+            AVG(configured_memory_bytes)::double precision AS configured_memory_bytes,
+            COUNT(memory_total_bytes) AS memory_samples
+        FROM pg_cpu_utilization
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   cpu_percent IS NOT NULL
+        GROUP BY 1
+        ORDER BY 1
+        """;
+
+    /// <summary>Runs <see cref="HistoryBucketedSql"/> - the served read behind <c>get_pg_cpu_utilization</c>.</summary>
+    public static async Task<System.Collections.Generic.List<CpuBucketPoint>> GetBucketedHistoryAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        var points = new System.Collections.Generic.List<CpuBucketPoint>();
+        await using var command = postgres.CreateCommand(HistoryBucketedSql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(bucketMinutes);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            points.Add(new CpuBucketPoint(
+                DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc),
+                reader.GetDouble(1),
+                reader.IsDBNull(2) ? null : reader.GetDouble(2),
+                reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                reader.IsDBNull(5) ? null : reader.GetDouble(5),
+                reader.IsDBNull(6) ? null : reader.GetDouble(6),
+                reader.GetInt64(7),
+                reader.GetInt64(8),
+                new HostMemory(
+                    TotalBytes: reader.IsDBNull(9) ? null : (long)Math.Round(reader.GetDouble(9)),
+                    FreeBytes: reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                    CachedBytes: reader.IsDBNull(11) ? null : (long)Math.Round(reader.GetDouble(11)),
+                    BuffersBytes: reader.IsDBNull(12) ? null : (long)Math.Round(reader.GetDouble(12)),
+                    ActiveBytes: reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                    ConfiguredBytes: reader.IsDBNull(14) ? null : (long)Math.Round(reader.GetDouble(14))),
+                reader.GetInt64(15)));
+        }
+
+        return points;
+    }
 }

@@ -336,7 +336,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs baseline, every capture before it. get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent and io_regression_percent are null, not 0%, when their baseline is 0 (severity is null with the former). additional_duration_ms is the ranking key. empty: no regression (all clear), or a baseline with nothing yet in the window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - every capture BEFORE that window. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
+    [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
     public static async Task<string> GetQueryStoreRegressions(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -363,6 +363,9 @@ public sealed class McpQueryTools
             var rows = await dataService.GetQueryStoreRegressionsAsync(
                 resolved.ServerId, hours_back, limit + 1, databases, asOfUtc: windowEnd);
 
+            var windowStart = windowEnd.AddHours(-hours_back);
+            var baselineStart = windowStart.AddDays(-LocalDataService.BaselineLookbackDays);
+
             if (rows.Count == 0)
                 return await EmptyRegressionsAsync(dataService, resolved.ServerId, resolved.ServerName, hours_back, windowEnd);
 
@@ -373,12 +376,11 @@ public sealed class McpQueryTools
                 server = resolved.ServerName,
                 hours_back,
                 database_name,
-                /*
-                    Named so the caller cannot mistake which side is which. "baseline" is NOT a fixed
-                    lookback: it is everything collected before the window, so a longer hours_back makes
-                    the recent window bigger AND the baseline shorter.
-                */
-                baseline_is = "every Query Store capture collected BEFORE the recent window",
+                /* A fixed lookback ending at the recent window's start, not "every capture ever collected
+                   before it" - the baseline no longer grows with retention (Lite's twin of Darling's #4195). */
+                baseline_start = baselineStart.ToString("o"),
+                baseline_end = windowStart.ToString("o"),
+                baseline_is = $"Query Store captures from baseline_start to the recent window's start ({LocalDataService.BaselineLookbackDays} days)",
                 gate = "average CPU regressed by more than 25%",
                 regression_count = Math.Min(rows.Count, limit),
                 truncated,
@@ -468,7 +470,7 @@ public sealed class McpQueryTools
         {
             return McpHelpers.Status(
                 "unavailable",
-                $"Every Query Store capture for {serverName} falls INSIDE the last {hours_back} hour(s), so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Shorten hours_back so more of the collected history falls before the window, or wait until this server has history older than it.");
+                $"{serverName} has no Query Store capture in the {LocalDataService.BaselineLookbackDays}-day baseline window before this window, so there is no baseline to compare against and no regression can be detected however badly one regressed. This is NOT a clean bill of health. Either this server's whole collected history falls inside the last {hours_back} hour(s), or it has none older than the baseline lookback yet.");
         }
 
         if (!hasRecent)

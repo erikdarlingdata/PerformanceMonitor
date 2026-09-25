@@ -78,13 +78,20 @@ public sealed class McpToolsListBudgetTests
     /// head is not left to guess which of the four empty-window rungs applies. Raised deliberately.</item>
     /// <item>#3898 close-out: every content PR and both feature PRs have merged. Lowered once, to the measured
     /// total, banking the accumulated saving; a future PR only raises it again.</item>
+    /// <item>#4193: <c>get_pg_cpu_utilization</c> gained its first <c>bucket_minutes</c> parameter (the
+    /// #3897 TrendBuckets contract), a genuinely new schema property this tool never served before - not
+    /// text to trim. The two head descriptions this PR also touched (#4193, #4195) were trimmed back down
+    /// to bank under their own per-tool ceilings first; only the new parameter's own bytes are raised
+    /// here.</item>
     /// </list>
     /// </summary>
     /* #4198/#4199 (M2b): +839 bytes for get_fleet_overview's worst_only/band filters (2 new params) and
        get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
        parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
        tools/list and so is not counted here. */
-    private const int TotalCeilingBytes = 171_637;
+    /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
+       +82 bytes net after trimming. */
+    private const int TotalCeilingBytes = 171_719;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

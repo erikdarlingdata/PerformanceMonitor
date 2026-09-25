@@ -299,11 +299,11 @@ public sealed class McpToolGuideHeadsPgTrendCpuTests
         ("get_pg_database_trend", "A point spanning a stats reset reports everything since, never a quiet interval"),
         ("get_pg_database_trend", "Empty: wrong name, only one snapshot so far, or none in the window - the message says which"),
         ("get_pg_cpu_utilization", "Aurora only; RDS and self-hosted are not_collected"),
-        ("get_pg_cpu_utilization", "cpu_percent is percent of the capacity CURRENTLY ALLOCATED, not a fixed ceiling"),
+        ("get_pg_cpu_utilization", "cpu_percent is percent of capacity CURRENTLY ALLOCATED, not a fixed ceiling"),
         ("get_pg_cpu_utilization", "100% is often a scale-up, not saturation"),
-        ("get_pg_cpu_utilization", "acu_utilization_percent is percent of the CONFIGURED ceiling and is the saturation figure to alert on"),
+        ("get_pg_cpu_utilization", "acu_utilization_percent is percent of the CONFIGURED ceiling, the saturation figure"),
         ("get_pg_cpu_utilization", "null ACU means no sample, never headroom"),
-        ("get_pg_cpu_utilization", "Host-memory bytes (since V136) are null when unmeasured, never 0"),
+        ("get_pg_cpu_utilization", "Host-memory bytes (since V136) are null when unmeasured"),
     ];
 
     [Fact]

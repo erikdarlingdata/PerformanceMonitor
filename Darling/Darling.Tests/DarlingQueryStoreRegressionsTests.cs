@@ -292,8 +292,12 @@ public sealed class DarlingQueryStoreRegressionsLiveTests
             Assert.Contains("no baseline", noBaselineText, StringComparison.Ordinal);
             Assert.Contains("NOT a clean bill of health", noBaselineText, StringComparison.Ordinal);
 
-            /* Widening would make the window bigger and the baseline SHORTER — the wrong direction. */
-            Assert.Contains("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
+            /* #4195: the baseline is now a FIXED lookback (BaselineLookbackDays), not "everything before
+               hours_back" — so neither widening nor shortening hours_back changes how far back the baseline
+               reaches, and the old "Shorten hours_back" advice (correct for the unbounded baseline, where a
+               shorter recent window left more history in the baseline arm) no longer applies and was removed. */
+            Assert.Contains("baseline lookback", noBaselineText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Shorten hours_back", noBaselineText, StringComparison.Ordinal);
             Assert.DoesNotContain("Widen", noBaselineText, StringComparison.Ordinal);
             Assert.NotEqual(neverText, noBaselineText);
 
