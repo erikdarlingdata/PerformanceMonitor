@@ -10,7 +10,7 @@ namespace PerformanceMonitorLite.Mcp;
 [McpServerToolType]
 public sealed class McpQueryTools
 {
-    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_queries_by_cpu"), Description("Gets expensive cached queries from sys.dm_exec_query_stats, ranked by CPU over a window ending at as_of. Filters (database_name, parallel_only, min_dop) apply before the top-N cap: filter_applied names the floor in force, and an empty page under it is the window's real answer, not a miss. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed; cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Gets expensive queries from sys.dm_exec_query_stats (plan cache). Best for: currently cached queries with detailed per-execution stats, DOP, spills, and query_hash for trending. Returns query_hash, query_plan_hash, sql_handle, plan_handle, and host_object (the hosting procedure/function for proc-hosted statements, null for ad-hoc) — groups key on (database, query_hash, host_object), so INSERT...EXEC callers in different procedures report separately with their own text. distinct_texts counts statement texts merged into a group (>1 = ad-hoc literal variants or pre-upgrade history; query_text is one representative, 0 means no stored text for the group). Supports database and parallelism filtering; every filter is applied IN the query before the ranking and the cap, so the page is the top-N of the FILTERED population (filter_applied names the parallelism floor in force, null when none), and an empty page under parallel_only/min_dop is the window's answer rather than a page artefact. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes for the plan's time in cache (same semantics as max_dop), not windowed — totals and avgs are windowed deltas; rows where an extreme provably predates the window carry extremes_note. max_dop comes from sys.dm_exec_query_stats and is a lifetime-max for the plan's time in cache, so a plan compiled before MAXDOP was lowered keeps reporting the old higher value until it is evicted or recompiled; confirm current parallelism with analyze_query_plan, which reads the actual plan. Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. " + McpToolGuideTopics.CpuTimeExtremesAndAttribution + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetTopQueriesByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -51,6 +51,7 @@ public sealed class McpQueryTools
                 ? $"lifetime max_dop >= {minMaxDop} (applied in SQL before the top-{top} ranking; the page is the top-{top} of the parallel population)"
                 : null;
 
+            var requestedStart = nowUtc.AddHours(-hours_back);
             var rows = await dataService.GetTopQueriesByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd, minMaxDop: minMaxDop);
             if (rows.Count == 0)
             {
@@ -67,19 +68,27 @@ public sealed class McpQueryTools
                     ?? McpHelpers.Status("unavailable", "No query stats available for the specified time range.");
             }
 
+            /* #4231: what the window ACTUALLY reached, from the SAME relation (v_query_stats) the ranking read
+               above just used — a raw-only table with no rollup fallback, so a lowered retention_days or a
+               young install can cut a "Last 7 days" ask well short of 7 days with nothing on the page saying
+               so. One probe, shared with the Queries-tab grid (LocalDataService.GetQueryWindowFloorAsync). */
+            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStats, resolved.ServerId, requestedStart, nowUtc);
+            var effectiveStart = floor ?? requestedStart;
+            var truncated = IsWindowTruncated(floor, requestedStart);
+
             /* #2320: what fraction of the box's measured CPU the RETURNED rows explain — numerator is
                the caller-visible ranking (post top-N, post filters), denominator is measured, and the
                ratio is omitted rather than invented when a denominator piece is missing. One nowUtc
                backs the aggregate read AND the ratio math, and the two independent reads run
                concurrently (review catches; Darling has both by construction). */
-            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
+            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, requestedStart, nowUtc);
             var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
-                nowUtc.AddHours(-hours_back), nowUtc,
+                requestedStart, nowUtc,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
@@ -128,6 +137,15 @@ public sealed class McpQueryTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4231: what was served, beside what was asked for — query_stats is raw-only (no rollup
+                   fallback), so a lowered retention_days or a young install can serve less than hours_back
+                   with nothing else on the payload saying so. */
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
+                window_truncated = truncated,
+                truncation_note = truncated
+                    ? "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read."
+                    : null,
                 /* #3541 A13: the filter that shaped the population, stated on the payload; null when none. */
                 filter_applied = filterApplied,
                 cpu_attribution = new
@@ -146,7 +164,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. " + McpToolGuideTopics.CpuTimeExtremesAndAttribution)]
+    [McpServerTool(Name = "get_top_procedures_by_cpu"), Description("Gets the most expensive stored procedures ranked by total CPU time over a window ending at as_of. Delta-based: requires ~30 minutes after adding a new server before data appears. min/max_cpu_ms and min/max_elapsed_ms are LIFETIME extremes, not windowed (extremes_note flags a provably stale one); cpu_attribution's ratio is omitted, not invented, when its inputs are missing. Reads the raw tier only, which on a store with a lowered retention_days or less history than the window can be shorter than hours_back: window_truncated is the store's retention floor, not a page cut, and effective_start / effective_hours_back say where the answer begins. <<GUIDE>> Shows execution counts, CPU/elapsed times, and I/O metrics. Delta-based: requires ~30 minutes after adding a new server before data appears. " + McpToolGuideTopics.CpuTimeExtremesAndAttribution + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetTopProceduresByCpu(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -169,6 +187,7 @@ public sealed class McpQueryTools
 
             /* Same pre-read capture as the queries tool — the skew shrinks to call-entry overhead. */
             var nowUtc = windowEnd;
+            var requestedStart = nowUtc.AddHours(-hours_back);
             var rows = await dataService.GetTopProceduresByCpuAsync(resolved.ServerId, hours_back, top, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd);
             if (rows.Count == 0)
             {
@@ -178,16 +197,22 @@ public sealed class McpQueryTools
                         "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
             }
 
+            /* #4231: what the window ACTUALLY reached, from the SAME relation (v_procedure_stats) the ranking
+               read above just used. One probe, shared with the Queries-tab grid. */
+            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.ProcedureStats, resolved.ServerId, requestedStart, nowUtc);
+            var effectiveStart = floor ?? requestedStart;
+            var truncated = IsWindowTruncated(floor, requestedStart);
+
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation, one
                nowUtc backing aggregate and ratio, same concurrent independent reads. */
-            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, nowUtc.AddHours(-hours_back), nowUtc);
+            var cpuAggregateTask = dataService.GetCpuWindowAggregateAsync(resolved.ServerId, requestedStart, nowUtc);
             var propertiesTask = dataService.GetLatestServerPropertiesAsync(resolved.ServerId);
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuMs) / 1000.0,
-                nowUtc.AddHours(-hours_back), nowUtc,
+                requestedStart, nowUtc,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
@@ -221,6 +246,15 @@ public sealed class McpQueryTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4231: what was served, beside what was asked for — procedure_stats is raw-only (no rollup
+                   fallback), so a lowered retention_days or a young install can serve less than hours_back
+                   with nothing else on the payload saying so. */
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
+                window_truncated = truncated,
+                truncation_note = truncated
+                    ? "The window reaches further back than this server's raw procedure_stats retains (or this server has been monitored for less time than that), so the older part of it was not read."
+                    : null,
                 cpu_attribution = new
                 {
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
@@ -237,7 +271,7 @@ public sealed class McpQueryTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. Darling: window_truncated marks a window floor, not a page cut — no limit changes it — because raw retention can be shorter than asked; effective_start / effective_hours_back give the reach actually served. Lite: no such floor; the full requested window is always read. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition.")]
+    [McpServerTool(Name = "get_query_store_top"), Description("Cost-ranked top Query Store queries (heaviest first), not time-ordered. Requires Query Store enabled on target databases. window_truncated marks a window floor, not a page cut — no limit changes it — because query_store_stats is raw-only (no rollup carries query_id/plan_id) and a lowered retention_days or a young install can hold less than the window asked for; effective_start / effective_hours_back give the reach actually served. Same disclosure as Darling's get_query_store_top. <<GUIDE>> Gets expensive queries from Query Store (persistent, survives restarts). Best for: historical analysis, queries no longer in plan cache. Requires Query Store enabled on target databases. Supports database and module filtering. Rows are per Query Store execution outcome (execution_type: Regular, Aborted, Exception): a plan with aborted executions returns one row per outcome, each with its own counts and averages. The execution_type filter keeps one outcome, and module_name keeps one module: the exact, case-sensitive schema-qualified name the collector records (get_top_procedures_by_cpu's full_name; Adhoc for ad-hoc statements, Unknown for an object it could not resolve), applied after interval deduplication and before ranking. When a filter matches nothing but the same read without the filters has rows, the answer is empty (a measured zero), not a Query Store precondition; a module_name miss also carries the window read (effective_start, effective_hours_back, window_truncated) as hints." + McpHelpers.WindowTruncatedDescription)]
     public static async Task<string> GetQueryStoreTop(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -270,12 +304,24 @@ public sealed class McpQueryTools
 
             module_name = string.IsNullOrWhiteSpace(module_name) ? null : module_name;
 
+            var nowUtc = windowEnd;
+            var requestedStart = nowUtc.AddHours(-hours_back);
             var rows = await dataService.GetQueryStoreTopQueriesAsync(
                 resolved.ServerId, hours_back, top,
                 databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name },
                 asOfUtc: windowEnd,
                 executionType: execution_type,
                 moduleName: module_name);
+
+            /* #4231 (Lite's twin of Darling's #2364): what the window ACTUALLY reached. rows above are the top
+               N by COST, so their timestamps say nothing about how far back the read went. query_store_stats
+               has no rollup fallback (the only one that keeps query_id/plan_id would approach raw's own size),
+               so the honest move is to report what was served rather than echo what was asked for. Deliberately
+               unfiltered: the floor is a property of the tier, not narrowed by database/execution_type/module. */
+            var floor = await dataService.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, resolved.ServerId, requestedStart, nowUtc);
+            var effectiveStart = floor ?? requestedStart;
+            var truncated = IsWindowTruncated(floor, requestedStart);
+
             if (rows.Count == 0)
             {
                 /* A filter that matched nothing is an answer, not a missing collection. Most queries never abort,
@@ -288,7 +334,14 @@ public sealed class McpQueryTools
                     && (await dataService.GetQueryStoreTopQueriesAsync(resolved.ServerId, hours_back, 1, databaseNames: string.IsNullOrEmpty(database_name) ? null : new[] { database_name }, asOfUtc: windowEnd)).Count > 0)
                     return module_name is null
                         ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
-                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name);
+                        /* The module miss hands back the window it read: "did not run" is a claim about that
+                           window, and the raw tier may not reach the whole of the one asked for. */
+                        : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
+                        {
+                            effective_start = effectiveStart.ToString("o"),
+                            effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
+                            window_truncated = truncated
+                        });
 
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "query_store")
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it had to, because the
@@ -327,6 +380,14 @@ public sealed class McpQueryTools
             {
                 server = resolved.ServerName,
                 hours_back,
+                /* #4231: what was served, beside what was asked for — hours_back alone is a request echoed
+                   back as though it described the data. Same keys, same meaning as Darling's get_query_store_top. */
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((nowUtc - effectiveStart).TotalHours, 1),
+                window_truncated = truncated,
+                truncation_note = truncated
+                    ? "The window reaches further back than this server's raw query_store_stats retains (or this server has been monitored for less time than that), so the older part of it was not read. This tool reads the raw tier only: no rollup carries query_id or plan_id, and plan identity is what it exists to return."
+                    : null,
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -855,6 +916,16 @@ public sealed class McpQueryTools
     /// the window's head (Lite's per-collector <c>retention_days</c> purge, or a server added mid-window).
     /// </summary>
     internal static readonly TimeSpan TruncationSlack = TimeSpan.FromMinutes(90);
+
+    /// <summary>
+    /// #4231: whether a <see cref="LocalDataService.GetQueryWindowFloorAsync"/> probe found the store's raw
+    /// data starting LATER than the window asked for, by more than <see cref="TruncationSlack"/> — the window
+    /// floor, not a page cut; no <c>top</c>/<c>limit</c> changes it. Shared so <c>get_top_queries_by_cpu</c>,
+    /// <c>get_top_procedures_by_cpu</c>, <c>get_query_store_top</c> and the Queries-tab grids that read the
+    /// same three tables all compute the same verdict from the same probe instead of drifting apart.
+    /// </summary>
+    internal static bool IsWindowTruncated(DateTime? floor, DateTime requestedStart) =>
+        floor is DateTime f && f > requestedStart + TruncationSlack;
 
     /// <summary>
     /// The disclosure block every Performance-Trends payload carries (#3541 A2), written in the same key order
