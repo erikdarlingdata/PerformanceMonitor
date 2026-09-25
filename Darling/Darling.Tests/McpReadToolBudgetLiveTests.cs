@@ -94,10 +94,14 @@ public sealed class McpReadToolBudgetLiveTests
     /// </summary>
     private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
     {
-        /* Empty: every #4198 per-tool lane has merged (get_blocking #4267, get_collection_log #4265,
-           get_query_store_regressions #4264, get_collection_health #4268, describe_custom_view_catalog #4272,
-           get_query_store_top #4273), and get_fleet_overview already fit. A new offender gets a row here only
-           with an issue for its own fix. */
+        /* Every other #4198 per-tool lane has merged and fits here now (get_blocking #4267, get_collection_log
+           #4265, get_query_store_regressions #4264, describe_custom_view_catalog #4272, get_query_store_top
+           #4273), and get_fleet_overview already fit. A new offender gets a row here only with an issue for
+           its own fix. */
+        /* #4268 compacts only HEALTHY collectors with nothing to report; this fixture's collectors are not
+           healthy, so nothing compacts and the reply is still over. Measured by CI on 08e6e818. Stays open
+           under #4198. */
+        ["get_collection_health"] = 35_145,          // #4198
     };
 
     [Fact]
