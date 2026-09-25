@@ -28,13 +28,13 @@ namespace Darling.Tests;
 ///
 /// <para>This file takes over the "I am the top rung" claims that moved off
 /// <see cref="CheckpointsTimedRungTests"/> (V140) when this rung landed, and handed them on to
-/// <see cref="QueryStoreIntervalLatestRungTests"/> (V142, #3953) when that one did.</para>
+/// <see cref="QueryStoreIntervalLatestRungTests"/> (V143, #3953) when that one did.</para>
 /// </summary>
 public sealed class CollectionCaveatsRungTests
 {
     private const int RungVersion = 141;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V142 (#3953,
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V143 (#3953,
     /// the Query Store interval table) appended its own — so this is a position within the signature rather
     /// than its end.</summary>
     private const int ProbeOrdinal = 116;
@@ -54,7 +54,7 @@ public sealed class CollectionCaveatsRungTests
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         /* Not `RungVersion == SchemaVersion` any more, and not `Same(V141, Scripts[^1])`: both asserted this
-           rung is the newest, which stopped being true when V142 landed. The invariant that outlives the
+           rung is the newest, which stopped being true when V143 landed. The invariant that outlives the
            handoff is that the LADDER's top and the declared version agree, which the two lines above already
            say. */
         Assert.True(RungVersion < StorageVersion.SchemaVersion);
@@ -94,7 +94,7 @@ public sealed class CollectionCaveatsRungTests
 
     /// <summary>
     /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
-    /// returns 141 — a position within the signature, not its end, now that V142 has appended its own.
+    /// returns 141 — a position within the signature, not its end, now that V143 has appended its own.
     /// </summary>
     [Fact]
     public void TheProbeMapsAStoreStoppedHereToThisRung()
@@ -113,7 +113,7 @@ public sealed class CollectionCaveatsRungTests
         var arity = method.GetParameters().Length;
 
         /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
-           NEWEST sentinel, which stopped being true the moment V142 appended its own. */
+           NEWEST sentinel, which stopped being true the moment V143 appended its own. */
         Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasCollectionCaveats", method.GetParameters()[ProbeOrdinal].Name);
 
@@ -124,7 +124,7 @@ public sealed class CollectionCaveatsRungTests
         behind[ProbeOrdinal] = false;
         Assert.Equal(140, (int)method.Invoke(null, behind)!);
 
-        /* In the source, this rung's arm sits ABOVE V140's and BELOW V142's, and returns this build's version. */
+        /* In the source, this rung's arm sits ABOVE V140's and BELOW V143's, and returns this build's version. */
         var thisArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCheckpointsTimed)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V141 sentinel arm — a fully-migrated store would map one rung low");

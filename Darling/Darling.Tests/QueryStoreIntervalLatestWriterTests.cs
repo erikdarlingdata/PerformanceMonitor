@@ -240,7 +240,7 @@ GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_
         Assert.Equal(faulted, (await CoverageAsync(connection, ct)).AppliedThrough);
 
         /* Restored: the next batch replays the queued one first, and the pending table drains. */
-        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 142).Sql, ct);
+        await ExecAsync(connection, PgMigrations.Scripts.Single(m => m.Version == 143).Sql, ct);
         await WriteAsync(runner, T0.AddMinutes(65), context, ct, Row("qsB", 3, 31, 100, T0, T0.AddMinutes(58), 9, 310));
 
         Assert.Equal(1, context.QueryStoreIntervalMisses);

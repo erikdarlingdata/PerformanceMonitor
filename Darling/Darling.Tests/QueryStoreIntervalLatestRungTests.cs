@@ -17,7 +17,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins Darling rung V142 (#3953): three new tables, all engine-plain, and nothing on an existing table. The
+/// Pins Darling rung V143 (#3953): three new tables, all engine-plain, and nothing on an existing table. The
 /// latest Query Store snapshot per interval, its per-server coverage, and the replay record for a batch whose apply
 /// failed. The writer, the reads and the retention are pinned where they live
 /// (<see cref="QueryStoreIntervalLatestWriterTests"/>, <see cref="PlanRegressionIntervalTableEquivalenceTests"/>);
@@ -30,20 +30,20 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryStoreIntervalLatestRungTests
 {
-    private const int RungVersion = 142;
+    private const int RungVersion = 143;
     private const int PreviousVersion = 141;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
     private const int ProbeOrdinal = 117;
 
-    private static PgMigrations.Migration V142 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
+    private static PgMigrations.Migration V143 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
     public void TheRungIsRegisteredAtTheTopOfADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
-        Assert.Equal("query-store-interval-latest", V142.Name);
+        Assert.Equal("query-store-interval-latest", V143.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
         Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
@@ -59,7 +59,7 @@ public sealed class QueryStoreIntervalLatestRungTests
     [Fact]
     public void TheRungCreatesThreeTablesAndOneUniqueIndex_EnginePlain_AndNothingElse()
     {
-        var sql = V142.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var sql = V143.Sql.Replace("\r\n", "\n", StringComparison.Ordinal);
 
         Assert.Equal(3, CountOf(sql, "CREATE TABLE IF NOT EXISTS collect."));
         Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_latest"));
@@ -116,15 +116,15 @@ public sealed class QueryStoreIntervalLatestRungTests
 
         var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V142 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(thisArm < previousArm, "the V142 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(thisArm >= 0, "the viewer has no V143 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm < previousArm, "the V143 arm sits below the previous rung's, so a current store maps one rung low");
         Assert.Contains(
             "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
-        var armProseStart = viewer.LastIndexOf("/* V142 (#3953)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V142 arm has no comment block saying why it exists");
+        var armProseStart = viewer.LastIndexOf("/* V143 (#3953)", thisArm, StringComparison.Ordinal);
+        Assert.True(armProseStart >= 0, "the V143 arm has no comment block saying why it exists");
         Assert.DoesNotContain("query_store_interval_latest", viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }
 

@@ -928,7 +928,7 @@ SELECT
        V106 / V121 / V129 / V136 shape). It is not yet read by any viewer surface, so this gate rests on the
        standing invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'analysis_collection_caveats'),
-    /* V142 creates three tables at once, so any of them would answer; the replay table is chosen because the rung
+    /* V143 creates three tables at once, so any of them would answer; the replay table is chosen because the rung
        creates it last, and that choice is stated so nobody goes looking for a significance it does not have.
        Named only in this probe line, never in prose, per the V71 finding. */
     EXISTS (SELECT 1 FROM information_schema.tables  WHERE table_name = 'query_store_interval_latest_pending')";
@@ -1142,7 +1142,7 @@ SELECT
            Trends and Top Procedures surfaces — the banner has to fire before those do. The column and its
            tables are named only in the probe line, not this prose, per the V71 finding: the coverage
            ratchet strips information_schema lines but cannot strip a comment. */
-        /* V142 (#3953): the latest Query Store snapshot per interval, kept as it is written, with its per-server
+        /* V143 (#3953): the latest Query Store snapshot per interval, kept as it is written, with its per-server
            coverage and the replay record for a batch whose apply failed. TABLE-existence sentinel, newest-first,
            and now the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than
            falling through to the rung below and showing a spurious upgrade banner on a store that is current.
@@ -1153,7 +1153,7 @@ SELECT
            but cannot strip a comment. */
         if (hasQueryStoreIntervalLatest)
         {
-            return 142;
+            return 143;
         }
 
         /* V139 (#3955): the postmaster start time beside every sample of a server's cumulative checkpointer
@@ -1178,7 +1178,7 @@ SELECT
            finding. */
         /* V141 (#3691, part a1): collect.analysis_collection_caveats, the store side of a scheduled pass's
            collection caveats. TABLE-existence sentinel (its own new table), newest-first, one rung behind
-           the top since V142 landed. No viewer surface reads the table yet, so this gate rests on the
+           the top since V143 landed. No viewer surface reads the table yet, so this gate rests on the
            standing invariant alone. The table is named only in the probe line, not this prose, per the V71
            finding. */
         if (hasCollectionCaveats)

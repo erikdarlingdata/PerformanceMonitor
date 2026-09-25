@@ -266,7 +266,7 @@ public sealed class PostmasterStartTimeLivePostgresTests
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS postmaster_start_time");
             await DarlingMcpTestData.ExecAsync(connection, ct, "ALTER TABLE collect.pg_write_stats DROP COLUMN IF EXISTS postmaster_start_time");
             await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= 139");
-            /* Every rung from 139 up re-applies (V140-V142 are idempotent: ADD COLUMN IF NOT EXISTS or CREATE
+            /* Every rung from 139 up re-applies (V140-V143 are idempotent: ADD COLUMN IF NOT EXISTS or CREATE
                TABLE/INDEX IF NOT EXISTS), so the count is the distance to the top rung, not 1. */
             Assert.Equal(StorageVersion.SchemaVersion - 138, await PgMigrations.MigrateAsync(connection, ct));
             Assert.Equal(0, await PgMigrations.MigrateAsync(connection, ct));

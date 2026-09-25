@@ -135,8 +135,8 @@ public sealed class ViewerCollectionCaveatsGateTests
 
         /* Every sentinel BELOW hasCollectionCaveats true, it and everything from it up false: a store that
            has not reached V141 also has not reached whatever landed above it. Found BY NAME, not
-           `arity - 1` -- V142 (#3953) appended its own parameter after this one, so the last ordinal is no
-           longer V141's, and leaving it true would let the V142 arm answer 142 regardless of V141. */
+           `arity - 1` -- V143 (#3953) appended its own parameter after this one, so the last ordinal is no
+           longer V141's, and leaving it true would let the V143 arm answer 143 regardless of V141. */
         var throughV140 = Enumerable.Range(0, arity).Select(i => (object)(i < collectionCaveatsOrdinal)).ToArray();
         var result = (int)method.Invoke(null, throughV140)!;
         Assert.True(result < 141, $"expected below 141 with the V141 sentinel absent, got {result}");

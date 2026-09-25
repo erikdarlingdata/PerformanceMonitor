@@ -221,7 +221,7 @@ public static class PgMigrations
         new Migration(139, "postmaster-start-time", V139Sql),
         new Migration(140, "checkpointer-timed-count", V140Sql),
         new Migration(141, "collection-caveats", V141Sql),
-        new Migration(142, "query-store-interval-latest", V142Sql),
+        new Migration(143, "query-store-interval-latest", V143Sql),
     };
 
     /// <summary>
@@ -1896,7 +1896,7 @@ CREATE TABLE IF NOT EXISTS collect.analysis_collection_caveats
 );";
 
     /// <summary>
-    /// V142 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
+    /// V143 — the latest Query Store snapshot per interval, kept as it is written (#3953), so PLAN_REGRESSION and its
     /// drill-down read one row per interval instead of deduplicating the whole raw <c>query_store_stats</c> slice on
     /// every pass. Three new tables, all engine-plain here (the <c>PgMigrations</c> rule); nothing on an existing
     /// table changes, and there is no backfill.
@@ -1921,7 +1921,7 @@ CREATE TABLE IF NOT EXISTS collect.analysis_collection_caveats
     /// batch here, and raw still commits: raw ingestion never depends on this table. The next apply for the server
     /// replays the row, and a server with any pending row reads raw. Empty in steady state.</para>
     /// </summary>
-    private const string V142Sql = @"
+    private const string V143Sql = @"
 /* One row per Regular Query Store interval identity: the raw dedup's GROUP BY plus server_id. Types and nullability
    mirror query_store_stats exactly, so no row raw accepts can be refused here. fillfactor 50 keeps the open
    interval's refreshes HOT (measured, #3953). */
