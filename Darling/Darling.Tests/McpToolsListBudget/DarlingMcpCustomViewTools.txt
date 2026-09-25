@@ -7,7 +7,9 @@ param create_custom_view.name 60
 tool delete_custom_view 158
 param delete_custom_view.view_id 54
 
-tool describe_custom_view_catalog 514
+tool describe_custom_view_catalog 582
+param describe_custom_view_catalog.full_detail 111
+param describe_custom_view_catalog.source 186
 
 tool get_custom_view 271
 param get_custom_view.view_id 61

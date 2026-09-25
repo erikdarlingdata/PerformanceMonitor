@@ -34,7 +34,14 @@ public sealed class QueryStoreRegressionsWebDefaultTests
 
         Assert.Contains("full_text: QueryBool(c, \"full_text\", true)", web, StringComparison.Ordinal);
         Assert.Contains("PLimit(50), PBool(\"full_text\", true)", web, StringComparison.Ordinal);
-        Assert.DoesNotContain("full_text: QueryBool(c, \"full_text\", false)", web, StringComparison.Ordinal);
+        /* Scoped to this tool's own dispatch entry: get_query_store_top's web entry keeps full_text OFF by
+           default on purpose (#4273 - the viewer keeps that field's old 2,000-char cap through previewLength),
+           so a whole-file check would flag the other tool's deliberate default rather than this one. */
+        var regressionsEntry = Array.Find(
+            web.Split('\n'),
+            line => line.Contains("[\"get_query_store_regressions\"] = (c, pg, an) =>", StringComparison.Ordinal));
+        Assert.NotNull(regressionsEntry);
+        Assert.DoesNotContain("full_text: QueryBool(c, \"full_text\", false)", regressionsEntry, StringComparison.Ordinal);
     }
 
     private static string StripComments(string source)

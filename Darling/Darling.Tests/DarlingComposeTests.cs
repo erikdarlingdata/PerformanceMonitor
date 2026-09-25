@@ -1098,6 +1098,17 @@ public sealed class DarlingComposeTests
         Assert.NotNull(compose["aggregates"]);
         Assert.NotNull(compose["timeBuckets"]);
         Assert.NotNull(compose["filterOps"]);
+
+        /* #4198: describe_custom_view_catalog's MCP default is now COMPACT (measures grouped by source, most
+           fields dropped) to fit the tool's 32 KB response budget, but /api/catalog routes here — straight to
+           BuildComposeCatalogNode(), never through the MCP tool method or its new compact/source-filter logic —
+           so the web Custom Views editor must still see every measure at full per-field detail, unfiltered and
+           ungrouped. A regression that wired /api/catalog through the compact builder would drop these fields. */
+        var firstMeasure = Assert.IsType<JsonObject>(measures[0]);
+        Assert.NotNull(firstMeasure["appliesTo"]);
+        Assert.NotNull(firstMeasure["allowedDimensions"]);
+        Assert.NotNull(firstMeasure["category"]);
+        Assert.Null(compose["compact"]);
     }
 
     /* ─────────────────────────── DoS backstop + loopback scrub (provisioning) ─────────────────────────── */

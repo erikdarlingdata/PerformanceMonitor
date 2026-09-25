@@ -110,7 +110,9 @@ export const DASHBOARD_TEMPLATES = [
           {
             title: "Collection Health",
             read: "get_collection_health",
-            params: { server },
+            /* #4198: full_detail keeps every column below populated - errors, avg_duration_ms etc. are
+               omitted by default on a boring-healthy collector row, and this template reads them. */
+            params: { server, full_detail: true },
             viz: "table",
             span: 2,
             rowsKey: "collectors",

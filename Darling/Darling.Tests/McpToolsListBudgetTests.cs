@@ -99,6 +99,20 @@ public sealed class McpToolsListBudgetTests
        so neither counts here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
+    /* #4198: +364 bytes for get_analysis_findings' new limit/full_text parameters (the head is unchanged —
+       both parameter descriptions are under the D2 200-char cap and the guidance moved to the tool's tail,
+       get_tool_guide, which is not served in tools/list and so is not counted here). */
+    /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). */
+    /* #4198 (lane TC): +472 bytes for describe_custom_view_catalog's default-is-compact note in its served
+       description and its two new opt-ins, source and full_detail (the catalog, 98,173 bytes at default
+       arguments, is now grouped-by-source with most per-measure fields dropped by default; source drills
+       into one source's full detail, full_detail returns the original shape). */
+    /* #4198 (lane TK): +240 bytes for get_collection_health's new full_detail opt-in parameter (the head is
+       unchanged; the compaction rule lives in the tail get_tool_guide serves, not the served head). Default
+       calls now compact HEALTHY collectors with nothing to report, which took the default response from
+       41,669 bytes (measured, every field on every collector) to 20,707 bytes, under the shared 32 KB budget. */
 
     /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
        limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
@@ -140,9 +154,25 @@ public sealed class McpToolsListBudgetTests
        combined total with blocking (#4267) changes on top. */
     /* #4198 (qs-regressions, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267);
        combined total with qs-regressions (#4264) changes on top. */
+    /* #4198 (analysis-findings, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264);
+       combined total with analysis-findings (#4266) changes on top. */
+    /* #4198 (collection-health, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266);
+       combined total with collection-health (#4268) changes on top. */
+    /* #4198 (custom-view-catalog, merge): re-measured after merging origin/dev (dev includes #4261+#4258+#4265+#4267+#4264+#4266+#4268);
+       combined total with custom-view-catalog (#4272) changes on top. */
+    /* #4198 (lane TJ, get_query_store_top): +136 bytes for the new full_text opt-in parameter (84 bytes of
+       description plus its JSON schema wrapper). The head is unchanged (its new sentence lives after
+       <<GUIDE>>, in the tail get_tool_guide serves, not the served head); the default query_text preview
+       dropped 2,000 chars -> 400, which took the default call from 48 KB (#4198's measurement) to under the
+       shared 32 KB budget and is not a served description either. */
+    /* #4198 (qs-top, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266+#4268+#4272);
+       combined total with qs-top (#4273) changes on top. */
     /* #4231 (merge): re-measured after merging origin/dev (dev now includes #4267+#4264 on top of the base
        #4231 branched from); combined total unchanged from the merge base since #4231 added no head bytes. */
-    private const int TotalCeilingBytes = 173_707;
+    /* #4231 (merge after #4273): re-measured after merging origin/dev (dev now includes #4272+#4273); #4231
+       still adds no head bytes, so the total is dev's own. */
+    private const int TotalCeilingBytes = 174_373;
+
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
