@@ -152,7 +152,7 @@ public sealed class McpToolsListBudgetTests
        combined total with collection-health (#4268) changes on top. */
     /* #4198 (custom-view-catalog, merge): re-measured after merging origin/dev (dev includes #4261+#4258+#4265+#4267+#4264+#4266+#4268);
        combined total with custom-view-catalog (#4272) changes on top. */
-    private const int TotalCeilingBytes = 999999;
+    private const int TotalCeilingBytes = 174_236;
 
 
     private const int ConvertedHeadCap = 1_000;
