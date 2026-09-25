@@ -598,9 +598,15 @@ public sealed class RuntimePreconditionReadWiringTests
 
     private static readonly Regex ToolMark = new(@"McpServerTool\(Name = ""([a-z_0-9]+)""", RegexOptions.Compiled);
 
-    /* The collector-name argument of a precondition call: quoted, or a const that names one. */
+    /* The collector-name argument of a precondition call: quoted, or a const that names one, optionally
+       followed by the call's cancellation token (#4203) - positional (`cancellationToken`) or named
+       (`cancellationToken: ct`) - and nothing else. The negative lookahead on the bare-identifier branch
+       keeps a call whose collector argument is a TYPE-QUALIFIED const (e.g. SomeReader.CollectorName,
+       which this file's own wiring walk cannot resolve) from backtracking past the dot and mis-capturing
+       the trailing token word itself as the collector name; it falls back to not matching that call at
+       all, its behavior before #4203 added the token argument, rather than asserting a wrong name. */
     private static readonly Regex PreconditionCall = new(
-        @"RuntimePrecondition\.StatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|([A-Za-z_][A-Za-z0-9_]*))\)",
+        @"RuntimePrecondition\.StatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|(?!cancellationToken\b|ct\b|CancellationToken\.None\b)([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*(?:cancellationToken\s*:\s*[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*[Tt]oken))?\s*\)",
         RegexOptions.Compiled);
 
     private static readonly Regex CapabilityCall = new(@"NotCollectedStatusAsync\(", RegexOptions.Compiled);
@@ -710,6 +716,26 @@ public sealed class RuntimePreconditionReadWiringTests
                     "the collection_log has no rows under that name, so the branch is dead and silently so");
             }
         }
+    }
+
+    /// <summary>
+    /// Pins <see cref="PreconditionCall"/> itself against the shape #4203 added: a trailing cancellation
+    /// token, positional or named, must not be read as the collector name, and must not stop the real name
+    /// from being read either.
+    /// </summary>
+    [Theory]
+    [InlineData(@"StatusAsync(a, b, ""x"")", "x")]
+    [InlineData(@"StatusAsync(a, b, ""x"", cancellationToken)", "x")]
+    [InlineData(@"StatusAsync(a, b, ""x"", cancellationToken: ct)", "x")]
+    [InlineData(@"StatusAsync(a, b, name, cancellationToken)", "name")]
+    public void PreconditionCall_ReadsTheNameAcrossTrailingTokenShapes(string call, string expectedName)
+    {
+        var match = PreconditionCall.Match("RuntimePrecondition." + call);
+
+        Assert.True(match.Success, $"'{call}' did not match at all");
+
+        var name = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+        Assert.Equal(expectedName, name);
     }
 
     /// <summary>

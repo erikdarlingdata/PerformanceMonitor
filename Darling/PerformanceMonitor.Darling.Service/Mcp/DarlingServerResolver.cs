@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -78,9 +79,10 @@ ORDER BY server_name";
     /// </summary>
     public static async Task<((int ServerId, string ServerName) resolved, string? error)> ResolveOrErrorAsync(
         NpgsqlDataSource postgres,
-        string? serverName)
+        string? serverName,
+        CancellationToken cancellationToken = default)
     {
-        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres);
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
             return (default, fault);
@@ -96,14 +98,18 @@ ORDER BY server_name";
     /// the caller's request, and this seam knows no tool name to put under <c>hints.operation</c>. It maps to
     /// the web surface's bare-string arm, which is the pre-#3739 behaviour, unchanged.
     /// </summary>
-    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(NpgsqlDataSource postgres)
+    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try
         {
-            return (await LoadEnabledAsync(postgres), null);
+            return (await LoadEnabledAsync(postgres, cancellationToken), null);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: an abandoned request's cancellation must reach the caller as OperationCanceledException,
+               not be folded into a fault sentence here — the web handler's own catch tells the two apart to
+               decide whether this is a quiet abandonment or a real registry-read failure. */
             return (new List<RegisteredServer>(), $"{RegistryReadFaultPrefix}{ex.Message}");
         }
     }
@@ -323,16 +329,17 @@ ORDER BY server_name";
     }
 
     /// <summary>Reads the enabled rows from the servers registry.</summary>
-    internal static async Task<List<RegisteredServer>> LoadEnabledAsync(NpgsqlDataSource postgres)
+    internal static async Task<List<RegisteredServer>> LoadEnabledAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         var servers = new List<RegisteredServer>();
 
-        await using var connection = await postgres.OpenConnectionAsync();
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(LoadEnabledServersSql, connection);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        while (await reader.ReadAsync())
+        while (await reader.ReadAsync(cancellationToken))
         {
             servers.Add(new RegisteredServer(
                 reader.GetInt32(0),

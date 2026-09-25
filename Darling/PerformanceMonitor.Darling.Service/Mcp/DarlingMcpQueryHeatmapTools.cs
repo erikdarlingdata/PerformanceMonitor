@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -65,9 +66,10 @@ public sealed class DarlingMcpQueryHeatmapTools
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = DarlingQueryHeatmapReader.ViewerBucketMinutes,
         [Description("Maximum CELLS to return, most recent bins first. Default 100. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false)
+        [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd)
@@ -105,10 +107,10 @@ public sealed class DarlingMcpQueryHeatmapTools
             */
             var previewLength = full_text ? FullTextPreviewLength : DefaultPreviewLength;
             var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
-                postgres, resolved.ServerId, parsedMetric, start, end, database_name, bucket_minutes, limit + 1, previewLength);
+                postgres, resolved.ServerId, parsedMetric, start, end, database_name, bucket_minutes, limit + 1, previewLength, cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back, cancellationToken);
 
             var truncated = rows.Count > limit;
             var cells = rows.Take(limit).ToList();
@@ -184,7 +186,7 @@ public sealed class DarlingMcpQueryHeatmapTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_heatmap", ex);
         }
@@ -202,13 +204,14 @@ public sealed class DarlingMcpQueryHeatmapTools
     /// caller to widen the window there would be advice pointed at the wrong problem.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, int hours_back)
+        NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, int hours_back,
+        CancellationToken cancellationToken)
     {
-        var (hasAny, hasInWindow) = await DarlingQueryHeatmapReader.GetCoverageAsync(postgres, serverId, start, end);
+        var (hasAny, hasInWindow) = await DarlingQueryHeatmapReader.GetCoverageAsync(postgres, serverId, start, end, cancellationToken);
 
         if (!hasAny)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_stats")
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_stats", cancellationToken)
                 ?? McpHelpers.Status(
                     "unavailable",
                     $"No query stats have EVER been collected for {serverName}, so this is NOT a report of a quiet server — there is nothing to draw. query_stats is a PERIODIC table rather than an edge table: the collector writes rows every cycle for whatever is in the plan cache, so an empty history means nobody looked. Check get_collection_health for this server.");

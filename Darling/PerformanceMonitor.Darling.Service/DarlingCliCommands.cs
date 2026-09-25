@@ -5582,7 +5582,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             List<DarlingServerResolver.RegisteredServer> servers;
             try
             {
-                servers = await DarlingServerResolver.LoadEnabledAsync(dataSource);
+                servers = await DarlingServerResolver.LoadEnabledAsync(dataSource, CancellationToken.None);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
