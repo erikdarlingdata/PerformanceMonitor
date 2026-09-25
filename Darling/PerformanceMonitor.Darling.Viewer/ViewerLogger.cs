@@ -124,7 +124,8 @@ public static class ViewerLogger
 
                 if (sb.Length > 0)
                 {
-                    File.AppendAllText(GetCurrentLogFile(), sb.ToString());
+                    /* #4281 review: AppendAllText's strict UTF-8 encoder throws on a lone surrogate, dropping the whole batch. */
+                    File.AppendAllText(GetCurrentLogFile(), sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
             }
             catch

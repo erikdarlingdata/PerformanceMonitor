@@ -81,7 +81,8 @@ namespace PerformanceMonitorDashboard.Helpers
                     var logEntry = new StringBuilder();
                     logEntry.AppendLine(CultureInfo.InvariantCulture, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{level}] {message}");
 
-                    File.AppendAllText(GetLogFilePath(), logEntry.ToString());
+                    // #4281 review: AppendAllText's strict UTF-8 encoder throws on a lone surrogate, dropping the whole batch.
+                    File.AppendAllText(GetLogFilePath(), logEntry.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
             }
             catch (Exception ex)
