@@ -244,6 +244,57 @@ public sealed class LiteTrendBucketingLiveTests : IClassFixture<SharedDuckDbFixt
         Assert.Equal(new long?[] { 300, 300, 300 }, points.Select(p => p.SampleIntervalSeconds).ToArray());
     }
 
+    /// <summary>The real guard for the 12-17x bug (#2234): <see cref="Lite.Tests.PerfmonIntervalAggregationTests"/>
+    /// pins the inner <c>MAX(sample_interval_seconds)</c> in source text, but no test before this one seeded
+    /// more than one instance row per collection — so a regression that turned that inner MAX into a SUM would
+    /// pass every other test in this file. Transactions/sec-shaped: 12 instance rows (the production median) on
+    /// the counter's ONE collection, each carrying the same delta and interval. A single-collection bucket's
+    /// DeltaValue/SampleIntervalSeconds must equal that one collection's already-correctly-aggregated values —
+    /// proven once by hand: reverting the inner MAX to SUM turns 300 into 3,600 here, a 12x-too-low rate.
+    /// </summary>
+    [Fact]
+    public async Task PerfmonTrend_MultiInstanceCollection_SingleCollectionBucket_TakesIntervalAsMaxNotSum()
+    {
+        var end = new DateTime(2026, 3, 12, 9, 5, 0);
+        var start = end.AddMinutes(-20);
+        var at = end.AddMinutes(-10);
+
+        await SeedPerfmonMultiInstanceAsync(at, "Transactions/sec", instanceCount: 12, deltaPerInstance: 100, intervalPerInstance: 300);
+
+        var trends = await _dataService.GetPerfmonTrendsByCountersAsync(
+            ServerId, new List<string> { "Transactions/sec" }, fromDate: start, toDate: end);
+
+        var point = Assert.Single(trends["Transactions/sec"]);
+        Assert.Equal(1200L, point.DeltaValue);
+        Assert.Equal(300L, point.SampleIntervalSeconds);
+    }
+
+    /// <summary>The merged-bucket half: several collections — each already correctly aggregated across its own
+    /// 12 instance rows by the inner GROUP BY — land in the SAME bucket. The bucket's DeltaValue and
+    /// SampleIntervalSeconds are the SUM across those COLLECTIONS (the ruling's summed-deltas-over-summed-
+    /// intervals rate), never across instance rows, so the rate they imply stays 100 * 12 / 300 = 4/second no
+    /// matter how many collections merge — 3,600 / 900, not 3,600 / 10,800 (which a SUM over 36 instance rows'
+    /// worth of interval would give).</summary>
+    [Fact]
+    public async Task PerfmonTrend_MultiInstanceCollection_MergedBucket_SumsAcrossCollectionsAtFourPerSecond()
+    {
+        var end = new DateTime(2026, 3, 12, 9, 5, 0);
+        var start = end.AddMinutes(-20);
+        var bucketStart = end.AddMinutes(-15);
+
+        await SeedPerfmonMultiInstanceAsync(bucketStart.AddSeconds(5), "Transactions/sec", instanceCount: 12, deltaPerInstance: 100, intervalPerInstance: 300);
+        await SeedPerfmonMultiInstanceAsync(bucketStart.AddSeconds(25), "Transactions/sec", instanceCount: 12, deltaPerInstance: 100, intervalPerInstance: 300);
+        await SeedPerfmonMultiInstanceAsync(bucketStart.AddSeconds(45), "Transactions/sec", instanceCount: 12, deltaPerInstance: 100, intervalPerInstance: 300);
+
+        var trends = await _dataService.GetPerfmonTrendsByCountersAsync(
+            ServerId, new List<string> { "Transactions/sec" }, fromDate: start, toDate: end);
+
+        var point = Assert.Single(trends["Transactions/sec"]);
+        Assert.Equal(3600L, point.DeltaValue);
+        Assert.Equal(900L, point.SampleIntervalSeconds);
+        Assert.Equal(4.0, (double)point.DeltaValue!.Value / point.SampleIntervalSeconds!.Value, precision: 6);
+    }
+
     /// <summary>The ruling's picker test: a second call inside 15 minutes runs no DISTINCT (the store gains a
     /// second wait type, but a within-TTL call still answers with the cached one-type list), and a call past
     /// the TTL reruns it and picks up the change. Only the picker entry point takes <c>nowUtc</c> / caches at
@@ -363,6 +414,29 @@ public sealed class LiteTrendBucketingLiveTests : IClassFixture<SharedDuckDbFixt
             cmd.Parameters.Add(new DuckDBParameter { Value = v });
         }
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Seeds ONE collection as <paramref name="instanceCount"/> instance rows — a counter whose DMV
+    /// shape is one row per database/file/whatever the instance is, all sharing one <paramref name="at"/> — so
+    /// the interval and delta aggregation runs over real instance rows instead of the single-row-per-collection
+    /// shape every other seed helper in this file uses.</summary>
+    private async Task SeedPerfmonMultiInstanceAsync(DateTime at, string counterName, int instanceCount, long deltaPerInstance, int intervalPerInstance)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        for (var i = 0; i < instanceCount; i++)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"INSERT INTO perfmon_stats
+                (collection_id, collection_time, server_id, server_name, object_name, counter_name, instance_name,
+                 cntr_value, delta_cntr_value, sample_interval_seconds)
+                VALUES ($1, $2, $3, $4, 'SQLServer:Databases', $5, $6, $7, $8, $9)";
+            foreach (var v in new object[] { _nextId--, at, ServerId, ServerName, counterName, "db" + i, deltaPerInstance, deltaPerInstance, intervalPerInstance })
+            {
+                cmd.Parameters.Add(new DuckDBParameter { Value = v });
+            }
+            await cmd.ExecuteNonQueryAsync();
+        }
     }
 
     /// <summary>One row a minute across the whole window, through <c>generate_series</c> in a single INSERT
