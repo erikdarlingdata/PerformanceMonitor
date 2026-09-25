@@ -121,6 +121,135 @@ public static class DarlingWebEndpoints
         "get_tool_guide",
     };
 
+    /// <summary>
+    /// #4203: every read-only tool NOT yet converted to observe cancellation all the way to Npgsql — the
+    /// ratchet <c>WebReadCancellationPinTests</c> holds in both directions, the same shape
+    /// <c>LiveCleanupConversionRatchetTests</c> uses for its own conversion sweep. A name here may only be
+    /// REMOVED, on the PR that finishes threading its <see cref="ReadToolHandler"/> entry AND its
+    /// <c>[McpServerTool]</c> method's own <c>CancellationToken</c> parameter down to every store call — never
+    /// added, because every tool on the <c>/api/read/*</c> surface is in scope for the same fix and none is
+    /// meant to stay uncancellable. First slice (this lane): <c>audit_config</c> (the tool #4191 measured) plus
+    /// every other tool the web viewer's Configuration tab calls. Later lanes take the rest, about 20 a lane,
+    /// against this same allowlist, until it is empty and #4203 closes.
+    /// </summary>
+internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "compare_analysis",
+        "get_analysis_facts",
+        "get_analysis_findings",
+        "get_session_stats",
+        "get_waiting_tasks",
+        "get_alert_history",
+        "get_alert_settings",
+        "get_mute_rules",
+        "get_notification_routes",
+        "get_sweep_reports",
+        "get_blocked_process_xml",
+        "get_blocking",
+        "get_blocking_trend",
+        "get_deadlock_detail",
+        "get_deadlock_trend",
+        "get_deadlocks",
+        "get_lock_wait_trend",
+        "get_database_config_changes",
+        "get_database_scoped_config",
+        "get_server_config_changes",
+        "get_trace_flag_changes",
+        "get_collection_health",
+        "get_collection_log",
+        "get_current_waits_trend",
+        "get_blocking_stats",
+        "get_cpu_utilization",
+        "get_file_io_stats",
+        "get_memory_clerks",
+        "get_memory_stats",
+        "get_perfmon_stats",
+        "get_query_store_top",
+        "get_tempdb_trend",
+        "get_pg_top_queries",
+        "get_pg_plans",
+        "get_pg_plan_capture_readiness",
+        "get_pg_logging_audit",
+        "get_pg_wraparound_risk",
+        "get_pg_xmin_horizon",
+        "get_pg_replication_slots",
+        "get_pg_autovacuum_health",
+        "get_pg_io_stats",
+        "get_pg_wait_stats",
+        "get_pg_cpu_utilization",
+        "get_pg_wait_sampling",
+        "get_pg_kernel_stats",
+        "get_pg_predicate_stats",
+        "get_pg_index_bloat",
+        "get_pg_column_stats",
+        "get_pg_buffer_usage",
+        "get_pg_extensions",
+        "get_pg_lock_stats",
+        "get_pg_write_stats",
+        "get_pg_server_config",
+        "get_pg_server_config_changes",
+        "get_pg_deadlocks",
+        "get_pg_deadlock_detail",
+        "get_pg_log_events",
+        "get_pg_wait_trend",
+        "get_pg_query_duration_trend",
+        "get_pg_io_trend",
+        "get_pg_database_trend",
+        "get_pg_replication_stats",
+        "get_pg_blocking",
+        "get_pg_database_stats",
+        "get_pg_index_usage",
+        "get_pg_table_bloat",
+        "get_pg_session_states",
+        "get_wait_stats",
+        "get_wait_trend",
+        "get_wait_types",
+        "list_servers",
+        "get_file_io_trend",
+        "get_memory_trend",
+        "get_perfmon_trend",
+        "get_procedure_duration_trend",
+        "get_query_duration_trend",
+        "get_query_store_duration_trend",
+        "get_query_trend",
+        "get_server_summary",
+        "get_daily_summary",
+        "get_daily_summary_range",
+        "get_fleet_overview",
+        "get_ag_health",
+        "get_store_metrics",
+        "get_store_log",
+        "get_store_query_stats",
+        "get_store_host",
+        "get_collector_cost",
+        "get_collector_stall_probes",
+        "get_oversized_plan_backlog",
+        "get_latch_stats",
+        "get_spinlock_stats",
+        "get_memory_grants",
+        "get_memory_pressure_events",
+        "get_resource_semaphore",
+        "get_database_sizes",
+        "get_pvs_stats",
+        "get_index_usage",
+        "get_object_locking",
+        "get_table_index_sizes",
+        "get_cpu_scheduler_pressure",
+        "get_plan_cache_bloat",
+        "get_running_jobs",
+        "get_plan_xml",
+        "get_default_trace_events",
+        "get_health_parser_cpu_tasks",
+        "get_health_parser_io_issues",
+        "get_health_parser_memory_broker",
+        "get_health_parser_memory_conditions",
+        "get_health_parser_memory_node_oom",
+        "get_health_parser_scheduler_issues",
+        "get_health_parser_severe_errors",
+        "get_health_parser_significant_waits",
+        "get_health_parser_system_health",
+    };
+
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
     private const int DefaultFleetHours = 1;
 
@@ -261,9 +390,10 @@ public static class DarlingWebEndpoints
 
         /* The four analysis-READ tools take a DarlingAnalysisService; the web host does not register one, so
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
-           persisted-finding read — need only the store; the optional plan fetcher / logger are for the excluded
-           analyze/drill path). Shared across requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, baselineCache: baselineCache);
+           persisted-finding read — need only the store; the optional plan fetcher is for the excluded
+           analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
+           requests, like the MCP host's singleton. */
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -2812,17 +2942,17 @@ public static class DarlingWebEndpoints
         return new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
             /* ── analysis reads (take the DarlingAnalysisService) ── */
-            ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c)),
+            ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28), as_of: AsOf(c)),
             ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0), as_of: AsOf(c)),
             // #4198: the tool's own default (limit 18, previews) is sized for a chat caller's token budget.
             // The viewer's two "Analysis Findings" tables render no preview-cut field and never asked for a
             // budget, so this row keeps asking for what dev always returned: every chain, full text. See
             // DarlingWebEndpointsTests.GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText.
-            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c)),
+            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger),
 
             /* ── sessions ── */
-            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c)),
+            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c), c.RequestAborted),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c)),
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c)),
 
@@ -2870,15 +3000,15 @@ public static class DarlingWebEndpoints
                keeps a busy production server's default call under the shared response budget), but the
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
-            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true)),
+            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true), cancellationToken: c.RequestAborted),
 
             /* ── config (current + history) ── */
-            ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name")),
-            ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c)),
-            ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c)),
+            ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c), c.RequestAborted),
+            ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
             ["get_database_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
             ["get_database_scoped_config"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), Str(c, "database_name")),
-            ["get_query_store_health"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), Str(c, "database_name")),
+            ["get_query_store_health"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
             ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
             ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
 
@@ -2907,25 +3037,25 @@ public static class DarlingWebEndpoints
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c)),
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name")),
-            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c)),
+            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
                production store's default call under the shared response budget), but the web viewer has
                always shown the whole query text. The row pins its OWN default to true so the MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c)),
-            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c)),
+            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), c.RequestAborted),
             /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
                query override) reproduces the page exactly as it always rendered. */
             ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000),
-            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),
-            ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c)),
+            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
                 : UnparseableParam("bucket_minutes"),
-            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c)),
-            ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c)),
+            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             /* query_id arrives as TEXT and is passed through as text (#2548): a queryid that made a
                round trip through a JSON number has already been rounded, and the tool rejects one it

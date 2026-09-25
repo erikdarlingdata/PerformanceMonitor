@@ -13,6 +13,11 @@ namespace PerformanceMonitorLite.Tests;
 /// were silently lost when ArchiveAllAndResetAsync fired due to the 512 MB size threshold.
 /// The reset deletes monitor.duckdb outright, and config_mute_rules was not preserved.
 /// </summary>
+/* ArchiveAllAndResetAsync touches CollectionResetGate and ArchiveService's own static s_archiveLock, both
+   process-wide (#4262) — tagged into the same serialized collection CollectionResetGateTests defines so
+   this doesn't race another class's ArchiveAllAndResetAsync call under xUnit's default cross-class
+   parallelism. */
+[Collection("CollectionResetGate")]
 public class MuteRulesSurviveResetTests : IDisposable
 {
     private readonly string _tempDir;

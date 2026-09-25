@@ -134,7 +134,7 @@ public sealed class PgTargetMcpSurfaceTests
 
         /* The order the arm must keep: engine off the registry, THEN the pass, THEN the filter. */
         var arm = body.IndexOf("if (MonitoredEngineKind.IsPostgres(engineKind))", StringComparison.Ordinal);
-        var engineRead = body.IndexOf("PostgresTargetFactsAsync(postgres, resolved.ServerId)", StringComparison.Ordinal);
+        var engineRead = body.IndexOf("PostgresTargetFactsAsync(postgres, resolved.ServerId, cancellationToken)", StringComparison.Ordinal);
         var factRead = body.IndexOf("analysisService.CollectConfigAuditFactsAsync(", StringComparison.Ordinal);
         var filter = body.IndexOf("StartsWith(PgTargetFactKeys.ConfigPrefix", StringComparison.Ordinal);
         Assert.True(engineRead > 0 && arm > engineRead, "the engine must be resolved off the registry before the arm branches");

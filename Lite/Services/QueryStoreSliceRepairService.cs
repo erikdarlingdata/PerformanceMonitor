@@ -826,7 +826,11 @@ COPY (
         File.Move(tempPath, originalPath);
 
         await FlushExternalFileCacheAsync(connection, cancellationToken);
-        await _duckDb.CreateArchiveViewsAsync();
+
+        /* CreateArchiveViewsCoreAsync, not CreateArchiveViewsAsync (#4262 round 1 finding 3): the caller
+           (RepairAsync, ~line 767) already holds the write lock for this exact swap, and s_dbLock's
+           NoRecursion policy makes a nested read lock throw. */
+        await _duckDb.CreateArchiveViewsCoreAsync();
     }
 
     /// <summary>The rewritten file's row count and total execution count, for the conservation check.</summary>
