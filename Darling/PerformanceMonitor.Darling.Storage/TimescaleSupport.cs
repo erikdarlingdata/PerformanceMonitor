@@ -436,8 +436,8 @@ public static partial class TimescaleSupport
 
     /// <summary>
     /// Baseline relations SUPERSEDED by an interval-honest successor (#3653, A6): each legacy aggregate is
-    /// dropped only once its successor COVERS the baseline tier, and <see cref="DropRetiredBaselineAggregatesAsync"/>
-    /// evaluates that condition on every service start until it holds.
+    /// dropped only once its successor COVERS the baseline tier, or it holds no rows (#4289), and
+    /// <see cref="DropRetiredBaselineAggregatesAsync"/> evaluates that condition on every service start until it holds.
     ///
     /// <para><b>Why a condition and not the #2007 list.</b> <see cref="RetiredBaselineRelations"/> drops on
     /// sight, which was right for aggregates nothing read. These two ARE read: they hold up to
@@ -1097,8 +1097,8 @@ $do$";
     /// Returns how many relations were actually dropped.
     ///
     /// <para>Since #3653 the same pass also walks <see cref="SupersededBaselineRelations"/>, dropping each
-    /// legacy relation ONLY when its successor covers the baseline tier (see
-    /// <see cref="SupersededBaselineRelationDropsAt"/>). The two lists ride one sweep because they need the
+    /// legacy relation once its successor covers the baseline tier, or once the legacy holds no rows of its
+    /// own (#4289) — see <see cref="SupersededBaselineRelationDropsAt"/>. The two lists ride one sweep because they need the
     /// same connection, the same ordering against the ensure (before it) and the same failure isolation; the
     /// worker's call site is unchanged. This overload takes the host clock itself, which is what the
     /// production call site wants; the tests pass a clock to walk the condition across time.</para>
@@ -1212,12 +1212,14 @@ $do$";
         /// so this is the expected verdict of that one start; the next start finds the successor.</summary>
         SuccessorAbsent,
 
-        /// <summary>The legacy relation is a continuous aggregate and the successor's oldest bucket is later than
-        /// the tier horizon (or the successor is empty) — the legacy still holds history the successor lacks.</summary>
+        /// <summary>The legacy relation is a continuous aggregate that holds rows of its own, and the successor's
+        /// oldest bucket is later than the tier horizon (or the successor is empty) — the legacy still holds
+        /// history the successor lacks.</summary>
         SuccessorShort,
 
-        /// <summary>Drop: the successor covers the tier, or the legacy relation is a plain view (nothing of its
-        /// own to lose).</summary>
+        /// <summary>Drop: the successor covers the tier, the legacy relation is a plain view (nothing of its
+        /// own to lose), or the legacy is a continuous aggregate that holds no rows of its own (#4289 — it has
+        /// no history to protect, whatever the successor holds).</summary>
         Drop,
     }
 
@@ -1328,7 +1330,10 @@ $do$";
         if (legacyIsContinuousAggregate)
         {
             using var probe = new NpgsqlCommand(BaselineRelationHasRowsSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds };
-            legacyHoldsRows = await probe.ExecuteScalarAsync(cancellationToken) is true;
+            /* is not false, not is true: only a definite false answer means empty. A later edit that lets this
+               read return null (a swallowed error, or SQL changed to return no row) must NOT read as "empty"
+               and drop a legacy that holds rows -- the safe default for an unrecognized answer is "holds rows". */
+            legacyHoldsRows = await probe.ExecuteScalarAsync(cancellationToken) is not false;
         }
 
         DateTime? successorOldest = null;

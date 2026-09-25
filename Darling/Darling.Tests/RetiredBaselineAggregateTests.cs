@@ -303,7 +303,7 @@ WITH NO DATA", ct);
             Assert.True(verdict.LegacyIsContinuousAggregate);
             /* #4289: this legacy aggregate has the restart-zero row refreshed into it (line ~267), so it HOLDS
                rows — the state that still waits for the successor's coverage, unlike
-               RetiredBaselineAggregateTests.EmptyLegacyAggregate_DropsOnSight_EvenWithAnEmptySuccessor_AgainstDevPostgres. */
+               EmptySupersededBaselineLiveTests.EmptyLegacyAggregate_DropsOnSight_EvenWithAnEmptySuccessor_AgainstDevPostgres. */
             Assert.True(verdict.LegacyHoldsRows);
             Assert.Equal(hour2, verdict.SuccessorOldest);
             await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct);
@@ -487,6 +487,85 @@ public sealed class EmptySupersededBaselineLiveTests
         Assert.Equal(1, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct));
         Assert.False(await RelationExistsAsync(connection, legacy, ct), "the empty legacy aggregate must be gone");
         Assert.True(await RelationExistsAsync(connection, successor, ct), "the successor must stay, empty or not");
+    }
+
+    /// <summary>#4292 Low 1: when the has-rows probe itself fails, the legacy must survive, not read as empty.
+    /// <see cref="TimescaleSupport.JudgeSupersededBaselineRelationAsync"/> has no catch of its own, so the
+    /// exception reaches <see cref="TimescaleSupport.DropRetiredBaselineAggregatesAsync"/>'s
+    /// per-relation catch, which logs and skips the drop. Forced with a lock timeout (a plain <c>REVOKE SELECT</c>
+    /// does not work here — <see cref="ScratchPostgres"/> connects as a superuser, which bypasses grants):
+    /// a second connection holds <c>ACCESS EXCLUSIVE</c> on the legacy relation in an open transaction, and the
+    /// judged connection carries a 1-second <c>lock_timeout</c>, so its <c>EXISTS</c> read against the legacy
+    /// view times out server-side.</summary>
+    [Fact]
+    public async Task LegacyProbeFails_LegacySurvives_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4292 probe-error test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #4292 probe-error test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        /* Stopped for the same reason as the sibling test above: a policy firing mid-test must never be able
+           to explain an unexpected lock wait or row. */
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        const string legacy = TimescaleSupport.LegacyWaitStatsBaselineView;
+        const string successor = TimescaleSupport.WaitStatsIntervalBaselineView;
+
+        await using (var create = new NpgsqlCommand(TimescaleSupport.LegacyCreateWaitStatsBaselineSql, connection) { CommandTimeout = 120 })
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var locker = new NpgsqlConnection(scratch.ConnectionString);
+        await locker.OpenAsync(ct);
+        await using var lockTransaction = await locker.BeginTransactionAsync(ct);
+        await using (var lockCommand = new NpgsqlCommand($"LOCK TABLE collect.{legacy} IN ACCESS EXCLUSIVE MODE", locker, lockTransaction))
+        {
+            await lockCommand.ExecuteNonQueryAsync(ct);
+        }
+
+        await using (var setLockTimeout = new NpgsqlCommand("SET lock_timeout = '1s'", connection))
+        {
+            await setLockTimeout.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The lock blocks the has-rows probe, which times out at 1s and (correctly, today) propagates all the
+           way out of DropRetiredBaselineAggregatesAsync's per-relation try, so the drop statement it guards is
+           never attempted and this returns almost immediately -- dropped stays 0. Released 1.5s in regardless,
+           on its own timer: a REGRESSION this test must still be able to catch -- a catch inside
+           JudgeSupersededBaselineRelationAsync that swallows the probe error and answers "empty" -- reaches
+           that same drop statement, which would otherwise sit behind the SAME lock and time out too, hiding the
+           regression behind a false "dropped stayed 0". Releasing on a fixed timer, not after the drop
+           completes, lets a wrongly-attempted drop actually succeed once unblocked, so it shows up as dropped=1. */
+        var dropTask = TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct);
+        var releaseTask = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1.5), ct);
+            await lockTransaction.RollbackAsync(ct);
+        }, ct);
+
+        Assert.Equal(0, await dropTask);
+        await releaseTask;
+
+        Assert.True(await RelationExistsAsync(connection, legacy, ct), "the legacy aggregate must survive a failed probe");
+        Assert.True(await RelationExistsAsync(connection, successor, ct), "the successor must stay regardless");
     }
 
     private static async Task<bool> HasRowsAsync(NpgsqlConnection connection, string view, System.Threading.CancellationToken ct)
