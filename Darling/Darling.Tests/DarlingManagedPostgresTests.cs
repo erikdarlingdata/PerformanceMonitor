@@ -2306,6 +2306,20 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(@"D:\darling\pg-credential.dpapi", DarlingManagedPostgres.CredentialPathFor(@"D:\darling\pg\"));
     }
 
+    /// <summary>Round-1 security review, #4280 Low 3: ResolveDataDirectory itself normalizes a trailing
+    /// separator, rather than relying on every caller downstream to trim it before building a quoted "-D"
+    /// argument (a trailing backslash there escapes the closing quote).</summary>
+    [Fact]
+    public void ResolveDataDirectory_TrimsATrailingSeparator()
+    {
+        Assert.Equal(
+            @"D:\darling\pg",
+            DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig { DataDirectory = @"D:\darling\pg\" }));
+        Assert.Equal(
+            @"D:\darling\pg",
+            DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig { DataDirectory = @"D:\darling\pg" }));
+    }
+
     [Fact]
     public void StoredCredential_DpapiRoundTrip_DerivesTheConnectionString()
     {

@@ -642,7 +642,11 @@ public sealed class DarlingManagedPostgres
             ? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "PerformanceMonitorDarling", "pg")
-            : Path.GetFullPath(config.DataDirectory);
+            /* Trimmed (round-1 security review, #4280 Low 3): Path.GetFullPath keeps a trailing separator, and
+               every caller that builds a "-D" argument from this value quotes it as `"{path}"` — a trailing
+               backslash then escapes that closing quote. Hardening only: every one of those callers already
+               fails its own first use of the broken value long before anything downstream reads it. */
+            : Path.TrimEndingDirectorySeparator(Path.GetFullPath(config.DataDirectory));
     }
 
     public static string CredentialPathFor(string dataDirectory)

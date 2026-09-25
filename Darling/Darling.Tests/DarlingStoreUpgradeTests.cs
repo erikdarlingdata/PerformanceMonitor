@@ -193,12 +193,28 @@ public sealed class DarlingStoreUpgradeTests
             timescaledb.max_background_workers = 8
             """;
 
-        var settings = DarlingStoreUpgrade.ParseAutoConf(content, out var skippedNames);
+        var settings = DarlingStoreUpgrade.ParseAutoConf(content, out var skippedLines);
 
         var setting = Assert.Single(settings);
         Assert.Equal("timescaledb.max_background_workers", setting.Name);
         Assert.Equal("8", setting.DisplayValue);
-        Assert.Equal(new[] { "bad\"name", "a b" }, skippedNames);
+        /* Line numbers, not names/text (round-1 security review, #4280 Medium 1) — line 1 is "bad"name = '1'",
+           line 2 is "a b = '1'", both invalid GUC names. */
+        Assert.Equal(new[] { 1, 2 }, skippedLines);
+    }
+
+    [Theory]
+    [InlineData("work_mem '128MB'\n", "work_mem", "128MB")]
+    [InlineData("max_connections 250\n", "max_connections", "250")]
+    public void ParseAutoConf_AcceptsANameValueLineWithNoEqualsSign(string content, string expectedName, string expectedValue)
+    {
+        /* PostgreSQL's own grammar makes the '=' optional between name and value (round-1 security review,
+           #4280 parse note) — ALTER SYSTEM always writes one, but a hand-edited file need not. */
+        var setting = Assert.Single(DarlingStoreUpgrade.ParseAutoConf(content, out var skippedLines));
+
+        Assert.Equal(expectedName, setting.Name);
+        Assert.Equal(expectedValue, setting.DisplayValue);
+        Assert.Empty(skippedLines);
     }
 
     [Fact]
@@ -584,9 +600,10 @@ public sealed class DarlingStoreUpgradeTests
                 TimeSpan.FromMinutes(3), timeout.Token);
             Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
 
+            var carryPort = FindFreeTcpPort();
             var log = new CapturingLogger();
             var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, bin, timeout.Token);
+                oldDataDirectory, newDataDirectory, bin, carryPort, timeout.Token);
 
             Assert.Contains("work_mem", result.CarriedNames);
             Assert.Contains("darling_4253_unknown_setting", result.RejectedNames);
@@ -594,6 +611,8 @@ public sealed class DarlingStoreUpgradeTests
             var logText = log.ToString();
             Assert.Contains("Carried work_mem", logText);
             Assert.Contains("NOT carried: darling_4253_unknown_setting", logText);
+            /* Round-1 security review, #4280 Medium 1: a carried setting's value never reaches any log line. */
+            Assert.DoesNotContain("199MB", logText, StringComparison.Ordinal);
 
             var preUpgradeCopy = Path.Combine(root.FullName, DarlingStoreUpgrade.PreUpgradeAutoConfFileName);
             Assert.True(File.Exists(preUpgradeCopy), $"expected the pre-upgrade file at {preUpgradeCopy}");
@@ -650,7 +669,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             await Assert.ThrowsAsync<TimeoutException>(() => upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None));
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0 /* unused: throws before the port is read */, Probe, CancellationToken.None));
 
             Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(newAutoConfPath));
         }
@@ -692,7 +711,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             await Assert.ThrowsAsync<OperationCanceledException>(() => upgrade.CarryAutoConfAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, cts.Token));
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0 /* unused: throws before the port is read */, Probe, cts.Token));
 
             Assert.Equal(AutoConfHeaderOnly, await File.ReadAllTextAsync(newAutoConfPath, CancellationToken.None));
         }
@@ -725,6 +744,310 @@ public sealed class DarlingStoreUpgradeTests
             "work_mem = '64MB'\nshared_buffers = '256MB'\nmax_connections = '250'\n");
 
         return (oldDataDirectory, newDataDirectory, Path.Combine(newDataDirectory, "postgresql.auto.conf"));
+    }
+
+    /* ---------------- round-1 security review, #4280 ---------------- */
+
+    /// <summary>Medium 1: a rejected setting whose name looks like it may hold a credential gets no reason
+    /// logged, and never its value — PostgreSQL's own reject reason for an out-of-range value often repeats
+    /// the offending value verbatim.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_RejectedSecretNamedSetting_NeverLogsItsValueOrReason()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-secretreject-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "primary_conninfo = 'host=x password=hunter2'\n");
+
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+                => Task.FromResult((1, "invalid value for parameter \"primary_conninfo\": \"host=x password=hunter2\""));
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            var result = await upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+
+            Assert.Empty(result.CarriedNames);
+            Assert.Contains("primary_conninfo", result.RejectedNames);
+
+            var logText = log.ToString();
+            Assert.Contains("primary_conninfo", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("host=x", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Medium 1: a CARRIED setting's log line never repeats its value either, secret-looking name or
+    /// not — only the name and a pointer to the pre-upgrade copy. "unused-bin-dir" makes the belt-and-braces
+    /// real start (Medium 2) fail fast and drop it again; this test only cares that the log and the file both
+    /// stay clean of the value either way.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_CarriedSecretNamedSetting_NeverLogsItsValue()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-secretcarry-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "primary_conninfo = 'host=x password=hunter2'\n");
+
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+                => Task.FromResult((0, string.Empty));
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            await upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+
+            var logText = log.ToString();
+            Assert.Contains("Carried primary_conninfo", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("host=x", logText, StringComparison.Ordinal);
+
+            var newAutoConf = await File.ReadAllTextAsync(Path.Combine(newDataDirectory, "postgresql.auto.conf"));
+            Assert.Equal(AutoConfHeaderOnly, newAutoConf);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Medium 1 (the ":2831" finding): a skipped invalid-name line logs a line number, never its
+    /// text — with the '=' optional, the text before this parser's name/value boundary can actually be part
+    /// of the value.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_SkippedInvalidNameLine_LogsALineNumberNotTheText()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-skipname-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "bad\"name = 'hunter2fragment'\n");
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            var result = await upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0,
+                (exePath, arguments, timeout, token) => Task.FromResult((0, string.Empty)),
+                CancellationToken.None);
+
+            Assert.Empty(result.CarriedNames);
+            Assert.Empty(result.RejectedNames);
+
+            var logText = log.ToString();
+            Assert.Contains("(line(s) 1)", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("hunter2fragment", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("bad\"name", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Low 1: when the catch's reset write ALSO fails, the fallback File.Delete is tried, and when
+    /// THAT also fails the thrown exception names the file and keeps the original as InnerException — here a
+    /// read-only postgresql.auto.conf blocks both the reset write and the delete deterministically.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_ResetAndDeleteBothFail_ThrowsNamingTheFile_WithTheOriginalAsInnerException()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-doublefail-");
+        try
+        {
+            var (oldDataDirectory, newDataDirectory, newAutoConfPath) = SetUpAutoConfCarryDirectories(root.FullName);
+
+            var probeCalls = 0;
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+            {
+                probeCalls++;
+                if (probeCalls == 2)
+                {
+                    /* Read-only blocks both the reset write and File.Delete deterministically, the same as a
+                       locked or access-denied file would. */
+                    File.SetAttributes(newAutoConfPath, FileAttributes.ReadOnly);
+                    throw new TimeoutException("forced timeout on the 2nd probe, for the test");
+                }
+
+                return Task.FromResult((0, string.Empty));
+            }
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None));
+
+            Assert.Contains(newAutoConfPath, ex.Message, StringComparison.Ordinal);
+            Assert.IsType<TimeoutException>(ex.InnerException);
+        }
+        finally
+        {
+            try
+            {
+                File.SetAttributes(Path.Combine(root.FullName, "new", "postgresql.auto.conf"), FileAttributes.Normal);
+            }
+            catch (Exception)
+            {
+                /* best-effort cleanup */
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Medium 2, live: "ssl = on" with no certificate files passes "postgres -C ssl" (which exits
+    /// right after reading the config files, before SSL setup) but stops the very next real start. The
+    /// belt-and-braces check must catch that with a real start/stop, not another -C probe: postgresql.auto.conf
+    /// ends at the header only, and the cluster still starts.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_ALineThatPassesDashCButFailsARealStart_EndsHeaderOnly_AndTheStoreStarts()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        var bin = Path.Combine(runtimeRoot!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-sslstart-");
+        var oldDataDirectory = Path.Combine(root.FullName, "old");
+        var newDataDirectory = Path.Combine(root.FullName, "new");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        string? runningDataDirectory = null;
+
+        try
+        {
+            var (oldInitExit, oldInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{oldDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(oldInitExit == 0, $"initdb (old) failed: {oldInitOutput}");
+
+            /* Hand-appended, not ALTER SYSTEM: "ssl = on" with no server.crt/server.key configured is exactly
+               the review's example, and it is syntactically valid so ALTER SYSTEM would accept it too. */
+            await File.AppendAllTextAsync(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"), "ssl = 'on'\n", timeout.Token);
+
+            var (newInitExit, newInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{newDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
+
+            var carryPort = FindFreeTcpPort();
+            var log = new CapturingLogger();
+            var result = await new DarlingStoreUpgrade(log).CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, bin, carryPort, timeout.Token);
+
+            Assert.Empty(result.CarriedNames);
+            Assert.Contains("ssl", result.RejectedNames);
+
+            var newAutoConf = await File.ReadAllTextAsync(Path.Combine(newDataDirectory, "postgresql.auto.conf"), timeout.Token);
+            Assert.Equal(AutoConfHeaderOnly, newAutoConf);
+
+            var newPort = FindFreeTcpPort();
+            runningDataDirectory = newDataDirectory;
+            await StartDirectAsync(bin, newDataDirectory, newPort, quiesced: false, timeout.Token);
+        }
+        finally
+        {
+            if (runningDataDirectory is not null)
+            {
+                await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Low 1, live: PostgreSQL treats postgresql.auto.conf as optional, so the File.Delete fallback
+    /// the reset's own catch falls back to is safe to reach for — proven here by removing the file the normal
+    /// reset (a probe throw mid-loop) leaves behind and confirming a real cluster still starts with none at
+    /// all. <see cref="CarryAutoConfAsync_ResetAndDeleteBothFail_ThrowsNamingTheFile_WithTheOriginalAsInnerException"/>
+    /// pins the code path that reaches File.Delete itself.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_ProbeThrows_TheNewClusterStarts_WithNoAutoConfFile()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        var bin = Path.Combine(runtimeRoot!, "pgsql", "bin");
+        Assert.SkipUnless(File.Exists(Path.Combine(bin, "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-nofilestart-");
+        var oldDataDirectory = Path.Combine(root.FullName, "old");
+        var newDataDirectory = Path.Combine(root.FullName, "new");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        string? runningDataDirectory = null;
+
+        try
+        {
+            var (newInitExit, newInitOutput) = await DarlingManagedPostgres.RunToolAsync(
+                Path.Combine(bin, "initdb.exe"),
+                $"-D \"{newDataDirectory}\" -U darling -A trust -E UTF8 --locale=C",
+                TimeSpan.FromMinutes(3), timeout.Token);
+            Assert.True(newInitExit == 0, $"initdb (new) failed: {newInitOutput}");
+
+            Directory.CreateDirectory(oldDataDirectory);
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "work_mem = '64MB'\nshared_buffers = '256MB'\n");
+
+            var probeCalls = 0;
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan probeTimeout, CancellationToken token)
+            {
+                probeCalls++;
+                if (probeCalls == 2)
+                {
+                    throw new TimeoutException("forced timeout on the 2nd probe, for the test");
+                }
+
+                return Task.FromResult((0, string.Empty));
+            }
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            await Assert.ThrowsAsync<TimeoutException>(() => upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, bin, 0, Probe, timeout.Token));
+
+            File.Delete(Path.Combine(newDataDirectory, "postgresql.auto.conf"));
+
+            var newPort = FindFreeTcpPort();
+            runningDataDirectory = newDataDirectory;
+            await StartDirectAsync(bin, newDataDirectory, newPort, quiesced: false, timeout.Token);
+        }
+        finally
+        {
+            if (runningDataDirectory is not null)
+            {
+                await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
+            }
+
+            TryDeleteTree(root.FullName);
+        }
     }
 
     private static async Task<string> StartDirectAsync(string binDirectory, string dataDirectory, int port, bool quiesced, CancellationToken cancellationToken)
