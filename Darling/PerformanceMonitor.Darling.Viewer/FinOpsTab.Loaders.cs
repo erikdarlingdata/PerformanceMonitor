@@ -206,8 +206,10 @@ public partial class FinOpsTab
 
         if (data != null)
         {
-            FinOpsTopTotalGrid.ItemsSource = await _dataService.GetTopResourceConsumersByTotalAsync(_server.ServerId);
-            FinOpsTopAvgGrid.ItemsSource = await _dataService.GetTopResourceConsumersByAvgAsync(_server.ServerId);
+            /* #4227: one round trip feeds both grids instead of two independent 24h query_stats scans. */
+            var topConsumers = await _dataService.GetTopResourceConsumersAsync(_server.ServerId);
+            FinOpsTopTotalGrid.ItemsSource = topConsumers.ByTotal;
+            FinOpsTopAvgGrid.ItemsSource = topConsumers.ByAvg;
             FinOpsDbSizeChart.ItemsSource = await _dataService.GetDatabaseSizeSummaryAsync(_server.ServerId);
             FinOpsProvisioningTrendGrid.ItemsSource = await _dataService.GetProvisioningTrendAsync(_server.ServerId);
         }
