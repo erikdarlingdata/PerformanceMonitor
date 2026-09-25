@@ -35,9 +35,25 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpQueryHeatmapTools
 {
-    /// <summary>The web panel's cap and this tool's default: 500 cells, which is a full day of 5-minute bins
-    /// on a server whose queries land in two or three magnitude buckets per bin.</summary>
-    public const int DefaultCellLimit = 500;
+    /// <summary>This tool's default cell cap (#4198, down from the web panel's own 500): at 500 cells the
+    /// fixed per-cell fields alone (time bin, bucket, count, hash) ran to roughly 75 KB before one byte of
+    /// query text, already more than double the shared 32 KB response budget
+    /// (<see cref="McpResponseBudget.DefaultBytes"/>) — so the cap had to fall regardless of the text width
+    /// chosen. 100 cells covers 14-plus 5-minute bins fully populated across all seven magnitude buckets, or
+    /// most of a business day on a server whose queries land in the usual two or three; raise bucket_minutes
+    /// for more of the window in the same cell count, or limit for more cells at this width.</summary>
+    public const int DefaultCellLimit = 100;
+
+    /// <summary>The default <c>top_query_text</c> preview width, in characters (#4198). Shrinking this alone
+    /// barely moves the total — seven-field JSON structure plus <see cref="DefaultCellLimit"/> already spends
+    /// most of the budget — but it is still cut well below the old fixed 120, and <c>full_text</c> opts back
+    /// into the whole statement.</summary>
+    public const int DefaultPreviewLength = 80;
+
+    /// <summary>What <c>full_text = true</c> asks for: not a literally unbounded fetch (one absurd statement
+    /// could still blow an opt-in call past the budget the caller explicitly waived), but a bound generous
+    /// enough that no real T-SQL statement is cut by it.</summary>
+    public const int FullTextPreviewLength = 32_000;
 
     [McpServerTool(Name = "get_query_heatmap"), Description("Draws the desktop viewer's Query Heatmap as a table: how many distinct queries fell into each (time bin x log-magnitude bucket) cell over a window, plus the most-executed query in each cell. It answers when a server was slow and how slow at the same time - get_top_queries_by_cpu ranks queries over a whole window and cannot show that the window had two very different halves. Bins are 5 minutes wide by default because that is exactly what the desktop viewer uses, so a browser, an agent and a desktop pointed at the same server draw the same picture; raise bucket_minutes for a longer window, which is also the lever that fits more of the window inside the cell cap. Magnitude buckets are the viewer's seven, in the metric's own unit: under 1, 1-10, 10-100, 100-1K, 1K-10K, 10K-100K and over 100K.")]
     public static async Task<string> GetQueryHeatmap(
@@ -47,8 +63,9 @@ public sealed class DarlingMcpQueryHeatmapTools
         [Description("Which per-execution metric to bucket by: duration, cpu, logical_reads, logical_writes or execution_count. Default duration.")] string? metric = null,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Width of each time bin, in minutes. Default 5 - the desktop viewer's own bin width, so the two surfaces agree. Raise it to cover a longer window in fewer cells.")] int bucket_minutes = DarlingQueryHeatmapReader.ViewerBucketMinutes,
-        [Description("Maximum CELLS to return, most recent bins first. Default 500. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description("Maximum CELLS to return, most recent bins first. Default 100. A full day of 5-minute bins can reach 2,016 cells on a busy server; raise bucket_minutes rather than the cap to see the whole window.")] int limit = DefaultCellLimit,
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        [Description("Return each cell's top query at full length instead of an 80-character preview. Default false.")] bool full_text = false)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -86,8 +103,9 @@ public sealed class DarlingMcpQueryHeatmapTools
                 happens to have exactly `limit` cells and nothing more, which is a false positive in the one
                 field whose whole reason for existing is that the cap should not have to be inferred.
             */
+            var previewLength = full_text ? FullTextPreviewLength : DefaultPreviewLength;
             var rows = await DarlingQueryHeatmapReader.GetQueryHeatmapAsync(
-                postgres, resolved.ServerId, parsedMetric, start, end, database_name, bucket_minutes, limit + 1);
+                postgres, resolved.ServerId, parsedMetric, start, end, database_name, bucket_minutes, limit + 1, previewLength);
 
             if (rows.Count == 0)
                 return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, hours_back);
@@ -135,6 +153,10 @@ public sealed class DarlingMcpQueryHeatmapTools
                 /* The same bin width the desktop viewer hardcodes, so the two surfaces cannot disagree
                    about the same server over the same window. */
                 bucket_minutes_matches_desktop_viewer = bucket_minutes == DarlingQueryHeatmapReader.ViewerBucketMinutes,
+                /* Echoed rather than left implicit in the cell-level flags alone (#4198): a caller who never
+                   looks at an individual cell still learns, from this one field, that a second call with
+                   full_text=true gets more than what came back. */
+                full_text,
                 /* A bare bucket_index is unreadable, and the labels differ by metric family: duration and
                    CPU are milliseconds, the other three are counts. */
                 magnitude_buckets = labels.Select((label, index) => new { bucket_index = index, label }),
@@ -156,6 +178,9 @@ public sealed class DarlingMcpQueryHeatmapTools
                     query_count = c.QueryCount,
                     top_query_hash = c.TopQueryHash,
                     top_query_text = c.TopQueryText,
+                    /* #4198: honest about the preview it just spent bytes on. True whenever the stored
+                       statement is longer than this call's preview width, at either preview length. */
+                    top_query_text_truncated = c.TopQueryTextTruncated,
                 }),
             }, McpHelpers.JsonOptions);
         }
