@@ -161,7 +161,8 @@ public sealed class PgTargetBetweenWavesV3Tests
         Assert.DoesNotContain("no-missing-index-folklore", keys, StringComparison.Ordinal);
 
         var provider = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs");
-        Assert.Contains("The first of the three seams a derived provider overrides", provider, StringComparison.Ordinal);
+        /* #4298 added the fourth seam (IsDailyCacheArm), and rewrote this doc from "three" to "four" to say so. */
+        Assert.Contains("The first of the four seams a derived provider overrides", provider, StringComparison.Ordinal);
         Assert.DoesNotContain("The one seam a derived provider overrides", provider, StringComparison.Ordinal);
 
         /* Lane 37 wrote these two docs as "the keyed seam exists since #3810; switching the anomaly to per-queryid is
