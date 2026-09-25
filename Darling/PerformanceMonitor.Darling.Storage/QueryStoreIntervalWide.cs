@@ -396,6 +396,232 @@ SELECT
     b.null_first_execution_rows
 FROM batch_rows AS b;";
 
+    /* ---- the read-source decision (grid/MCP/slicer reads, #3953, ruling issuecomment-5836972848) ------------ */
+    /* This is a SEPARATE decision from QueryStoreIntervalLatest.ReadsTableAsync (V143's, which PLAN_REGRESSION
+       alone uses): the two tables have independent coverage claims, and the reads gated here (the Queries grid,
+       its MCP twin, its slicer) have an upper bound and a per-read minimum window that PLAN_REGRESSION's
+       always-open, always-14-day read does not. V143's shape is still the model for clauses 1-3; read it once,
+       by offset, before touching this. */
+
+    /// <summary>
+    /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
+    /// <c>applied_through</c> (both NULL when there is no coverage row), whether it has pending batches, and
+    /// whether TimescaleDB's catalog views exist on this store. Same shape as
+    /// <see cref="QueryStoreIntervalLatest.ReadSourceInputsSql"/> plus <c>applied_through</c>, which this gate's
+    /// clause 4 needs and V143's PLAN_REGRESSION gate does not (PLAN_REGRESSION's read has no upper bound).
+    /// </summary>
+    public const string ReadSourceInputsSql = @"
+SELECT
+    c.filled_since,
+    c.applied_through,
+    EXISTS
+    (
+        SELECT
+            1
+        FROM collect.query_store_interval_wide_pending AS p
+        WHERE p.server_id = $1
+    ) AS has_pending,
+    to_regclass('timescaledb_information.chunks') IS NOT NULL AS has_timescale
+FROM (SELECT 1) AS one
+LEFT JOIN collect.query_store_interval_wide_coverage AS c
+  ON c.server_id = $1;";
+
+    /// <summary>
+    /// The floors, from TimescaleDB's catalog (metadata, never a scan), exactly as
+    /// <see cref="QueryStoreIntervalLatest.ChunkFloorsSql"/>: raw's oldest chunk, and this table's when
+    /// TimescaleDB's catalog carries it as a hypertable. It does not today — this table is engine-plain, per its
+    /// migration's own comment — so the <c>table_is_hypertable</c> arm is defensive, matching V143's.
+    /// </summary>
+    public const string ChunkFloorsSql = @"
+SELECT
+    (
+        SELECT
+            MIN(ch.range_start) AT TIME ZONE 'UTC'
+        FROM timescaledb_information.chunks AS ch
+        WHERE ch.hypertable_schema = 'collect'
+        AND   ch.hypertable_name = 'query_store_stats'
+    ) AS raw_floor,
+    EXISTS
+    (
+        SELECT
+            1
+        FROM timescaledb_information.hypertables AS h
+        WHERE h.hypertable_schema = 'collect'
+        AND   h.hypertable_name = 'query_store_interval_wide'
+    ) AS table_is_hypertable,
+    (
+        SELECT
+            MIN(ch.range_start) AT TIME ZONE 'UTC'
+        FROM timescaledb_information.chunks AS ch
+        WHERE ch.hypertable_schema = 'collect'
+        AND   ch.hypertable_name = 'query_store_interval_wide'
+    ) AS table_floor;";
+
+    /// <summary>The table's floor for one server where the table is a plain heap (today, always): its oldest
+    /// interval.</summary>
+    public const string PlainTableFloorSql = @"
+SELECT
+    MIN(t.first_execution_time)
+FROM collect.query_store_interval_wide AS t
+WHERE t.server_id = $1;";
+
+    /// <summary>
+    /// The Queries grid's own minimum window (#3953 clause 5, ruling issuecomment-5836972848 item 5): below this
+    /// the table's fixed per-decision round trips (two more queries plus a transaction) cost more than the read
+    /// they would save, so the gate reads raw regardless of coverage. One constant per read — the MCP and slicer
+    /// reads (a later lane) set their own, and may not share this value.
+    /// </summary>
+    public static readonly TimeSpan GridWideMinWindow = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// How far below the window start clause 3 still allows the table (V143's clause 3 restated: "B is the
+    /// window minus a day, and an interval spans at most a day"). One Query Store runtime-stats interval can
+    /// span up to a day, so an interval that STARTED up to a day before the window can still have executions
+    /// inside it. Restated here (rather than referencing <c>PgFactCollector.QueryPerf.PlanRegressionSkewMarginDays</c>)
+    /// because the viewer does not reference the service assembly (#1661 / #2530).
+    /// </summary>
+    public static readonly TimeSpan IntervalSpanMargin = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP/slicer read if and only if all five of
+    /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
+    /// items H3, M1). A sixth clause — the viewer's store must report schema version 144 or later — is the
+    /// caller's: it needs the viewer's own connection probe, which this pure function does not have.
+    /// <list type="number">
+    /// <item>Coverage exists (<paramref name="filledSince"/> is not null) and there is no pending batch.</item>
+    /// <item><c>filledSince &lt;= max(R, S)</c> (<paramref name="rawFloor"/>, <paramref name="windowStart"/>):
+    /// the table holds every snapshot raw's own read would, and may hold more (the ruled window extension).</item>
+    /// <item><c>R &gt;= H</c> or <c>S - 1 day &gt;= H</c> (<paramref name="tableFloor"/>,
+    /// <see cref="IntervalSpanMargin"/>): raw holds no history the table has dropped, or every interval the
+    /// window needs starts inside the table. A NULL <paramref name="tableFloor"/> means the table holds nothing
+    /// for the server, and clause 2 already refuses that case.</item>
+    /// <item>A literal <paramref name="literalWindowEnd"/> (a custom range, MCP <c>as_of</c>) must be at or
+    /// after <paramref name="appliedThrough"/>. NULL means an open end (a preset), which skips this clause
+    /// entirely: the WPF preset's own end is the viewer's clock, not the store's, so comparing it against
+    /// <paramref name="appliedThrough"/> would send a slow-clocked viewer to raw on every ordinary read (M1).</item>
+    /// <item>The window (<paramref name="windowEnd"/> minus <paramref name="windowStart"/>) is at least
+    /// <paramref name="minWindow"/> (<see cref="GridWideMinWindow"/> for the grid).</item>
+    /// </list>
+    /// A NULL <paramref name="rawFloor"/> is raw with no chunk floor (a plain store, whose raw keeps 30 days):
+    /// minus infinity, which can only pick raw. Every input errs toward raw, never toward an under-read, same as
+    /// V143's.
+    /// </summary>
+    public static bool UseTable(
+        DateTime? filledSince,
+        bool hasPending,
+        DateTime? rawFloor,
+        DateTime windowStart,
+        DateTime windowEnd,
+        DateTime? literalWindowEnd,
+        DateTime appliedThrough,
+        DateTime? tableFloor,
+        TimeSpan minWindow)
+    {
+        if (filledSince is not DateTime f || hasPending)
+        {
+            return false;
+        }
+
+        var rawReadsFrom = rawFloor is DateTime r && r > windowStart ? r : windowStart;
+        if (f > rawReadsFrom)
+        {
+            return false;
+        }
+
+        if (tableFloor is DateTime h)
+        {
+            var skewFloor = windowStart - IntervalSpanMargin;
+            if (!((rawFloor is DateTime floor && floor >= h) || skewFloor >= h))
+            {
+                return false;
+            }
+        }
+
+        if (literalWindowEnd is DateTime end && end < appliedThrough)
+        {
+            return false;
+        }
+
+        return windowEnd - windowStart >= minWindow;
+    }
+
+    /// <summary>The clamp (review D4R H3): the table read's own lower bound, <c>max(windowStart, rawFloor)</c>.
+    /// Raw chunks drop whole, so bounding the table there returns exactly the raw read's own answer over the
+    /// snapshots raw still holds, reaching further back only where raw has already dropped the chunk.</summary>
+    public static DateTime ClampedStart(DateTime? rawFloor, DateTime windowStart) =>
+        rawFloor is DateTime r && r > windowStart ? r : windowStart;
+
+    /// <summary>
+    /// <see cref="UseTable"/> plus the store round trips it needs, and the clamp (<see cref="ClampedStart"/>) the
+    /// caller's own table read must use as its lower bound — computed from the SAME <c>rawFloor</c> this decision
+    /// read, on the SAME connection, so the decision and the clamp cannot see different snapshots.
+    /// </summary>
+    public static async Task<(bool UseTable, DateTime ClampedStart)> ReadsTableAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        DateTime windowStart,
+        DateTime windowEnd,
+        DateTime? literalWindowEnd,
+        TimeSpan minWindow,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DateTime? filledSince;
+            DateTime appliedThrough;
+            bool hasPending;
+            bool hasTimescale;
+            await using (var inputs = new NpgsqlCommand(ReadSourceInputsSql, connection) { CommandTimeout = commandTimeoutSeconds })
+            {
+                inputs.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                await using var reader = await inputs.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                filledSince = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                appliedThrough = reader.IsDBNull(1) ? DateTime.MinValue : reader.GetDateTime(1);
+                hasPending = reader.GetBoolean(2);
+                hasTimescale = reader.GetBoolean(3);
+            }
+
+            if (filledSince is null || hasPending)
+            {
+                return (false, windowStart);
+            }
+
+            DateTime? rawFloor = null;
+            DateTime? tableFloor = null;
+            var tableIsHypertable = false;
+            if (hasTimescale)
+            {
+                await using var floors = new NpgsqlCommand(ChunkFloorsSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                await using var reader = await floors.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                tableIsHypertable = reader.GetBoolean(1);
+                tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+            }
+
+            if (!tableIsHypertable)
+            {
+                await using var plain = new NpgsqlCommand(PlainTableFloorSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                plain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                tableFloor = await plain.ExecuteScalarAsync(cancellationToken) as DateTime?;
+            }
+
+            var useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow);
+            logger?.LogDebug(
+                "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o})",
+                serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor);
+            return (useTable, ClampedStart(rawFloor, windowStart));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(ex, "Query Store wide-table source decision failed for server {ServerId}; reading raw", serverId);
+            return (false, windowStart);
+        }
+    }
+
     private readonly ConcurrentDictionary<int, byte> _coverageEnsured = new();
     private readonly ConcurrentDictionary<int, DateTime> _gapCheckedAt = new();
     private readonly ILogger? _logger;
