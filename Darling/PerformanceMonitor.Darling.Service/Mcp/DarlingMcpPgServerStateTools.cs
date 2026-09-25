@@ -671,11 +671,16 @@ public sealed class DarlingMcpPgServerStateTools
 
             /* #4251: attached like database_overrides below, from the collector's own cached verdict (no
                store read - PgFileSettingsCapability is process-wide and this Darling process is the same one
-               that ran the collector). TryGetCachedVerdict returns false with fileSettingsReadable unset for
-               a target never checked (collector has not run yet, or is SQL Server), which correctly shows no
-               caveat rather than a false one - "readable" is not claimed, only "known unreadable" is. */
+               that ran the collector). TryGetCachedVerdict returns false with fileSettingsReadable/
+               fileSettingsIsWindows unset for a target never checked (collector has not run yet, or is SQL
+               Server), which correctly shows no caveat rather than a false one - "readable" is not claimed,
+               only "known unreadable" is. #4251 round-1 review, H1(a): also gated on Windows - the grants
+               this caveat asks for fix nothing on a non-Windows target, where pending_restart is already
+               correct off pg_settings alone, so an unreadable verdict there is not worth a caveat. */
             var fileSettingsUnreadable =
-                PgFileSettingsCapability.TryGetCachedVerdict(resolved.ServerName, out var fileSettingsReadable)
+                PgFileSettingsCapability.TryGetCachedVerdict(
+                    resolved.ServerName, out var fileSettingsReadable, out var fileSettingsIsWindows)
+                && fileSettingsIsWindows
                 && !fileSettingsReadable;
 
             var configPage = new

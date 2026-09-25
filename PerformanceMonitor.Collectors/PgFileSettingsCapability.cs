@@ -51,31 +51,57 @@ public static class PgFileSettingsCapability
     /// type header): <c>SELECT</c> on the view itself, and <c>EXECUTE</c> on the function it wraps —
     /// checked against the calling role independently of the view's own grant. Safe to send unconditionally:
     /// both check functions are callable by any role, only the ANSWER can be false.
+    ///
+    /// <para><b>#4251 round-1 review, L2.</b> <c>to_regclass</c>/<c>to_regprocedure</c> wrap the object names
+    /// so a target where the view or function does not exist (unsupported before core 9.5, in practice never
+    /// seen) answers <c>NULL</c> from <c>has_table_privilege</c>/<c>has_function_privilege</c> rather than
+    /// raising 42P01/42883 — <c>coalesce(..., false)</c> then reads that as "not readable", the same outcome
+    /// a real permission denial gives, instead of failing every <c>pg_server_config</c> cycle uncached.</para>
+    ///
+    /// <para><b>#4251 round-1 review, H1(a).</b> A second fact rides in the same round trip, joined onto the
+    /// readable text with <c>:</c> — the same shape <see cref="PgReadBinaryFileCapability"/> uses to carry an
+    /// encoding alongside its own verdict: whether <c>pg_catalog.version()</c> matches
+    /// <c>(windows|visual c\+\+|msvc|mingw)</c>, case-insensitively. Up to PostgreSQL 16 that string reads
+    /// "...compiled by Visual C++ build ..."; 17 and later reads "...on x86_64-windows, compiled by msvc-...".
+    /// Windows is the only platform where the stale <c>pending_restart</c> this capability exists for can
+    /// happen at all — see <see cref="PgFileSettingsCapability"/>'s own remarks — so a non-Windows target's
+    /// grant fixes nothing, and callers gate the caveat, the log line and the enhanced query on this fact
+    /// rather than merely on <see cref="IsReadableAsync"/>'s answer.</para>
     /// </summary>
     public const string ProbeSql =
-        "SELECT (pg_catalog.has_table_privilege(current_user, 'pg_catalog.pg_file_settings', 'SELECT') "
-        + "AND pg_catalog.has_function_privilege(current_user, 'pg_catalog.pg_show_all_file_settings()', 'EXECUTE'))::text";
+        "SELECT coalesce(pg_catalog.has_table_privilege(current_user, "
+        + "pg_catalog.to_regclass('pg_catalog.pg_file_settings'), 'SELECT') "
+        + "AND pg_catalog.has_function_privilege(current_user, "
+        + "pg_catalog.to_regprocedure('pg_catalog.pg_show_all_file_settings()'), 'EXECUTE'), false)::text "
+        + "|| ':' || (pg_catalog.version() ~* '(windows|visual c\\+\\+|msvc|mingw)')::text";
 
     /// <summary>
     /// The line <c>get_pg_server_config</c> and <c>get_pg_logging_audit</c> attach to their answer when this
-    /// target's cached verdict says <c>pg_file_settings</c> is unreadable (#4251), so a reader of
-    /// <c>pending_restart</c> sees the caveat every time it applies rather than needing to already know about
-    /// it. One spelling shared by both readers rather than a copy in each.
+    /// target is Windows AND its cached verdict says <c>pg_file_settings</c> is unreadable (#4251), so a
+    /// reader of <c>pending_restart</c> sees the caveat every time it applies rather than needing to already
+    /// know about it. One spelling shared by both readers rather than a copy in each. Never attached on a
+    /// non-Windows target (#4251 round-1 review, H1(a)): there, <c>pending_restart</c> is already correct off
+    /// <c>pg_settings</c> alone, because every backend is forked from the postmaster and inherits the flag,
+    /// so the first sentence below would be false and the grants it asks for would fix nothing.
     /// </summary>
     public const string UnreadableCaveat =
-        "pending_restart above may under-report: this target's monitoring role cannot read pg_file_settings, "
-        + "so a postmaster-context setting that was changed and reloaded but is still pending a restart can "
-        + "show pending_restart = false here. This is most visible on Windows, where pg_settings.pending_restart "
-        + "is backend-local and every collection cycle opens a fresh connection after the reload, so the value "
-        + "the file itself would confirm is never seen. Fixing it needs TWO grants, not one: "
-        + "GRANT SELECT ON pg_file_settings TO the monitoring role, and "
-        + "GRANT EXECUTE ON FUNCTION pg_show_all_file_settings() TO the monitoring role - the view's own "
-        + "grant does not extend to the function it calls.";
+        "pending_restart above can under-report on this Windows PostgreSQL server: on Windows, a connection "
+        + "opened after pg_reload_conf() reads pending_restart = false for a setting that is still waiting for a "
+        + "restart, and this collector opens a new connection every cycle. Reading pg_file_settings closes that "
+        + "gap, but it needs two grants: GRANT SELECT ON pg_file_settings and GRANT EXECUTE ON FUNCTION "
+        + "pg_show_all_file_settings() to the monitoring role. Both are superuser-only by default for a reason: "
+        + "they show every line of every configuration file, including lines that are not the running value "
+        + "(a superseded or misspelled primary_conninfo with its password, for example) and each file's path. "
+        + "Grant them only if that exposure is acceptable for this role; the collector reads nothing from the "
+        + "view but a setting's name and its error text.";
 
     /// <summary>Cache TTL — a target's verdict is re-checked after this interval.</summary>
     public static TimeSpan CacheTtl { get; set; } = TimeSpan.FromHours(1);
 
-    private sealed record CacheEntry(bool Readable, DateTime CheckedAtUtc);
+    /// <summary>#4251 round-1 review, H1(a): <see cref="IsWindowsTarget"/> rides alongside <see cref="Readable"/>
+    /// from the same probe round trip, so a caller can tell "not readable, and it matters" from "not readable,
+    /// and it does not" without a second query.</summary>
+    private sealed record CacheEntry(bool Readable, bool IsWindowsTarget, DateTime CheckedAtUtc);
 
     /* Process-wide and static, like PgReadBinaryFileCapability's cache: "reset on restart" is then simply
        what a fresh process starts with — an empty dictionary — and needs no explicit action. Reset() below
@@ -109,9 +135,25 @@ public static class PgFileSettingsCapability
         command.CommandText = ProbeSql;
         var result = await command.ExecuteScalarAsync(cancellationToken);
 
-        var readable = result is string text && bool.TryParse(text, out var parsed) && parsed;
+        /* "readable:isWindows" - see ProbeSql's own remarks (#4251 round-1 review, H1(a)) for why a second
+           fact rides here rather than costing a second round trip, the same "combined:bool" shape
+           PgReadBinaryFileCapability.IsGrantedAsync parses for its own encoding-plus-verdict scalar. The
+           separator is REQUIRED, matching that parser: a scalar with no ':' is not "the readable half with
+           an empty Windows half", it is malformed, and both facts read as false, same as an unparsable half
+           on either side of a present separator. */
+        var readable = false;
+        var isWindowsTarget = false;
+        if (result is string text)
+        {
+            var separator = text.IndexOf(':');
+            if (separator >= 0)
+            {
+                readable = bool.TryParse(text[..separator], out var parsedReadable) && parsedReadable;
+                isWindowsTarget = bool.TryParse(text[(separator + 1)..], out var parsedWindows) && parsedWindows;
+            }
+        }
 
-        s_cache[targetKey] = new CacheEntry(readable, DateTime.UtcNow);
+        s_cache[targetKey] = new CacheEntry(readable, isWindowsTarget, DateTime.UtcNow);
         return readable;
     }
 
@@ -119,21 +161,26 @@ public static class PgFileSettingsCapability
     /// The cached verdict for <paramref name="targetKey"/> WITHOUT a round trip and without refreshing an
     /// expired entry — for a reader (<c>get_pg_server_config</c>, <c>get_pg_logging_audit</c>) that wants to
     /// say why <c>pending_restart</c> can be stale, taken after <see cref="IsReadableAsync"/> has already run
-    /// this cycle's collection for the same target. Returns false with <paramref name="readable"/> unset when
-    /// nothing is cached, which is also the honest answer for a target this capability was never checked for
-    /// (a process just started, or the collector has not run yet).
+    /// this cycle's collection for the same target. Returns false with <paramref name="readable"/> and
+    /// <paramref name="isWindowsTarget"/> unset when nothing is cached, which is also the honest answer for a
+    /// target this capability was never checked for (a process just started, or the collector has not run
+    /// yet). A caller should show its caveat only when this returns true, <paramref name="readable"/> is
+    /// false AND <paramref name="isWindowsTarget"/> is true (#4251 round-1 review, H1(a)) — the grants fix
+    /// nothing on a non-Windows target, so an unreadable verdict there is not worth a caveat.
     /// </summary>
-    public static bool TryGetCachedVerdict(string targetKey, out bool readable)
+    public static bool TryGetCachedVerdict(string targetKey, out bool readable, out bool isWindowsTarget)
     {
         ArgumentNullException.ThrowIfNull(targetKey);
 
         if (s_cache.TryGetValue(targetKey, out var cached))
         {
             readable = cached.Readable;
+            isWindowsTarget = cached.IsWindowsTarget;
             return true;
         }
 
         readable = false;
+        isWindowsTarget = false;
         return false;
     }
 

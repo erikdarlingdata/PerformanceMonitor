@@ -70,9 +70,12 @@ public sealed class DarlingMcpPgLoggingAuditTools
 
             /* #4251: the collector's own cached verdict, no store read - see the identical comment on
                get_pg_server_config, which this tool's own reading guide already points readers at for
-               pending_restart's other trap. */
+               pending_restart's other trap. #4251 round-1 review, H1(a): also gated on Windows - the
+               grants this caveat asks for fix nothing on a non-Windows target. */
             var fileSettingsUnreadable =
-                PgFileSettingsCapability.TryGetCachedVerdict(resolved.ServerName, out var fileSettingsReadable)
+                PgFileSettingsCapability.TryGetCachedVerdict(
+                    resolved.ServerName, out var fileSettingsReadable, out var fileSettingsIsWindows)
+                && fileSettingsIsWindows
                 && !fileSettingsReadable;
 
             return BuildAuditJson(resolved.ServerName, DarlingPgLoggingAudit.Audit(snapshot), fileSettingsUnreadable);
@@ -137,7 +140,7 @@ public sealed class DarlingMcpPgLoggingAuditTools
                target's monitoring role cannot read pg_file_settings - the same fact get_pg_server_config
                attaches, worded once on PgFileSettingsCapability so the two readers cannot disagree. */
             pending_restart_caveat = fileSettingsUnreadable ? PgFileSettingsCapability.UnreadableCaveat : null,
-            note = "One facet per logging setting, in the order an operator reaches for them - statements,"
+            note = "One facet per logging setting, in the order an operator reaches for them - statements, "
                  + "locks, spills, maintenance, checkpoints, connections - not a causal order; nothing here "
                  + "gates anything else. verdict describes the LINES: instrumented writes every line the "
                  + "setting can, partial has a threshold filtering and the row says what falls below it, off "
