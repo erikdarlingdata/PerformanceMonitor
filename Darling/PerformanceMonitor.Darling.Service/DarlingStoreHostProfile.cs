@@ -759,6 +759,40 @@ WHERE NOT is_compressed";
         ];
     }
 
+    /// <summary>Whether <paramref name="verdict"/> should read as <see cref="HostSettingVerdict.OperatorOverride"/>
+    /// instead (#4215, lane A1d, on A1f's note): <c>--check-settings</c>' LIVE read
+    /// (<see cref="GatherSettingProfilesAsync"/>) has no write-result to consult — review H1 item 3's ruling
+    /// only reaches the STARTUP path, through <see cref="ComputeAndStoreManagedConfVerdictsAsync"/>'s
+    /// <c>writeResult.ChangedKeys</c> — so a hand-edited <see cref="ManagedConfFile.FileName"/> was reporting
+    /// every changed sizing key as <see cref="HostSettingVerdict.StaleAfterHardwareChange"/>: a hardware-drift
+    /// story for a value the OPERATOR chose, not this host's formula. PURE, so it pins without a live
+    /// connection. Only the STALE arm is overridden: a hand edit that happens to already match the derived
+    /// value stays <see cref="HostSettingVerdict.Matches"/>, and every other verdict (override, not-managed,
+    /// command-line…) already reads correctly without consulting the file at all.</summary>
+    internal static (string SourceDescription, HostSettingVerdict Verdict) ApplyHandEditOverride(
+        string sourceDescription, HostSettingVerdict verdict, bool isHandEdited)
+        => isHandEdited && verdict == HostSettingVerdict.StaleAfterHardwareChange
+            ? ("hand edit of darling-managed.conf", HostSettingVerdict.OperatorOverride)
+            : (sourceDescription, verdict);
+
+    /// <summary>Best-effort <see cref="ManagedConfFile.IsHandEdited"/> off disk, for the live
+    /// <c>--check-settings</c> read, which (unlike the startup path) never has a
+    /// <c>ManagedConfWriteResult</c> handed to it. An unreadable or absent file answers false — the same
+    /// "degrade the signal, not the check" posture <see cref="AttributeManagedSetting"/> already takes on its
+    /// own reads.</summary>
+    private static bool TryReadManagedConfIsHandEdited(string dataDirectory)
+    {
+        try
+        {
+            var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+            return File.Exists(managedPath) && ManagedConfFile.IsHandEdited(File.ReadAllText(managedPath));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     internal static async Task<IReadOnlyList<HostSettingProfile>> GatherSettingProfilesAsync(
         NpgsqlConnection connection,
         PostgresConfig postgres,
@@ -788,6 +822,7 @@ WHERE NOT is_compressed";
            which falls through to the dataDirectory-is-null branch below exactly like a bring-your-own store —
            every setting reports not-managed, and this method never reads a file off the share. */
         var dataDirectory = postgres.Managed ? TryResolveProfileDataDirectory(postgres) : null;
+        var isHandEdited = dataDirectory is not null && TryReadManagedConfIsHandEdited(dataDirectory);
         var results = new List<HostSettingProfile>(targets.Length);
 
         foreach (var (name, derivedValue, unit) in targets)
@@ -817,6 +852,7 @@ WHERE NOT is_compressed";
 
             var attribution = AttributeManagedSetting(dataDirectory, name);
             var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValue);
+            (sourceDescription, verdict) = ApplyHandEditOverride(sourceDescription, verdict, isHandEdited);
             results.Add(new HostSettingProfile(
                 name, currentDisplay, currentValue ?? 0, sourceDescription, derivedDisplay, derivedValue, verdict,
                 attribution.File, attribution.Line));

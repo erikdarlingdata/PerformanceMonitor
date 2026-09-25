@@ -291,6 +291,39 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(HostSettingVerdict.OperatorOverride, verdict);
     }
 
+    /* ------------------------------ ApplyHandEditOverride (#4215, lane A1d, A1f's note) ------------------------------ */
+
+    [Fact]
+    public void ApplyHandEditOverride_StaleAndHandEdited_BecomesOperatorOverride()
+    {
+        var (source, verdict) = DarlingStoreHostProfile.ApplyHandEditOverride(
+            "managed block (darling-managed.conf:3)", HostSettingVerdict.StaleAfterHardwareChange, isHandEdited: true);
+
+        Assert.Equal(HostSettingVerdict.OperatorOverride, verdict);
+        Assert.Contains("hand edit", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ApplyHandEditOverride_StaleButNotHandEdited_StaysStale()
+    {
+        var (source, verdict) = DarlingStoreHostProfile.ApplyHandEditOverride(
+            "managed block (darling-managed.conf:3)", HostSettingVerdict.StaleAfterHardwareChange, isHandEdited: false);
+
+        Assert.Equal(HostSettingVerdict.StaleAfterHardwareChange, verdict);
+        Assert.Equal("managed block (darling-managed.conf:3)", source);
+    }
+
+    [Fact]
+    public void ApplyHandEditOverride_MatchesAndHandEdited_StaysMatches()
+    {
+        // A hand edit that happens to equal the derived value is not evidence of anything wrong.
+        var (source, verdict) = DarlingStoreHostProfile.ApplyHandEditOverride(
+            "managed block (darling-managed.conf:3)", HostSettingVerdict.Matches, isHandEdited: true);
+
+        Assert.Equal(HostSettingVerdict.Matches, verdict);
+        Assert.Equal("managed block (darling-managed.conf:3)", source);
+    }
+
     /* ------------------------------------- FormatSourceForMcp (round-1 review, Medium 1) ------------------------------------- */
     /* Three shapes: a file inside the managed data directory redacts to a directory-relative path, a file
        outside it (an include elsewhere) redacts to the bare file name only, and anything with no SourceFile

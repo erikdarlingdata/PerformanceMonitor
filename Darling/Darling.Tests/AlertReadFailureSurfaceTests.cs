@@ -915,7 +915,9 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 13),
+        /* 14th exempt since #4215 (lane A1d): EvaluateStoreSettingsAsync's wrapper catch — the store-settings
+           self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 14),
     };
 
     /// <summary>
@@ -944,6 +946,9 @@ public sealed class AlertReadFailureSurfaceTests
         "SweepStoreSelfMetricsAsync",
         "NotifyPgResolutionAsync",
         "FetchFailedJobsAsync",
+        /* #4215 (lane A1d): the store-settings self-alert's one real store read — the rejected-verdict names
+           behind EvaluateStoreSettingsAsync, the ReadStoreSizeBytesAsync precedent exactly. */
+        "ReadRejectedManagedConfSettingNamesAsync",
         /* #3354: the mute-rule reload. Not an alert pass — a control-plane read — but its swallowed
            failure decides what the engine suppresses on every following sweep, so it belongs to this
            population. It is also the member whose scope this list was designed to admit: an alerting read
@@ -953,8 +958,9 @@ public sealed class AlertReadFailureSurfaceTests
     };
 
     private const int WorkerCountedSites = 10;
-    /* 10th since #4012: the deadlock re-mask pass's catch, beside the store-log re-mask's in the same sweep. */
-    private const int WorkerExemptSites = 10;
+    /* 11th since #4215 (lane A1d): ReadRejectedManagedConfSettingNamesAsync's catch, the ReadStoreSizeBytesAsync
+       precedent exactly — context for the alert text, not the evidence the condition is judged on. */
+    private const int WorkerExemptSites = 11;
 
     /// <summary>
     /// Counted sites tree-wide. ONE numeral with several readers rather than the same number written out at
@@ -1019,6 +1025,8 @@ public sealed class AlertReadFailureSurfaceTests
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
+        ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own best-effort catch in DarlingWorker, exempted separately below",
+        ["could not read stored managed-conf verdicts"] = "context for the alert (which settings to name); UsedLastGoodConf/HandEdited are judged from the parameters either way, so losing this costs the message some names, not the condition's ability to fire",
         ["Failed to record resolution"] = "an audit-row write",
         ["Could not record Postgres alert resolution"] = "a history write",
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
@@ -1209,8 +1217,11 @@ public sealed class AlertReadFailureSurfaceTests
            failure costs no alert, and whose whole point is to leave the store-log census and the
            collector-cost flush below it running on the connection this catch keeps open. 29th since #4012:
            the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
-           deadlock read normalizing in the meantime. */
-        Assert.Equal(29, totalExempt);
+           deadlock read normalizing in the meantime. 30th and 31st since #4215 (lane A1d): the store-settings
+           self-alert's wrapper catch (its report is a parameter, like every sibling standing condition) and
+           ReadRejectedManagedConfSettingNamesAsync's catch (context for the alert text, the
+           ReadStoreSizeBytesAsync precedent exactly). */
+        Assert.Equal(31, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch

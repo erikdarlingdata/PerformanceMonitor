@@ -574,7 +574,7 @@ A route names what it matches and a destination per channel type, and **an empty
 
 | Family | Owns |
 |---|---|
-| `self-monitor` | The monitor about itself: `Collection Stopped`, `Capture Down`, `Compression Job Stuck`, `Refresh Job Stuck`, `Retention Job Stuck`, `Store Job Failing`, `Store Disk Pressure`, `Store Runtime Upgrade`, `Store Job Over Cadence`, `Retention Held`, `Custom Alert Rules Unhealthy`, `Stale Mute Rules`, `Web TLS Certificate Expiring`, `Collector Cost Regression` |
+| `self-monitor` | The monitor about itself: `Collection Stopped`, `Capture Down`, `Compression Job Stuck`, `Refresh Job Stuck`, `Retention Job Stuck`, `Store Job Failing`, `Store Disk Pressure`, `Store Runtime Upgrade`, `Store Job Over Cadence`, `Retention Held`, `Custom Alert Rules Unhealthy`, `Stale Mute Rules`, `Web TLS Certificate Expiring`, `Store Settings Need Attention`, `Collector Cost Regression` |
 | `reports` | Scheduled prose, never a page: `Collector Cost Digest`, `Fleet Sweep Rollup`, `Analysis Singles Digest` |
 | `agent-jobs` | `Failed Agent Job`, `Long-Running Job`, `Agent Not Running` |
 | `performance` | Everything about a monitored server the on-call is paged for: `High CPU`, `Blocking Detected`, `Blocking Wait Time`, `Deadlocks Detected`, `Poison Wait`, `Long-Running Query`, `tempdb Space`, `Volume Free Space`, `Version Store (PVS)`, `Database File Growth`, `Database State`, `Forced Plan Failing`, the three PostgreSQL outage predictors, the five `AG …` alerts, `Server Unreachable` / `Server Restored`, every `Custom:<id>` rule and every `Analysis: …` finding — and any metric the taxonomy does not name, so an unclassified alert lands where every alert landed before routes existed |

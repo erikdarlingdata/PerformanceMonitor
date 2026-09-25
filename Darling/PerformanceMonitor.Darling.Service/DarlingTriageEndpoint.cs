@@ -132,6 +132,7 @@ internal static class DarlingTriageEndpoint
         (DarlingSelfAlertEvaluator.CustomRuleHealthResolvedMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric),
         (DarlingSelfAlertEvaluator.ToastSlackClearedMetric, DarlingSelfAlertEvaluator.ToastSlackMetric),
         (DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, DarlingSelfAlertEvaluator.CheckpointerPressureMetric),
+        (DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, DarlingSelfAlertEvaluator.StoreSettingsMetric),
     };
 
     /// <summary>

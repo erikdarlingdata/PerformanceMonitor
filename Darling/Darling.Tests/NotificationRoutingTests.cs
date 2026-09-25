@@ -509,6 +509,7 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.AnalysisSinglesDigestMetric,
             DarlingSelfAlertEvaluator.DiskPressureMetric, DarlingSelfAlertEvaluator.CustomRuleHealthMetric,
             DarlingSelfAlertEvaluator.StaleMuteMetric, DarlingSelfAlertEvaluator.WebTlsCertExpiryMetric,
+            DarlingSelfAlertEvaluator.StoreSettingsMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
             /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed

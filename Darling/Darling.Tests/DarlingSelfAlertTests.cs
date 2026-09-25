@@ -1130,6 +1130,96 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("never expires", fired.DetailText);
     }
 
+    /* ---------------- managed store settings needing attention (#4215, lane A1d) ---------------- */
+
+    private static DarlingSelfAlertEvaluator.StoreSettingsReport BuildStoreSettingsReport(
+        bool isManagedStore = true, bool usedLastGood = false, bool handEdited = false,
+        params string[] rejected) =>
+        new(isManagedStore, usedLastGood, handEdited, rejected);
+
+    [Fact]
+    public async Task StoreSettings_UsedLastGoodConf_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(usedLastGood: true), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsMetric, fired.MetricName);
+        Assert.Equal("storesettings", fired.ServerKey);        // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Contains("last-good copy", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_HandEdited_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("hand-edited", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_RejectedValue_Fires_AndNamesTheSetting()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("shared_buffers", fired.DetailText);
+        Assert.Contains("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_ExternalStore_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Every condition true, but IsManagedStore is false — a BYO store never raises this.
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(false, true, true, ["shared_buffers"]), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StoreSettings_Resolves_WhenEveryConditionClears()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);       // unchanged: no re-fire on the resolving sweep
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task StoreSettings_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     private static readonly DateTime CertClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);

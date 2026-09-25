@@ -112,6 +112,15 @@ public sealed class DarlingWorker : BackgroundService
     /// itself is a field read and a date compare.</summary>
     private static readonly TimeSpan s_webTlsCheckInterval = TimeSpan.FromHours(1);
 
+    /// <summary>#4215 (lane A1d): how often the sweep re-evaluates the managed-store settings condition
+    /// (last-good fallback, a kept hand edit, a rejected value). Every fact behind it is fixed for the life of
+    /// this process — only a restart changes any of them — so the tick exists for the RESOLUTION half, the
+    /// <see cref="s_staleMuteCheckInterval"/> reasoning exactly: an operator who fixes a rejected value and
+    /// restarts should see the alert clear on the FIRST tick after this process comes back up, not an hour
+    /// later. The one store read it costs (<c>collect.managed_conf_verdicts</c>, at most eight rows) and the
+    /// alert itself is rate-limited to once a day inside the evaluator.</summary>
+    private static readonly TimeSpan s_storeSettingsCheckInterval = TimeSpan.FromMinutes(5);
+
     /* The compression-job self-heal check's cadence (fleet-level, #1581). Compression is a slow archival tier
        and a stuck policy job takes hours to matter, so hourly is ample and cheap (one job_stats read + at most
        one alter_job per stuck job) — no need for the 15s sweep or the 30s alert cadence.
@@ -765,6 +774,10 @@ public sealed class DarlingWorker : BackgroundService
     /* #3514: next due time for the web-dashboard TLS certificate expiry self-alert. Fleet-level (the web
        certificate is a store-wide concept), so a single field like the stale-mute cadence above. */
     private DateTime _nextWebTlsCheckUtc = DateTime.MinValue;
+
+    /* #4215 (lane A1d): next due time for the managed store-settings self-alert. Fleet-level (a managed
+       store's settings are a store-wide concept), so a single field like the stale-mute cadence above. */
+    private DateTime _nextStoreSettingsCheckUtc = DateTime.MinValue;
 
     /* MinValue = the first sweep after startup drains the oversized-plan backlog (#3392), then on whatever
        OversizedPlanBacklogSweep.NextSweepDelay returns for what that tick found. Both the cadence and the
@@ -1447,11 +1460,18 @@ public sealed class DarlingWorker : BackgroundService
         var managedDataDirectory = managedPostgres?.DataDirectory;
         var managedConfWriteResult = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfWriteResult : null;
 
+        /* #4215 lane A1d: whether THIS start fell back to darling-managed.conf.last-good, carried out of the
+           bootstrap the same way managedConfWriteResult already is — see
+           DarlingManagedPostgres.LastStartUsedLastGoodManagedConf. False (never true) on a BYO store, off
+           Windows, and on the adopted-listener path, for the same reasons managedConfWriteResult is null
+           there. */
+        var managedUsedLastGoodConf = OperatingSystem.IsWindows() && (managedPostgres?.LastStartUsedLastGoodManagedConf ?? false);
+
         try
         {
             await RunCollectionLoopAsync(
                 config, storeConnectionString, storeUpgradeReport, storeTimescaleReport,
-                managedDataDirectory, managedConfWriteResult, stoppingToken);
+                managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, stoppingToken);
         }
         finally
         {
@@ -1755,6 +1775,7 @@ public sealed class DarlingWorker : BackgroundService
         DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport,
         string? managedDataDirectory,
         ManagedConfWriteResult? managedConfWriteResult,
+        bool managedUsedLastGoodConf,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -2780,6 +2801,21 @@ public sealed class DarlingWorker : BackgroundService
                 _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
                 await _selfAlerts.EvaluateWebTlsCertificateAsync(
                     BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
+            }
+
+            /* #4215 (lane A1d): the managed-store settings self-alert — darling-managed.conf fell back to the
+               last-good copy, is hand-edited and kept in force, or PostgreSQL rejected one or more owned
+               settings outright (the adopted review's items 2 and 3, plus the RejectedValue ruling). Every
+               fact but the rejected-setting list is this start's own in-process state, carried down from
+               ExecuteAsync exactly like managedConfWriteResult already is — never re-read, because the writer
+               runs on every start and the state is re-derived after a restart. The rejected list is the one
+               fact that is store-backed (collect.managed_conf_verdicts, V144), read fresh each tick so a value
+               fixed by a later start clears without this process restarting. Fleet-level, own slow cadence;
+               the Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
+            if (_selfAlerts is not null && DateTime.UtcNow >= _nextStoreSettingsCheckUtc)
+            {
+                _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
+                await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
@@ -6293,6 +6329,58 @@ LIMIT 1";
            per-server EvaluateStoreAlertsAsync. This sweep-loop body has no catch-all of its own, so an
            un-isolated throw here would stop collection for the whole fleet. */
         await _selfAlerts!.EvaluateDiskPressureAsync(freeBytes, totalBytes, storeSizeBytes, cancellationToken);
+    }
+
+    /// <summary>
+    /// #4215 (lane A1d): builds the <see cref="DarlingSelfAlertEvaluator.StoreSettingsReport"/> and hands it to
+    /// <see cref="DarlingSelfAlertEvaluator.EvaluateStoreSettingsAsync"/>, mirroring
+    /// <see cref="EvaluateStoreDiskPressureAsync"/>'s split between "gather the facts here" and "judge them in
+    /// the evaluator". <paramref name="managedConfWriteResult"/> and <paramref name="managedUsedLastGoodConf"/>
+    /// are this start's own in-process facts, carried down unchanged from <c>ExecuteAsync</c>; the rejected-value
+    /// list is the one genuine store read, isolated in <see cref="ReadRejectedManagedConfSettingNamesAsync"/> so
+    /// a throw there degrades to "no rejected settings this tick" rather than stopping the fleet loop.
+    /// </summary>
+    private async Task EvaluateStoreSettingsAsync(
+        DarlingConfig config, ManagedConfWriteResult? managedConfWriteResult, bool managedUsedLastGoodConf,
+        CancellationToken cancellationToken)
+    {
+        var isManagedStore = config.Postgres.Managed && OperatingSystem.IsWindows();
+        IReadOnlyList<string> rejectedSettingNames = isManagedStore
+            ? await ReadRejectedManagedConfSettingNamesAsync(cancellationToken)
+            : [];
+
+        var report = new DarlingSelfAlertEvaluator.StoreSettingsReport(
+            isManagedStore, managedUsedLastGoodConf, managedConfWriteResult?.HandEdited ?? false, rejectedSettingNames);
+
+        /* EvaluateStoreSettingsAsync (not ApplyStoreSettingsAsync) so a throwing seam — the shared mute check —
+           is isolated inside the evaluator, exactly like the disk-pressure call just above. */
+        await _selfAlerts!.EvaluateStoreSettingsAsync(report, cancellationToken);
+    }
+
+    /// <summary>Every setting name <c>collect.managed_conf_verdicts</c> (V144) currently holds as
+    /// <see cref="HostSettingVerdict.RejectedValue"/> — the store-settings self-alert's one real store read.
+    /// Best-effort: an unreachable store or an unmigrated column degrades to "no rejected settings reported
+    /// this tick" rather than losing the whole sweep, the same posture <see cref="ReadStoreSizeBytesAsync"/>
+    /// already takes for its own read.</summary>
+    private async Task<IReadOnlyList<string>> ReadRejectedManagedConfSettingNamesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            var stored = await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
+            return stored
+                .Where(static row => row.Verdict == HostSettingVerdict.RejectedValue)
+                .Select(static row => row.SettingName)
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* NOT counted by #3013's swallowed-read counter: this read is CONTEXT for the alert (which
+               settings to name), not the whole condition — UsedLastGoodConf/HandEdited are judged either way,
+               so losing this costs the message some names, not the alert's ability to fire. */
+            _logger.LogDebug("Store settings self-alert: could not read stored managed-conf verdicts: {Message}", ex.Message);
+            return [];
+        }
     }
 
     /// <summary>

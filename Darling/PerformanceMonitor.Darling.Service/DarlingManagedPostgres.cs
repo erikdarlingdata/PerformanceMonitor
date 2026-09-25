@@ -683,6 +683,15 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal ManagedConfWriteResult? LastManagedConfWriteResult { get; private set; }
 
+    /// <summary>Whether THIS start ran PostgreSQL on <see cref="ManagedConfFile.LastGoodFileName"/> rather than
+    /// the file <see cref="WriteManagedConfFile"/> just rendered (#4215, lane A1d) — set only in the recovery
+    /// branch of <see cref="EnsureManagedConfReadyAsync"/>, the one place that copies the last-good file back
+    /// over the rejected one. Reset to false at the top of every <see cref="EnsureManagedConfReadyAsync"/> call
+    /// so a later, clean start clears it without a process restart — carried out to the store-settings self-alert
+    /// the same way <see cref="LastManagedConfWriteResult"/> already is.</summary>
+    [SupportedOSPlatform("windows")]
+    internal bool LastStartUsedLastGoodManagedConf { get; private set; }
+
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
     {
@@ -3411,6 +3420,7 @@ public sealed class DarlingManagedPostgres
     {
         var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
         LastManagedConfWriteResult = WriteManagedConfFile(dataDirectory, postgresMajor);
+        LastStartUsedLastGoodManagedConf = false;
 
         var (valid, output) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
         if (valid)
@@ -3426,6 +3436,7 @@ public sealed class DarlingManagedPostgres
             var (validAfterRestore, outputAfterRestore) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
             if (validAfterRestore)
             {
+                LastStartUsedLastGoodManagedConf = true;
                 _logger.LogError(
                     "{Message} Restored {LastGood}, which still starts.",
                     BuildManagedConfValidationFailureMessage(dataDirectory, output), lastGoodPath);
