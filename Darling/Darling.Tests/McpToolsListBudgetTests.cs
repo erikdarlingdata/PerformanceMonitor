@@ -91,10 +91,11 @@ public sealed class McpToolsListBudgetTests
        tools/list and so is not counted here. */
     /* #4192/#4195/#4193/#4217: audit_config narrowed, regression baseline bounded, PG CPU bucketed.
        +82 bytes net after trimming. */
-    /* #4198 (lane TH): +305 bytes for get_active_queries' default-preview note in its served description,
-       its new full_query_text opt-in parameter, and its limit description's #4198 note (query_text, the
-       wide field, is now a 500-char preview by default; limit is 25, down from 50). */
-    private const int TotalCeilingBytes = 172_024;
+    /* #4198 (lane TH): +193 bytes for get_active_queries' new full_query_text opt-in parameter and its
+       limit description's #4198 note (query_text, the wide field, is now a 500-char preview by default;
+       limit is 25, down from 50); the preview note itself moved after <<GUIDE>> to stay under the head's
+       own 620-char target, so the served head is unchanged at 616. */
+    private const int TotalCeilingBytes = 171_912;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

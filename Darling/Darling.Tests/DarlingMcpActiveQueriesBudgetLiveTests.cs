@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// around 700 characters (a parameterized statement with a modest literal list), ten near 2,800 characters
 /// (a big IN-list, the realistic cause of an outsized capture) — and asserts the default call stays under
 /// <see cref="McpResponseBudget.DefaultBytes"/>, that <c>full_query_text: true</c> opts back into the whole
-/// text. New file (not the shared seeding in <see cref="DarlingMcpSessionToolsTests"/>) because #4198 ran a
+/// text. New file (not the shared seeding in <c>DarlingMcpSessionToolsTests.cs</c>) because #4198 ran a
 /// dozen lanes against this store tonight.
 /// </summary>
 [Collection("live-postgres")]
