@@ -1440,9 +1440,18 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* #4215 ruling M2/H1 item 3: this start's darling-managed.conf write result, carried past the
+           bootstrap the same way storeUpgradeReport/storeTimescaleReport are, so LogStoreHostProfileAsync can
+           fold a hand edit's changed keys into the stored verdict rows without re-reading the file. Null on a
+           BYO store (managedPostgres itself is null) and on the adopted-listener path (the write never ran). */
+        var managedDataDirectory = managedPostgres?.DataDirectory;
+        var managedConfWriteResult = managedPostgres?.LastManagedConfWriteResult;
+
         try
         {
-            await RunCollectionLoopAsync(config, storeConnectionString, storeUpgradeReport, storeTimescaleReport, stoppingToken);
+            await RunCollectionLoopAsync(
+                config, storeConnectionString, storeUpgradeReport, storeTimescaleReport,
+                managedDataDirectory, managedConfWriteResult, stoppingToken);
         }
         finally
         {
@@ -1674,7 +1683,9 @@ public sealed class DarlingWorker : BackgroundService
     /// way <see cref="DarlingStoreHostProfile.GatherStoreFactsAsync"/>'s store-size read is deliberately
     /// NEVER reached from here — see <see cref="DarlingStoreHostProfile.GatherStartupProfileAsync"/>.
     /// </summary>
-    private async Task LogStoreHostProfileAsync(DarlingConfig config, NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    private async Task LogStoreHostProfileAsync(
+        DarlingConfig config, NpgsqlDataSource postgres, string? managedDataDirectory,
+        ManagedConfWriteResult? managedConfWriteResult, CancellationToken stoppingToken)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         budget.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.StartupHostProfileSeconds));
@@ -1695,6 +1706,20 @@ public sealed class DarlingWorker : BackgroundService
                         "derive {Derived} ({Source}). Run --check-settings for the full picture.",
                         setting.Name, setting.CurrentValueDisplay, setting.DerivedValueDisplay, setting.SourceDescription);
                 }
+            }
+
+            /* #4215 ruling M2: on the OWNER connection, right after start, compute and store every owned
+               key's verdict (collect.managed_conf_verdicts, V144) so --check-settings, the MCP self-store
+               reader and (#4215's next lane) the stale-setting alert can all read it back — the mcp/viewer
+               roles have neither file access nor pg_file_settings visibility to compute it themselves. Same
+               budget, same try/catch as the read above: never fails or delays startup. BYO stores
+               (managedDataDirectory null) and the adopted-listener path skip it — nothing this service wrote
+               changed, and there is no NEW conf-write result to fold in. */
+            if (config.Postgres.Managed && managedDataDirectory is not null)
+            {
+                await DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync(
+                    connection, managedDataDirectory, profile.Memory.EffectiveBytes, profile.DataVolume.FreeBytes,
+                    managedConfWriteResult, _logger, budget.Token);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -1728,6 +1753,8 @@ public sealed class DarlingWorker : BackgroundService
         string storeConnectionString,
         DarlingSelfAlertEvaluator.StoreUpgradeReport? storeUpgradeReport,
         DarlingSelfAlertEvaluator.StoreTimescaleReport? storeTimescaleReport,
+        string? managedDataDirectory,
+        ManagedConfWriteResult? managedConfWriteResult,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -1821,7 +1848,7 @@ public sealed class DarlingWorker : BackgroundService
            the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
            read own. Its own short deadline and its own catch: a bad conf file, a permission problem or a
            slow store here must never fail or delay the collection start immediately below it. */
-        await LogStoreHostProfileAsync(config, postgres, stoppingToken);
+        await LogStoreHostProfileAsync(config, postgres, managedDataDirectory, managedConfWriteResult, stoppingToken);
 
         /* Least-privilege role provisioning (V8 security hardening), managed mode only: create /
            refresh the admin + viewer login roles and their per-role DPAPI credentials, and grant the

@@ -16,6 +16,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
 
@@ -23,8 +24,11 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// The verdict on one sizing-relevant setting (#4214): what the check verb and the once-per-start log line
-/// both report. Four states, no fifth — see <see cref="DarlingStoreHostProfile.ClassifyVerdict"/> for how a
-/// managed store's file attribution collapses onto these.
+/// both report. Four states in #4214's original scope — see
+/// <see cref="DarlingStoreHostProfile.ClassifyVerdict"/> for how a managed store's file attribution collapses
+/// onto those. #4215 rulings M1 and H1 item 4 add three more, produced only by
+/// <see cref="DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync"/>'s restart-check and
+/// command-line layer, never by <see cref="DarlingStoreHostProfile.ClassifyVerdict"/> itself.
 /// </summary>
 public enum HostSettingVerdict
 {
@@ -36,12 +40,35 @@ public enum HostSettingVerdict
     StaleAfterHardwareChange,
 
     /// <summary><c>postgresql.auto.conf</c> (an <c>ALTER SYSTEM</c>), or a line placed after every managed
-    /// block in <c>postgresql.conf</c>, is what is actually in force.</summary>
+    /// block in <c>postgresql.conf</c>, is what is actually in force. Also the verdict a hand edit of
+    /// <c>darling-managed.conf</c> gets for each key it changed (#4215 review H1 item 3): the file the operator
+    /// touched by hand is exactly as much an override as an <c>ALTER SYSTEM</c>.</summary>
     OperatorOverride,
 
     /// <summary>A bring-your-own store: this class never wrote any block here, so there is nothing to compare
     /// the live value against beyond what <c>pg_settings.source</c> itself says.</summary>
     NotManaged,
+
+    /// <summary>#4215 ruling M1: <c>pg_settings.source = 'command line'</c> for this key (<c>port</c>,
+    /// <c>listen_addresses</c>, always; the SSL trio, only on an exposed store — every one of them rides
+    /// <c>pg_ctl</c>'s <c>-o</c> runtime override, never a conf file). Never classified as an override and
+    /// never checked for a pending restart: there is no <c>sourcefile</c> to attribute it to, file or otherwise,
+    /// and re-deriving would report a false override on every managed store.</summary>
+    CommandLine,
+
+    /// <summary>#4215 ruling H1 item 4/#4251: <c>pg_file_settings</c> shows this key's file value as
+    /// <c>error = 'setting could not be applied'</c>, and <c>pg_settings.context = 'postmaster'</c> for it — the
+    /// file (which already passed this start's own <c>postgres -C</c> validation) holds a value that needs a
+    /// restart, not a reload, to take effect. Deliberately never read from
+    /// <c>pg_settings.pending_restart</c>: on Windows a connection opened after the reload reads <c>f</c> there
+    /// regardless (#4251).</summary>
+    PendingRestart,
+
+    /// <summary>#4215 ruling H1 item 4: the same <c>pg_file_settings</c> error text as
+    /// <see cref="PendingRestart"/>, but for a key whose <c>pg_settings.context</c> is NOT <c>postmaster</c> —
+    /// PostgreSQL's <c>guc.c</c> gives one error string for two different causes (restart-only timing vs. an
+    /// outright invalid value), and this is the "outright invalid" one: no restart will make it apply.</summary>
+    RejectedValue,
 }
 
 /// <summary>Where one setting's winning assignment was found, before it is collapsed into a verdict.</summary>
@@ -114,6 +141,23 @@ internal readonly record struct HostSettingProfile(
     HostSettingVerdict Verdict,
     string? SourceFile = null,
     int SourceLine = 0);
+
+/// <summary>One row of <c>collect.managed_conf_verdicts</c> (#4215 V144): a managed store's owner-computed
+/// verdict for one owned key, stored once per start and read back by every later caller —
+/// <c>--check-settings</c>, the MCP self-store reader, and (#4215's next lane) the stale-setting alert. See
+/// <see cref="DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync"/> for how a row is built and
+/// <see cref="DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync"/> for how it is read back.</summary>
+internal readonly record struct ManagedConfVerdictRow(
+    string SettingName,
+    string CurrentValue,
+    string DerivedValue,
+    string SourceDescription,
+    string? SourceFile,
+    int? SourceLine,
+    HostSettingVerdict Verdict,
+    string? Detail,
+    DateTime ComputedAtUtc,
+    DateTime PostmasterStartTimeUtc);
 
 /// <summary>The whole host/store/settings snapshot one <c>--check-settings</c> run or one service-start log
 /// line reports (#4214).</summary>
@@ -802,6 +846,9 @@ WHERE NOT is_compressed";
         HostSettingVerdict.StaleAfterHardwareChange => "stale-after-hardware-change",
         HostSettingVerdict.OperatorOverride => "operator-override",
         HostSettingVerdict.NotManaged => "not-managed",
+        HostSettingVerdict.CommandLine => "command-line",
+        HostSettingVerdict.PendingRestart => "pending-restart",
+        HostSettingVerdict.RejectedValue => "rejected-value",
         _ => "unknown",
     };
 
@@ -936,4 +983,348 @@ WHERE NOT is_compressed";
     }
 
     private static readonly JsonSerializerOptions ProfileJsonOptions = new() { WriteIndented = true };
+
+    /* ================================ Stored verdicts (#4215 ruling M2, V144) ============================= */
+
+    /// <summary>The text <c>--check-settings</c> appends after its existing table (ruling M2: "every reader
+    /// reads the stored rows... including --check-settings, which shows computed_at"). Empty-but-present
+    /// rather than omitted when nothing is stored yet, so an operator sees WHY rather than a silently shorter
+    /// report.</summary>
+    internal static string FormatStoredVerdictsText(IReadOnlyList<ManagedConfVerdictRow> rows)
+    {
+        var sb = new StringBuilder();
+        if (rows.Count == 0)
+        {
+            sb.Append("Stored verdicts: none yet — no service-owned managed start has computed them.\n");
+            return sb.ToString();
+        }
+
+        sb.Append("Stored verdicts (computed at ")
+          .Append(rows[0].ComputedAtUtc.ToString("O", CultureInfo.InvariantCulture)).Append(" UTC, postmaster start ")
+          .Append(rows[0].PostmasterStartTimeUtc.ToString("O", CultureInfo.InvariantCulture)).Append(" UTC):\n");
+        sb.Append(FormattableString.Invariant($"{"Setting",-38}{"Current",-14}{"Derived",-14}{"Verdict",-18}Detail")).Append('\n');
+        foreach (var row in rows)
+        {
+            sb.Append(FormattableString.Invariant(
+                $"{row.SettingName,-38}{row.CurrentValue,-14}{row.DerivedValue,-14}{DescribeVerdict(row.Verdict),-18}{row.Detail ?? ""}")).Append('\n');
+        }
+
+        return sb.ToString();
+    }
+
+    internal static string FormatStoredVerdictsJson(IReadOnlyList<ManagedConfVerdictRow> rows)
+    {
+        var payload = rows.Select(r => new
+        {
+            setting = r.SettingName,
+            current = r.CurrentValue,
+            derived = r.DerivedValue,
+            source = r.SourceDescription,
+            sourceFile = r.SourceFile,
+            sourceLine = r.SourceLine,
+            verdict = DescribeVerdict(r.Verdict),
+            detail = r.Detail,
+            computedAt = r.ComputedAtUtc,
+            postmasterStartTime = r.PostmasterStartTimeUtc,
+        });
+
+        return JsonSerializer.Serialize(payload, ProfileJsonOptions);
+    }
+
+    /// <summary>#4215 ruling M1: the keys that ALWAYS ride <c>pg_ctl</c>'s <c>-o</c> runtime override on a
+    /// managed store — confirmed empirically in <c>ManagedConfFileLiveTests</c> — so <c>pg_settings.source</c>
+    /// is <c>command line</c> for both, unconditionally, exposed or not. The SSL trio is command-line only on
+    /// an EXPOSED store and is not in this fixed set yet; scoped out of this lane, noted in the PR body.</summary>
+    internal static readonly string[] CommandLineOnlyKeys = ["port", "listen_addresses"];
+
+    internal const string ManagedConfPgFileSettingsErrorSql = @"
+SELECT name, sourcefile, sourceline
+FROM pg_file_settings
+WHERE error = 'setting could not be applied'
+AND   name = ANY($1)";
+
+    internal const string ManagedConfPostmasterStartTimeSql = "SELECT pg_postmaster_start_time() AT TIME ZONE 'UTC'";
+
+    internal const string ManagedConfVerdictsDeleteSql = "DELETE FROM collect.managed_conf_verdicts";
+
+    internal const string ManagedConfVerdictsInsertSql = @"
+INSERT INTO collect.managed_conf_verdicts
+    (setting_name, current_value, derived_value, source_description, source_file, source_line, verdict, detail, computed_at, postmaster_start_time)
+VALUES
+    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+
+    internal const string ManagedConfVerdictsSelectSql = @"
+SELECT setting_name, current_value, derived_value, source_description, source_file, source_line, verdict, detail, computed_at, postmaster_start_time
+FROM collect.managed_conf_verdicts
+ORDER BY setting_name";
+
+    /// <summary>
+    /// #4215 ruling M2: computes every owned key's verdict on the OWNER connection and replaces
+    /// <c>collect.managed_conf_verdicts</c> (V144) with the new set — "replace the previous start's rows" is
+    /// the literal ruling, so this is a DELETE-then-INSERT in one transaction, never an UPSERT. Called once per
+    /// service-owned managed start from <c>DarlingWorker.LogStoreHostProfileAsync</c>, right after
+    /// <see cref="GatherStartupProfileAsync"/> on the SAME connection and the SAME never-fail-startup budget —
+    /// this never throws past the caller's own cancellation, matching ruling 9's "never fail or delay startup"
+    /// for the sibling read this sits beside.
+    ///
+    /// <para><b>The eight sizing keys</b> (<see cref="BuildDerivedTargets"/>) get the full treatment: file
+    /// attribution (<see cref="AttributeManagedSetting"/>, unchanged — it never touches
+    /// <c>pg_settings.sourcefile</c>, so it already handles <c>timescaledb.*</c> keys' missing sourcefile
+    /// correctly), the current-vs-derived classification (<see cref="ClassifyVerdict"/>, unchanged), then the
+    /// restart check below. <see cref="CommandLineOnlyKeys"/> get a fixed
+    /// <see cref="HostSettingVerdict.CommandLine"/> row (ruling M1) — never classified, never checked for a
+    /// pending restart, because there is no conf file to attribute either to, and
+    /// <c>pg_settings.source = 'command line'</c> is checked directly rather than inferred from a NULL
+    /// <c>sourcefile</c> (lane A1c: <c>timezone</c>/<c>log_timezone</c> also read a NULL sourcefile —
+    /// PostgreSQL's assign hook — despite being file-set, so NULL-sourcefile alone would misclassify them).</para>
+    ///
+    /// <para><b>The restart check</b> (ruling H1 item 4, #4251): every <c>pg_file_settings</c> row whose
+    /// <c>error = 'setting could not be applied'</c>, for one of the eight sizing keys, OVERRIDES that key's
+    /// verdict — <see cref="HostSettingVerdict.PendingRestart"/> when <c>pg_settings.context = 'postmaster'</c>,
+    /// <see cref="HostSettingVerdict.RejectedValue"/> otherwise (PostgreSQL's <c>guc.c</c> gives one error text
+    /// for both) — regardless of what the plain classification above found, because a row here means the file
+    /// and the running value disagree RIGHT NOW. Read as the owner: <c>pg_file_settings</c> needs superuser or
+    /// <c>pg_read_all_settings</c>. Deliberately never <c>pg_settings.pending_restart</c> — on Windows a
+    /// connection opened after the reload reads <c>f</c> there regardless of the true state (#4251).</para>
+    ///
+    /// <para><b>A hand edit</b> (review H1 item 3) is the LAST step and wins over both of the above: when
+    /// <paramref name="writeResult"/> reports <c>HandEdited</c>, every key in its <c>ChangedKeys</c> is stored
+    /// as <see cref="HostSettingVerdict.OperatorOverride"/> with <c>detail = "hand edit of darling-managed.conf"</c>
+    /// — overriding a sizing-key row already built above, or added as a new row for a key outside the eight (a
+    /// hand edit can touch any managed key). A hand edit is the most specific evidence available about a key's
+    /// actual state.</para>
+    /// </summary>
+    internal static async Task ComputeAndStoreManagedConfVerdictsAsync(
+        NpgsqlConnection connection,
+        string dataDirectory,
+        long ramBytesForDerivation,
+        long freeDiskBytesForDerivation,
+        ManagedConfWriteResult? writeResult,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        var targets = BuildDerivedTargets(ramBytesForDerivation, freeDiskBytesForDerivation);
+        var sizingNames = targets.Select(t => t.Name).ToArray();
+        var allNames = sizingNames.Concat(CommandLineOnlyKeys).ToArray();
+
+        var live = new Dictionary<string, (string Setting, string? Unit, string? Source, string? Context)>(StringComparer.Ordinal);
+        await using (var cmd = new NpgsqlCommand(
+            "SELECT name, setting, unit, source, context FROM pg_settings WHERE name = ANY($1)", connection)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds })
+        {
+            cmd.Parameters.AddWithValue(allNames);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                live[reader.GetString(0)] = (
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4));
+            }
+        }
+
+        var fileSettingErrors = new Dictionary<string, (string? File, int? Line)>(StringComparer.Ordinal);
+        await using (var cmd = new NpgsqlCommand(ManagedConfPgFileSettingsErrorSql, connection)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds })
+        {
+            cmd.Parameters.AddWithValue(sizingNames);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                fileSettingErrors[reader.GetString(0)] = (
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2));
+            }
+        }
+
+        DateTime postmasterStartTimeUtc;
+        await using (var cmd = new NpgsqlCommand(ManagedConfPostmasterStartTimeSql, connection)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds })
+        {
+            postmasterStartTimeUtc = DateTime.SpecifyKind((DateTime)(await cmd.ExecuteScalarAsync(cancellationToken))!, DateTimeKind.Utc);
+        }
+
+        var computedAtUtc = DateTime.UtcNow;
+        var rows = new Dictionary<string, ManagedConfVerdictRow>(StringComparer.Ordinal);
+        var pendingRestartKeys = new List<string>();
+        var rejectedValueKeys = new List<string>();
+        var overriddenKeys = new List<string>();
+
+        foreach (var (name, derivedValueMb, unit) in targets)
+        {
+            if (!live.TryGetValue(name, out var pgValue))
+            {
+                continue; /* not visible on this connection -- degrade quietly rather than storing an
+                             unsupported row; GatherSettingProfilesAsync's live read reports this case for
+                             --check-settings' own table. */
+            }
+
+            var derivedDisplay = FormatSettingValue(derivedValueMb, unit);
+            var currentValue = NormalizePgSetting(pgValue.Setting, pgValue.Unit);
+            var currentDisplay = currentValue.HasValue ? FormatSettingValue(currentValue.Value, unit) : pgValue.Setting;
+
+            if (string.Equals(pgValue.Source, "command line", StringComparison.Ordinal))
+            {
+                /* Defensive only -- none of the eight sizing keys is command-line by default, but ruling M1
+                   says report ANY command-line-sourced key this way, never as an override. */
+                rows[name] = new ManagedConfVerdictRow(
+                    name, currentDisplay, derivedDisplay, "command line", null, null,
+                    HostSettingVerdict.CommandLine, null, computedAtUtc, postmasterStartTimeUtc);
+                continue;
+            }
+
+            var attribution = AttributeManagedSetting(dataDirectory, name);
+            var (sourceDescription, verdict) = ClassifyVerdict(attribution, currentValue ?? long.MinValue, derivedValueMb);
+            string? detail = null;
+
+            if (fileSettingErrors.TryGetValue(name, out var errorAttribution))
+            {
+                var isPostmasterContext = string.Equals(pgValue.Context, "postmaster", StringComparison.Ordinal);
+                verdict = isPostmasterContext ? HostSettingVerdict.PendingRestart : HostSettingVerdict.RejectedValue;
+                detail = isPostmasterContext
+                    ? "the file holds a different value; restart the service to apply it"
+                    : "the file's value for this key was rejected; the running value stays in force";
+                (isPostmasterContext ? pendingRestartKeys : rejectedValueKeys).Add(name);
+
+                /* The line pg_file_settings itself names for the PENDING value, which is what this row is
+                   now describing -- not necessarily the same line AttributeManagedSetting's own scan found. */
+                if (errorAttribution.File is not null)
+                {
+                    attribution = new ConfSettingAttribution(attribution.Origin, errorAttribution.File, errorAttribution.Line ?? 0, attribution.RawValue);
+                    sourceDescription = FormattableString.Invariant($"{sourceDescription} — pending ({errorAttribution.File}:{errorAttribution.Line})");
+                }
+            }
+            else if (verdict == HostSettingVerdict.OperatorOverride)
+            {
+                overriddenKeys.Add(name);
+            }
+
+            rows[name] = new ManagedConfVerdictRow(
+                name, currentDisplay, derivedDisplay, sourceDescription, attribution.File,
+                attribution.Line == 0 ? null : attribution.Line, verdict, detail, computedAtUtc, postmasterStartTimeUtc);
+        }
+
+        foreach (var name in CommandLineOnlyKeys)
+        {
+            if (!live.TryGetValue(name, out var pgValue))
+            {
+                continue;
+            }
+
+            rows[name] = new ManagedConfVerdictRow(
+                name, pgValue.Setting, pgValue.Setting, "command line", null, null,
+                HostSettingVerdict.CommandLine, null, computedAtUtc, postmasterStartTimeUtc);
+        }
+
+        if (writeResult is { HandEdited: true } handEdited)
+        {
+            foreach (var diff in handEdited.ChangedKeys)
+            {
+                rows[diff.Key] = new ManagedConfVerdictRow(
+                    diff.Key, diff.FileValue ?? "(absent)", diff.RenderedValue ?? "(absent)",
+                    "hand edit of darling-managed.conf", null, null,
+                    HostSettingVerdict.OperatorOverride, "hand edit of darling-managed.conf", computedAtUtc, postmasterStartTimeUtc);
+            }
+
+            logger?.LogWarning(
+                "{Path} was hand-edited: {Count} key(s) stored as operator overrides. Run --check-settings for the full picture.",
+                ManagedConfFile.FileName, handEdited.ChangedKeys.Count);
+        }
+
+        if (pendingRestartKeys.Count > 0)
+        {
+            logger?.LogWarning(
+                "{Count} owned setting(s) pending restart: {Keys}. Restart the service to apply them.",
+                pendingRestartKeys.Count, string.Join(", ", pendingRestartKeys));
+        }
+
+        if (rejectedValueKeys.Count > 0)
+        {
+            logger?.LogWarning(
+                "{Count} owned setting(s) rejected by PostgreSQL: {Keys}. Run --check-settings for the full picture.",
+                rejectedValueKeys.Count, string.Join(", ", rejectedValueKeys));
+        }
+
+        if (overriddenKeys.Count > 0)
+        {
+            logger?.LogWarning(
+                "{Count} owned setting(s) overridden (ALTER SYSTEM, or a line placed after the managed blocks): {Keys}.",
+                overriddenKeys.Count, string.Join(", ", overriddenKeys));
+        }
+
+        await StoreManagedConfVerdictsAsync(connection, rows.Values.ToList(), cancellationToken);
+    }
+
+    private static async Task StoreManagedConfVerdictsAsync(
+        NpgsqlConnection connection, IReadOnlyList<ManagedConfVerdictRow> rows, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var delete = new NpgsqlCommand(ManagedConfVerdictsDeleteSql, connection, transaction)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds })
+        {
+            await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        foreach (var row in rows)
+        {
+            await using var insert = new NpgsqlCommand(ManagedConfVerdictsInsertSql, connection, transaction)
+                { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+            insert.Parameters.AddWithValue(row.SettingName);
+            insert.Parameters.AddWithValue(row.CurrentValue);
+            insert.Parameters.AddWithValue(row.DerivedValue);
+            insert.Parameters.AddWithValue(row.SourceDescription);
+            insert.Parameters.AddWithValue((object?)row.SourceFile ?? DBNull.Value);
+            insert.Parameters.AddWithValue((object?)row.SourceLine ?? DBNull.Value);
+            insert.Parameters.AddWithValue(DescribeVerdict(row.Verdict));
+            insert.Parameters.AddWithValue((object?)row.Detail ?? DBNull.Value);
+            insert.Parameters.AddWithValue(row.ComputedAtUtc);
+            insert.Parameters.AddWithValue(row.PostmasterStartTimeUtc);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    /// <summary>Reads <c>collect.managed_conf_verdicts</c> back (#4215 ruling M2) — the only way a role without
+    /// file access or <c>pg_file_settings</c> visibility (<c>viewer</c>, <c>mcp</c>, or a <c>--check-settings</c>
+    /// run on a store this process did not just start) learns a managed key's file attribution and restart
+    /// status. Empty on a store that has never completed a service-owned managed start under this feature.</summary>
+    internal static async Task<IReadOnlyList<ManagedConfVerdictRow>> ReadStoredManagedConfVerdictsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var results = new List<ManagedConfVerdictRow>();
+        await using var cmd = new NpgsqlCommand(ManagedConfVerdictsSelectSql, connection)
+            { CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds };
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new ManagedConfVerdictRow(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                ParseStoredVerdict(reader.GetString(6)),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc)));
+        }
+
+        return results;
+    }
+
+    private static HostSettingVerdict ParseStoredVerdict(string text) => text switch
+    {
+        "matches" => HostSettingVerdict.Matches,
+        "stale-after-hardware-change" => HostSettingVerdict.StaleAfterHardwareChange,
+        "operator-override" => HostSettingVerdict.OperatorOverride,
+        "not-managed" => HostSettingVerdict.NotManaged,
+        "command-line" => HostSettingVerdict.CommandLine,
+        "pending-restart" => HostSettingVerdict.PendingRestart,
+        "rejected-value" => HostSettingVerdict.RejectedValue,
+        _ => HostSettingVerdict.NotManaged,
+    };
 }

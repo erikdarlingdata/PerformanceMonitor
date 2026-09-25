@@ -675,6 +675,14 @@ public sealed class DarlingManagedPostgres
 
     public string DataDirectory => _dataDirectory;
 
+    /// <summary>What <see cref="WriteManagedConfFile"/> did with <c>darling-managed.conf</c> on this start
+    /// (#4215 ruling H1 item 3/review H1 item 3) — carried out of the bootstrap the same way
+    /// <see cref="LastUpgradeOutcome"/> is, so <c>DarlingWorker</c> can fold a hand edit's changed keys into
+    /// the stored verdict rows without re-reading the file itself. Null when the service-owned conf-write path
+    /// never ran this start (the adopted-listener branch of <see cref="EnsureRunningAsync"/>).</summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfWriteResult? LastManagedConfWriteResult { get; private set; }
+
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
     {
@@ -3402,7 +3410,7 @@ public sealed class DarlingManagedPostgres
     internal async Task EnsureManagedConfReadyAsync(string binDirectory, string dataDirectory, CancellationToken cancellationToken)
     {
         var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
-        WriteManagedConfFile(dataDirectory, postgresMajor);
+        LastManagedConfWriteResult = WriteManagedConfFile(dataDirectory, postgresMajor);
 
         var (valid, output) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
         if (valid)
