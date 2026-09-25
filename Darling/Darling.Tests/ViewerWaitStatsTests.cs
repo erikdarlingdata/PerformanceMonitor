@@ -59,13 +59,19 @@ public sealed class ViewerWaitStatsSqlTests
            per-type LAG window (the truncate-then-diff epoch idiom proven value-identical between DuckDB and
            Postgres) only for pre-V127 rows that never recorded one. */
         ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(sql, "wait_type");
-        /* The three metric expressions: per-second wait, per-second signal, avg ms per wait — none with an
-           ELSE 0, so an unknowable interval yields NULL and the reader drops the row. */
-        Assert.Contains("CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second", sql, StringComparison.Ordinal);
-        Assert.Contains("interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("ELSE 0", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY wait_type, collection_time", sql, StringComparison.Ordinal);
+        /* #4234: bucketed — a bucket's rate is its summed rated wait over its summed rated seconds (the
+           "rated" CTE), not a per-row division. Neither rate CASE carries an ELSE, so an all-unrated bucket
+           sums to NULL/NULL = NULL and the reader drops the row, same as the pre-#4234 per-row read did. */
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN delta_wait_time_ms END AS rated_wait_ms", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN delta_signal_wait_time_ms END AS rated_signal_ms", sql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_seconds) AS wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_signal_ms) AS DOUBLE PRECISION) / SUM(rated_seconds) AS signal_wait_time_ms_per_second", sql, StringComparison.Ordinal);
+        /* avg_ms_per_wait is the one metric with a deliberate, EXPLICIT "ELSE 0" — a bucket whose rated
+           collections all logged zero waiting tasks would otherwise raise division_by_zero, so the guard is
+           spelled out rather than left to NULL propagation like the two rate columns above. */
+        Assert.Contains("CASE WHEN SUM(rated_tasks) > 0 THEN CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_tasks) ELSE 0 END AS avg_ms_per_wait", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY wait_type, 2", sql, StringComparison.Ordinal);
     }
 
     [Theory]
