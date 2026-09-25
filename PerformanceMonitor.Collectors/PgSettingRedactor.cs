@@ -61,7 +61,8 @@ public static class PgSettingRedactor
 
     private const string Mask = "********";
 
-    /// <summary>Names whose value is masked in full when the setting is extension-scoped (#4348).</summary>
+    /// <summary>Names whose value is masked in full when the setting is extension-scoped (#4348), or when a
+    /// marker sits in ANY dot-separated segment of the name, not only the last (review round 1, M5/L1).</summary>
     private static readonly string[] WholeValueNameMarkers =
     {
         "password",
@@ -71,21 +72,30 @@ public static class PgSettingRedactor
         "salt",
         "token",
         "key",
+        "credential",
+        "pwd",
     };
 
     /// <summary>A libpq <c>password</c>/<c>sslpassword</c> keyword inside a conninfo-shaped value. The keyword
     /// must sit at the start of the string or after whitespace, exactly like every other libpq keyword=value
     /// pair, so it does not fire on an unrelated keyword such as <c>passfile</c>. The value is either a
-    /// libpq-quoted string (backslash escapes <c>\\</c> and <c>\'</c>, closing on the first unescaped <c>'</c>)
-    /// or an unquoted run of non-whitespace.</summary>
+    /// libpq-quoted string (backslash escapes <c>\\</c> and <c>\'</c>, closing on the first unescaped <c>'</c>,
+    /// or running to the end of the value when the closing quote never arrives — round 1's L2), plus whatever
+    /// non-whitespace immediately follows the closing quote (round 1's M4: a quoted value glued to a trailing
+    /// <c>;</c> or another token with no space), or an unquoted run of non-whitespace.</summary>
     private static readonly Regex LibpqPasswordKeyword = new(
-        @"(?<=^|\s)(?<kw>sslpassword|password)\s*=\s*(?:'(?:\\.|[^'\\])*'|\S*)",
+        @"(?<=^|\s)(?<kw>sslpassword|password)\s*=\s*(?:'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>The password half of a URI's user info: <c>scheme://user:secret@host</c>. A bare
-    /// <c>user@host</c>, with no password, does not match and the username is left alone.</summary>
+    /// <c>user@host</c>, with no password, does not match and the username is left alone. The user name may
+    /// be empty (round 1's M2: <c>postgresql://:secret@host</c> is valid libpq and still carries a
+    /// password). The password itself may contain a raw space or an NBSP (round 1's L2 — libpq's own
+    /// <c>isspace</c> is not Unicode-aware, so a literal space can sit inside the password up to the <c>@</c>),
+    /// so the password class excludes only <c>@</c>, <c>/</c> and the URI's own delimiters, not all
+    /// whitespace.</summary>
     private static readonly Regex UriUserInfoPassword = new(
-        @"://(?<user>[^:@/\s]+):[^@/\s]*@",
+        @"://(?<user>[^:@/\s\u00A0]*):[^@/]*@",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A <c>password</c> query parameter in a URI's query string.</summary>
@@ -93,13 +103,29 @@ public static class PgSettingRedactor
         @"(?<=[?&])(?<key>password)=[^&#\s'""]*",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>A shell-style or option-style assignment (<c>NAME=value</c>, <c>--name=value</c>) whose name
-    /// contains PASSWORD, PASSWD, SECRET or TOKEN. Covers <c>PGPASSWORD=x</c>, <c>AWS_SECRET_ACCESS_KEY=x</c>,
-    /// <c>--password=x</c> inside <c>archive_command</c>/<c>restore_command</c>-shaped values. The value side
-    /// accepts the same libpq-style quoting as <see cref="LibpqPasswordKeyword"/>, plus double quotes, so a
-    /// quoted value with an <c>=</c> or space inside it is not mistaken for the start of the next token.</summary>
+    /// <summary>A shell-style or option-style assignment (<c>NAME=value</c>) whose name contains PASSWORD,
+    /// PASSWD, PASSPHRASE, SECRET, TOKEN, CREDENTIAL, PWD, or a standalone KEY segment (round 1's M5
+    /// amendment: common WAL-G/Azure/pgBackRest variable names such as <c>WALG_LIBSODIUM_KEY</c> and
+    /// <c>AZURE_STORAGE_ACCESS_KEY</c>). <c>PASS</c> covers PASSWORD, PASSWD and PASSPHRASE as substrings; KEY
+    /// is bounded on both sides by <c>(?&lt;![A-Za-z0-9])</c>/<c>(?![A-Za-z0-9])</c> so it matches only as its
+    /// own word or delimited segment, never as a substring — which is what keeps libpq's <c>sslkey=/path</c>
+    /// unmasked. Covers <c>PGPASSWORD=x</c>, <c>AWS_SECRET_ACCESS_KEY=x</c>, <c>WALG_PGP_KEY_PASSPHRASE=x</c>
+    /// inside <c>archive_command</c>/<c>restore_command</c>-shaped values. The value side accepts the same
+    /// libpq-style quoting as <see cref="LibpqPasswordKeyword"/>, plus double quotes, plus whatever
+    /// non-whitespace immediately follows the closing quote (round 1's M4), so a quoted value with an
+    /// <c>=</c>, space, or trailing punctuation inside or after it is not mistaken for the start of the next
+    /// token.</summary>
     private static readonly Regex AssignmentSecretName = new(
-        @"(?<name>[\w.-]*(?:PASSWORD|PASSWD|SECRET|TOKEN)[\w.-]*)=(?:""(?:\\.|[^""\\])*""|'(?:\\.|[^'\\])*'|\S*)",
+        @"(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)=(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>A space-separated option whose name contains PASSWORD, PASSWD, SECRET or TOKEN, taking its
+    /// value from the next whitespace-delimited token rather than an <c>=</c> (round 1's M3: <c>--password
+    /// hunter2</c> and <c>--secret-access-key hunter2</c> have no <c>=</c> at all, so
+    /// <see cref="AssignmentSecretName"/> never fires on them). <c>(?!-)</c> keeps a value-less flag such as
+    /// <c>--no-password -h x</c> from swallowing the next option as its value.</summary>
+    private static readonly Regex OptionSecretSpaced = new(
+        @"(?<=^|\s)(?<opt>--?[\w.-]*(?:PASSWORD|PASSWD|SECRET|TOKEN)[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
@@ -123,6 +149,7 @@ public static class PgSettingRedactor
         redacted = UriUserInfoPassword.Replace(redacted, static m => "://" + m.Groups["user"].Value + ":" + Mask + "@");
         redacted = UriQueryPassword.Replace(redacted, static m => m.Groups["key"].Value + "=" + Mask);
         redacted = AssignmentSecretName.Replace(redacted, static m => m.Groups["name"].Value + "=" + Mask);
+        redacted = OptionSecretSpaced.Replace(redacted, static m => m.Groups["opt"].Value + " " + Mask);
 
         return redacted;
     }
@@ -140,18 +167,18 @@ public static class PgSettingRedactor
         }
 
         // Extension-scoped settings only: a bare core GUC such as password_encryption never matches here,
-        // no matter what its name contains — only the part after the LAST dot is tested, and only when
-        // there is a dot at all.
-        var dot = name.LastIndexOf('.');
-        if (dot < 0 || dot == name.Length - 1)
+        // no matter what its name contains — only a dotted name is tested at all. Round 1's L1: a marker in
+        // ANY dot-separated segment counts, not only the last one (vault.secret.value), so the whole name is
+        // tested as a substring rather than slicing off just the last part.
+        var dot = name.IndexOf('.');
+        if (dot < 0)
         {
             return false;
         }
 
-        var lastPart = name.AsSpan(dot + 1);
         foreach (var marker in WholeValueNameMarkers)
         {
-            if (lastPart.Contains(marker, StringComparison.OrdinalIgnoreCase))
+            if (name.Contains(marker, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }

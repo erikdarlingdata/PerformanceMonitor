@@ -72,6 +72,10 @@ public sealed class PgSettingRedactorTests
     [InlineData("primary_conninfo",
         "postgresql://alice@host/db?sslmode=require&password=hunter2",
         "postgresql://alice@host/db?sslmode=require&password=********")]
+    // M2 (review round 1): an empty user name in the URI's user info still carries a password to libpq.
+    [InlineData("primary_conninfo",
+        "postgresql://:hunter2@primary:5432/db",
+        "postgresql://:********@primary:5432/db")]
     // assignment / option whose NAME contains PASSWORD, PASSWD, SECRET or TOKEN.
     [InlineData("archive_command",
         "PGPASSWORD=hunter2 psql -c 'select 1'",
@@ -85,6 +89,40 @@ public sealed class PgSettingRedactorTests
     [InlineData("restore_command",
         @"pg_dump --password=""hunter 2"" --host=foo",
         "pg_dump --password=******** --host=foo")]
+    // M3 (review round 1): a space-separated option, no '=' at all.
+    [InlineData("archive_command",
+        "mycmd --password hunter2 %p",
+        "mycmd --password ******** %p")]
+    [InlineData("archive_command",
+        "aws s3 cp s3://b/%f %p --secret-access-key hunter2secret",
+        "aws s3 cp s3://b/%f %p --secret-access-key ********")]
+    [InlineData("archive_command",
+        "mycmd --no-password -h x %p",
+        "mycmd --no-password -h x %p")]
+    // M4 (review round 1): a quoted value glued to a trailing ';' rather than whitespace.
+    [InlineData("archive_command",
+        "export PGPASSWORD='hunter 2'; psql",
+        "export PGPASSWORD=******** psql")]
+    [InlineData("primary_conninfo",
+        "password='x'host=y",
+        "password=********")]
+    // M5 (ruling amendment): backup-tool secret variable names the assignment list did not cover.
+    [InlineData("archive_command",
+        "WALG_LIBSODIUM_KEY=hunter2 wal-g wal-push %p",
+        "WALG_LIBSODIUM_KEY=******** wal-g wal-push %p")]
+    [InlineData("archive_command",
+        "AZURE_STORAGE_ACCESS_KEY=hunter2 wal-g wal-push %p",
+        "AZURE_STORAGE_ACCESS_KEY=******** wal-g wal-push %p")]
+    [InlineData("archive_command",
+        "WALG_PGP_KEY_PASSPHRASE=hunter2 wal-g wal-push %p",
+        "WALG_PGP_KEY_PASSPHRASE=******** wal-g wal-push %p")]
+    [InlineData("restore_command",
+        "PGBACKREST_REPO1_CIPHER_PASS=hunter2 pgbackrest restore",
+        "PGBACKREST_REPO1_CIPHER_PASS=******** pgbackrest restore")]
+    // KEY is bounded to its own segment, so libpq's sslkey keyword is never touched.
+    [InlineData("primary_conninfo",
+        "sslkey=/path/to/client.key sslmode=require",
+        "sslkey=/path/to/client.key sslmode=require")]
     // ssl_passphrase_command: whole value masked; empty stays empty.
     [InlineData("ssl_passphrase_command",
         "/usr/bin/cat /etc/ssl/passphrase-hunter2.txt",
@@ -92,18 +130,41 @@ public sealed class PgSettingRedactorTests
     [InlineData("ssl_passphrase_command",
         "",
         "")]
-    // extension setting (dotted name): whole value masked when the LAST segment names a secret.
+    // extension setting (dotted name): whole value masked when a segment names a secret.
     [InlineData("anon.salt", "s0mesalt", "********")]
     [InlineData("myext.api_key", "AKIAABCDEFG", "********")]
     // the substring decision, pinned: "key" matches wherever it appears in the last segment, not only as
     // its own word — myext.turkey_interval is not about a key at all, and is still masked in full.
     [InlineData("myext.turkey_interval", "anything", "********")]
-    // negative: myext.keep_alive does not contain any marker (password/passwd/passphrase/secret/salt/token/key)
-    // as a substring of "keep_alive", so its value is left alone.
+    // negative: myext.keep_alive does not contain any marker (password/passwd/passphrase/secret/salt/token/key/
+    // credential/pwd) as a substring of "keep_alive", so its value is left alone.
     [InlineData("myext.keep_alive", "30s", "30s")]
+    // L1 (review round 1): "credential" and "pwd" join the whole-value markers, and a marker in ANY
+    // dot-separated segment counts, not only the last one.
+    [InlineData("myext.api_credentials", "AKIAABCDEFG", "********")]
+    [InlineData("app.db_pwd", "hunter2", "********")]
+    [InlineData("vault.secret.value", "hunter2", "********")]
+    // L2 (review round 1): edge forms, probe-confirmed.
+    [InlineData("primary_conninfo",
+        "postgresql://u:pa S8@h/db",
+        "postgresql://u:********@h/db")]
+    [InlineData("restore_command",
+        "password = S16 host=foo",
+        "password=******** host=foo")]
+    [InlineData("restore_command",
+        "curl -u admin:S22",
+        "curl -u admin:S22")]
+    [InlineData("primary_conninfo",
+        "password='S5 unterminated",
+        "password=********")]
+    [InlineData("primary_conninfo",
+        "password='it\\\nhas a newline' host=foo",
+        "password=******** host=foo")]
     // must not change at all.
     [InlineData("password_encryption", "scram-sha-256", "scram-sha-256")]
-    [InlineData("unix_socket_directories", "passfile=/x/.pgpass", "passfile=/x/.pgpass")]
+    // PASS is a deliberately unbounded substring (unlike the bounded KEY segment test), so a libpq
+    // passfile keyword now over-masks rather than leaking — the ruling's own tradeoff, never a leak.
+    [InlineData("unix_socket_directories", "passfile=/x/.pgpass", "passfile=********")]
     [InlineData("primary_conninfo", "host=a user=b", "host=a user=b")]
     [InlineData("primary_conninfo", "", "")]
     public void RedactsPerTheRuling_AndIsIdempotent(string name, string value, string expected)
