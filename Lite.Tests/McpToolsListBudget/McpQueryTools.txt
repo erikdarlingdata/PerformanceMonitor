@@ -34,7 +34,7 @@ param get_query_store_regressions.hours_back 110
 param get_query_store_regressions.limit 164
 param get_query_store_regressions.server_name 28
 
-tool get_query_store_top 390
+tool get_query_store_top 422
 param get_query_store_top.as_of 167
 param get_query_store_top.database_name 30
 param get_query_store_top.execution_type 72

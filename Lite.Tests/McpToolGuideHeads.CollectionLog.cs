@@ -32,7 +32,7 @@ public sealed class McpToolGuideHeadsCollectionLogTests
         ("get_collection_log", "an unknown value is refused, never silently empty"),
         ("get_query_store_top", "window_truncated"),
         ("get_query_store_top", "not a page cut"),
-        ("get_query_store_top", "raw-tier retention floor"),
+        ("get_query_store_top", "Lite: no such floor"),
     ];
 
     [Fact]
@@ -74,14 +74,20 @@ public sealed class McpToolGuideHeadsCollectionLogTests
     }
 
     /// <summary>
-    /// #4231: Lite gained the same raw-tier window floor Darling already had, so the head no longer splits
-    /// "Darling: has one. Lite: does not" -- it names the same disclosure both SKUs now carry.
+    /// #4231: Lite gained the same raw-tier window floor Darling already had (LocalDataService.
+    /// GetQueryWindowFloorAsync), so the head's "Lite: no such floor" line is now stale prose. It survives here
+    /// UNCHANGED anyway: this head sentence is shared, byte-identical, cross-SKU text (Darling.Tests'
+    /// McpToolGuideTests lockstep pin), so it can only change in a coordinated PR that updates both SKUs' heads
+    /// together. The correction lives in the tail instead (right after &lt;&lt;GUIDE&gt;&gt;) and on the
+    /// payload's own window_truncated / effective_start / effective_hours_back, which this file's other tests
+    /// (and QueryWindowTruncationTests on the Lite side) already pin as truthful.
     /// </summary>
     [Fact]
-    public void QueryStoreTop_HeadNamesTheSameDisclosureAsDarling()
+    public void QueryStoreTop_WindowFloorClause_IsScopedToDarlingInTheHead()
     {
         var served = McpToolGuideTests.Served("get_query_store_top");
-        Assert.Contains("window_truncated", served.Served, StringComparison.Ordinal);
-        Assert.Contains("Same disclosure as Darling's get_query_store_top", served.Served, StringComparison.Ordinal);
+        Assert.Contains("Darling: window_truncated", served.Served, StringComparison.Ordinal);
+        Assert.Contains("Lite: no such floor", served.Served, StringComparison.Ordinal);
+        Assert.Contains("that head sentence is shared, byte-identical, cross-SKU text", served.Tail, StringComparison.Ordinal);
     }
 }
