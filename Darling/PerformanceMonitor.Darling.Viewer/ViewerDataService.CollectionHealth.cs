@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -469,6 +470,124 @@ public sealed partial class ViewerDataService
 
         return items;
     }
+
+    /// <summary>
+    /// The per-(server, collector) breakdown <see cref="FleetCollectionHealthSql"/> groups by but does not
+    /// project (#4226): identical eleven aggregates, identical <c>is_enabled</c> scope, with <c>server_id</c>
+    /// added as column 0 so the Overview cards and the status bar can take their per-server counts from ONE
+    /// fleet-wide read instead of one raw <c>CollectionHealthSql</c> scan per server. Shaped for
+    /// <see cref="CollectionHealthRollupSupport.ComposeFleetSql"/> — thirteen columns, in the order it requires.
+    /// </summary>
+    public const string FleetCollectionHealthByServerSql = $"""
+        SELECT
+            server_id,
+            collector_name,
+            COUNT(*) AS total_runs,
+            SUM(CASE WHEN status = 'SUCCESS'
+                      AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
+                     THEN 1 ELSE 0 END) AS success_count,
+            SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
+            MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
+            SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
+            MAX(collection_time) AS last_run_time,
+            SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
+                     THEN 1 ELSE 0 END) AS abandoned_count,
+            SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
+            MAX(CASE WHEN status IS NULL
+                      OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+                     THEN collection_time END) AS last_non_skip_time,
+            MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
+            MAX(CASE WHEN NOT (status = 'SUCCESS'
+                               AND COALESCE(rows_collected, 0) = 0
+                               AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
+                     THEN collection_time END) AS last_zero_row_streak_break_time
+        FROM v_collection_log
+        WHERE collection_time >= $1
+        AND   server_id IN (SELECT server_id FROM config_monitored_servers WHERE is_enabled)
+        GROUP BY server_id, collector_name
+        """;
+
+    /// <summary><see cref="FleetCollectionHealthByServerSql"/> served from
+    /// <c>collect.collection_health_hourly</c> when <see cref="CollectionHealthRollupSupport.RollupUsableAsync"/>
+    /// says the rollup is usable, computed once (#4226).</summary>
+    private static readonly string FleetCollectionHealthByServerComposedSql =
+        CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthByServerSql);
+
+    private Dictionary<int, List<CollectorHealthRow>>? _fleetHealthByServer;
+    private DateTime _fleetHealthByServerAtUtc;
+
+    /// <summary>Re-probe at most this often (#4226) — the same "benignly racy" TTL-cache shape
+    /// <see cref="GetRollupAvailabilityAsync"/> already uses: a fresh call within the window is served from
+    /// memory, and concurrent callers racing a cold cache (the Overview loader's per-server lanes, the status
+    /// bar's own tick) may each start one scan rather than sharing a single in-flight one. That is still one to
+    /// a handful of fleet-wide rollup reads per tick, not the 43 raw per-server scans this replaces.</summary>
+    private static readonly TimeSpan FleetHealthByServerMemoLifetime = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// The 7-day per-(server, collector) health breakdown, ONE store round trip (rollup-backed when usable,
+    /// else the exact raw scan), grouped by server for the caller — the read #4226 gives the Overview cards and
+    /// the status bar so a 30 s refresh tick costs one fleet-wide read instead of 43 per-server raw scans plus a
+    /// second raw fleet scan. Memoized for <see cref="FleetHealthByServerMemoLifetime"/>.
+    /// </summary>
+    public async Task<Dictionary<int, List<CollectorHealthRow>>> GetFleetCollectionHealthByServerAsync(CancellationToken cancellationToken = default)
+    {
+        if (_fleetHealthByServer is not null && DateTime.UtcNow - _fleetHealthByServerAtUtc < FleetHealthByServerMemoLifetime)
+        {
+            return _fleetHealthByServer;
+        }
+
+        var now = DateTime.UtcNow;
+        var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
+        var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
+        var composed = await CollectionHealthRollupSupport.RollupUsableAsync(_dataSource, headEnd, cancellationToken);
+
+        await using var command = _dataSource.CreateCommand(composed ? FleetCollectionHealthByServerComposedSql : FleetCollectionHealthByServerSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+        if (composed)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
+        }
+
+        var byServer = new Dictionary<int, List<CollectorHealthRow>>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var serverId = reader.GetInt32(0);
+            if (!byServer.TryGetValue(serverId, out var rows))
+            {
+                rows = new List<CollectorHealthRow>();
+                byServer[serverId] = rows;
+            }
+
+            rows.Add(MapFleetByServerRow(reader));
+        }
+
+        _fleetHealthByServer = byServer;
+        _fleetHealthByServerAtUtc = now;
+        return byServer;
+    }
+
+    /// <summary>Maps one row of <see cref="FleetCollectionHealthByServerSql"/> / its composed twin (ordinals
+    /// 0-12) to a <see cref="CollectorHealthRow"/>. Only the fields <see cref="CollectorHealthRow.HealthStatus"/>
+    /// and <see cref="CollectorHealthRow.RegressedFromProductive"/> read are populated — the Overview cards and
+    /// the status bar band collectors and count them, and render neither an exemplar message nor a note
+    /// (#4226); AvgDurationMs, LastError(Time), YieldCount, LastNote, NoteCount and TargetHasUserDatabases stay
+    /// at their defaults, as they never reach this projection.</summary>
+    private static CollectorHealthRow MapFleetByServerRow(NpgsqlDataReader reader) => new()
+    {
+        CollectorName = reader.GetString(1),
+        TotalRuns = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+        SuccessCount = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3)),
+        ErrorCount = reader.IsDBNull(4) ? 0 : Convert.ToInt64(reader.GetValue(4)),
+        LastSuccessTime = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+        PermissionDeniedCount = reader.IsDBNull(6) ? 0 : Convert.ToInt64(reader.GetValue(6)),
+        LastRunTime = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+        AbandonedCount = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8)),
+        ExtensionMissingCount = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9)),
+        LastNonSkipTime = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+        LastProductiveTime = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+    };
 
     /// <summary>Maps one row of the shared 18-column health projection (per-server or fleet, ordinals 0-17) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY

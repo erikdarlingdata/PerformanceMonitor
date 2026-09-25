@@ -264,9 +264,14 @@ public partial class MainWindow
         List<CollectorHealthRow> health;
         try
         {
+            /* #4226: the same fleet-wide rollup-backed, memoized read the Overview cards take their counts
+               from — a per-server tab filters it to that server's rows; an aggregate tab concatenates every
+               server's rows for the cumulative total, replacing what used to be a second raw fleet scan
+               (FleetCollectionHealthSql) or a raw per-server scan (GetCollectionHealthAsync) every tick. */
+            var byServer = await _dataService.GetFleetCollectionHealthByServerAsync();
             health = serverId.HasValue
-                ? await _dataService.GetCollectionHealthAsync(serverId.Value)
-                : await _dataService.GetFleetCollectionHealthAsync();
+                ? (byServer.TryGetValue(serverId.Value, out var serverRows) ? serverRows : new List<CollectorHealthRow>())
+                : byServer.Values.SelectMany(rows => rows).ToList();
         }
         catch (Exception ex)
         {

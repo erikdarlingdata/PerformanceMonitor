@@ -572,7 +572,13 @@ WHERE id = 1";
     /// </summary>
     private async Task<(int Healthy, int Failing, int Total, string? DeadlockBand, string? PgDeadlockBand)> GetCollectorHealthCountsAsync(int serverId, CancellationToken cancellationToken)
     {
-        var rows = await GetCollectionHealthAsync(serverId, cancellationToken);
+        /* #4226: the fleet-wide rollup-backed read, memoized, instead of this server's OWN raw
+           CollectionHealthSql scan — the Overview loader's per-server loop now shares one store round trip
+           (or a handful, on a cold cache) instead of issuing 43. A server absent from the fleet result (never
+           collected, or disabled between the fleet read and this call) reads as no rows, same as the old
+           per-server scan finding none. */
+        var byServer = await GetFleetCollectionHealthByServerAsync(cancellationToken);
+        var rows = byServer.TryGetValue(serverId, out var serverRows) ? serverRows : new List<CollectorHealthRow>();
         var healthy = rows.Count(r => r.HealthStatus == "HEALTHY");
         var failing = rows.Count(r => r.HealthStatus == "FAILING");
         var deadlockBand = rows
