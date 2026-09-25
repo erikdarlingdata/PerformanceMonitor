@@ -89,6 +89,9 @@ public sealed class McpToolsListBudgetTests
        get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
        parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
        tools/list and so is not counted here. */
+/* #4198 (get_query_heatmap): +147 bytes for the new full_text opt-in parameter (94 bytes of description
+       plus its JSON schema property scaffolding), part of shrinking the default cell cap and preview width
+       under the shared response budget. */
 /* #4198 (get_plan_corrections): +137 bytes for the new full_text opt-in parameter (the head is unchanged;
        the preview explanation lives in the tail get_tool_guide serves, not the served head). The default row
        limit dropped 50 -> 25 and the preview 2,000 chars -> 150, which is what took the default call from
@@ -104,7 +107,7 @@ public sealed class McpToolsListBudgetTests
        <<GUIDE>>, in the tail get_tool_guide serves, not the served head); the default query_text preview
        dropped 2,000 chars -> 400, which took the default call from 48 KB (#4198's measurement) to under the
        shared 32 KB budget and is not a served description either. */
-    private const int TotalCeilingBytes = 172_356;
+    private const int TotalCeilingBytes = 172_503;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
