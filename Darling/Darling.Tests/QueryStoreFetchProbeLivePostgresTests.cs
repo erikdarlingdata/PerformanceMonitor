@@ -147,6 +147,102 @@ SELECT
         }
     }
 
+    /// <summary>
+    /// #4250: the touch guard's freshness gate is the <c>last_seen</c> stored in the map, dimension and
+    /// text rows themselves — nothing about it lives in the writer's memory, because this design has none;
+    /// <see cref="QueryStoreFetchProbe"/> is static and every call is connection-scoped. So a process
+    /// restart — the nearest thing a live rig can rehearse is a brand-new connection, since there is no
+    /// other per-process state to reset — must not re-touch rows the guard already stamped fresh: probing
+    /// the SAME references again from a DIFFERENT connection, still inside the guard window, updates zero
+    /// rows anywhere.
+    /// </summary>
+    [Fact]
+    public async Task Restart_ANewConnectionRetouchesNothingFresh_TheGuardReadsStoredLastSeen()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live fetch-probe test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Older than the guard, so the FIRST touch below actually fires (same reasoning as the sibling
+               test above: a hard-coded age would silently stop exercising the touch once the width moves). */
+            var landedAt = DateTime.UtcNow.AddHours(-(QueryStoreLivenessTouchGuard.GuardHours + 1));
+
+            await QueryStorePlanWriter.WriteAsync(
+                connection, ServerId, Db,
+                new[] { new FetchedPlan(201, "<plan restart/>", "0xR1") },
+                landedAt, TestTimeoutSeconds, ct);
+            await QueryStoreTextWriter.WriteAsync(
+                connection, ServerId, Db,
+                new[] { new FetchedQueryText(202, "SELECT 'restart'", "0xR2") },
+                landedAt, TestTimeoutSeconds, ct);
+
+            async Task<(long Map, long Dim, long Text)> FreshnessCountsAsync(DateTime stamp)
+            {
+                using var freshness = new NpgsqlCommand(@"
+SELECT
+    (SELECT COUNT(*) FROM collect.query_store_plan_map
+     WHERE server_id = $1 AND database_name = $2 AND last_seen = $3),
+    (SELECT COUNT(*) FROM collect.query_plan_dim d
+     JOIN collect.query_store_plan_map m ON m.digest = d.digest
+     WHERE m.server_id = $1 AND m.database_name = $2 AND d.last_seen = $3),
+    (SELECT COUNT(*) FROM collect.query_store_text
+     WHERE server_id = $1 AND database_name = $2 AND last_seen = $3)", connection);
+                freshness.Parameters.AddWithValue(ServerId);
+                freshness.Parameters.AddWithValue(Db);
+                freshness.Parameters.AddWithValue(stamp);
+                await using var reader = await freshness.ExecuteReaderAsync(ct);
+                await reader.ReadAsync(ct);
+                return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+            }
+
+            // The first touch, from the original connection: the rows landed older than the guard, so
+            // this fires and stamps all three relations with firstTouch.
+            var firstTouch = DateTime.UtcNow;
+            await QueryStoreFetchProbe.TouchAndProbePlansAsync(
+                connection, ServerId, Db, new[] { (201L, (string?)"0xR1") }, firstTouch, TestTimeoutSeconds, ct);
+            await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
+                connection, ServerId, Db, new[] { (202L, (string?)"0xR2") }, firstTouch, TestTimeoutSeconds, ct);
+
+            var firstTouchStamp = QueryStorePlanMap.Naive(firstTouch);
+            Assert.Equal((1L, 1L, 1L), await FreshnessCountsAsync(firstTouchStamp));
+
+            // "Restart": a brand-new connection. Same references, five minutes later — still well inside
+            // the guard window, so nothing here should qualify for a re-touch.
+            using var freshConnection = new NpgsqlConnection(cs);
+            await freshConnection.OpenAsync(ct);
+            var secondTouch = firstTouch.AddMinutes(5);
+
+            var planVerdicts = await QueryStoreFetchProbe.TouchAndProbePlansAsync(
+                freshConnection, ServerId, Db, new[] { (201L, (string?)"0xR1") }, secondTouch, TestTimeoutSeconds, ct);
+            var textVerdicts = await QueryStoreFetchProbe.TouchAndProbeTextsAsync(
+                freshConnection, ServerId, Db, new[] { (202L, (string?)"0xR2") }, secondTouch, TestTimeoutSeconds, ct);
+
+            // Zero rows updated: every row still carries the FIRST touch's stamp, none carry the second.
+            Assert.Equal((1L, 1L, 1L), await FreshnessCountsAsync(firstTouchStamp));
+            Assert.Equal((0L, 0L, 0L), await FreshnessCountsAsync(QueryStorePlanMap.Naive(secondTouch)));
+
+            // The fresh connection's verdicts still resolve correctly — the restart cost nothing but the
+            // write it correctly skipped.
+            Assert.Equal(new FetchProbeVerdict(201, Resolved: true, HashStale: false), planVerdicts.Single());
+            Assert.Equal(new FetchProbeVerdict(202, Resolved: true, HashStale: false), textVerdicts.Single());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var sql =

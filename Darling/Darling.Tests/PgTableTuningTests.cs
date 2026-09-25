@@ -28,16 +28,16 @@ public sealed class PgTableTuningTests
     {
         var sql = string.Join("\n", PgTableTuning.Statements);
 
-        /* Three COVERING composer indexes (INCLUDE the aggregate columns -> Index Only Scan), schema-qualified collect. */
-        Assert.Contains("idx_procedure_stats_object_name ON collect.procedure_stats (object_name, collection_time) INCLUDE (database_name, delta_worker_time, delta_elapsed_time, delta_execution_count)", sql, StringComparison.Ordinal);
-        Assert.Contains("idx_query_stats_query_hash ON collect.query_stats (query_hash, collection_time) INCLUDE (database_name, delta_worker_time, delta_elapsed_time, delta_execution_count)", sql, StringComparison.Ordinal);
-        Assert.Contains("idx_query_store_stats_query_hash ON collect.query_store_stats (query_hash, collection_time) INCLUDE (database_name, module_name, execution_count, avg_duration_us, max_duration_us, avg_cpu_time_us, max_cpu_time_us)", sql, StringComparison.Ordinal);
+        /* #4247: the three composer covering indexes and two of the three single-row lookup indexes are now
+           guarded DROPs, not CREATEs — measured near-zero reads against ~25% of two production stores' WAL,
+           and each drop's own-reader deadline headroom is documented on the statement in PgTableTuning.cs. */
+        Assert.Contains("BEGIN; SET LOCAL lock_timeout = '5s'; DROP INDEX IF EXISTS collect.idx_procedure_stats_object_name; COMMIT;", sql, StringComparison.Ordinal);
+        Assert.Contains("BEGIN; SET LOCAL lock_timeout = '5s'; DROP INDEX IF EXISTS collect.idx_procedure_stats_server_handle_time; COMMIT;", sql, StringComparison.Ordinal);
+        Assert.Contains("BEGIN; SET LOCAL lock_timeout = '5s'; DROP INDEX IF EXISTS collect.idx_query_stats_server_handle_time; COMMIT;", sql, StringComparison.Ordinal);
+        Assert.Contains("BEGIN; SET LOCAL lock_timeout = '5s'; DROP INDEX IF EXISTS collect.idx_query_stats_query_hash; COMMIT;", sql, StringComparison.Ordinal);
+        Assert.Contains("BEGIN; SET LOCAL lock_timeout = '5s'; DROP INDEX IF EXISTS collect.idx_query_store_stats_query_hash; COMMIT;", sql, StringComparison.Ordinal);
 
-        /* Three single-row analyze_*_plan lookup indexes (no INCLUDE — one heap fetch is cheap),
-           plus the #1981 query_stats handle twin the ProcStats comparison's representative-statement
-           LATERAL probes (server_id, sql_handle, newest-first — bounded by raw retention's 4 days). */
-        Assert.Contains("idx_procedure_stats_server_handle_time ON collect.procedure_stats (server_id, sql_handle, collection_time DESC)", sql, StringComparison.Ordinal);
-        Assert.Contains("idx_query_stats_server_handle_time ON collect.query_stats (server_id, sql_handle, collection_time DESC)", sql, StringComparison.Ordinal);
+        /* The lookup index that IS read constantly stays, plus the QS db+query+plan lookup, schema-qualified collect. */
         Assert.Contains("idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)", sql, StringComparison.Ordinal);
         Assert.Contains("idx_query_store_stats_server_db_query_plan_time ON collect.query_store_stats (server_id, database_name, query_id, plan_id, collection_time DESC)", sql, StringComparison.Ordinal);
 
@@ -56,8 +56,10 @@ public sealed class PgTableTuningTests
            covering index for an Index Only Scan. */
         Assert.Contains("idx_store_metrics_kind_name_time ON collect.store_metrics (object_kind, object_name, metric_time DESC)", sql, StringComparison.Ordinal);
 
-        /* Every index is idempotent (no-op where a field box already hand-applied it, or a prior start made it). */
-        Assert.Equal(9, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* +1: the #1981 handle index; +1: the #3573 forced-plan covering index; +1: the #3934 store-metrics skip-scan index */
+        /* Every remaining index is idempotent (no-op where a field box already hand-applied it, or a prior
+           start made it); every #4247 drop is idempotent the same way (IF EXISTS no-ops once it is gone). */
+        Assert.Equal(4, CountOccurrences(sql, "CREATE INDEX IF NOT EXISTS"));   /* server_hash_time; server_db_query_plan_time; #3573 forced-plan covering index; #3934 store-metrics skip-scan index */
+        Assert.Equal(5, CountOccurrences(sql, "DROP INDEX IF EXISTS"));         /* #4247: the two handle indexes + the three composer covering indexes */
         Assert.DoesNotContain("CREATE INDEX ON", sql, StringComparison.Ordinal);
 
         /* Per-table autovacuum-insert override on exactly the FOUR high-rate insert tables (NOT a global GUC
@@ -76,7 +78,7 @@ public sealed class PgTableTuningTests
         Assert.Contains("ALTER TABLE collect.query_plan_dim SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 10000)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("collect.query_plan_dim SET (autovacuum_vacuum_insert_scale_factor", sql, StringComparison.Ordinal);
 
-        Assert.Equal(14, PgTableTuning.Statements.Count);   /* +1 #1981 query_stats handle index, +1 pg_statement_stats, +1 #2402 query_plan_dim, +1 #3573 forced-plan covering index, +1 #3934 store-metrics skip-scan index */
+        Assert.Equal(14, PgTableTuning.Statements.Count);   /* unchanged by #4247: 5 CREATEs became 5 guarded DROPs in place, so the list is still 4 CREATE INDEX + 5 DROP INDEX + 5 ALTER TABLE */
     }
 
     /// <summary>

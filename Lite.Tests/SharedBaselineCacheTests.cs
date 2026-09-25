@@ -79,6 +79,39 @@ public sealed class SharedBaselineCacheTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(0, cache.Count);
     }
 
+    /// <summary>
+    /// #4248: a daily-cache metric's entry (<see cref="BaselineProvider.CachedBaseline.FreshUntilUtc"/> set) answers
+    /// any analysis instant that rounds to the same UTC day, an hour or more after the compute — the CacheTtl the
+    /// non-daily case above is held to — and stops answering the instant the day rolls over, even well inside
+    /// CacheTtl. Direct against <see cref="BaselineCache"/>, so it needs no seed and cannot be confused by which
+    /// hour-of-day cell a lookup would extract from the buckets.
+    /// </summary>
+    [Fact]
+    public void DailyCacheEntry_AnswersForItsWholeUtcDay_NotJustTheTtl_AndStopsAtMidnight()
+    {
+        var cache = new BaselineCache();
+        var day = new DateTime(2026, 3, 18, 0, 0, 0); // the logical key: the analysis day, not real time
+        var now = DateTime.UtcNow; // when the compute actually ran
+        var dailyEntry = new BaselineProvider.CachedBaseline
+        {
+            ComputedAt = day,
+            RealTime = now,
+            Buckets = new Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>(),
+            Clock = LocalClockWindow.Utc(day),
+            FreshUntilUtc = now.AddDays(1),
+        };
+        cache.Put(1, "1:cpu", dailyEntry);
+
+        /* Well over CacheTtl (an hour) after the compute, same UTC day as the key (`day`): still a hit, unlike the
+           hourly entry above, which the sibling test already holds to CacheTtl. */
+        Assert.True(cache.TryGet(1, "1:cpu", day, out var lateSameDay));
+        Assert.Same(dailyEntry, lateSameDay);
+
+        /* Midnight: a new day, a new key — the shared tier's TryGet is keyed on the ROUNDED DAY the caller asks
+           for, so this is a natural miss, not a FreshUntilUtc check. */
+        Assert.False(cache.TryGet(1, "1:cpu", day.AddDays(1), out _));
+    }
+
     [Fact]
     public void TheTier_IsOnePerStore()
     {
@@ -125,9 +158,17 @@ public sealed class SharedBaselineCacheTests : IClassFixture<SharedDuckDbFixture
         AssertSameBucket(fresh, stillShared);
         Assert.Equal(fresh.SampleCount + 1, changed.SampleCount);
 
-        /* The next analysis hour is another window: computed, and it sees the new row. */
-        var nextHour = await new BaselineProvider(_duckDb, sharedCache: shared).GetBaselineAsync(ServerId, MetricNames.Cpu, Hour.AddMinutes(65));
-        Assert.True(nextHour.SampleCount > 0);
+        /* #4248: Cpu reads its RAW table over the full 30-day window, so since #4248 it is cached by UTC DAY, not
+           the hour — a lookup later the SAME day (even a different hour-of-day cell, so not compared bucket-for-
+           bucket against `fresh`) still finds rows, and DailyCacheEntry_AnswersForItsWholeUtcDay below pins the
+           no-recompute behavior directly against the cache's own liveness check. */
+        var nextHourSameDay = await new BaselineProvider(_duckDb, sharedCache: shared).GetBaselineAsync(ServerId, MetricNames.Cpu, Hour.AddMinutes(65));
+        Assert.True(nextHourSameDay.SampleCount > 0);
+
+        /* The next UTC DAY is a new window end: computed, and it sees the new row (the window's oldest day also
+           drops off the far end, so this only checks the compute ran and found rows, not an exact count). */
+        var nextDay = await new BaselineProvider(_duckDb, sharedCache: shared).GetBaselineAsync(ServerId, MetricNames.Cpu, Hour.AddDays(1).AddMinutes(50));
+        Assert.True(nextDay.SampleCount > 0);
     }
 
     [Fact]
