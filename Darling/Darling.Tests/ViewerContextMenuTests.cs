@@ -102,9 +102,9 @@ public sealed class ViewerChartContextMenuTests
 
 /// <summary>
 /// "Copy Repro Script" builds from STORED row fields with NO live connection (the inventory found the
-/// "needs a live connection" rationale OVERSTATED): Active Queries carries its plan + isolation in-row; Top
-/// Queries / Query Store take a best-effort STORED plan the caller already read from Postgres. Pure mapping,
-/// so the pin never opens a connection.
+/// "needs a live connection" rationale OVERSTATED): Active Queries carries its isolation in-row and, like Top
+/// Queries / Query Store, takes a best-effort STORED plan the caller resolved (in-row first, else a Postgres
+/// fetch by natural key — #4239) as <c>enrichedPlanXml</c>. Pure mapping, so the pin never opens a connection.
 /// </summary>
 public sealed class ViewerReproScriptTests
 {
@@ -136,17 +136,20 @@ public sealed class ViewerReproScriptTests
     }
 
     [Fact]
-    public void ActiveQueriesRow_UsesItsInRowPlan_NotTheCallersEnrichedPlan()
+    public void ActiveQueriesRow_UsesTheCallersEnrichedPlan_NotItsOwnPlanProperty()
     {
-        /* The snapshot carries QueryPlan in-row; enrichedPlanXml (which the caller supplies only for the
-           aggregate grids) must be ignored here. With a null in-row plan the script reports plan-unavailable
-           even though a non-null enrichedPlanXml was passed — proving the snapshot branch reads in-row. */
+        /* #4239: BuildReproScriptForRow is a pure mapper — the caller (CopyReproScript_Click) already resolved
+           in-row-first / fetch-fallback into enrichedPlanXml before calling here, so the snapshot arm now uses
+           enrichedPlanXml like every other row type, regardless of the row's own (now usually-null,
+           fetch-on-demand) QueryPlan property. A null row.QueryPlan with a non-null enrichedPlanXml still
+           produces a plan-bearing repro, proving the snapshot branch reads the caller's plan, not the row's. */
         var row = new ViewerQuerySnapshotRow { QueryText = "SELECT 1", DatabaseName = "db", QueryPlan = null };
 
         var script = ViewerServerTab.BuildReproScriptForRow(row, enrichedPlanXml: "<ShowPlanXML/>", Product);
 
         Assert.NotNull(script);
-        Assert.Contains("plan XML not available", script!, StringComparison.Ordinal);
+        Assert.DoesNotContain("plan XML not available", script!, StringComparison.Ordinal);
+        Assert.Contains("No parameters found in plan cache", script!, StringComparison.Ordinal);
     }
 
     [Fact]
