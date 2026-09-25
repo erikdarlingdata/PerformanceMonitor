@@ -1436,6 +1436,9 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
         "Darling/PerformanceMonitor.Darling.Service/HypotheticalIndexRequest.cs IsComplete",
+        /* #4214: an expression-bodied one-liner, same shape as the pairs elsewhere in this list — it strands
+           only its own ternary, not T-SQL or a tempdb label, so no census reads a site of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingStoreHostProfile.cs ComputeEffectiveMemoryLimitBytes",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDataReader.cs OutputFinding",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TriggerMbPerSecond",
         "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingStallProbeReader.cs TerminalSilenceMs",

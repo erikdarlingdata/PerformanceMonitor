@@ -92,6 +92,21 @@ public sealed class SerialLoopStoreSizeSourceTests
         (Path.Combine("PerformanceMonitor.Collectors", "PgDatabaseSizeStatsCollector.cs"), 1,
             "the hourly per-database size collector — runs against the MONITORED TARGET, not the store, "
             + "under the collector's own cadence and command timeout, off the serial loop"),
+
+        /* #4214: a FOURTH regime — DarlingStoreHostProfile.GatherStoreFactsAsync's live store-size read.
+           Its only caller is DarlingCliCommands.CheckSettingsAsync (--check-settings), a user-invoked,
+           one-shot verb; its CommandTimeout is ServiceCommandDeadlines.CliStoreReadSeconds (10s), not
+           SerialLoopSeconds, and it never runs on the collection loop's serial thread. Ruling 9 (#4214)
+           kept it out of the once-per-start profile log too: DarlingWorker's startup step calls
+           GatherStartupProfileAsync, which gathers host facts and settings only and never reaches
+           GatherStoreFactsAsync, so a store-size-scaling read still never runs on a serial-loop deadline
+           or from the collection loop. One occurrence, inside the StoreSizeSql query literal. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingStoreHostProfile.cs"), 1,
+            "the --check-settings CLI verb's live store-size read (GatherStoreFactsAsync) — user-invoked, "
+            + "one-shot, under ServiceCommandDeadlines.CliStoreReadSeconds (10s) rather than the serial "
+            + "loop's 5s bound, and never called from the collection loop or at service startup: ruling 9 "
+            + "keeps every store fact that scales with the store out of the startup profile log, so "
+            + "--check-settings is this regime's only caller"),
     };
 
     /// <summary>

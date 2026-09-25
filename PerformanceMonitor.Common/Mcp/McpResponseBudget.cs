@@ -36,11 +36,23 @@ public static class McpResponseBudget
     /// <summary>
     /// <c>get_collection_log</c>'s fleet-wide form (#4199, both products) default row limit, shared so a caller
     /// who omits <c>server_name</c> (or passes <c>"*"</c>) gets the same page size from Darling and Lite. The
-    /// per-server form keeps its own default (200) — sizing it is #4198's per-tool pass, out of scope here.
+    /// per-server form keeps its own default — sized separately by <see cref="CollectionLogPerServerDefaultLimit"/>.
     /// #4198 measured a per-server default call at 85-88 KB for 200 rows (about 435-440 bytes/row); the fleet
     /// form's row is that same shape plus one added <c>server_name</c> field, so a page this size stays under
     /// <see cref="DefaultBytes"/> with room for the envelope fields around the array. See the fleet-form
     /// byte-budget tests in Darling.Tests / Lite.Tests for the measured number this was set from.
     /// </summary>
     public const int CollectionLogFleetDefaultLimit = 60;
+
+    /// <summary>
+    /// <c>get_collection_log</c>'s ONE-SERVER form (#4198) default row limit. The old default (200) measured
+    /// 85,206-90,514 bytes on a seeded store — about 2.6-2.8x <see cref="DefaultBytes"/> — with the SQL Server
+    /// target shape the wider of the two, because its <c>query_store</c> rows carry the <c>plan_fetch</c>/
+    /// <c>text_fetch</c> deferred-fetch split that PostgreSQL targets never populate. Sized down so a default
+    /// call stays under budget on the wider shape, with room for the envelope fields around the array; a
+    /// caller after more rows still passes <c>limit</c> explicitly. See
+    /// <c>McpCollectionLogPerServerResponseBudgetLivePostgresTests</c> / the Lite.Tests twin for the measured
+    /// numbers this was set from.
+    /// </summary>
+    public const int CollectionLogPerServerDefaultLimit = 58;
 }

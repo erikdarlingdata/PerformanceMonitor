@@ -128,6 +128,21 @@ public sealed class DarlingWebEndpointsTests
         Assert.Contains("get_ag_health", DarlingWebEndpoints.BuildReadDispatch().Keys);
     }
 
+    [Fact]
+    public void ReadEndpoints_ActiveQueries_KeepsTheTwoThousandCharacterWebPreview()
+    {
+        /* #4198 lane W2: the MCP default fell to a 500-char query_text preview (QueryTextPreviewLength), but
+           the web viewer isn't that budget's caller — its /api/read row calls the internal budget-taking
+           overload with an explicit 2000, the pre-#4198 McpHelpers.Truncate budget every caller got, so the
+           Active Queries tab doesn't shrink under it. A regression here (dropping the overload, or the literal
+           2000) silently starves that tab's query text down to 500 characters. Source-text pin rather than a
+           live call: no rig in this lane. */
+        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        Assert.Contains(
+            "[\"get_active_queries\"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, \"database_name\"), QueryBool(c, \"blocking_only\", false), Rows(c, \"limit\", 50), 2000, AsOf(c)),",
+            source, StringComparison.Ordinal);
+    }
+
     /* ── response-kind mapping (the error envelope -> 500, the invalid envelope -> 400 as the body, the '{'-sniff -> 200, miss envelope -> 200) ── */
 
     [Theory]

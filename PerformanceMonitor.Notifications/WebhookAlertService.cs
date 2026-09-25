@@ -2512,8 +2512,11 @@ public class WebhookAlertService
     /// Derives the PagerDuty dedup_key from the same fingerprint the cooldown uses, so repeated alerts for
     /// the same ongoing incident correlate into one PagerDuty alert. Falls back to a stable metric+server
     /// key when there is no incident (mirrors the cooldown's own "no incidents → metric-level fallback key" rule).
+    ///
+    /// <para>Internal (#4220), not private: <see cref="EmailSendCore"/> reads it too, so the triage link's
+    /// dedup key agrees with PagerDuty's for the same firing across every channel, email included.</para>
     /// </summary>
-    private static string DerivePagerDutyDedupKey(string serverId, string metricName, AlertContext? context)
+    internal static string DerivePagerDutyDedupKey(string serverId, string metricName, AlertContext? context)
     {
         var incidents = context?.Incidents;
         if (incidents is { Count: > 0 })
