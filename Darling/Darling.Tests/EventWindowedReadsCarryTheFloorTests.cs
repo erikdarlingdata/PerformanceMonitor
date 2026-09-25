@@ -48,8 +48,12 @@ public sealed class EventWindowedReadsCarryTheFloorTests
         { nameof(DarlingDataReader) + "." + nameof(DarlingDataReader.BlockingDurationStatsSql), DarlingDataReader.BlockingDurationStatsSql, 2 },
         { nameof(ViewerDataService) + "." + nameof(ViewerDataService.BlockingPairRowsSql), ViewerDataService.BlockingPairRowsSql, 1 },
         { nameof(ViewerDataService) + "." + nameof(ViewerDataService.MemoryPressureEventsSql), ViewerDataService.MemoryPressureEventsSql, 1 },
-        { nameof(ViewerDataService) + ".BuildJobHistorySql(false)", ViewerDataService.BuildJobHistorySql(scopedToServer: false), 1 },
-        { nameof(ViewerDataService) + ".BuildJobHistorySql(true)", ViewerDataService.BuildJobHistorySql(scopedToServer: true), 1 },
+        /* 2, not 1: #4229's own fix split the single job_history scan into two — job_stats (the per-job
+           GROUP BY) and base (the newest-2000 selection) — so this is the "two-CTE reads have TWO scans"
+           case the class summary calls out, and a floor on only one would leave the other opening every
+           chunk again. */
+        { nameof(ViewerDataService) + ".BuildJobHistorySql(false)", ViewerDataService.BuildJobHistorySql(scopedToServer: false), 2 },
+        { nameof(ViewerDataService) + ".BuildJobHistorySql(true)", ViewerDataService.BuildJobHistorySql(scopedToServer: true), 2 },
     };
 
     [Theory]
