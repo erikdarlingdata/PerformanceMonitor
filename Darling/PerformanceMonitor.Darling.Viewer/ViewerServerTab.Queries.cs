@@ -312,7 +312,7 @@ public partial class ViewerServerTab
 
     private async Task LoadQueryStoreSlicerAsync(DateTime startUtc, DateTime endUtc)
     {
-        var data = await _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        var data = await _dataService.GetQueryStoreSlicerDataAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStoreSlicerData = data;
         _queryStoreSlicerMetric = "TotalCpu";
         if (data.Count > 0)

@@ -376,6 +376,18 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
+    /// The store schema version <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) requires before it will
+    /// even attempt <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the
+    /// <c>PgMigrations</c> migration that creates the table. The slicer never routes to this table (ruling
+    /// issuecomment-5840737421): it reads <see cref="QueryStoreSlicerSql"/> at every window, so it carries no
+    /// constant of its own here. B3a's separate <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>
+    /// constant for the MCP top read is pinned the same way but stays its own symbol: that surface compares the
+    /// compiled <see cref="PerformanceMonitor.Darling.Storage.StorageVersion.SchemaVersion"/> instead of probing
+    /// the store live, for the reason documented on that constant.
+    /// </summary>
+    private const int QueryStoreIntervalWideMinSchemaVersion = 145;
+
+    /// <summary>
     /// The top Query Store queries for one server over [<paramref name="startUtc"/>, <paramref name="endUtc"/>],
     /// pre-sorted by total duration descending (the grid's default sort). #3953: reads
     /// <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> says its
@@ -737,30 +749,17 @@ public sealed partial class ViewerDataService
     /// Query Store rows are already per-interval averages, so the bucket totals weight each by
     /// <c>execution_count</c> (<c>SUM(avg_metric * execution_count)</c>). Same 7-column shape as the
     /// query/procedure slicers, so it shares <see cref="ReadQueryStatsSlicerAsync"/>.
+    ///
+    /// The slicer reads this raw statement at every window (ruling issuecomment-5840737421, amending
+    /// issuecomment-5836972848 item 3): a per-interval table route (#3953) was built and measured
+    /// alongside the grid and MCP top reads, but at 6 h, 12 h and 24 h raw beat the table with
+    /// non-overlapping spreads, and at 7 d the two tied — a 24 h threshold would have made every
+    /// 24 h-to-7 d slicer read slower, not faster. The grid and MCP top read do route to the table
+    /// (<see cref="GetQueryStoreTopQueriesAsync"/>, <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>);
+    /// the slicer does not, and this is its only statement.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
-    public const string QueryStoreSlicerSql = QueryStoreSlicerRawPrefix + QueryStoreSlicerSuffix;
-
-    /// <summary>
-    /// The table twin of <see cref="QueryStoreSlicerSql"/> (#3953): <see cref="QueryStoreSlicerTablePrefix"/>
-    /// reading <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreSlicerSuffix"/>
-    /// so the two reads cannot drift on the bucketing/aggregation below <c>deduped</c>. Chosen per call by
-    /// <see cref="TryGetQueryStoreSlicerDataFromTableAsync"/>.
-    /// $1 server_id, $2 the REQUESTED window start (unwidened — plays the role raw's own $2 plays in the bar
-    /// filter), $3 window end (naive UTC, NULL for an open/preset end), $4 the gate's clamp
-    /// (<c>max(window start - 1 hour, raw's chunk floor)</c> — the widened lower bound raw's own
-    /// <c>$2 - interval '1 hour'</c> plays for chunk exclusion, NOT the bar filter), $5 database filter.
-    /// </summary>
-    public const string QueryStoreSlicerTableSql = QueryStoreSlicerTablePrefix + QueryStoreSlicerSuffix;
-
-    /// <summary>
-    /// The raw read's head (#3953 split it off <see cref="QueryStoreSlicerSql"/>'s prior single-string form,
-    /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
-    /// over the server's raw Query Store slice. <see cref="QueryStoreSlicerSuffix"/> is shared with
-    /// <see cref="QueryStoreSlicerTableSql"/>, so the two reads cannot drift on the bucketing below.
-    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 database filter.
-    /// </summary>
-    private const string QueryStoreSlicerRawPrefix = """
+    public const string QueryStoreSlicerSql = """
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. The rows are CUMULATIVE per-interval
                snapshots and the collector re-fetches the OPEN interval every cycle, so summing the raw
@@ -822,47 +821,6 @@ public sealed partial class ViewerDataService
             AND   collection_time <= $3 + interval '30 days'
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
-
-        """;
-
-    /// <summary>
-    /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
-    /// interval (the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written), so this reads it
-    /// directly and sets <c>rn</c> to a literal 1. The bar filter ($2/$3) uses the REQUESTED window, unwidened,
-    /// exactly as raw's own COALESCE bounds do; the separate collection_time floor ($4) is the gate's own clamp
-    /// (<see cref="QueryStoreIntervalWide.ClampedStart"/> against the 1-hour-widened start), and the ceiling
-    /// mirrors raw's 30-day slack so a literal end still excludes chunks the same way. $3 is nullable: NULL is
-    /// an open end (a WPF preset), which reads through whatever the table currently holds.
-    /// </summary>
-    private const string QueryStoreSlicerTablePrefix = """
-        WITH deduped AS (
-            SELECT
-                collection_time,
-                interval_start_time_utc,
-                query_id,
-                execution_count,
-                avg_cpu_time_us,
-                avg_duration_us,
-                avg_logical_io_reads,
-                avg_logical_io_writes,
-                avg_physical_io_reads,
-                1 AS rn
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   ($3::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) <= $3)
-            AND   collection_time >= $4
-            AND   ($3::timestamp IS NULL OR collection_time <= $3 + interval '30 days')
-            AND   ($5::text[] IS NULL OR database_name = ANY($5))
-        )
-
-        """;
-
-    /// <summary>Everything from the final <c>SELECT</c> down, shared by <see cref="QueryStoreSlicerSql"/> and
-    /// <see cref="QueryStoreSlicerTableSql"/> — both prefixes above produce the same 9-column <c>deduped</c>
-    /// shape (one row per identity already deduped, <c>rn = 1</c>), so this buckets either one identically.
-    /// References no parameters of its own, so both share it unchanged.</summary>
-    private const string QueryStoreSlicerSuffix = """
         SELECT
             /* The bar sits in the hour the work RAN, not the hour it was last COLLECTED (#1841 tier 2).
                Query Store's default interval is 60 minutes and the closing fetch lands in the cycle AFTER
@@ -884,169 +842,9 @@ public sealed partial class ViewerDataService
         ORDER BY bucket
         """;
 
-    /// <summary>
-    /// The slicer's own minimum window (#3953 clause 5, ruling issuecomment-5836972848 item 5, restated here):
-    /// measured in <see cref="TryGetQueryStoreSlicerDataFromTableAsync"/> on the slicer's OWN requested window
-    /// (<c>endUtc - startUtc</c>), never on the 1-hour-widened start <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
-    /// is called with there for clauses 2/3 and the clamp. One constant per read: this does not track
-    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/>. Raised from 12 to 24 hours (lane B4t, rig-d4,
-    /// 15-day seed at a field store's rate, end-to-end through <see cref="GetQueryStoreSlicerDataAsync"/>): median
-    /// of 5 at the ruled 12-hour cell, table 815.8 ms (spread 756.3-883.2) against raw 595.3 ms (spread
-    /// 495.0-633.2) — the table was slower than raw there, so the ruling moves this threshold to 24 hours.
-    /// </summary>
-    public static readonly TimeSpan QueryStoreSlicerMinWindow = TimeSpan.FromHours(24);
-
-    /// <summary>
-    /// The store schema version both <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) and
-    /// <see cref="GetQueryStoreSlicerDataAsync"/> (the slicer) require before either will even attempt
-    /// <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the <c>PgMigrations</c> migration
-    /// that creates the table. Named, rather than the two sites each carrying their own literal, so
-    /// <c>QueryStoreIntervalWideMinSchemaVersionPinTests</c> can assert both against that migration's own
-    /// version in one place and a renumber cannot miss one. B3a's separate
-    /// <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/> constant for the MCP top read is
-    /// pinned the same way but stays its own symbol: that surface compares the compiled
-    /// <see cref="PerformanceMonitor.Darling.Storage.StorageVersion.SchemaVersion"/> instead of probing the
-    /// store live, for the reason documented on that constant.
-    /// </summary>
-    private const int QueryStoreIntervalWideMinSchemaVersion = 145;
-
-    /// <summary>
-    /// A defensive gate clause the grid does not need (#3953): does this server have ANY
-    /// <c>query_store_interval_wide</c> row whose <c>interval_start_time_utc</c> is NULL (a legacy, pre-#1841
-    /// tier-2 snapshot)? For such a row the table keeps only the interval's OVERALL latest snapshot (the
-    /// upsert's running max), while raw's slicer dedupe keeps the latest snapshot COLLECTED INSIDE the
-    /// requested window — for a legacy interval whose final collection landed AFTER the window, those are two
-    /// different rows, and the table has no row at all standing in for the earlier, in-window one raw would
-    /// show: an omission, not just a different value, and no WHERE clause on the table alone can recover it.
-    /// Unscoped by window deliberately: the table cannot tell, after the fact, whether a NULL row's earlier
-    /// (unretained) snapshots would have mattered to THIS window, so any legacy row at all sends the whole read
-    /// to raw. In practice this is cheap and rarely true: the table's own retention is 8-9 days
-    /// (<see cref="QueryStoreIntervalWide"/>'s class doc), and interval_start_time_utc has been populated since
-    /// #1841, so a store has to still be carrying pre-#1841 history inside this table's own short retention for
-    /// the check to matter — and the query itself is one index-prefix scan on <c>server_id</c>
-    /// (<c>ux_query_store_interval_wide</c> leads with it), not a table scan.
-    /// </summary>
-    private const string QueryStoreSlicerHasLegacyRowSql = """
-        SELECT EXISTS (
-            SELECT 1
-            FROM query_store_interval_wide
-            WHERE server_id = $1
-            AND   interval_start_time_utc IS NULL
-        );
-        """;
-
-    /// <summary>
-    /// Hourly Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>]. #3953:
-    /// reads <c>query_store_interval_wide</c> via <see cref="TryGetQueryStoreSlicerDataFromTableAsync"/> when its
-    /// gate holds; any fault or a "no" reads <see cref="QueryStoreSlicerSql"/> unchanged through the shared
-    /// <see cref="ReadQueryStatsSlicerAsync"/>, exactly as before this table existed. <paramref name="literalEndUtc"/>
-    /// follows <see cref="GetQueryStoreTopQueriesAsync"/>'s own convention: NULL for an open end (a WPF preset),
-    /// or <paramref name="endUtc"/> itself for a custom range.
-    /// </summary>
+    /// <summary>Hourly Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
-    {
-        var schemaVersion = await GetStoreSchemaVersionAsync(cancellationToken);
-        if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
-        {
-            var tableRows = await TryGetQueryStoreSlicerDataFromTableAsync(serverId, startUtc, endUtc, literalEndUtc, databaseNames, cancellationToken);
-            if (tableRows is not null)
-            {
-                return tableRows;
-            }
-        }
-
-        return await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
-    }
-
-    /// <summary>
-    /// #3953's gate and table read for the slicer, on ONE connection in ONE read-only REPEATABLE READ
-    /// transaction (M1, ruling issuecomment-5836972848), same shape as
-    /// <see cref="TryGetQueryStoreTopQueriesFromTableAsync"/>. Returns null (never an empty list) when the gate
-    /// says raw, so the caller can tell "read raw instead" from "the table legitimately has nothing". Any fault
-    /// opening the connection, starting the transaction, running the gate, or reading the table also returns
-    /// null (except cancellation, which propagates).
-    /// </summary>
-    private async Task<List<TimeSliceBucket>?> TryGetQueryStoreSlicerDataFromTableAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
-    {
-        try
-        {
-            /* The slicer's own threshold (clause 5), checked on the REQUESTED window before any round trip —
-               unlike the grid, this lane's clause 5 is not bundled into QueryStoreIntervalWide.ReadsTableAsync
-               (that call below gets minWindow: TimeSpan.Zero instead), because its widened windowStart would
-               otherwise measure the wrong window. */
-            if (endUtc - startUtc < QueryStoreSlicerMinWindow)
-            {
-                return null;
-            }
-
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
-
-            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
-            {
-                await readOnly.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            /* windowStart here is startUtc - 1 hour, not startUtc: the general gate's "S" (clauses 2/3 and the
-               clamp) is raw's OWN earliest collection_time, and the slicer's raw statement reads from
-               $2 - interval '1 hour', not $2 itself (QueryStoreSlicerRawPrefix above). minWindow: Zero neutralizes
-               ReadsTableAsync's own clause-5 check (windowEnd here is always >= the widened windowStart), since
-               the real one already ran above on the unwidened window. */
-            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
-                connection, serverId, startUtc - TimeSpan.FromHours(1), endUtc, literalEndUtc, TimeSpan.Zero,
-                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
-            if (!useTable)
-            {
-                return null;
-            }
-
-            await using (var legacy = new Npgsql.NpgsqlCommand(QueryStoreSlicerHasLegacyRowSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
-            {
-                legacy.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-                var hasLegacyRow = (bool)(await legacy.ExecuteScalarAsync(cancellationToken))!;
-                if (hasLegacyRow)
-                {
-                    return null;
-                }
-            }
-
-            var items = new List<TimeSliceBucket>();
-            await using var command = new Npgsql.NpgsqlCommand(QueryStoreSlicerTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter
-            {
-                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
-                Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
-            });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
-            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var cpu = reader.IsDBNull(2) ? 0 : Convert.ToDouble(reader.GetValue(2));
-                items.Add(new TimeSliceBucket
-                {
-                    BucketTime = reader.GetDateTime(0),
-                    SessionCount = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1)),
-                    TotalCpu = cpu,
-                    TotalElapsed = reader.IsDBNull(3) ? 0 : Convert.ToDouble(reader.GetValue(3)),
-                    TotalReads = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
-                    TotalLogicalReads = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4)),
-                    TotalWrites = reader.IsDBNull(5) ? 0 : Convert.ToDouble(reader.GetValue(5)),
-                    TotalPhysicalReads = reader.IsDBNull(6) ? 0 : Convert.ToDouble(reader.GetValue(6)),
-                    Value = cpu,
-                });
-            }
-
-            return items;
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return null;
-        }
-    }
+        => await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 }
