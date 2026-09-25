@@ -153,7 +153,8 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
                 var root = doc.RootElement;
                 Assert.False(root.TryGetProperty("cards", out _), "summary must not carry a cards array.");
                 Assert.False(root.GetProperty("cards_included").GetBoolean());
-                Assert.Equal(3, root.GetProperty("total_servers").GetInt32());
+                Assert.True(root.GetProperty("total_servers").GetInt32() >= 3,
+                    "CI store may hold servers from other tests; we seeded 3, so total_servers must be >= 3.");
                 Assert.True(root.GetProperty("offline_count").GetInt32() >= 1);
                 Assert.True(root.GetProperty("worst_servers").GetArrayLength() >= 1);
             }
@@ -163,7 +164,8 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
             {
                 var root = doc.RootElement;
                 Assert.True(root.GetProperty("cards_included").GetBoolean());
-                Assert.Equal(3, root.GetProperty("cards").GetArrayLength());
+                Assert.True(root.GetProperty("cards").GetArrayLength() >= 3,
+                    "CI store may hold servers from other tests; we seeded 3, so cards must have >= 3 entries.");
             }
 
             var bandJson = await DarlingMcpFleetTools.GetFleetOverview(
@@ -186,7 +188,9 @@ public sealed class McpFleetResponseBudgetLivePostgresTests
                     .Select(c => c.GetProperty("server_id").GetInt32()).ToList();
                 Assert.NotEmpty(cardIds);
                 Assert.All(cardIds, id => Assert.Contains(id, worstIds));
-                Assert.True(cardIds.Count < 3, "worst_only must narrow the 3-card fleet, not return it whole.");
+                var totalServers = summaryDoc.RootElement.GetProperty("total_servers").GetInt32();
+                Assert.True(cardIds.Count < totalServers,
+                    $"worst_only must narrow the fleet, not return it whole ({cardIds.Count} cards, {totalServers} total).");
             }
 
             var invalidBand = await DarlingMcpFleetTools.GetFleetOverview(postgres, detail: "cards", band: "not-a-band");
