@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -44,7 +45,13 @@ public sealed record MemoryGrantTrendPoint(
 
 /// <summary>One point on a selected memory clerk's trend line: its memory footprint (MB) at a
 /// collection. Mirror of Lite's <c>MemoryClerkTrendPoint</c> — the clerk type is the dictionary key of
-/// the batched read, so it is not repeated on each point.</summary>
+/// the batched read, so it is not repeated on each point.
+/// <para>#4234: a gauge, bucketed to <see cref="TrendBudget.Chart"/>'s point budget — <c>MemoryMb</c> is the
+/// AVERAGE footprint across the bucket's collections. <c>CollectionTime</c> is a <c>date_bin</c> bucket start,
+/// EXCEPT when every bucket the call returned holds exactly one physical collection, in which case every point
+/// is stamped at its own raw collection time instead — see
+/// <see cref="ViewerDataService.GetMemoryClerkTrendsByTypesAsync"/>.</para>
+/// </summary>
 public sealed record MemoryClerkTrendPoint(
     DateTime CollectionTime,
     double MemoryMb);
@@ -93,6 +100,10 @@ public sealed record MemoryPressureEventRow(
 /// </summary>
 public sealed partial class ViewerDataService
 {
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctMemoryClerkTypesAsync"/> — see
+    /// <see cref="ViewerNameListCache"/>'s remarks.</summary>
+    private readonly ViewerNameListCache _distinctMemoryClerkTypesCache = new();
+
     /// <summary>
     /// The Overview summary snapshot — Lite's <c>GetLatestMemoryStatsAsync</c> ported to Postgres: the
     /// most recent memory_stats row for the server (no window; ORDER BY collection_time DESC LIMIT 1).
@@ -140,6 +151,10 @@ public sealed partial class ViewerDataService
     /// Postgres verbatim: every clerk_type collected for the server over the window, ranked by total
     /// memory descending so the picker + "Top Clerks" fill see the heaviest clerks first. $1 server_id,
     /// $2 window start, $3 window end (naive UTC).
+    /// <para>#4234: memoized through <see cref="_distinctMemoryClerkTypesCache"/> — keyed on (server, window
+    /// length) for <see cref="ViewerNameListCache.Ttl"/>, so the full-window DISTINCT behind this runs at most
+    /// once per 15 minutes rather than on every 1-minute auto-refresh, exactly like
+    /// <c>GetDistinctWaitTypesAsync</c>.</para>
     /// </summary>
     public const string DistinctMemoryClerkTypesSql = """
         SELECT
@@ -153,28 +168,39 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// Lite's batched <c>GetMemoryClerkTrendsByTypesAsync</c> body, ported to Postgres: the trend for ALL
-    /// selected clerk types in ONE query (replacing an N+1 loop), grouped by clerk type. The
-    /// <c>clerk_type IN (...)</c> list is built dynamically from <c>$4</c> onward
-    /// (server_id/start/end take <c>$1</c>/<c>$2</c>/<c>$3</c>), exactly like Lite's numbering. memory_mb
-    /// is <c>numeric(18,2)</c> in the store, CAST to double precision for the typed reader. A caller
-    /// passing <paramref name="typeCount"/> = 0 is a bug the <see cref="GetMemoryClerkTrendsByTypesAsync"/>
-    /// guard prevents.
+    /// Lite's batched <c>GetMemoryClerkTrendsByTypesAsync</c> body, ported to Postgres, then bucketed (#4234):
+    /// the trend for ALL selected clerk types in ONE query (replacing an N+1 loop), grouped by clerk type and
+    /// <c>date_bin</c> bucket. The <c>clerk_type IN (...)</c> list is built dynamically from <c>$4</c> onward
+    /// (server_id/start/end take <c>$1</c>/<c>$2</c>/<c>$3</c>, the bucket width takes the trailing parameter
+    /// after the list, exactly like <c>WaitTrendsSql</c>), exactly like Lite's numbering. memory_mb is
+    /// <c>numeric(18,2)</c> in the store, CAST to double precision for the typed reader. A caller passing
+    /// <paramref name="typeCount"/> = 0 is a bug the <see cref="GetMemoryClerkTrendsByTypesAsync"/> guard
+    /// prevents.
+    /// <para>#4234: a gauge — <c>memory_mb</c> is the AVERAGE footprint across the bucket's collections, not a
+    /// summed-delta rate (a clerk's memory_mb is a point-in-time reading, not an accumulating counter).
+    /// <c>first_collection_time</c> (<c>MIN(collection_time)</c>) and <c>collection_count</c> (<c>COUNT(*)</c>)
+    /// ride along per bucket, exactly like <c>WaitTrendsSql</c>, so the caller can tell a true singleton bucket
+    /// from one the bucketing merged.</para>
+    /// $4.. clerk types, last $ the bucket width in minutes.
     /// </summary>
     public static string MemoryClerkTrendsSql(int typeCount)
     {
         var typeParams = string.Join(", ", Enumerable.Range(0, typeCount).Select(i => "$" + (i + 4)));
-        return $"""
+        var widthParam = "$" + (typeCount + 4);
+        return $$"""
             SELECT
                 clerk_type,
-                collection_time,
-                CAST(memory_mb AS double precision) AS memory_mb
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CAST(AVG(memory_mb) AS double precision) AS memory_mb,
+                MIN(collection_time) AS first_collection_time,
+                COUNT(*) AS collection_count
             FROM v_memory_clerks
             WHERE server_id = $1
             AND   collection_time >= $2
             AND   collection_time <= $3
-            AND   clerk_type IN ({typeParams})
-            ORDER BY clerk_type, collection_time
+            AND   clerk_type IN ({{typeParams}})
+            GROUP BY clerk_type, 2
+            ORDER BY clerk_type, 2
             """;
     }
 
@@ -290,10 +316,20 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>The distinct clerk types collected for one server in the window, ranked by total memory
-    /// descending — feeds the clerk picker's population + "Top Clerks" fill.</summary>
+    /// descending — feeds the clerk picker's population + "Top Clerks" fill.
+    /// <para><paramref name="nowUtc"/> is the cache's clock seam — null uses the wall clock; a test passes an
+    /// explicit time to fast-forward past the TTL without sleeping.</para>
+    /// </summary>
     public async Task<List<string>> GetDistinctMemoryClerkTypesAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endUtc - startUtc;
+        if (_distinctMemoryClerkTypesCache.TryGet(serverId, windowLength, endUtc, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
         var items = new List<string>();
 
         await using var command = _dataSource.CreateCommand(DistinctMemoryClerkTypesSql);
@@ -314,11 +350,17 @@ public sealed partial class ViewerDataService
             items.Add(reader.GetString(0));
         }
 
+        _distinctMemoryClerkTypesCache.Set(serverId, windowLength, endUtc, items, effectiveNow);
         return items;
     }
 
     /// <summary>The memory trend for every selected clerk type in one query, grouped by clerk type.
-    /// Empty selection returns an empty map without touching the store.</summary>
+    /// Empty selection returns an empty map without touching the store.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (clerk type), exactly
+    /// like <c>GetWaitStatsTrendsByTypesAsync</c> — see its remarks for the width and singleton-stamping rules,
+    /// which this read shares verbatim (only the metric itself differs: an averaged gauge here, a summed-delta
+    /// rate there).</para>
+    /// </summary>
     public async Task<Dictionary<string, List<MemoryClerkTrendPoint>>> GetMemoryClerkTrendsByTypesAsync(
         int serverId, List<string> clerkTypes, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
@@ -327,6 +369,9 @@ public sealed partial class ViewerDataService
         {
             return result;
         }
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(MemoryClerkTrendsSql(clerkTypes.Count));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -343,20 +388,37 @@ public sealed partial class ViewerDataService
         {
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = clerkType });
         }
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(string ClerkType, DateTime BucketStart, DateTime FirstCollectionTime, double MemoryMb)>();
+        var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var clerkType = reader.GetString(0);
-            if (!result.TryGetValue(clerkType, out var list))
+            if (reader.GetInt64(4) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+        }
+
+        foreach (var row in rows)
+        {
+            if (!result.TryGetValue(row.ClerkType, out var list))
             {
                 list = new List<MemoryClerkTrendPoint>();
-                result[clerkType] = list;
+                result[row.ClerkType] = list;
             }
 
             list.Add(new MemoryClerkTrendPoint(
-                reader.GetDateTime(1),
-                reader.IsDBNull(2) ? 0 : reader.GetDouble(2)));
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.MemoryMb));
         }
 
         return result;
