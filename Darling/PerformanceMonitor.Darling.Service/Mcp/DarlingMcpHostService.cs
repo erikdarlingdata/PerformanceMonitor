@@ -492,6 +492,20 @@ public sealed class DarlingMcpHostService : BackgroundService
 
             /* Register services that MCP tools need via dependency injection. */
             builder.Services.AddSingleton<NpgsqlDataSource>(postgres);
+            /* #4214 part 2: get_store_host's config seat — the same config this host loaded to reach this
+               point, so it cannot disagree with what actually connected. Read-only: GatherAsync only ever
+               reads dataDirectory/Managed off it, never writes.
+               Trimmed copy, not config.Postgres itself (round-1 review, Low 3): the full PostgresConfig
+               also carries the owner connection string. Nothing serializes this DI registration today,
+               but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
+               takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
+            builder.Services.AddSingleton(new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory });
+            /* #4214 round-1 review, Medium 2: get_store_host's 5-minute shared cache — the process-wide
+               Shared instance, not a fresh one per request, so every caller (MCP and the direct-call web
+               path below) actually shares the one cache window. Typed-generic AddSingleton<T>, not the
+               untyped AddSingleton(instance) overload: McpServiceParameterDiSeatCensusTests greps this
+               file's source text for AddSingleton<StoreHostProfileCache> specifically. */
+            builder.Services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
             builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache));
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
@@ -716,6 +730,10 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
                surface beside get_store_metrics. */
             .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+            /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store
+               facts, per-setting verdicts), the read side of part 1's --check-settings verb. Darling-only:
+               Lite has no managed PostgreSQL store to profile. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreHostTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreQueryStatsTools>()
             .WithGeminiCompatibleTools<DarlingMcpCollectorCostTools>()
             /* #2880 get_collector_stall_probes - the out-of-band server-wide wait samples taken
