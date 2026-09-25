@@ -144,7 +144,7 @@ public sealed class SharedBaselineCacheTests
         var web = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig);", web, StringComparison.Ordinal);
         var endpoints = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Contains("new DarlingAnalysisService(postgres, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
 
         /* And no other production site builds an analysis service at all (a new one must be wired, or say why not). */
         var sites = new[] { worker, mcp, endpoints }.Sum(code => CountOf(code, "new DarlingAnalysisService("));

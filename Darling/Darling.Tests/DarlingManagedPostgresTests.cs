@@ -1284,7 +1284,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.True(method >= 0, "EnsureRunningAsync's signature moved, so this pin can no longer find it.");
 
         var heal = source.IndexOf("HealLegacyMaintenanceWorkMem(_dataDirectory);", method, StringComparison.Ordinal);
-        var upgrade = source.IndexOf("await EnsureDataDirectoryMajorAsync(binDirectory, cancellationToken);", method, StringComparison.Ordinal);
+        var upgrade = source.IndexOf("await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);", method, StringComparison.Ordinal);
         Assert.True(heal > method, "EnsureRunningAsync no longer heals maintenance_work_mem before anything starts a PostgreSQL 17 cluster (#3909).");
         Assert.True(upgrade > heal,
             "The heal must run before EnsureDataDirectoryMajorAsync: the store upgrade's first step starts the old cluster on the data directory's own conf.");
@@ -2620,6 +2620,20 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(@"D:\darling\pg-credential.dpapi", DarlingManagedPostgres.CredentialPathFor(@"D:\darling\pg\"));
     }
 
+    /// <summary>Round-1 security review, #4280 Low 3: ResolveDataDirectory itself normalizes a trailing
+    /// separator, rather than relying on every caller downstream to trim it before building a quoted "-D"
+    /// argument (a trailing backslash there escapes the closing quote).</summary>
+    [Fact]
+    public void ResolveDataDirectory_TrimsATrailingSeparator()
+    {
+        Assert.Equal(
+            @"D:\darling\pg",
+            DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig { DataDirectory = @"D:\darling\pg\" }));
+        Assert.Equal(
+            @"D:\darling\pg",
+            DarlingManagedPostgres.ResolveDataDirectory(new PostgresConfig { DataDirectory = @"D:\darling\pg" }));
+    }
+
     [Fact]
     public void StoredCredential_DpapiRoundTrip_DerivesTheConnectionString()
     {
@@ -3396,6 +3410,84 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains("DarlingToolExitCode.IsLoaderStatus(exitCode)", source, StringComparison.Ordinal);
         Assert.Contains("? await ProbeRuntimeBinariesAsync(binDirectory, cancellationToken)", source, StringComparison.Ordinal);
         Assert.Contains(": string.Empty;", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4280: a server <see cref="DarlingStoreUpgrade.CarryAutoConfAsync(string, string, string, CancellationToken)"/>'s
+    /// auto.conf trial left on a private port must be stopped BEFORE <c>IsRunningAsync</c> below — <c>pg_ctl
+    /// status</c> cannot tell that orphan apart from the store's own postmaster (it answers "running" for a
+    /// postmaster on ANY port), so checking first would read a leftover trial as the store already being up.
+    /// Pinned at the source: the whole point is the ORDER of two calls inside one method, which no
+    /// behavioral test can isolate without a live cluster and a trial deliberately made un-stoppable.
+    /// </summary>
+    [Fact]
+    public void EnsureRunningAsync_StopsAQuiescedOrphan_BeforeItChecksIfAlreadyRunning()
+    {
+        var source = ReadManagedPostgresSource();
+
+        var methodStart = source.IndexOf(
+            "public async Task<string> EnsureRunningAsync(CancellationToken cancellationToken)", StringComparison.Ordinal);
+        Assert.True(methodStart >= 0, "could not find EnsureRunningAsync's declaration");
+
+        var methodEnd = source.IndexOf(
+            "public async Task StopIfStartedByThisProcessAsync()", methodStart, StringComparison.Ordinal);
+        Assert.True(methodEnd > methodStart, "could not find the next method, to bound the search to EnsureRunningAsync alone");
+
+        var method = source[methodStart..methodEnd];
+
+        var orphanStop = method.IndexOf("StopQuiescedUpdateOrphanAsync(binDirectory, _dataDirectory)", StringComparison.Ordinal);
+        var runningCheck = method.IndexOf("await IsRunningAsync(binDirectory, cancellationToken)", StringComparison.Ordinal);
+
+        Assert.True(orphanStop >= 0, "EnsureRunningAsync must stop a quiesced-start orphan before it does anything else with the data directory");
+        Assert.True(runningCheck > orphanStop, "the orphan stop must run BEFORE IsRunningAsync, or a leftover trial server is read as the store already running");
+    }
+
+    /// <summary>
+    /// #4280 item 1: the real-start fallback exists for a "trial-passed" carry alone, and never for a
+    /// cancellation the caller itself requested — a service stop during the first real start after an
+    /// upgrade must not read as "the start failed" and fall back to dropping settings that already passed
+    /// their trial. <see cref="DarlingManagedPostgres.ShouldFallBackToHeaderOnly"/> is the catch clause's own
+    /// <c>when</c> filter, tested directly because a live cancelled start needs a running cluster the source
+    /// pin below cannot exercise.
+    /// </summary>
+    [Theory]
+    [InlineData(DarlingStoreUpgrade.AutoConfCarryStateTrialPassed, false, true)]
+    [InlineData(DarlingStoreUpgrade.AutoConfCarryStateTrialPassed, true, false)]
+    [InlineData(DarlingStoreUpgrade.AutoConfCarryStateCarrying, false, false)]
+    public void ShouldFallBackToHeaderOnly_TrialPassedAndNotCancelled_IsTheOnlyTrueCase(string state, bool cancelled, bool expected)
+    {
+        var marker = new DarlingStoreUpgrade.AutoConfCarryMarker(state, Array.Empty<string>());
+        using var cts = new CancellationTokenSource();
+        if (cancelled)
+        {
+            cts.Cancel();
+        }
+
+        Assert.Equal(expected, DarlingManagedPostgres.ShouldFallBackToHeaderOnly(marker, cts.Token));
+    }
+
+    /// <summary>A null marker (no carry in progress — the overwhelmingly common start) is never a fallback
+    /// case, same as before this fix.</summary>
+    [Fact]
+    public void ShouldFallBackToHeaderOnly_NullMarker_IsFalse()
+    {
+        Assert.False(DarlingManagedPostgres.ShouldFallBackToHeaderOnly(null, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// #4280 item 1: pins that the real-start fallback's own filter is
+    /// <see cref="DarlingManagedPostgres.ShouldFallBackToHeaderOnly"/> and not a restated inline condition —
+    /// a future edit to the condition has one place to change, so the catch clause and the behavioral tests
+    /// above can never drift apart.
+    /// </summary>
+    [Fact]
+    public void EnsureRunningAsync_RealStartFallback_FiltersThroughShouldFallBackToHeaderOnly()
+    {
+        var source = ReadManagedPostgresSource();
+
+        Assert.Contains(
+            "catch (Exception) when (ShouldFallBackToHeaderOnly(autoConfCarryMarker, cancellationToken))",
+            source, StringComparison.Ordinal);
     }
 
     private static string ReadManagedPostgresSource([CallerFilePath] string thisFile = "")

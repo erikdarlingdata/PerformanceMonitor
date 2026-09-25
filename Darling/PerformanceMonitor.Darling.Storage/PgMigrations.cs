@@ -223,6 +223,7 @@ public static class PgMigrations
         new Migration(141, "collection-caveats", V141Sql),
         new Migration(142, "index-object-stats-server-time", V142Sql),
         new Migration(143, "query-store-interval-latest", V143Sql),
+        new Migration(144, "raw-chunk-interval-rung-history", V144Sql),
     };
 
     /// <summary>
@@ -2041,6 +2042,58 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
     failure text,
     CONSTRAINT pk_query_store_interval_latest_pending PRIMARY KEY (server_id, collection_time, database_name)
 );";
+
+    /// <summary>
+    /// V144 (#4211) — the rung history <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalReconciler"/>
+    /// both writes to and reads <c>IntervalLastChangedUtc</c> back from, plus a small per-run record of WAL
+    /// volume (ruling decision 8, review finding L4: stage 1 records WAL volume so a later stage can correlate
+    /// it against interval moves). Two engine-plain tables, the <c>collect.store_log_events</c> /
+    /// <c>collect.store_log_captures</c> shape (V111): plain tables, no serial id, a time index, naive-UTC
+    /// <c>timestamp</c> columns per the store's cross-engine contract. Neither table is purged — the run
+    /// table gains one row per daily pass (about 365 a year) and the history one row per move, and the
+    /// history has to keep at least
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/> days
+    /// anyway, because the next pass reads <c>MAX(changed_at)</c> from it. Like store_log's tables, these are
+    /// self-telemetry about the store's OWN tuning, not collected monitoring data, so they are deliberately
+    /// outside <c>CollectorCatalog.All</c>.
+    ///
+    /// <para><b><c>raw_chunk_interval_rung_history</c></b>: one row per rung CHANGE (not per table per run) —
+    /// table, when, the interval it moved from and to, the reason text
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.Decision"/> already built, and the
+    /// three inputs the decision was made from (ingest rate, budget B, the store-wide open-chunk total). The
+    /// reconciler's own <c>MAX(changed_at)</c> per table is what feeds
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.TableInput.IntervalLastChangedUtc"/>
+    /// back into the next run, which is what makes <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/>
+    /// hold across restarts and not just within one process's lifetime.</para>
+    ///
+    /// <para><b><c>raw_chunk_interval_reconcile_runs</c></b>: one row per reconcile RUN, whether or not it
+    /// changed anything — <c>wal_bytes</c> is <c>numeric</c> because that is <c>pg_stat_wal.wal_bytes</c>'s own
+    /// type (a lifetime counter PostgreSQL does not bound to bigint).</para>
+    /// </summary>
+    private const string V144Sql = @"
+CREATE TABLE IF NOT EXISTS collect.raw_chunk_interval_rung_history
+(
+    changed_at timestamp NOT NULL,
+    table_name text NOT NULL,
+    from_interval_hours integer NOT NULL,
+    to_interval_hours integer NOT NULL,
+    reason text NOT NULL,
+    ingest_bytes_per_hour double precision NOT NULL,
+    budget_bytes double precision NOT NULL,
+    store_total_bytes double precision NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_rung_history_table_time
+    ON collect.raw_chunk_interval_rung_history(table_name, changed_at DESC);
+
+CREATE TABLE IF NOT EXISTS collect.raw_chunk_interval_reconcile_runs
+(
+    run_at timestamp NOT NULL,
+    wal_bytes numeric
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_reconcile_runs_time
+    ON collect.raw_chunk_interval_reconcile_runs(run_at);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

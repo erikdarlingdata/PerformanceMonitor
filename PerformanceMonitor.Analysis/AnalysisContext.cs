@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -237,9 +238,14 @@ public class AnalysisContext
     /// families split their reads across helper methods); <paramref name="read"/> is the reporting method's
     /// own name (the reporter's <see cref="CallerMemberNameAttribute"/> value),
     /// kept beside it so the entry says WHICH read of the family failed.
+    ///
+    /// <para>#4316 round 1 B1: <paramref name="exception"/> rather than a caller-built string, so the record's
+    /// <see cref="CollectionFailure.Message"/> is always <see cref="CollectionFailure.Describe"/>'s output and
+    /// a fact collector cannot put the exception's own message — which can name a role, a host or a relation —
+    /// into a record this project serves to MCP clients. There is no string parameter left to do that with.</para>
     /// </summary>
-    public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, string message) =>
-        CollectionFailures.Add(new CollectionFailure(family, read, outcome, message));
+    public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, Exception exception) =>
+        CollectionFailures.Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>
@@ -269,9 +275,26 @@ public enum CollectionFailureOutcome
     Error
 }
 
-/// <summary>One failed read: which family, which read of it, how it failed, and the exception's own message.</summary>
+/// <summary>One failed read: which family, which read of it, how it failed, and <see cref="Describe"/>'s
+/// non-message text for it — never the exception's own message (#4316).</summary>
 public sealed record CollectionFailure(string Family, string Read, CollectionFailureOutcome Outcome, string Message)
 {
+    /// <summary>#4316: the only text a collection-failure record carries: the exception's type, plus its SQLSTATE
+    /// when it is a database error, and where the full error is. Never the message: a PostgreSQL or DuckDB message
+    /// can name roles, hosts and relations, and this record is served to MCP clients.</summary>
+    public static string Describe(Exception exception, CollectionFailureOutcome outcome)
+    {
+        var what = exception is DbException { SqlState: { Length: > 0 } sqlState }
+            ? $"{exception.GetType().Name}, SQLSTATE {sqlState}"
+            : exception.GetType().Name;
+
+        /* #4316 round 1 (L1): the missing-schema arm logs at Debug (the expected pre-migration case), so at the
+           default level the log holds nothing for it; say so rather than point at an empty log. */
+        return outcome == CollectionFailureOutcome.MissingSchema
+            ? $"{what}; a table or column the read needs is missing, logged only at Debug level"
+            : $"{what}; the log has the full error";
+    }
+
     /// <summary>
     /// The family label for a collector partial file: the dotted segment before <c>.cs</c>, lower-cased —
     /// <c>PgTargetFactCollector.Vacuum.cs</c> → <c>vacuum</c>, <c>PgTargetFactCollector.Write.cs</c> → <c>write</c>.

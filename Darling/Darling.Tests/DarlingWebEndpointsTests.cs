@@ -486,6 +486,33 @@ public sealed class DarlingWebEndpointsTests
 
         Assert.Contains("Rows(c, \"limit\", MaxRowLimit)", line, StringComparison.Ordinal);
         Assert.Contains("QueryBool(c, \"full_text\", true)", line, StringComparison.Ordinal);
+
+        /* #4316 M2: GetAnalysisFindings grew a trailing ILogger? logger parameter so a web-path force-plan
+           read failure logs instead of riding along unlabelled in the payload note. This row builds the
+           service off the DI-resolved postgres/an directly, not through a logger-less helper, so dropping the
+           argument here is the whole regression — there is no second call site downstream to catch it. */
+        Assert.Contains("logger: logger", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4316 M2: <c>MapAll</c> used to build the web host's <see cref="DarlingAnalysisService"/> with no
+    /// logger, so both fact collectors on the web path (audit_config, get_analysis_facts) logged nothing on
+    /// failure and the collection-failure note's "the log has the full error" was false there. No rig: this
+    /// reads the construction site's SOURCE rather than invoking it.
+    /// </summary>
+    [Fact]
+    public void MapAll_BuildsTheAnalysisServiceWithTheHostsLogger()
+    {
+        var source = ReadSource(WebEndpointsSourcePath);
+
+        var line = source
+            .Split('\n')
+            .FirstOrDefault(l => l.Contains("new DarlingAnalysisService(", StringComparison.Ordinal));
+
+        Assert.True(line is not null,
+            "#4316: the web host's DarlingAnalysisService construction has moved or been renamed; update this pin's search text.");
+
+        Assert.Contains("logger: logger", line, StringComparison.Ordinal);
     }
 
     private static string ReadSource(string relative)

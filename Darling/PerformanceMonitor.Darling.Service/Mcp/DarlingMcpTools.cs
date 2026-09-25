@@ -14,6 +14,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Analysis;
@@ -54,7 +55,12 @@ public sealed class DarlingMcpTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 4. Longer windows give more stable results but may miss recent spikes.")] int hours_back = 4,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* DI-resolved like postgres (no [Description]); trailing rather than beside postgres like
+           get_sweep_reports's (#3473 review) because every Darling.Tests call site passes args positionally
+           through as_of. Threaded into the force-plan state read so its failure logs instead of only riding
+           along, unlabelled, in a payload note (#4316). */
+        ILogger? logger = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -182,7 +188,7 @@ public sealed class DarlingMcpTools
                acts. A failed read does not fail the tool: the reason lands on every target's state_note
                and eligible is then explicitly the finding-only verdict. */
             var (forcePlanStates, forcePlanStateNote) =
-                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, findings);
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, findings, logger: logger);
 
             /* #3691: collection.Attach returns this very object on a clean pass — same object, same
                serializer call, same bytes — and a JsonObject with collection_caveats appended last otherwise. */
@@ -1075,7 +1081,11 @@ public sealed class DarlingMcpTools
         [Description("Maximum diagnostic chains to return, still-firing first then by severity. Default 18. findings_truncated flags a cut here.")] int limit = 18,
         [Description("If true, each finding carries drill_down: the persisted evidence rows behind the chain's latest occurrence. Default false.")] bool include_drilldown = false,
         [Description("Return each finding's confidence_basis and advice untruncated instead of a preview. Default false. remediation_command is always the full command.")] bool full_text = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        /* DI-resolved like postgres (no [Description]); trailing so the /api/read dispatch row and every
+           Darling.Tests call site, none of which name arguments past as_of, keep compiling. See
+           analyze_server's copy of this note for the full reasoning (#4316). */
+        ILogger? logger = null)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;
@@ -1148,7 +1158,7 @@ public sealed class DarlingMcpTools
 
             /* #3652: one state read for every representative's force-plan targets — see analyze_server. */
             var (forcePlanStates, forcePlanStateNote) =
-                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest));
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), logger: logger);
 
             return JsonSerializer.Serialize(new
             {

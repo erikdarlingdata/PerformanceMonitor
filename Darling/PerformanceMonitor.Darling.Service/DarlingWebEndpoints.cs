@@ -132,7 +132,7 @@ public static class DarlingWebEndpoints
     /// every other tool the web viewer's Configuration tab calls. Later lanes take the rest, about 20 a lane,
     /// against this same allowlist, until it is empty and #4203 closes.
     /// </summary>
-    internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSet<string>(StringComparer.Ordinal)
+internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSet<string>(StringComparer.Ordinal)
     {
         "compare_analysis",
         "get_analysis_facts",
@@ -390,9 +390,10 @@ public static class DarlingWebEndpoints
 
         /* The four analysis-READ tools take a DarlingAnalysisService; the web host does not register one, so
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
-           persisted-finding read — need only the store; the optional plan fetcher / logger are for the excluded
-           analyze/drill path). Shared across requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, baselineCache: baselineCache);
+           persisted-finding read — need only the store; the optional plan fetcher is for the excluded
+           analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
+           requests, like the MCP host's singleton. */
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -2948,7 +2949,7 @@ public static class DarlingWebEndpoints
             // The viewer's two "Analysis Findings" tables render no preview-cut field and never asked for a
             // budget, so this row keeps asking for what dev always returned: every chain, full text. See
             // DarlingWebEndpointsTests.GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText.
-            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c)),
+            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger),
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c), c.RequestAborted),

@@ -88,11 +88,14 @@ public partial class DuckDbFactCollector : IFactCollector
             CollectionFailure.FamilyOf(collectMethod),
             collectMethod,
             ex is OperationCanceledException ? CollectionFailureOutcome.Cancelled : CollectionFailureOutcome.Error,
-            ex.Message);
+            ex);
 
+        /* #4316 round 1 B1: ex is now also the third argument, not just interpolated into the message, so
+           the log entry carries the full exception (stack and inner-exception chain), not just its message —
+           the same full-error-in-the-log guarantee CollectionFailure.Describe's note on the context points at. */
         AppLogger.Error("DuckDbFactCollector",
             $"{collectMethod} failed for {context.ServerName} (server {context.ServerId}) and " +
-            $"contributes no facts this pass: {ex.Message}");
+            $"contributes no facts this pass: {ex.Message}", ex);
     }
 
     /// <summary>
