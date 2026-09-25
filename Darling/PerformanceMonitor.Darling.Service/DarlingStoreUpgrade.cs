@@ -2951,13 +2951,17 @@ internal sealed class DarlingStoreUpgrade
                 else
                 {
                     rejected.Add(setting.Name);
-                    if (NameMayHoldASecret(setting.Name))
+                    if (NameMayHoldASecret(setting.Name) || setting.Name.Contains('.'))
                     {
                         /* PostgreSQL's own reject reason often repeats the offending value verbatim, so a
-                           setting name that looks like it carries a credential gets no reason logged at all. */
+                           setting name that looks like it carries a credential gets no reason logged at all —
+                           and neither does any extension-qualified name (anything with a dot): we cannot
+                           enumerate every extension's own reject-reason wording well enough to know none of
+                           them ever echoes a value either (#4280 round-2 Q3 hardening). */
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: " +
-                            "the name suggests it may hold a credential). The original setting is kept at {Path}.",
+                            "the name suggests it may hold a credential, or names an extension setting whose " +
+                            "reason could). The original setting is kept at {Path}.",
                             setting.Name, preUpgradeCopy);
                     }
                     else
@@ -3083,7 +3087,7 @@ internal sealed class DarlingStoreUpgrade
         => s_secretNameFragments.Any(fragment => name.Contains(fragment, StringComparison.OrdinalIgnoreCase));
 
     private static readonly string[] s_secretNameFragments =
-        { "conninfo", "command", "password", "passphrase", "secret", "key" };
+        { "conninfo", "command", "password", "passphrase", "secret", "key", "token", "credential", "auth" };
 
     /// <summary>
     /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure before the commit

@@ -814,6 +814,46 @@ public sealed class DarlingStoreUpgradeTests
         }
     }
 
+    /// <summary>Round-2 Q3 hardening: an extension-qualified name withholds the reason even when it also
+    /// matches one of the new secret fragments ("auth", "token") — PostgreSQL's own reject reason for an
+    /// out-of-range value often repeats the offending value verbatim, and an unrecognized extension's own
+    /// wording is not something this class can vouch for either way.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_RejectedDotQualifiedSecretNamedSetting_NeverLogsItsValueOrReason()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-dotsecretreject-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "myext.auth_token = 'topsecrettoken'\n");
+
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+                => Task.FromResult((1, "invalid value for parameter \"myext.auth_token\": \"topsecrettoken\""));
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            var result = await upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+
+            Assert.Empty(result.CarriedNames);
+            Assert.Contains("myext.auth_token", result.RejectedNames);
+
+            var logText = log.ToString();
+            Assert.Contains("myext.auth_token", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("topsecrettoken", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
     /// <summary>Medium 1: a CARRIED setting's log line never repeats its value either, secret-looking name or
     /// not — only the name and a pointer to the pre-upgrade copy. "unused-bin-dir" makes the belt-and-braces
     /// real start (Medium 2) fail fast and drop it again; this test only cares that the log and the file both
