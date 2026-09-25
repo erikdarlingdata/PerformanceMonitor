@@ -21,7 +21,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// though every day but today (and yesterday, briefly after midnight) is closed and its rows do not change.
 /// This holds the CLOSED portion of one range as one block for one hour; every refresh inside that hour
 /// re-runs the statement only over the days still open and joins them to the block. After an hour, one refresh
-/// recomputes the whole range and repopulates it. No migration, no store job -- this lives entirely on the
+/// recomputes the whole range and repopulates it. Blocks older than <see cref="BlockTtl"/> are dropped on the
+/// next miss, and the cache never holds more than <see cref="MaxBlocks"/> blocks at once, evicting the oldest
+/// first (#4232 follow-up: the key carries the range, so every distinct server/range/day combination otherwise
+/// added a block that nothing ever removed). No migration, no store job -- this lives entirely on the
 /// reading side, next to <see cref="DailySummarySql"/> so both its consumers (the viewer, which cannot see the
 /// service, and the service) can share the shape.
 ///
@@ -59,8 +62,17 @@ public sealed class DailySummaryRangeCache<TRow>
     /// <summary>How long after midnight UTC yesterday stays in the open (always-recomputed) set.</summary>
     public static readonly TimeSpan ClosedGrace = TimeSpan.FromHours(2);
 
+    /// <summary>The most blocks this cache holds at once. The key carries the store, server, range and routed
+    /// SQL, so an unbounded cache grows with every distinct combination a caller ever asks for; the fleet case
+    /// is one or two ranges per server, and a block holds at most 366 rows, so this cap is generous headroom,
+    /// not a tuned limit.</summary>
+    public const int MaxBlocks = 1024;
+
     private readonly Func<DateTime> _clock;
     private readonly ConcurrentDictionary<BlockKey, CachedBlock> _blocks = new();
+
+    /// <summary>The number of blocks currently cached, for tests.</summary>
+    internal int Count => _blocks.Count;
 
     /// <param name="clock">Defaults to the wall clock; tests pass one that can move (the same
     /// <c>Func&lt;DateTime&gt;?</c> shape <c>RdsLogSource</c> already uses), so the one-hour and two-hour
@@ -148,6 +160,27 @@ public sealed class DailySummaryRangeCache<TRow>
 
         var full = await runRange(fromDate, toDate, cancellationToken).ConfigureAwait(false);
         var closedRows = full.Where(row => day(row) < closedEndUtc).ToList();
+
+        /* #4232 follow-up: the key carries the range, so nothing ever replaces a block for a range nobody asks
+           for again (a one-off days_back value, a server that's gone). Trim on every miss rather than on a
+           timer -- this cache has no background thread, and a miss is exactly when growth happens. */
+        foreach (var entry in _blocks)
+        {
+            if (nowUtc - entry.Value.ComputedAtUtc >= BlockTtl)
+            {
+                _blocks.TryRemove(entry); // KeyValuePair overload: never removes a block another caller just replaced
+            }
+        }
+
+        while (_blocks.Count >= MaxBlocks && !_blocks.IsEmpty)
+        {
+            var oldest = _blocks.MinBy(entry => entry.Value.ComputedAtUtc);
+            if (!_blocks.TryRemove(oldest))
+            {
+                break; // another caller changed it; the next miss trims again
+            }
+        }
+
         _blocks[key] = new CachedBlock(closedRows, closedEndUtc, nowUtc);
         return full;
     }

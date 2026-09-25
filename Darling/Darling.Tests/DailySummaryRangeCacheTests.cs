@@ -166,6 +166,83 @@ public sealed class DailySummaryRangeCacheTests
     }
 
     [Fact]
+    public async Task GetRangeAsync_ExpiredBlock_EvictedOnNextMissForAnotherKey_AndOldKeyMissesAgain()
+    {
+        /* #4232 follow-up: the cache never removed a block on its own -- every distinct server/range added one
+           that nothing replaced. Here two different servers share a range, so each gets its own block, and
+           moving the clock past BlockTtl before the second server's first (miss) call must sweep server 1's
+           now-stale block, not just leave it to rot. */
+        var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+        var calls = new List<(int ServerId, DateTime Start, DateTime End)>();
+
+        Task<List<TestRow>> Recording(int serverId, DateTime start, DateTime end, CancellationToken ct)
+        {
+            calls.Add((serverId, start, end));
+            return Task.FromResult(new List<TestRow> { new(start, 0) });
+        }
+
+        var fromDate = D(1);
+        var toDate = D(26);
+
+        await cache.GetRangeAsync("store", 1, fromDate, toDate, RoutedSql, true, r => r.Day,
+            (s, e, ct) => Recording(1, s, e, ct), CancellationToken.None);
+        Assert.Equal(1, cache.Count);
+
+        now = now.Add(DailySummaryRangeCache<TestRow>.BlockTtl).AddMinutes(1); // past BlockTtl for server 1's block
+
+        await cache.GetRangeAsync("store", 2, fromDate, toDate, RoutedSql, true, r => r.Day,
+            (s, e, ct) => Recording(2, s, e, ct), CancellationToken.None);
+        Assert.Equal(1, cache.Count); // server 1's expired block swept, server 2's fresh block is the only one left
+
+        var callsBeforeReread = calls.Count;
+        await cache.GetRangeAsync("store", 1, fromDate, toDate, RoutedSql, true, r => r.Day,
+            (s, e, ct) => Recording(1, s, e, ct), CancellationToken.None);
+        Assert.Equal(callsBeforeReread + 1, calls.Count); // server 1's block is gone -- this is a miss, not a hit
+        Assert.Equal((1, fromDate, toDate), calls[^1]); // whole range re-run, exactly like the very first read
+    }
+
+    [Fact]
+    public async Task GetRangeAsync_MoreThanMaxBlocksDistinctKeys_CountStaysCapped_OldestKeysDropped()
+    {
+        /* #4232 follow-up: the key carries the range, so a fleet with many servers (or one MCP client stepping
+           through days_back values) can add a block per distinct key forever. Filling MaxBlocks + 10 of them,
+           each a fresh key, must cap Count at MaxBlocks by dropping the OLDEST blocks first, not the newest. */
+        var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
+        var cache = new DailySummaryRangeCache<TestRow>(() => now);
+
+        var fromDate = D(1);
+        var toDate = D(26);
+        var total = DailySummaryRangeCache<TestRow>.MaxBlocks + 10;
+
+        Task<List<TestRow>> Fresh(DateTime start, DateTime end, CancellationToken ct)
+            => Task.FromResult(new List<TestRow> { new(start, 0) });
+
+        for (var serverId = 1; serverId <= total; serverId++)
+        {
+            await cache.GetRangeAsync("store", serverId, fromDate, toDate, RoutedSql, true, r => r.Day, Fresh, CancellationToken.None);
+            now = now.AddSeconds(1); // distinct ComputedAtUtc per block, well inside BlockTtl for the whole loop
+        }
+
+        Assert.Equal(DailySummaryRangeCache<TestRow>.MaxBlocks, cache.Count);
+
+        /* The oldest 10 keys (server 1..10) were evicted to make room for the newest ones. A read for the
+           very first server is therefore a miss (runRange called again over the whole range). */
+        var calls = new List<(DateTime Start, DateTime End)>();
+        Task<List<TestRow>> Recording(DateTime start, DateTime end, CancellationToken ct)
+        {
+            calls.Add((start, end));
+            return Task.FromResult(new List<TestRow> { new(start, 0) });
+        }
+
+        await cache.GetRangeAsync("store", 1, fromDate, toDate, RoutedSql, true, r => r.Day, Recording, CancellationToken.None);
+        Assert.Single(calls);
+        Assert.Equal((fromDate, toDate), calls[0]); // server 1's original block is gone -- whole range re-run
+
+        Assert.True(cache.Count <= DailySummaryRangeCache<TestRow>.MaxBlocks); // the re-add still respects the cap
+    }
+
+    [Fact]
     public async Task GetRangeAsync_ExplicitEndTime_SkipsCacheEveryTime()
     {
         var now = new DateTime(2026, 9, 25, 12, 0, 0, DateTimeKind.Utc);
