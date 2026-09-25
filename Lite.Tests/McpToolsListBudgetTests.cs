@@ -86,7 +86,11 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (per-tool lane, get_object_locking): +79 bytes for the new limit parameter (default lowered from
        a 200-row hard cap to 75, measured under McpResponseBudget.DefaultBytes on a seeded fixture). Matches
        Darling's twin change exactly. */
-    private const int TotalCeilingBytes = 89_960;
+    /* #4198 (lane TB): +253 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). Darling's twin grew by a different amount (+364): Darling's description also
+       covers the dedup_key exemption, which Lite's get_deadlock_detail has no dedup_key parameter to need. */
+    private const int TotalCeilingBytes = 90_213;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
