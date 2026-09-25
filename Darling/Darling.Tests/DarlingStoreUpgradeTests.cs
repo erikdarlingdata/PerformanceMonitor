@@ -218,6 +218,32 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public void ParseAutoConf_ANameValueLineSeparatedByNbspOnly_IsSkippedNotCarried()
+    {
+        /* U+00A0 (NBSP) satisfies char.IsWhiteSpace but is neither ' ' nor '\t' — guc-file.l's own
+           tokenizer would not split a line on it, so this parser must not either (#4280 round-2 Low 2).
+           Before the fix this split into name "work_mem" and value "128MB" and was carried; now nothing
+           separates name from value, so the whole line is unparseable and only its line number is
+           reported — never silently carried as work_mem. */
+        var settings = DarlingStoreUpgrade.ParseAutoConf("work_mem 128MB\n", out var skippedLines);
+
+        Assert.Empty(settings);
+        Assert.Equal(new[] { 1 }, skippedLines);
+    }
+
+    [Fact]
+    public void ParseAutoConf_ANameValueLineSplitByABareCarriageReturn_SkipsBothResultingLines()
+    {
+        /* StringReader.ReadLine treats a bare '\r' as its own line terminator, so "work_mem\r128MB" reads
+           back as two separate lines — neither "work_mem" nor "128MB" has a space/tab left to split on, so
+           BOTH land in skippedLines under their own line number, not just the first (#4280 round-2 Low 2). */
+        var settings = DarlingStoreUpgrade.ParseAutoConf("work_mem\r128MB\n", out var skippedLines);
+
+        Assert.Empty(settings);
+        Assert.Equal(new[] { 1, 2 }, skippedLines);
+    }
+
+    [Fact]
     public void DecideTransferMode_CopyWhenTheVolumeHasRoomForTwoCopies()
     {
         const long tenGb = 10L * 1024 * 1024 * 1024;

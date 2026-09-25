@@ -2633,11 +2633,13 @@ internal sealed class DarlingStoreUpgrade
     /// resolves repeated assignments within one config file, and how this class already describes its own
     /// v1-v5 postgresql.conf blocks ("last-occurrence-wins override").</para>
     ///
-    /// <para>A line whose name fails <see cref="s_validGucName"/> is skipped, and its 1-based line number
-    /// (never its text) is returned in <paramref name="skippedLines"/>, for <see cref="CarryAutoConfAsync"/>
-    /// to log as not carried. Line number, not name: with the <c>=</c> optional, the text before the point
-    /// this parser treats as the name/value boundary can actually be part of the VALUE, so nothing about a
-    /// skipped line's own text is safe to log (round-1 security review, #4280 Medium 1).</para>
+    /// <para>A line whose name fails <see cref="s_validGucName"/> is skipped, and so is a <c>name value</c>
+    /// line (the <c>=</c>-less form) with no space or tab to split on — either way, only the 1-based line
+    /// number (never its text) is returned in <paramref name="skippedLines"/>, for
+    /// <see cref="CarryAutoConfAsync"/> to log as not carried. Line number, not name: with the <c>=</c>
+    /// optional, the text before the point this parser treats as the name/value boundary can actually be
+    /// part of the VALUE, so nothing about a skipped line's own text is safe to log (round-1 security
+    /// review, #4280 Medium 1).</para>
     /// </summary>
     internal static IReadOnlyList<AutoConfSetting> ParseAutoConf(string content, out IReadOnlyList<int> skippedLines)
     {
@@ -2651,7 +2653,10 @@ internal sealed class DarlingStoreUpgrade
         while ((line = reader.ReadLine()) is not null)
         {
             lineNumber++;
-            var trimmed = line.Trim();
+            /* PostgreSQL's guc-file.l tokenizer treats only ' ' and '\t' as whitespace — NOT the full
+               Unicode set string.Trim() strips (e.g. U+00A0 NBSP). Matching that keeps a line PostgreSQL
+               itself would not split on from being mis-split here (#4280 round-2 Low 2). */
+            var trimmed = line.Trim(' ', '\t');
             if (trimmed.Length == 0 || trimmed[0] == '#')
             {
                 continue;
@@ -2667,14 +2672,17 @@ internal sealed class DarlingStoreUpgrade
             if (eq < 0)
             {
                 var ws = 0;
-                while (ws < trimmed.Length && !char.IsWhiteSpace(trimmed[ws]))
+                while (ws < trimmed.Length && trimmed[ws] != ' ' && trimmed[ws] != '\t')
                 {
                     ws++;
                 }
 
                 if (ws >= trimmed.Length)
                 {
-                    /* A bare token with nothing after it — no value to carry. */
+                    /* A bare token with nothing after it — no space/tab for guc-file.l to split on, so
+                       there is no value to carry. Not a silent continue: the line could not be parsed,
+                       so it is reported the same way an invalid name is (line number only). */
+                    skipped.Add(lineNumber);
                     continue;
                 }
 
@@ -2683,8 +2691,8 @@ internal sealed class DarlingStoreUpgrade
             }
             else
             {
-                name = trimmed[..eq].Trim();
-                valueField = trimmed[(eq + 1)..].Trim();
+                name = trimmed[..eq].Trim(' ', '\t');
+                valueField = trimmed[(eq + 1)..].Trim(' ', '\t');
             }
 
             if (!s_validGucName.IsMatch(name))
