@@ -67,7 +67,7 @@ public sealed class DarlingMcpStoreHostTools
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
         + "of calls costs one live read. This tool never writes a setting or a conf file.")]
-    public static async Task<string> GetStoreHost(NpgsqlDataSource postgres, PostgresConfig? postgresConfig)
+    public static async Task<string> GetStoreHost(NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache)
     {
         if (postgresConfig is null)
         {
@@ -83,8 +83,16 @@ public sealed class DarlingMcpStoreHostTools
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(ServiceCommandDeadlines.McpStoreHostProfileSeconds));
 
-            await using var connection = await postgres.OpenConnectionAsync(cts.Token);
-            var profile = await DarlingStoreHostProfile.GatherAsync(postgresConfig, connection, cts.Token);
+            /* Round-1 review, Medium 2: the store/settings facts are cached for up to 5 minutes and shared
+               across callers, so a burst of calls costs one live read. The connection opens INSIDE the
+               gather delegate — a cache hit never calls this delegate at all, so a hit opens no connection. */
+            var (profile, gatheredAtUtc) = await cache.GetOrGatherAsync(
+                async token =>
+                {
+                    await using var connection = await postgres.OpenConnectionAsync(token);
+                    return await DarlingStoreHostProfile.GatherAsync(postgresConfig, connection, token);
+                },
+                cts.Token);
 
             var anyStale = profile.Settings.Any(s => s.Verdict == HostSettingVerdict.StaleAfterHardwareChange);
             var ramPercent = profile.Memory.EffectiveBytes > 0
@@ -147,6 +155,11 @@ public sealed class DarlingMcpStoreHostTools
                     verdict = DarlingStoreHostProfile.DescribeVerdict(s.Verdict).Replace('-', '_'),
                 }),
                 any_stale = anyStale,
+                /* Round-1 review, correcting the original plan: naive-UTC (no trailing Z), matching every
+                   other "_at" timestamp on an MCP payload in this codebase (DarlingFleetReader.GeneratedAt,
+                   DarlingAgReader, DarlingMcpConfigHistoryTools's NaiveUtc helper, DarlingMcpTrendTools) —
+                   not a DateTimeKind.Utc value, which would serialize with a trailing Z instead. */
+                gathered_at = DateTime.SpecifyKind(gatheredAtUtc, DateTimeKind.Unspecified),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)

@@ -111,7 +111,12 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
 
                 await using var dataSource = NpgsqlDataSource.Create(RoleConnectionString(connectionString!, role));
 
-                var managedJson = await DarlingMcpStoreHostTools.GetStoreHost(dataSource, managedConfig);
+                /* A fresh cache per call, not one shared across this loop (round-1 review, Medium 2): the
+                   cache holds a single un-keyed entry (production only ever has one store to profile), so
+                   sharing one instance across the managed and BYO calls below would serve the FIRST call's
+                   cached profile back for the second, regardless of which PostgresConfig was passed. */
+                var managedJson = await DarlingMcpStoreHostTools.GetStoreHost(
+                    dataSource, managedConfig, new StoreHostProfileCache(TimeSpan.FromMinutes(5)));
                 using var managed = JsonDocument.Parse(managedJson);
                 AssertVerdictFor(role, managed, "work_mem", "matches");
                 AssertVerdictFor(role, managed, "max_connections", "stale_after_hardware_change");
@@ -119,7 +124,8 @@ public sealed class DarlingMcpStoreHostToolsLiveTests
                 Assert.True(managed.RootElement.GetProperty("any_stale").GetBoolean(),
                     $"{role}: any_stale should be true with a stale_after_hardware_change row present.");
 
-                var byoJson = await DarlingMcpStoreHostTools.GetStoreHost(dataSource, byoConfig);
+                var byoJson = await DarlingMcpStoreHostTools.GetStoreHost(
+                    dataSource, byoConfig, new StoreHostProfileCache(TimeSpan.FromMinutes(5)));
                 using var byo = JsonDocument.Parse(byoJson);
                 AssertVerdictFor(role, byo, "work_mem", "not_managed");
                 AssertVerdictFor(role, byo, "max_connections", "not_managed");

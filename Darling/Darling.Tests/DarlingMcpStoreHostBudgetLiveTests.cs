@@ -50,7 +50,11 @@ public sealed class DarlingMcpStoreHostBudgetLiveTests
         }
 
         await using var postgres = NpgsqlDataSource.Create(cs!);
-        var json = await DarlingMcpStoreHostTools.GetStoreHost(postgres, new PostgresConfig { Managed = false });
+        /* A fresh cache per test (round-1 review, Medium 2), not the production Shared singleton — this
+           test's budget measurement must always hit the live gather, never a hit left warm by another test
+           in the same process. */
+        var cache = new StoreHostProfileCache(TimeSpan.FromMinutes(5));
+        var json = await DarlingMcpStoreHostTools.GetStoreHost(postgres, new PostgresConfig { Managed = false }, cache);
 
         var bytes = Encoding.UTF8.GetByteCount(json);
         _output.WriteLine($"get_store_host (not_managed) call: {bytes:N0} bytes (budget {McpResponseBudget.DefaultBytes:N0}).");

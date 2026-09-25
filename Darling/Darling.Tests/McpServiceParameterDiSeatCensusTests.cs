@@ -71,10 +71,13 @@ public sealed class McpServiceParameterDiSeatCensusTests
             "argument instead of resolved from DI.");
 
         /* A change worth knowing about even when nothing is missing: today's distinct complex service types are
-           exactly these four (NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger) — pin the set
-           so a fifth type appearing here is a deliberate, reviewed addition rather than a silent one. */
+           exactly these five (NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
+           StoreHostProfileCache) — pin the set so a sixth type appearing here is a deliberate, reviewed
+           addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
+           Medium 2): get_store_host's 5-minute shared cache, registered via the typed-generic
+           AddSingleton<StoreHostProfileCache> overload this test's own Contains check requires. */
         Assert.Equal(
-            new List<string> { "DarlingAnalysisService", "ILogger", "NpgsqlDataSource", "PostgresConfig" },
+            new List<string> { "DarlingAnalysisService", "ILogger", "NpgsqlDataSource", "PostgresConfig", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 
