@@ -392,7 +392,13 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
             await AssertChunksAsync(connection,
                 OldJobHistorySql, new NpgsqlParameter[] { P(marks.WindowStart), P(2000) },
                 ViewerDataService.BuildJobHistorySql(scopedToServer: false), new NpgsqlParameter[] { P(marks.WindowStart), P(floor), P(2000) },
-                ct, "BuildJobHistorySql(false)", maxChunks: 3);
+                /* minReduction: 2, not the default 3 — #4229's own GROUP BY fix split the single scan
+                   OldJobHistorySql has into two (job_stats + base), so "new" now scans job_history TWICE,
+                   each independently floor-bounded. The per-scan bound still holds (each touches at most the
+                   window's own chunk plus the floor's one extra day), but the STATEMENT-level chunk count
+                   roughly doubles against a genuinely single-scan oracle, unlike BlockingTrendSql/
+                   BlockingDurationStatsSql above, whose OLD oracle is itself already two-scan shaped. */
+                ct, "BuildJobHistorySql(false)", maxChunks: 3, minReduction: 2);
 
             bodySucceeded = true;
         }
@@ -439,7 +445,7 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
     /// </summary>
     private static async Task AssertChunksAsync(
         NpgsqlConnection connection, string oldSql, NpgsqlParameter[] oldArgs, string newSql, NpgsqlParameter[] newArgs,
-        CancellationToken ct, string label, int maxChunks)
+        CancellationToken ct, string label, int maxChunks, int minReduction = 3)
     {
         _ = maxChunks;
         var oldPlan = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + oldSql, oldArgs, ct);
@@ -447,8 +453,8 @@ public sealed class EventWindowedReadsAreBoundedLivePostgresTests
         var oldChunks = PlanChunkScans.Count(oldPlan);
         var newChunks = PlanChunkScans.Count(newPlan);
 
-        Assert.True(oldChunks - newChunks >= 3,
-            $"{label}: expected the floor to exclude at least 3 of the 4 seeded old-day chunks (old={oldChunks}, new={newChunks}):\nOLD:\n{oldPlan}\nNEW:\n{newPlan}");
+        Assert.True(oldChunks - newChunks >= minReduction,
+            $"{label}: expected the floor to exclude at least {minReduction} of the 4 seeded old-day chunks (old={oldChunks}, new={newChunks}):\nOLD:\n{oldPlan}\nNEW:\n{newPlan}");
     }
 
     /* ─────────────────────────── seeding ─────────────────────────── */

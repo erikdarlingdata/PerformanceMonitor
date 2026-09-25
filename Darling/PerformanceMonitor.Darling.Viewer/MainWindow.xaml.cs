@@ -608,12 +608,16 @@ public partial class MainWindow : Window
             _ = RefreshAvailabilityGroupsAsync();
         }
 
-        /* Two tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
+        /* Three tabs opt out of this timer: Recommendations refreshes on tab-activation only (matching Lite —
            analysis findings change on the service's 30-minute cadence, so an interval auto-refresh is pointless
-           churn and would reset the incident expanders' state under the reader), and the Overview has its OWN
-           timer, so this one skips it (they'd otherwise double-refresh the same grid). Every other aggregate tab
-           still auto-refreshes. */
+           churn and would reset the incident expanders' state under the reader); Job History (#4229) refreshes
+           on tab-activation and its own Refresh button ONLY — job history changes at job-run cadence, not every
+           NocRefreshIntervalSeconds, and polling the whole fleet tab re-ran its costliest read (the per-job
+           success average/max join over the window's newest 2,000 rows) for a grid that had not moved since the
+           last poll; and the Overview has its OWN timer, so this one skips it (they'd otherwise double-refresh
+           the same grid). Every other aggregate tab still auto-refreshes. */
         if (ReferenceEquals(MainTabs.SelectedItem, RecommendationsTab)
+            || ReferenceEquals(MainTabs.SelectedItem, JobHistoryTabItem)
             || ReferenceEquals(MainTabs.SelectedItem, OverviewTab))
         {
             return;
