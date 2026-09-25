@@ -53,8 +53,11 @@ public sealed class CollectionCaveatsRungTests
         Assert.Equal("collection-caveats", V141.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
-        Assert.Same(V141, PgMigrations.Scripts[^1]);
+        /* Not `RungVersion == SchemaVersion` any more, and not `Same(V141, Scripts[^1])`: both asserted this
+           rung is the newest, which stopped being true when V142 landed. The invariant that outlives the
+           handoff is that the LADDER's top and the declared version agree, which the two lines above already
+           say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
