@@ -198,6 +198,9 @@ public sealed partial class PgTargetFactCollector : IFactCollector
     public async Task<List<Fact>> CollectConfigAuditFactsAsync(AnalysisContext context)
     {
         var facts = new List<Fact>();
+        /* #4206: Metadata FIRST so CollectConfigFactsAsync can read the is_aurora flag off the registry
+           fact when stamping not_applicable on max_wal_size and checkpoint_timeout for Aurora targets. */
+        await CollectServerMetadataFactsAsync(context, facts);
         await CollectConfigFactsAsync(context, facts);
         await CollectMemoryFactsAsync(context, facts);
         await CollectVacuumFactsAsync(context, facts);

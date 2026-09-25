@@ -635,8 +635,10 @@ public sealed class DarlingMcpTools
                 /* Coverage discarded for the reason the SQL Server arm states below (#3538 A2): these are
                    point-in-time settings — the latest row regardless of window — and an hour the collector
                    missed changes nothing about what the server is configured to. #4192: the narrow read, not
-                   the full collect + detect + score pass — this tool never touches wait stats, blocking, plan
-                   regression or any of the other families the full pass runs. */
+                   the full collect + detect pass — this tool never touches wait stats, blocking, plan
+                   regression or any of the other families the full pass runs. The scorer IS run inside
+                   CollectConfigAuditFactsAsync (#4206): the status projection below reads fact.Severity,
+                   so facts must arrive scored. */
                 var pgFacts = await analysisService.CollectConfigAuditFactsAsync(
                     resolved.ServerId, resolved.ServerName);
 

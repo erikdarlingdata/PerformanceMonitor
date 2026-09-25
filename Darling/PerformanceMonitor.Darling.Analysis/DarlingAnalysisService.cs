@@ -759,12 +759,18 @@ public sealed class DarlingAnalysisService
     /// <summary>
     /// audit_config's own read (#4192): the resolved engine's narrow family collection, never the full
     /// collect + detect + score pass <see cref="CollectAndScoreFactsAsync"/> runs. No coverage witness, no
-    /// anomaly detector, no scorer — audit_config projects 8 point-in-time facts (SQL Server) or the
+    /// anomaly detector — audit_config projects 8 point-in-time facts (SQL Server) or the
     /// CONFIG_PG_*/host-memory facts (PostgreSQL) and discards WindowCoverage already, so the full pass was
     /// paying for, and this skips, every other family plus the detector's baseline reads. Falls back to the
     /// full <see cref="IFactCollector.CollectFactsAsync"/> for an engine that is neither of Darling's two
     /// concrete collectors (there is none today; the fallback keeps this correct rather than throwing if one
     /// is ever added without a narrow read of its own).
+    ///
+    /// <para>#4206: scorer IS run, on the narrow fact set. The PostgreSQL arm's AuditConfig projection maps
+    /// <see cref="Fact.Severity"/> to the ok/review/warning vocabulary, so facts must be scored before they
+    /// are returned. Config-family scoring is self-contained (pure threshold checks, no amplifiers that need
+    /// wait-stats or blocking), so running <see cref="FactScorer.ScoreAll"/> over the narrow set is correct
+    /// and cheap.</para>
     /// </summary>
     public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null)
     {
@@ -781,12 +787,18 @@ public sealed class DarlingAnalysisService
         try
         {
             var (engine, _) = await ResolveEngineAsync(serverId, context.CancellationToken);
-            return engine.Collector switch
+            var facts = engine.Collector switch
             {
                 PgFactCollector sql => await sql.CollectConfigAuditFactsAsync(context),
                 PgTargetFactCollector pg => await pg.CollectConfigAuditFactsAsync(context),
                 _ => await engine.Collector.CollectFactsAsync(context),
             };
+            /* #4206: Score so AuditConfig can map fact.Severity to ok/review/warning. The narrow
+               collector runs only the config-family partials, so ScoreAll sees only those facts;
+               no amplifiers that need wait-stats or blocking fire, and the config scorer's threshold
+               checks (shared_buffers ≤ 128 MB → 0.4, max_wal_size ≤ 1 GB → 0.4) are self-contained. */
+            _scorer.ScoreAll(facts);
+            return facts;
         }
         catch (Exception ex)
         {
