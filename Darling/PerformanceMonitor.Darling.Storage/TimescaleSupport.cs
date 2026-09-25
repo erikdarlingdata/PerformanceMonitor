@@ -1737,7 +1737,7 @@ $do$";
     /// <see cref="RollupBackfill.Targets"/> and the materialization-hole repair targets derived from it — there
     /// is nothing left to backfill or repair once nothing ever advances the watermark those verbs converge
     /// toward. Their own retention and compression are named where each already lived:
-    /// <see cref="RetentionPolicies"/> for the four still with a drop_chunks policy (the two legacy hourlies
+    /// <see cref="RetentionPolicies"/> for the three still with a drop_chunks policy (the legacy hourlies
     /// this raw purge moved off of keep their OWN retention unchanged — only <see cref="RawTierCoverage"/>'s
     /// raw-purge COVERAGE moved to the successors), and the frozen dailies' compression drain rule
     /// (<see cref="DrainFrozenDailyCompressionPoliciesAsync"/>) for the daily half.</para>
@@ -5431,9 +5431,22 @@ WITH NO DATA";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(
-                    "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
-                    view, ex.Message);
+                /* A frozen rollup (policyFor is null) already exists by the time its own detach can throw — its
+                   CREATE ran first, in this same try. "Falls back to raw scans" is false for that case: the
+                   view keeps serving composer queries same as ever, just still on its pre-freeze refresh
+                   schedule instead of frozen, until a later start's retry detaches it. */
+                if (IsFrozenRollupAggregate(view))
+                {
+                    logger?.LogWarning(
+                        "Could not detach the refresh policy from frozen rollup {View}; it keeps refreshing on its old schedule until a later start detaches it: {Message}",
+                        view, ex.Message);
+                }
+                else
+                {
+                    logger?.LogWarning(
+                        "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
+                        view, ex.Message);
+                }
             }
         }
 
