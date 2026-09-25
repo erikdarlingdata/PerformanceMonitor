@@ -13,6 +13,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -35,6 +37,9 @@ public sealed record WaitStatsTrendPoint(
 
 public sealed partial class ViewerDataService
 {
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctWaitTypesAsync"/> — see its remarks.</summary>
+    private readonly ViewerNameListCache _distinctWaitTypesCache = new();
+
     /// <summary>
     /// The wait-type picker's population read — Lite's <c>GetDistinctWaitTypesAsync</c> ported to
     /// Postgres verbatim (runs against the <c>v_wait_stats</c> passthrough view, the Darling-analysis
@@ -66,9 +71,28 @@ public sealed partial class ViewerDataService
     /// exactly like Lite; a caller passing <paramref name="waitTypeCount"/> = 0 is a bug the
     /// <see cref="GetWaitStatsTrendsByTypesAsync"/> guard prevents.
     /// </summary>
+    /// <summary>
+    /// #4234: BUCKETED (the per-collection read this replaced kept every row, up to 170,020 for 20 wait types
+    /// over 7 days — the issue's measured number). Same raw CTE, same three-state interval and "unrated
+    /// collection contributes to neither sum" rule as before; new is the <c>rated</c> CTE and the final
+    /// GROUP BY on <c>date_bin</c>, generalizing <c>DarlingDataReader.WaitTrendBucketedSql</c> (the MCP
+    /// <c>get_wait_trend</c> twin, #3960 — one wait type at a time) to <paramref name="waitTypeCount"/> types
+    /// in one query, the shape this read has always used. A bucket's rate is its summed wait over its summed
+    /// rated seconds — time-weighted, never an average of per-collection rates — and a bucket with no rated
+    /// collection is dropped (<c>HAVING</c>), same as the per-collection read always dropped that collection.
+    /// <c>avg_ms_per_wait</c> has no MCP twin to mirror (that tool publishes only the two per-second rates);
+    /// it follows the same summed-numerator-over-summed-denominator rule, guarded against a bucket whose
+    /// rated collections all logged zero waiting tasks — Postgres raises <c>division_by_zero</c> there rather
+    /// than returning NULL, so the guard is explicit, matching the per-collection read's own "0, not NULL"
+    /// answer for that case. The width is appended as its OWN trailing parameter, after the dynamic
+    /// <c>wait_type IN (...)</c> list, so that list's existing <c>$4..</c> numbering does not shift. Neither
+    /// wait-stats chart series plots a peak, so unlike the MCP twin there is no peak column.
+    /// $1 server_id, $2/$3 window (naive UTC), $4.. wait types, last $ the bucket width in minutes.
+    /// </summary>
     public static string WaitTrendsSql(int waitTypeCount)
     {
         var typeParams = string.Join(", ", Enumerable.Range(0, waitTypeCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (waitTypeCount + 4);
         return $$"""
             WITH raw AS
             (
@@ -91,25 +115,50 @@ public sealed partial class ViewerDataService
                 AND   collection_time >= $2
                 AND   collection_time <= $3
                 AND   wait_type IN ({{typeParams}})
+            ),
+            rated AS
+            (
+                SELECT
+                    wait_type,
+                    collection_time,
+                    CASE WHEN interval_seconds > 0 THEN delta_wait_time_ms END AS rated_wait_ms,
+                    CASE WHEN interval_seconds > 0 THEN delta_signal_wait_time_ms END AS rated_signal_ms,
+                    CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds,
+                    CASE WHEN interval_seconds > 0 THEN delta_waiting_tasks END AS rated_tasks
+                FROM raw
             )
             SELECT
                 wait_type,
-                collection_time,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second,
-                CASE WHEN interval_seconds > 0 THEN CAST(delta_signal_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS signal_wait_time_ms_per_second,
-                CASE WHEN interval_seconds > 0 AND delta_waiting_tasks > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / delta_waiting_tasks WHEN interval_seconds > 0 THEN 0 END AS avg_ms_per_wait
-            FROM raw
-            ORDER BY wait_type, collection_time
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_seconds) AS wait_time_ms_per_second,
+                CAST(SUM(rated_signal_ms) AS DOUBLE PRECISION) / SUM(rated_seconds) AS signal_wait_time_ms_per_second,
+                CASE WHEN SUM(rated_tasks) > 0 THEN CAST(SUM(rated_wait_ms) AS DOUBLE PRECISION) / SUM(rated_tasks) ELSE 0 END AS avg_ms_per_wait
+            FROM rated
+            GROUP BY wait_type, 2
+            HAVING COUNT(rated_seconds) > 0
+            ORDER BY wait_type, 2
             """;
     }
 
     /// <summary>
     /// The distinct wait types collected for one server in the window, ranked by total delta wait
     /// time descending — feeds the picker's population + default-selection.
+    /// <para>#4234: memoized through <see cref="_distinctWaitTypesCache"/> — keyed on (server, window length)
+    /// for <see cref="ViewerNameListCache.Ttl"/>, so the full-window DISTINCT behind this runs at most once
+    /// per 15 minutes rather than on every 1-minute auto-refresh (measured 2,079 ms cold on the Perfmon twin
+    /// of this read over 7 days). <paramref name="nowUtc"/> is the cache's clock seam — null uses the wall
+    /// clock; a test passes an explicit time to fast-forward past the TTL without sleeping.</para>
     /// </summary>
     public async Task<List<string>> GetDistinctWaitTypesAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endUtc - startUtc;
+        if (_distinctWaitTypesCache.TryGet(serverId, windowLength, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
         var items = new List<string>();
 
         await using var command = _dataSource.CreateCommand(DistinctWaitTypesSql);
@@ -129,12 +178,20 @@ public sealed partial class ViewerDataService
             items.Add(reader.GetString(0));
         }
 
+        _distinctWaitTypesCache.Set(serverId, windowLength, items, effectiveNow);
         return items;
     }
 
     /// <summary>
     /// The per-second (and avg-per-wait) trend for every selected wait type in one query, grouped by
     /// type. Empty selection returns an empty map without touching the store.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES — the ruling's own
+    /// wording, not the MCP convention of dividing one shared budget across every line a call draws — so the
+    /// pin is rows ≤ budget × series count; <c>seriesCount</c> is therefore always 1 into
+    /// <see cref="TrendBuckets.AutoMinutes"/>. At a window small enough that width resolves to one minute,
+    /// every collection becomes its own bucket and the values match the pre-#4234 per-collection read
+    /// exactly — only the timestamp changes, from the raw collection time to its bucket's <c>date_bin</c>
+    /// start.</para>
     /// </summary>
     public async Task<Dictionary<string, List<WaitStatsTrendPoint>>> GetWaitStatsTrendsByTypesAsync(
         int serverId, List<string> waitTypes, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -144,6 +201,9 @@ public sealed partial class ViewerDataService
         {
             return result;
         }
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(WaitTrendsSql(waitTypes.Count));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -160,6 +220,7 @@ public sealed partial class ViewerDataService
         {
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = waitType });
         }
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

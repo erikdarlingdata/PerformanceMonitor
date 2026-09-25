@@ -13,6 +13,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
+
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
@@ -43,6 +46,9 @@ public sealed record PerfmonTrendPoint(
 
 public sealed partial class ViewerDataService
 {
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctPerfmonCountersAsync"/> — see its remarks.</summary>
+    private readonly ViewerNameListCache _distinctPerfmonCountersCache = new();
+
     /// <summary>
     /// The perfmon picker's population read — Lite's <c>GetDistinctPerfmonCountersAsync</c> ported to
     /// Postgres verbatim (runs against the <c>v_perfmon_stats</c> passthrough view, the Darling-analysis
@@ -76,34 +82,75 @@ public sealed partial class ViewerDataService
     /// an average under one counter name) from being classified by whichever instance's id happened to
     /// sort first. Byte-identical to Lite's expression.</para>
     /// </summary>
+    /// <summary>
+    /// #4234: the per-collection SUM above, BUCKETED — the per-collection read this replaced kept every row,
+    /// up to 102,012 for 12 counters over 7 days (the issue's measured number). Wraps the unchanged
+    /// per-collection statement as a subquery and re-aggregates into <c>date_bin</c> buckets, generalizing
+    /// <c>DarlingTrendReader.PerfmonTrendBucketedSql</c> (the MCP <c>get_perfmon_trend</c> twin, #3960 — one
+    /// counter at a time) to <paramref name="counterCount"/> counters in one query. <see cref="PerfmonTrendPoint"/>'s
+    /// four fields keep their exact per-collection MEANING so <see cref="PerformanceMonitor.Common.DeltaSeriesShaping"/>
+    /// downstream needs no change: <c>Value</c> is the bucket's rounded GAUGE average (the ruling's rule for a
+    /// gauge); <c>DeltaValue</c>/<c>SampleIntervalSeconds</c> are summed only over rated collections (stored
+    /// interval &gt; 0), so <c>DeltaValue / SampleIntervalSeconds</c> downstream is exactly the ruling's rate —
+    /// summed deltas over summed intervals — and both are NULL together for a bucket with no rated collection,
+    /// which <c>DeltaSeriesShaping.Shape</c> already reads as a line break, the same as an unrated per-collection
+    /// row always did; <c>CntrType</c> keeps the per-collection MIN=MAX-agreement rule, now double-aggregated the
+    /// same way the MCP twin re-aggregates its own per-collection subquery. Neither perfmon chart plots a peak
+    /// value, so unlike the MCP twin there is no peak column. The width is its own trailing parameter, after the
+    /// dynamic <c>counter_name IN (...)</c> list, so that list's existing numbering does not shift.
+    /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
+    /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
     {
         var nameParams = string.Join(", ", Enumerable.Range(0, counterCount).Select(i => "$" + (i + 4)));
-        return $"""
+        var widthParam = "$" + (counterCount + 4);
+        return $$"""
             SELECT
                 counter_name,
-                collection_time,
-                CAST(SUM(cntr_value) AS bigint) AS cntr_value,
-                CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
-                CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
+                GREATEST(date_bin(CAST({{widthParam}} AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+                CAST(ROUND(AVG(cntr_value)) AS bigint) AS cntr_value,
+                SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds > 0) AS delta_cntr_value,
+                SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS sample_interval_seconds,
                 CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
-            FROM v_perfmon_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            AND   counter_name IN ({nameParams})
-            GROUP BY counter_name, collection_time
-            ORDER BY counter_name, collection_time
+            FROM (
+                SELECT
+                    counter_name,
+                    collection_time,
+                    CAST(SUM(cntr_value) AS bigint) AS cntr_value,
+                    CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
+                    CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
+                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+                FROM v_perfmon_stats
+                WHERE server_id = $1
+                AND   collection_time >= $2
+                AND   collection_time <= $3
+                AND   counter_name IN ({{nameParams}})
+                GROUP BY counter_name, collection_time
+            ) AS collections
+            GROUP BY counter_name, 2
+            ORDER BY counter_name, 2
             """;
     }
 
     /// <summary>
     /// The distinct counter names collected for one server in the window, ordered by name — feeds the
     /// picker's population + pack fills.
+    /// <para>#4234: memoized through <see cref="_distinctPerfmonCountersCache"/> — keyed on (server, window
+    /// length) for <see cref="ViewerNameListCache.Ttl"/>, so the full-window DISTINCT behind this runs at most
+    /// once per 15 minutes rather than on every 1-minute auto-refresh (the issue's measured 2,079 ms cold read
+    /// over a 7-day window). <paramref name="nowUtc"/> is the cache's clock seam — null uses the wall clock; a
+    /// test passes an explicit time to fast-forward past the TTL without sleeping.</para>
     /// </summary>
     public async Task<List<string>> GetDistinctPerfmonCountersAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endUtc - startUtc;
+        if (_distinctPerfmonCountersCache.TryGet(serverId, windowLength, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
         var items = new List<string>();
 
         await using var command = _dataSource.CreateCommand(DistinctPerfmonCountersSql);
@@ -123,12 +170,20 @@ public sealed partial class ViewerDataService
             items.Add(reader.GetString(0));
         }
 
+        _distinctPerfmonCountersCache.Set(serverId, windowLength, items, effectiveNow);
         return items;
     }
 
     /// <summary>
     /// The value + delta trend for every selected counter in one query, grouped by counter name.
     /// Empty selection returns an empty map without touching the store.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES — the ruling's own
+    /// wording, not the MCP convention of dividing one shared budget across every line a call draws — so the
+    /// pin is rows ≤ budget × series count; <c>seriesCount</c> is therefore always 1 into
+    /// <see cref="TrendBuckets.AutoMinutes"/>. At a window small enough that width resolves to one minute,
+    /// every collection becomes its own bucket and the values match the pre-#4234 per-collection read
+    /// exactly — only the timestamp changes, from the raw collection time to its bucket's <c>date_bin</c>
+    /// start.</para>
     /// </summary>
     public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(
         int serverId, List<string> counterNames, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -138,6 +193,9 @@ public sealed partial class ViewerDataService
         {
             return result;
         }
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(PerfmonTrendsSql(counterNames.Count));
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -154,6 +212,7 @@ public sealed partial class ViewerDataService
         {
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = counterName });
         }
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
